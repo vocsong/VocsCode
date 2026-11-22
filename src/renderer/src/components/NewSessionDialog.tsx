@@ -2,16 +2,18 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { branchNameFromText, branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
-import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
+import { HARNESSES, PERMISSION_MODE_LABELS, closestPermissionMode, effortOptionsFor, permissionModeHint } from '../../../shared/harness-meta';
 import { harnessNeedsSetup, harnessStatus } from '../../../shared/harness-setup';
 import { FAST_MODE_COST_WARNING, fastModeSupport } from '../../../shared/fast-mode';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
-import { invoke } from '../api';
+import { canInvoke, invoke } from '../api';
 import { FileAttachmentChips, readAttachments } from '../attachments';
 import { rememberEffort, rememberWithoutEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
+import { FolderPicker } from './FolderPicker';
+import { folderChoices } from '../folderChoices';
 import { MissionLaunch } from './mission/MissionLaunch';
 
 /** The prefix select's "Custom…" option; never a valid prefix itself (`:` cannot be in a ref). */
@@ -39,16 +41,19 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const toast = useStore((s) => s.toast);
   const activeSession = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
 
-  // The folder is chosen before the dialog opens (sidebar button or per-folder +); the dialog only
-  // configures harness, model and options for that folder. What it opens on is the folder's own
-  // remembered choices, falling back field by field to the app-wide defaults (see session-defaults).
+  // The folder is chosen before the dialog opens (sidebar button or per-folder +) and can be switched
+  // from the header. What the dialog shows is the folder's own remembered choices, falling back field
+  // by field to the app-wide defaults (see session-defaults).
   const projectRoot = useStore((s) => s.newSessionRoot) ?? activeSession?.config.projectRoot ?? '';
+  const sessions = useStore((s) => s.sessions);
   const initial = resolveNewSessionDefaults(settings, projectRoot);
   const [harness, setHarness] = useState<HarnessId>(initial.harness);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(!!projectRoot);
   const [modelsError, setModelsError] = useState<string | undefined>();
   const [modelRefresh, setModelRefresh] = useState(0);
+  // Set by Recheck and consumed by the next discovery, so only that one bypasses main's cache.
+  const forceModelRefresh = useRef(false);
   const onboardingOpen = useStore((s) => s.onboardingOpen);
   const previousSetupOpen = useRef(onboardingOpen);
   useEffect(() => {
@@ -87,6 +92,38 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const promptId = useId();
   const permissionsHintId = useId();
+  const fastModeLabelId = useId();
+
+  // Switching folders re-applies that folder's remembered choices; the drafted prompt, goal, title
+  // and branch name stay, since they describe the work rather than the folder.
+  const appliedRoot = useRef(projectRoot);
+  useEffect(() => {
+    if (appliedRoot.current === projectRoot) return;
+    appliedRoot.current = projectRoot;
+    const next = resolveNewSessionDefaults(useStore.getState().settings ?? settings, projectRoot);
+    setHarness(next.harness);
+    setEffort(next.effort);
+    setMode(next.permissionMode);
+    setUseWorktree(next.useWorktree);
+    setPrefixChoice(next.branchPrefix);
+    setCustomPrefix('');
+    if (next.acpAgent) setAcpAgent(next.acpAgent);
+    setFolderBranches({ branches: [] });
+    setBase('');
+  }, [projectRoot]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Every folder the sidebar knows, once each and most recently worked in first, whichever layout the
+  // sidebar is in; the current one is listed even before it has a session.
+  const folderList = folderChoices(sessions, settings, projectRoot);
+  const chooseRoot = (root: string) => useStore.setState({ newSessionRoot: root });
+  const browseRoot = async () => {
+    try {
+      const r = await invoke('app:pickFolder', { defaultPath: projectRoot || undefined });
+      if (r.path) chooseRoot(r.path);
+    } catch (e) {
+      toast(String((e as Error).message ?? e), 'error');
+    }
+  };
 
   // `git worktree add` needs a repository; without one the toggle would only produce a failed
   // session creation, so the folder is probed before the toggle is offered.
@@ -132,9 +169,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
 
   const descriptor = HARNESSES.find((h) => h.id === harness)!;
   const modes = descriptor.capabilities.permissionModes;
+  const modelsAfterStart = descriptor.capabilities.modelSource === 'acp-config';
 
   useEffect(() => {
-    if (!modes.includes(mode)) setMode(modes.includes('ask') ? 'ask' : modes[0]);
+    if (!modes.includes(mode)) setMode(closestPermissionMode(harness, mode));
   }, [harness]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -146,7 +184,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
     if (!projectRoot) return;
     // Publish the same discovery to existing sessions; opening this dialog must not leave their
     // composer pickers on an older, private snapshot.
-    useStore.getState().refreshModelCatalog(harness, { acpAgent, projectRoot })
+    // Main serves a cached catalog for a week; only the Recheck button rediscovers.
+    const refresh = forceModelRefresh.current;
+    forceModelRefresh.current = false;
+    useStore.getState().refreshModelCatalog(harness, { acpAgent, projectRoot, ...(refresh ? { refresh } : {}) })
       .then((r) => {
         if (cancelled) return;
         setModels(r.models);
@@ -268,7 +309,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         initialPrompt: prompt.trim() || undefined,
         initialImages: images.length ? images : undefined,
         initialFiles: files.length ? files : undefined,
-        goal: goal.trim() || undefined,
+        goal: harness === 'antigravity' ? undefined : goal.trim() || undefined,
         // The name is sent as previewed, so the branch is the one the dialog showed; the
         // checked-out branch is where an unspecified worktree starts anyway.
         ...(isolate && (branchName.trim() || autoSlug) ? { worktreeName: branchName.trim() || autoSlug } : {}),
@@ -308,9 +349,8 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
       <span className="row gap8">
         <Icon name="plus" /> New session
       </span>
-      <span className="ns-header-root row gap6" title={projectRoot}>
-        <Icon name="folder" size={13} />
-        <span className="ns-root">{projectRoot || 'No folder selected'}</span>
+      <span className="ns-header-root">
+        <FolderPicker value={projectRoot} choices={folderList} onChoose={chooseRoot} onBrowse={canInvoke('app:pickFolder') ? () => void browseRoot() : undefined} />
       </span>
     </span>
   );
@@ -323,7 +363,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
       footer={
         <>
           <span className="muted small ns-summary">
-            {descriptor.name} · {selectedModel?.displayName ?? model?.model ?? (harness === 'acp' ? 'Agent default' : 'Harness default')}
+            {descriptor.name} · {selectedModel?.displayName ?? model?.model ?? (modelsAfterStart ? 'Agent default' : 'Harness default')}
             {isolate && branchPreview && <> · <code>{branchPreview}</code></>}
           </span>
           <span className="spacer" />
@@ -350,9 +390,11 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                 const av = availability[h.id];
                 const status = harnessStatus(h.id, av);
                 return (
+                  // Two fixed lines, name over status, each cut with an ellipsis (full text on hover),
+                  // so every card has the same shape whatever its name or sign-in state says.
                   <button key={h.id} type="button" className={`harness-card ${harness === h.id ? 'active' : ''}`} aria-pressed={harness === h.id} title={h.tagline} onClick={() => setHarness(h.id)}>
-                    <span className="harness-card-name">{h.name}</span>
-                    {av ? <Badge tone={status.tone}>{status.label}</Badge> : !availabilityError && <Spinner size={10} />}
+                    <span className="harness-card-name" title={h.name}>{h.name}</span>
+                    <span className="harness-card-status">{av ? <Badge tone={status.tone} title={status.label}>{status.label}</Badge> : !availabilityError && <Spinner size={10} />}</span>
                   </button>
                 );
               })}
@@ -389,15 +431,17 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
           <section className="ns-col">
             <div className="ns-model-heading">
               <span className="field-label">Model</span>
-              <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
+              <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { forceModelRefresh.current = true; setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
             </div>
-            {modelsError && <p className="muted small ns-model-notice">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
+            {modelsError && !modelsAfterStart && <p className="muted small ns-model-notice">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
             <ModelPicker
               models={models}
               loading={modelsLoading}
               error={modelsError}
               selected={model}
-              clearOption={{ label: harness === 'acp' ? 'Agent default (choose after start)' : 'Harness default' }}
+              // The first prompt takes focus on open, so the dialog can be typed into straight away.
+              autoFocus={false}
+              clearOption={{ label: modelsAfterStart ? 'Agent default (choose after start)' : 'Harness default' }}
               // No onSelectCustom here: a new session starts on a listed model only; an unlisted id is switched in the header afterwards.
               onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
             />
@@ -425,10 +469,13 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                   ))}
                 </select>
               </label>
-              <span id={permissionsHintId} className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</span>
+              <span id={permissionsHintId} className="field-hint">{permissionModeHint(harness, mode)}</span>
             </div>
-            <div className="field ns-fast-mode">
-              <Toggle checked={fastSupport.supported && fastMode} onChange={setFastMode} disabled={creating || modelsLoading || !fastSupport.supported} label="Fast mode" />
+            <div className="field ns-fast-mode" role="group" aria-labelledby={fastModeLabelId}>
+              <span id={fastModeLabelId} className="field-label">Fast mode</span>
+              <div className="ns-fast-mode-control">
+                <Toggle checked={fastSupport.supported && fastMode} onChange={setFastMode} disabled={creating || modelsLoading || !fastSupport.supported} ariaLabel="Fast mode" />
+              </div>
               <span className="field-hint">{FAST_MODE_COST_WARNING}</span>
               {!fastSupport.supported && <span className="field-hint">{fastSupport.reason ?? 'Fast mode is not supported on this route.'}</span>}
             </div>
@@ -453,7 +500,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             )}
             <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
             <div className="ns-prompt-box">
-              <textarea id={promptId} ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <textarea id={promptId} ref={promptRef} autoFocus rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
               <label className="icon-btn ns-attach" title="Attach files">
                 <Icon name="file" size={14} />
                 <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
@@ -461,12 +508,12 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             </div>
             <span className="field-hint">Paste or attach files and images — they are sent with the first message.</span>
           </div>
-          <Field
+          {harness !== 'antigravity' && <Field
             label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>}
             hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips. On a harness that has its own /goal command, the objective is handed to that harness instead and the guard does not apply."
           >
             <textarea rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. Make the test suite pass and open a PR" />
-          </Field>
+          </Field>}
         </section>
 
         <section className="ns-span2 ns-workspace">

@@ -6,14 +6,17 @@ import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, HarnessUpdat
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { harnessStatus } from '../../../shared/harness-setup';
+import { DEFAULT_HOUSEKEEP_RECENT_DAYS, MAX_HOUSEKEEP_RECENT_DAYS, normalizeHousekeepRecentDays } from '../../../shared/housekeep';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
 import { DEFAULT_REMOTE_ORIGIN, pairingLink as pairingLinkFor, remoteOrigin } from '../../../shared/pairing';
-import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
+import { DEFAULT_PALETTE, GROUP_LABELS, GROUP_ORDER, PALETTES, THEME_MODES, findPalette, resolveScheme, swatchFor, type PaletteId, type ThemeMode } from '../../../shared/themes';
 import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
 import { invoke, isMac, on, platform } from '../api';
 import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
-import { systemPrefersDark } from '../theme';
+import { darkQuery, systemPrefersDark } from '../theme';
+import { UI_MODES, type UiModeId } from '../../../shared/ui-modes';
+import { useMinimalUi } from '../ui-mode';
 import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { PairingQr } from './PairingQr';
@@ -28,6 +31,7 @@ import { ChatImport } from './ChatImport';
 
 import { SETTINGS_GROUPS, SETTINGS_PAGES, searchSettings, type SettingsSection } from '../settings-catalog';
 import { SettingsGroup, SettingsNote } from './SettingsPrimitives';
+import { TypographySettings } from './TypographySettings';
 import './settings.css';
 
 export type { SettingsSection } from '../settings-catalog';
@@ -85,9 +89,11 @@ export function SettingsView() {
     } else heading.current?.focus();
     setDestination(null);
   }, [destination, searching, section]);
-  const update = (patch: Partial<AppSettings>) => void invoke('settings:update', patch).catch((error: unknown) => {
+  const update = (patch: Partial<AppSettings>) => invoke('settings:update', patch).catch((error: unknown) => {
     toast(`Could not save settings: ${error instanceof Error ? error.message : String(error)}`, 'error');
   });
+  // Zen shows the section nav as icons, so each one carries its name as a tooltip.
+  const minimal = useMinimalUi();
   return (
     <div className="settings" onKeyDown={(e) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
@@ -121,7 +127,7 @@ export function SettingsView() {
               <div className="settings-nav-group" key={group}>
                 <div className="settings-nav-label">{group}</div>
                 {SETTINGS_PAGES.filter((p) => p.group === group).map((p) => (
-                  <button key={p.id} type="button" className={`settings-link ${section === p.id && !searching ? 'active' : ''}`} aria-current={section === p.id && !searching ? 'page' : undefined} onClick={() => navigate(p.id)}>
+                  <button key={p.id} type="button" className={`settings-link ${section === p.id && !searching ? 'active' : ''}`} aria-current={section === p.id && !searching ? 'page' : undefined} title={minimal ? p.label : undefined} onClick={() => navigate(p.id)}>
                     <Icon name={p.icon} size={16} /><span>{p.label}</span>
                   </button>
                 ))}
@@ -161,6 +167,7 @@ export function SettingsView() {
               {section === 'voice' && <VoiceSection settings={settings} />}
               {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
               {section === 'import' && <ChatImport />}
+              {section === 'housekeep' && <Housekeep recentDays={settings.housekeepRecentDays} onSave={(days) => update({ housekeepRecentDays: days })} />}
               {section === 'instructions' && <InstructionsSection />}
               {section === 'pi' && <PiSection />}
               {section === 'acp' && <AcpAgents settings={settings} update={update} />}
@@ -178,29 +185,104 @@ export function SettingsView() {
   );
 }
 
-/** Swatch grid for the theme catalogue, grouped by family. */
-function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: ThemeId) => void }) {
-  const systemDark = systemPrefersDark();
+function Housekeep({ recentDays, onSave }: { recentDays?: number; onSave: (days: number) => Promise<unknown> }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState<{ days: number } | null>(null);
+  const [invalid, setInvalid] = useState(false);
+  const current = submitted?.days ?? normalizeHousekeepRecentDays(recentDays);
+  const commit = (input: HTMLInputElement) => {
+    if (draft === null) return;
+    setDraft(null);
+    // A blank or incomplete number is not an intentional zero. Only submit a valid, finished edit.
+    setInvalid(!input.validity.valid);
+    if (!input.validity.valid || input.valueAsNumber === current) return;
+    const mine = { days: input.valueAsNumber };
+    setSubmitted(mine);
+    void onSave(mine.days).finally(() => setSubmitted((latest) => latest === mine ? null : latest));
+  };
+
+  return (
+    <SettingsGroup id="housekeep-recent" title="Recent session protection" icon="clock">
+      <Field label="Protect sessions used in the last (days)">
+        <input
+          type="number" min={0} max={MAX_HOUSEKEEP_RECENT_DAYS} step={1} required
+          value={draft ?? current}
+          aria-describedby="housekeep-recent-hint"
+          onChange={(e) => { setDraft(e.currentTarget.value); setInvalid(false); }}
+          onBlur={(e) => commit(e.currentTarget)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            commit(e.currentTarget);
+          }}
+        />
+      </Field>
+      <p id="housekeep-recent-hint" className="field-hint">Enter a whole number from 0 to {MAX_HOUSEKEEP_RECENT_DAYS} (default: {DEFAULT_HOUSEKEEP_RECENT_DAYS}). 0 disables only the age guard; other protections still apply.</p>
+      {invalid && <p role="alert">That value wasn’t saved. Enter a whole number from 0 to {MAX_HOUSEKEEP_RECENT_DAYS}.</p>}
+    </SettingsGroup>
+  );
+}
+
+const MODE_ICONS: Record<ThemeMode, string> = { system: 'monitor', light: 'sun', dark: 'moon' };
+
+/** Whether the OS currently asks for dark, kept live so System previews follow an OS switch. */
+function useSystemDark(): boolean {
+  const [dark, setDark] = useState(systemPrefersDark);
+  useEffect(() => {
+    const query = darkQuery();
+    if (!query) return;
+    const sync = (): void => setDark(query.matches);
+    query.addEventListener('change', sync);
+    return () => query.removeEventListener('change', sync);
+  }, []);
+  return dark;
+}
+
+/**
+ * The color theme: a System / Light / Dark switch, then one swatch per palette, grouped by family.
+ * The two are independent — every palette has a light and a dark variant — so the swatches are
+ * drawn in the scheme the window paints right now.
+ */
+function ThemePicker({ mode, palette, onMode, onPalette }: { mode: ThemeMode; palette: PaletteId; onMode: (mode: ThemeMode) => void; onPalette: (id: PaletteId) => void }) {
+  const scheme = resolveScheme(mode, useSystemDark());
   return (
     <div className="theme-picker">
+      <div className="theme-mode-row">
+        <div className="theme-mode" role="group" aria-label="Light or dark mode">
+          {THEME_MODES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              className={`theme-mode-option${mode === m.id ? ' active' : ''}`}
+              title={m.description}
+              aria-pressed={mode === m.id}
+              onClick={() => onMode(m.id)}
+            >
+              <Icon name={MODE_ICONS[m.id]} size={14} />
+              {m.name}
+            </button>
+          ))}
+        </div>
+        <span className="theme-mode-hint">{mode === 'system' ? `Following your computer · ${scheme === 'dark' ? 'Dark' : 'Light'} now` : 'Applies to every palette'}</span>
+      </div>
       {GROUP_ORDER.map((group) => {
-        const themes = THEMES.filter((t) => t.group === group);
-        if (!themes.length) return null;
+        const palettes = PALETTES.filter((p) => p.group === group);
+        if (!palettes.length) return null;
         return (
           <div key={group}>
             <div className="theme-family">{GROUP_LABELS[group]}</div>
             <div className="theme-grid">
-              {themes.map((t) => {
-                const [base, raised, accent] = swatchFor(t.id, systemDark);
+              {palettes.map((t) => {
+                const [base, raised, accent] = swatchFor(t.id, scheme);
                 return (
                   <button
                     key={t.id}
                     type="button"
-                    className={`theme-card${value === t.id ? ' active' : ''}`}
+                    className={`theme-card${palette === t.id ? ' active' : ''}`}
                     title={t.description}
                     aria-label={t.name}
-                    aria-pressed={value === t.id}
-                    onClick={() => onChange(t.id)}
+                    aria-pressed={palette === t.id}
+                    onClick={() => onPalette(t.id)}
                   >
                     <span className="theme-swatch" style={{ background: base, borderColor: raised }}>
                       <span className="theme-swatch-bar" style={{ background: raised }} />
@@ -222,9 +304,10 @@ function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: Theme
 }
 
 function General({ settings, update, navigate }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void; navigate: (section: Section) => void }) {
-  const theme = THEMES.find((t) => t.id === settings.theme);
+  const palette = findPalette(settings.palette ?? DEFAULT_PALETTE);
+  const mode = THEME_MODES.find((m) => m.id === settings.theme);
   const links: { section: Section; detail: string }[] = [
-    { section: 'appearance', detail: theme?.name ?? 'System' },
+    { section: 'appearance', detail: `${UI_MODES.find((m) => m.id === (settings.uiMode ?? 'standard'))?.name ?? 'Standard'} · ${palette?.name ?? 'Default'} · ${mode?.name ?? 'System'}` },
     { section: 'sessions', detail: HARNESSES.find((h) => h.id === settings.defaultHarness)?.name ?? 'Choose your defaults' },
     { section: 'providers', detail: `${settings.providers.filter((p) => p.enabled).length} enabled providers` },
     { section: 'shortcuts', detail: 'Make it second nature' },
@@ -254,17 +337,71 @@ function General({ settings, update, navigate }: { settings: AppSettings; update
 }
 
 function Appearance({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
-  const theme = THEMES.find((t) => t.id === settings.theme)!;
+  const palette = findPalette(settings.palette ?? DEFAULT_PALETTE) ?? PALETTES[0];
+  const mode = THEME_MODES.find((m) => m.id === settings.theme) ?? THEME_MODES[0];
   return <div className="settings-section">
     <div className="settings-theme-preview" aria-hidden="true">
       <div className="settings-preview-sidebar"><Icon name="logo" size={24} /><span /><span /><span /></div>
       <div className="settings-preview-workspace"><div className="settings-eyebrow">YOUR NEXT GREAT IDEA</div><strong>A calmer place to build.</strong><p>One workspace. Every coding agent.</p><div className="settings-preview-message"><Icon name="sparkles" size={16} /> Ready when you are.</div></div>
-      <div className="settings-preview-caption"><Icon name={theme?.id === 'system' ? 'sun' : 'palette'} size={15} />{theme?.name ?? 'System'}<span>Live preview</span></div>
+      <div className="settings-preview-caption"><Icon name={MODE_ICONS[mode.id]} size={15} />{palette.name} · {mode.name}<span>Live preview</span></div>
     </div>
-    <SettingsGroup id="appearance-theme" title="Color theme" description="Choose a palette below. System follows your computer’s light or dark preference." icon="palette">
-      <ThemePicker value={settings.theme} onChange={(next) => update({ theme: next })} />
+    <SettingsGroup id="appearance-interface" title="Interface" description="How the window is laid out. Separate from the color theme: every theme works with every layout, and switching keeps your sessions, drafts and panels as they are." icon="layout">
+      <UiModePicker value={settings.uiMode ?? 'standard'} onChange={(next) => update({ uiMode: next })} />
+    </SettingsGroup>
+    <SettingsGroup id="appearance-theme" title="Color theme" description="Pick light or dark once, then any palette. Every palette has both variants, and System follows your computer." icon="palette">
+      <ThemePicker mode={settings.theme} palette={settings.palette ?? DEFAULT_PALETTE} onMode={(next) => update({ theme: next })} onPalette={(next) => update({ palette: next })} />
+    </SettingsGroup>
+    <SettingsGroup id="appearance-typography" title="Text & fonts" description="Size, fonts and line length, tuned for long reading sessions. The sample below shows each change as you make it." icon="type">
+      <TypographySettings value={settings.typography} onChange={(next) => update({ typography: next })} />
     </SettingsGroup>
   </div>;
+}
+
+/** One card per interface mode, each with a wireframe of the layout it gives the window. */
+function UiModePicker({ value, onChange }: { value: UiModeId; onChange: (id: UiModeId) => void }) {
+  return (
+    <div className="ui-mode-picker" role="group" aria-label="Interface">
+      {UI_MODES.map((m) => (
+        <button
+          key={m.id}
+          type="button"
+          className={`ui-mode-card${value === m.id ? ' active' : ''}`}
+          data-testid={`ui-mode-${m.id}`}
+          title={m.description}
+          aria-label={`${m.name} interface`}
+          aria-pressed={value === m.id}
+          onClick={() => onChange(m.id)}
+        >
+          <UiModeMiniature id={m.id} />
+          <span className="ui-mode-name">
+            {m.name}
+            {value === m.id && <Icon name="check" size={13} />}
+          </span>
+          <span className="ui-mode-tagline">{m.tagline}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A schematic of each layout, drawn in the current theme's colors. */
+function UiModeMiniature({ id }: { id: UiModeId }) {
+  if (id === 'zen') {
+    return (
+      <span className="ui-mini ui-mini-zen" aria-hidden="true">
+        <span className="ui-mini-rail"><i className="on" /><i /><i /><i /></span>
+        <span className="ui-mini-column"><b className="w60" /><b className="w90" /><b className="w75" /><b className="w40 user" /><b className="w85" /></span>
+        <span className="ui-mini-pill" />
+      </span>
+    );
+  }
+  return (
+    <span className="ui-mini ui-mini-standard" aria-hidden="true">
+      <span className="ui-mini-side"><b className="w80" /><b className="w60" /><b className="w70" /><b className="w50" /></span>
+      <span className="ui-mini-main"><span className="ui-mini-head" /><b className="w70" /><b className="w90" /><b className="w50 user" /><span className="ui-mini-box" /></span>
+      <span className="ui-mini-panel"><b className="w70" /><b className="w50" /></span>
+    </span>
+  );
 }
 
 function SessionDefaults({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
@@ -410,7 +547,7 @@ function BackgroundModelFields({ settings, update }: { settings: AppSettings; up
   return (
     <div className="settings-section">
       <SettingsGroup id="assistant-models" title="Utility model" icon="bolt" description="Small, fast chores shouldn’t need your most powerful model.">
-      <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions and worktree branches. Falls back to the session's own model when unset.">
+      <Field label="Utility model" hint="A fast model for background tasks. After each completed turn, it uses an excerpt of the reply to refresh automatic session titles. Opening titles and worktree names can still use the session's model when unset.">
         {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
         <div className="onboarding-model-picker">
           <ModelPicker
@@ -788,9 +925,9 @@ function ProviderBaseUrl({ provider, onSave }: { provider: ProviderConfig; onSav
   );
 }
 
-/** The harnesses this card manages: their own logins, and an npm package that can be updated here. */
-const LOGIN_HARNESSES = ['claude', 'codex', 'pi'] as const;
-type LoginHarness = (typeof LOGIN_HARNESSES)[number];
+const NPM_LOGIN_HARNESSES = ['claude', 'codex', 'pi'] as const;
+const LOGIN_HARNESSES = [...NPM_LOGIN_HARNESSES, 'antigravity'] as const;
+type NpmLoginHarness = (typeof NPM_LOGIN_HARNESSES)[number];
 
 /**
  * Login state for harnesses that bring their own credentials, shown next to the key vault. The same
@@ -804,16 +941,16 @@ function HarnessLogins() {
   const [refreshing, setRefreshing] = useState(false);
   const [checking, setChecking] = useState(false);
   const [updates, setUpdates] = useState<Partial<Record<HarnessId, HarnessUpdate>> | null>(null);
-  const [updating, setUpdating] = useState<LoginHarness | null>(null);
+  const [updating, setUpdating] = useState<NpmLoginHarness | null>(null);
   const refreshModels = useStore((s) => s.refreshModelCatalog);
-  const modelRefreshPending = useRef(new Set<LoginHarness>());
-  const [modelRefreshes, setModelRefreshes] = useState<Partial<Record<LoginHarness, { pending: boolean; text?: string; error?: boolean }>>>({});
+  const modelRefreshPending = useRef(new Set<NpmLoginHarness>());
+  const [modelRefreshes, setModelRefreshes] = useState<Partial<Record<HarnessId, { pending: boolean; text?: string; error?: boolean }>>>({});
   const credHome: Partial<Record<HarnessId, string>> = { claude: '~/.claude', codex: '~/.codex', pi: '~/.pi/agent' };
 
   const checkUpdates = async () => {
     setChecking(true);
     try {
-      setUpdates((await invoke('harness:checkUpdates', { ids: [...LOGIN_HARNESSES] })) ?? {});
+      setUpdates((await invoke('harness:checkUpdates', { ids: [...NPM_LOGIN_HARNESSES] })) ?? {});
     } catch (e) {
       toast(`Could not check for harness updates: ${(e as Error).message}`, 'error');
     } finally {
@@ -827,7 +964,7 @@ function HarnessLogins() {
     setRefreshing(false);
   };
 
-  const update = async (id: LoginHarness) => {
+  const update = async (id: NpmLoginHarness) => {
     setUpdating(id);
     try {
       const r = await invoke('harness:install', { id });
@@ -840,7 +977,7 @@ function HarnessLogins() {
     } finally { setUpdating(null); }
   };
 
-  const refreshRowModels = async (id: LoginHarness) => {
+  const refreshRowModels = async (id: NpmLoginHarness) => {
     // Ref guard covers a second click before React has committed the disabled button.
     if (modelRefreshPending.current.has(id)) return;
     modelRefreshPending.current.add(id);
@@ -849,7 +986,7 @@ function HarnessLogins() {
     try {
       // Both Codex adapters use the same runtime but have separate renderer catalog caches.
       const ids: HarnessId[] = id === 'codex' ? ['codex', 'codex-exec'] : [id];
-      const results = await Promise.all(ids.map(async (harness) => ({ harness, ...await refreshModels(harness) })));
+      const results = await Promise.all(ids.map(async (harness) => ({ harness, ...await refreshModels(harness, { refresh: true }) })));
       const failures = results.filter((r) => r.error);
       const error = failures.length > 0;
       const text = error
@@ -890,17 +1027,17 @@ function HarnessLogins() {
               <strong>{h.name}</strong>
               <Badge tone={harnessStatus(id, av).tone}>{harnessStatus(id, av).label}</Badge>
               <Button size="sm" variant="ghost" aria-label={`Sign in to ${h.name}`} onClick={() => useStore.getState().openOnboarding(id)}>Sign in / setup</Button>
-              <Button size="sm" variant="ghost" icon="refresh" aria-label={`Refresh ${h.name} models`} disabled={modelRefresh?.pending} onClick={() => void refreshRowModels(id)}>
+              {id !== 'antigravity' && <Button size="sm" variant="ghost" icon="refresh" aria-label={`Refresh ${h.name} models`} disabled={modelRefresh?.pending} onClick={() => void refreshRowModels(id)}>
                 {modelRefresh?.pending ? <Spinner size={11} /> : null} Refresh models
-              </Button>
+              </Button>}
               {modelRefresh && <span role="status" className={`muted small${modelRefresh.error ? ' info-error' : ''}`}>
                 {modelRefresh.pending ? 'Refreshing models…' : modelRefresh.text}
               </span>}
               <span className="muted small">
                 {av?.version ? `${av.version} · ` : ''}
-                uses its own credentials from {credHome[id]}
+                {id === 'antigravity' ? 'uses the Antigravity CLI’s Google sign-in' : <>uses its own credentials from {credHome[id]}</>}
               </span>
-              {upd?.newer && (
+              {id !== 'antigravity' && upd?.newer && (
                 <>
                   <span className="spacer" />
                   {upd.updatable ? (
@@ -1088,6 +1225,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
       {bin('dsh', 'dsh path override')}
       {bin('npx', 'npx path override')}
       {bin('gemini', 'gemini path override')}
+      {bin('agy', 'Antigravity CLI (agy) path override')}
       </SettingsGroup>
     </div>
   );

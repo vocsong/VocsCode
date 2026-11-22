@@ -139,6 +139,8 @@ export async function listCursorModels(apiKey?: string): Promise<ModelInfo[]> {
 export class CursorAdapter implements HarnessAdapter {
   readonly id = 'cursor' as const;
   private agent: SDKAgent | null = null;
+  /** The permission mode `agent` was resumed or created with; its tools and sandbox are fixed by it. */
+  private agentMode: PermissionMode | null = null;
   private run: Run | null = null;
   private _busy = false;
   private disposed = false;
@@ -194,8 +196,15 @@ export class CursorAdapter implements HarnessAdapter {
   }
 
   private async ensureAgent(): Promise<SDKAgent> {
+    // A mode change made while a turn was running could not drop the handle then; drop it before
+    // the next turn so that turn runs with the new tools and sandbox.
+    if (this.agent && this.agentMode !== this.permissionMode) {
+      this.agent.close();
+      this.agent = null;
+    }
     if (this.agent) return this.agent;
     const opts = this.buildOptions();
+    this.agentMode = this.permissionMode;
     const resumeId = this.ctx.session().harnessRef.cursorAgentId;
     if (resumeId) {
       try {

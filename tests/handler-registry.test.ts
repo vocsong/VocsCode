@@ -8,10 +8,11 @@ import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry, type HandlerDeps } from '../src/main/handlers';
-import { PUSH_CHANNELS } from '../src/shared/ipc';
+import { FILE_PREVIEW_MAX_BYTES, PUSH_CHANNELS } from '../src/shared/ipc';
 import { agentChannels } from '../src/shared/agent-manifest';
 import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-channels';
 import type { AnalyticsStore } from '../src/main/analytics';
+import * as runtime from '../src/main/runtime';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
 import { providerSecrets } from '../src/main/secret-ids';
@@ -26,9 +27,11 @@ import { openHarnessLogin, readHarnessSetup } from '../src/main/harness-setup';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 import { discoverChatImports } from '../src/main/chat-import';
+import { listHarnessModels } from '../src/main/harness/registry';
 import type { ChatImportPreview } from '../src/shared/chat-import';
 
 vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
+vi.mock('../src/main/harness/registry', async (original) => ({ ...await original<typeof import('../src/main/harness/registry')>(), listHarnessModels: vi.fn() }));
 vi.mock('../src/main/harness-setup', async (original) => ({ ...await original<typeof import('../src/main/harness-setup')>(), openHarnessLogin: vi.fn(), readHarnessSetup: vi.fn() }));
 
 const dirs: string[] = [];
@@ -134,6 +137,81 @@ async function fileResolveRig() {
 }
 
 describe('handler registry', () => {
+  it('restricts Housekeep and its excerpts to the desktop and refuses forged batches before session dispatch', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list');
+    for (const channel of ['housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory']) {
+      expect(registry.channels()).toContain(channel);
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels()).not.toContain(channel);
+      await expect(registry.invoke(channel, {}, 'agent')).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke(channel, {}, 'user')).rejects.toThrow(/desktop owner/);
+    }
+    const previewId = '56756756-e138-4775-8652-44316fa0203b';
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['s_test'], protectedIds: [], force: true }, 'desktop')).rejects.toThrow();
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['../s_test'], protectedIds: [] }, 'desktop')).rejects.toThrow();
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['s_test'], protectedIds: [] }, 'desktop')).rejects.toThrow(/preview expired/);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('scopes inventory to the desktop profile without accepting paths or starting normal session Git polling', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list').mockReturnValue([]);
+    await expect(registry.invoke('housekeep:inventory', { folders: [ws] }, 'desktop')).rejects.toThrow();
+    expect(list).not.toHaveBeenCalled();
+    const [first, second] = await Promise.all([
+      registry.invoke('housekeep:inventory', undefined, 'desktop'),
+      registry.invoke('housekeep:inventory', undefined, 'desktop')
+    ]);
+    expect(first).toEqual({ repositories: 0, rows: [], warnings: [], limited: false });
+    expect(second).toEqual(first);
+    expect(list).toHaveBeenCalledExactlyOnceWith({ refreshGit: false });
+  });
+
+  it('validates the Housekeep override before scanning and accepts it only with a new preview', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list').mockReturnValue([]);
+    for (const recentDaysOverride of [null, '3', -1, 1.5, 3651]) {
+      await expect(registry.invoke('housekeep:preview', { protectedIds: [], recentDaysOverride }, 'desktop')).rejects.toThrow();
+    }
+    expect(list).not.toHaveBeenCalled();
+    const preview = await registry.invoke('housekeep:preview', { protectedIds: [], recentDaysOverride: 3 }, 'desktop') as { id: string; recentDays: number };
+    expect(preview.recentDays).toBe(3);
+    for (const [channel, payload] of [
+      ['housekeep:assess', { previewId: preview.id }],
+      ['housekeep:apply', { previewId: preview.id, ids: ['s_test'], protectedIds: [] }]
+    ] as const) {
+      await expect(registry.invoke(channel, { ...payload, recentDaysOverride: 0 }, 'desktop')).rejects.toThrow(/Unrecognized key/);
+    }
+    expect(deps.settings.get().housekeepRecentDays).toBe(7);
+  });
+
+  it('keeps intelligence grants on the desktop and derives the project from the held session', async () => {
+    const view = vi.fn(async () => ({ available: true }));
+    const forget = vi.fn(async () => ({ forgotten: true }));
+    const { registry, deps } = stubDeps({ intelligence: { view, forget } as unknown as HandlerDeps['intelligence'] });
+    const settingsUpdate = vi.spyOn(deps.settings, 'update');
+    for (const actor of ['user', 'agent'] as const) {
+      await expect(registry.invoke('intelligence:view', { sessionId: 's_test' }, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: 'mem_abcdef' }, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('settings:update', { intelligence: { gateway: false, personalMemory: true } }, actor)).rejects.toThrow(/desktop owner/);
+    }
+    expect(settingsUpdate).not.toHaveBeenCalled();
+    await expect(registry.invoke('intelligence:view', { sessionId: '../s_test' }, 'desktop')).rejects.toThrow(/Invalid Mission\/session identifier/);
+    await expect(registry.invoke('intelligence:view', { sessionId: 's_unknown' }, 'desktop')).rejects.toThrow('Session not found');
+    await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: '../../another' }, 'desktop')).rejects.toThrow('A memory record id is required');
+    expect(view).not.toHaveBeenCalled();
+    expect(forget).not.toHaveBeenCalled();
+    const channels = registry.channels().filter((channel) => channel.startsWith('intelligence:'));
+    expect(channels).toContain('intelligence:view');
+    expect(channels.every((channel) => !isRemoteChannel(channel) && !agentChannels().includes(channel))).toBe(true);
+    const session = deps.sessions.get('s_test')!;
+    session.cwd = path.join(ws, 'worktree');
+    session.worktreeBranch = 'vocs/test';
+    await expect(registry.invoke('intelligence:view', { sessionId: 's_test', projectRoot: 'attacker', cwd: 'attacker', branch: 'other' }, 'desktop')).resolves.toEqual({ available: true });
+    expect(view).toHaveBeenCalledExactlyOnceWith({ sessionId: 's_test', projectRoot: ws, cwd: session.cwd, branch: session.worktreeBranch });
+  });
+
   it('keeps all account channels local-only and accepts no endpoint/credential configuration', async () => {
     const snapshot = { realm: 'staging', status: 'signed_out', refreshing: false, revision: 0, connections: [] } as const;
     const account = { get: vi.fn(() => snapshot), signIn: vi.fn(async () => snapshot), cancel: vi.fn(() => snapshot), signOut: vi.fn(async () => snapshot), refresh: vi.fn(async () => snapshot), dispose: vi.fn() };
@@ -324,6 +402,41 @@ describe('handler registry', () => {
     const channels = registry.channels();
     for (const c of ['sessions:list', 'settings:get', 'terminal:input', 'git:summary', 'fs:read', 'fs:resolve', 'approvals:respond', 'analytics:summary', 'window:zoom']) {
       expect(channels).toContain(c);
+    }
+  });
+
+  it('reads a linked PR by its GitHub URL after the session worktree was removed', async () => {
+    const { registry, deps } = stubDeps();
+    const removedCheckout = path.join(ws, 'removed-worktree');
+    const archived = { ...deps.sessions.get('s_test')!, id: '_archived', archived: true, cwd: removedCheckout };
+    const getSession = vi.spyOn(deps.sessions, 'get').mockImplementation((id) => id === archived.id ? archived : undefined);
+    const channel = 'git:pullRequest';
+    const url = 'https://github.com/other/project/pull/42';
+    const comment = { body: 'Ready to ship' };
+    const pr = { number: 42, title: 'Ship it', state: 'MERGED', url };
+    const which = vi.spyOn(runtime, 'which').mockReturnValue('fake-gh');
+    const capture = vi.spyOn(runtime, 'runCapture').mockImplementation(async (_cmd, _args, opts) => (
+      opts?.cwd === removedCheckout
+        ? { code: null, stdout: '', stderr: 'spawn gh ENOENT' }
+        : { code: 0, stdout: JSON.stringify({ ...pr, comments: [comment] }), stderr: '' }
+    ));
+    try {
+      await expect(registry.invoke(channel, { sessionId: 's_missing', url }, 'desktop')).rejects.toThrow('Session not found');
+      await expect(registry.invoke(channel, { sessionId: archived.id, url, cwd: 'caller-supplied' }, 'desktop')).rejects.toThrow();
+      for (const invalidUrl of ['https://github.com.invalid/other/project/pull/42', `${url}/files`, 'https://github.com/other/project/pull/0']) {
+        await expect(registry.invoke(channel, { sessionId: archived.id, url: invalidUrl }, 'desktop')).resolves.toEqual({ error: 'Invalid GitHub pull request link.' });
+      }
+      expect(capture).not.toHaveBeenCalled();
+
+      await expect(registry.invoke(channel, { sessionId: archived.id, url: `${url}?source=chat#issuecomment-1` }, 'desktop'))
+        .resolves.toEqual({ pr: { ...pr, comments: 1 }, comments: [comment] });
+      expect(capture).toHaveBeenCalledExactlyOnceWith('fake-gh', ['pr', 'view', url, '--json', expect.stringContaining('comments')], expect.objectContaining({ cwd: undefined }));
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels()).not.toContain(channel);
+    } finally {
+      capture.mockRestore();
+      which.mockRestore();
+      getSession.mockRestore();
     }
   });
 
@@ -569,13 +682,59 @@ describe('handler registry', () => {
     expect(list.map((e) => e.path)).toEqual(['sub', 'a.txt']);
     const read = (await registry.invoke('fs:read', { sessionId: 's_test', path: 'a.txt' })) as { content: string; truncated: boolean };
     expect(read).toEqual({ content: 'hello', truncated: false });
-    const escaped = (await registry.invoke('fs:read', { sessionId: 's_test', path: '../escape.txt' })) as { content: string };
-    expect(escaped.content).toBe('');
+    await expect(registry.invoke('fs:read', { sessionId: 's_test', path: '../escape.txt' })).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+    await expect(registry.invoke('fs:read', { sessionId: 's_test', path: 'sub' })).resolves.toEqual({ content: '', truncated: false, readOnly: true });
     const outside = (await registry.invoke('fs:list', { sessionId: 's_test', relPath: '../' })) as unknown[];
     expect(outside).toEqual([]);
     const search = (await registry.invoke('fs:search', { sessionId: 's_test', query: 'txt' })) as string[];
     expect(search).toHaveLength(2);
     expect(search).toEqual(expect.arrayContaining(['a.txt', 'sub/b.txt']));
+  });
+
+  it('saves only desktop text using an exact byte precondition in the session worktree', async () => {
+    const r = await fileResolveRig();
+    const file = path.join(r.cwd, 'edit.txt');
+    const checkoutFile = path.join(r.projectRoot, 'edit.txt');
+    const before = '\uFEFFfirst\r\nsecond\r\n';
+    const content = '\uFEFF雪\r\n';
+    await fs.writeFile(file, before);
+    await fs.writeFile(checkoutFile, before);
+    const target = { sessionId: 's_test', path: 'edit.txt' };
+    const preview = await r.registry.invoke('fs:read', { ...target, maxBytes: FILE_PREVIEW_MAX_BYTES });
+    expect(preview).toEqual({ content: before, truncated: false });
+    const req = { ...target, content, expectedContent: before };
+    expect(isRemoteChannel('fs:writeText')).toBe(false);
+    for (const actor of ['user', 'agent'] as const) {
+      await expect(r.registry.invoke('fs:writeText', req, actor)).rejects.toThrow(/local desktop owner/);
+    }
+    await expect(fs.readFile(file)).resolves.toEqual(Buffer.from(before));
+    await expect(r.registry.invoke('fs:writeText', req, 'desktop')).resolves.toBeUndefined();
+    await expect(fs.readFile(file)).resolves.toEqual(Buffer.from(content));
+    await expect(fs.readFile(checkoutFile)).resolves.toEqual(Buffer.from(before));
+    await fs.writeFile(file, 'external');
+    await expect(r.registry.invoke('fs:writeText', { ...req, expectedContent: content }, 'desktop')).rejects.toThrow(/changed on disk/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('external');
+  });
+
+  it('rejects malformed and out-of-workspace save requests before opening files', async () => {
+    const r = await fileResolveRig();
+    const file = path.join(r.cwd, 'edit.txt');
+    const outside = path.join(r.sibling, 'edit.txt');
+    await fs.writeFile(file, 'before');
+    await fs.writeFile(outside, 'before');
+    await fs.symlink(r.sibling, path.join(r.cwd, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const req = { sessionId: 's_test', path: 'edit.txt', content: 'after', expectedContent: 'before' };
+    const open = vi.spyOn(fs, 'open');
+    for (const invalid of [undefined, null, {}, { ...req, expectedContent: undefined }, { ...req, content: 1 },
+      { ...req, root: r.sibling }, { ...req, sessionId: '../s_test' }, { ...req, sessionId: 'missing' },
+      { ...req, missionWorkspaceId: 1 }, { ...req, path: 'escape/edit.txt' }, { ...req, path: '../edit.txt' },
+      { ...req, path: outside }, { ...req, path: 'edit.txt:stream' }, { ...req, path: 'missing.txt' }]) {
+      await expect(r.registry.invoke('fs:writeText', invalid, 'desktop')).rejects.toThrow();
+    }
+    expect(open).not.toHaveBeenCalled();
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('before');
+    await expect(fs.readFile(outside, 'utf8')).resolves.toBe('before');
+    await expect(fs.stat(path.join(r.cwd, 'missing.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('resolves an exact file from the session cwd before suffix matches or the configured project root', async () => {
@@ -1127,5 +1286,66 @@ describe('remote sign-in handlers', () => {
       expect(((await registry.invoke('remote:get', undefined)) as { signInAvailable: boolean }).signInAvailable).toBe(expected);
     }
     expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual(['http://127.0.0.1:9911/v1/me', 'http://127.0.0.1:9912/v1/me', 'http://127.0.0.1:9913/v1/me']);
+  });
+});
+
+describe('harness:models catalog cache', () => {
+  const opus = { id: 'claude-opus-5-5', provider: 'anthropic', displayName: 'Opus 5.5' };
+  const sonnet = { id: 'claude-sonnet-5-5', provider: 'anthropic', displayName: 'Sonnet 5.5' };
+  const rig = (userData: string) => {
+    const { bridge } = bridgeStub();
+    return stubDeps({ desktop: { ...bridge, userDataPath: () => userData } });
+  };
+  const ids = (r: unknown) => (r as { models: { id: string }[] }).models.map((m) => m.id);
+
+  it('reuses a clean catalog across dialog opens and restarts, and rediscovers only on an explicit refresh', async () => {
+    const discover = vi.mocked(listHarnessModels).mockReset().mockResolvedValue({ models: [opus] });
+    const userData = tmpDir('models');
+    const { registry } = rig(userData);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', projectRoot: 'G:/a' }))).toEqual(['claude-opus-5-5']);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', projectRoot: 'G:/b' }))).toEqual(['claude-opus-5-5']);
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    // A restarted app reads the catalog back from userData instead of spawning the CLI again.
+    expect(ids(await rig(userData).registry.invoke('harness:models', { harness: 'claude' }))).toEqual(['claude-opus-5-5']);
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    discover.mockResolvedValue({ models: [opus, sonnet] });
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', refresh: true }))).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude' }))).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
+    expect(discover).toHaveBeenCalledTimes(2);
+    // Each harness has its own entry.
+    await registry.invoke('harness:models', { harness: 'pi' });
+    expect(discover).toHaveBeenCalledTimes(3);
+  });
+
+  it('never caches a failed discovery, and a key, sign-in or catalog-settings change rediscovers', async () => {
+    const discover = vi.mocked(listHarnessModels).mockReset().mockResolvedValue({ models: [opus], error: 'Claude model discovery failed; showing the saved catalog.' });
+    const { registry, deps } = rig(tmpDir('models'));
+    await registry.invoke('harness:models', { harness: 'claude' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(2);
+
+    discover.mockResolvedValue({ models: [opus] });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(3);
+
+    await registry.invoke('secrets:set', { providerId: 'testprov', apiKey: 'sk-new' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(4);
+
+    vi.mocked(openHarnessLogin).mockReset().mockResolvedValue({ ok: true });
+    await registry.invoke('harness:login', { harness: 'claude' }, 'desktop');
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(5);
+
+    await deps.settings.update({ modelOverrides: { 'anthropic::claude-opus-5-5': { supportsImages: true } } });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(6);
+
+    for (const harness of ['__proto__', 'unknown', 1]) await expect(registry.invoke('harness:models', { harness })).rejects.toThrow();
+    expect(discover).toHaveBeenCalledTimes(6);
   });
 });

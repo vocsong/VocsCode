@@ -2,7 +2,8 @@ import type { VocsAccountSignInRequest, VocsAccountState } from './vocs-account'
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
 import type { LocalControlOwnerState } from './local-control';
-import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
+import type { HousekeepInventory, HousekeepOutcome, HousekeepPreview } from './housekeep';
+import type { AntigravityQuota, HarnessSetupStatus, LoginHarnessId } from './harness-setup';
 import type {
   AnalyticsSummary,
   AppInstructionFile,
@@ -21,6 +22,7 @@ import type {
   GitBranchOverview,
   GitCommentList,
   GitIssueList,
+  GitPullRequestDetail,
   GitPullRequestList,
   GitSetupStatus,
   GitSummary,
@@ -65,6 +67,7 @@ import type { AgentClientContext, AgentState } from './agent';
 import type { ChatImportPreview, ChatImportSource } from './chat-import';
 import type { ExecutionRecord } from './analytics/records';
 import type { KnowledgeGraph, KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
+import type { CollectionMember, ContextPacket, IntelligenceSearchResponse, IntelligenceView, MemoryExportBundle, MemoryState, MemoryType } from './intelligence';
 import type { AgentTypeInfo, SubagentRun, SubagentRunSummary } from './subagents';
 import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
@@ -83,6 +86,9 @@ export type WorkspaceFileResolution =
   | { status: 'ambiguous'; paths: string[] }
   | { status: 'missing' }
   | { status: 'incomplete' };
+
+/** Text previews and their desktop Save action share this UTF-8 byte limit. */
+export const FILE_PREVIEW_MAX_BYTES = 200_000;
 
 /** Readable text exports fail explicitly rather than silently truncating a saved artifact. */
 export const TEXT_EXPORT_MAX_BYTES = 1024 * 1024;
@@ -203,8 +209,11 @@ export interface IpcContract {
   'harness:setup': [{ harness: HarnessId }, HarnessSetupStatus];
   /** Desktop-owner action only. Opens the selected runtime's vendor login in a terminal. */
   'harness:login': [{ harness: LoginHarnessId; device?: boolean }, { ok: boolean; error?: string }];
+  /** Desktop-owner action only. Returns account quota bars, never credentials or raw CLI output. */
+  'harness:antigravityQuota': [void, AntigravityQuota];
+  /** Served from a 7-day disk cache of the last clean discovery; `refresh` rediscovers now. */
   'harness:models': [
-    { harness: HarnessId; acpAgent?: string; projectRoot?: string },
+    { harness: HarnessId; acpAgent?: string; projectRoot?: string; refresh?: boolean },
     { models: ModelInfo[]; error?: string }
   ];
   'harness:install': [{ id: 'pi' | 'dsh' | 'codex' | 'claude' }, { ok: boolean; log: string }];
@@ -323,6 +332,12 @@ export interface IpcContract {
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
   'sessions:label': [{ id: string; label?: string }, SessionMeta];
   'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean; forceWorktree?: boolean }, SessionMeta];
+  /** Local desktop only; review first, then apply a one-use preview. */
+  'housekeep:preview': [{ protectedIds: string[]; recentDaysOverride?: number }, HousekeepPreview];
+  'housekeep:assess': [{ previewId: string }, HousekeepPreview];
+  'housekeep:apply': [{ previewId: string; ids: string[]; protectedIds: string[] }, HousekeepOutcome[]];
+  /** Local desktop only, read-only, with no renderer-supplied scan paths. */
+  'housekeep:inventory': [void, HousekeepInventory];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];
@@ -435,6 +450,8 @@ export interface IpcContract {
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
   /** Pulls the repo's pull requests (all states) from GitHub through gh, for the Git panel's PR view. */
   'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
+  /** Loads the exact GitHub pull request and conversation named by a desktop transcript link. */
+  'git:pullRequest': [{ sessionId: string; url: string }, GitPullRequestDetail];
   /** Pulls the repo's issues (all states) from GitHub through gh, for the Git panel's Issues view. */
   'git:issues': [{ sessionId: string }, GitIssueList];
   /** Pulls one issue's conversation comments through gh, for the Git panel's issue preview. */
@@ -447,8 +464,11 @@ export interface IpcContract {
   'fs:search': [{ sessionId: string; query: string; limit?: number; missionWorkspaceId?: string }, string[]];
   /** Exact file first, then a bounded component-suffix search within the selected workspace. */
   'fs:resolve': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceFileResolution];
-  /** `binary` comes with empty content: the file is not text the panel can show. */
-  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean; binary?: boolean }];
+  /** `binary` comes with empty content. `readOnly` excludes placeholders and protected files from editing. */
+  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean; binary?: boolean; readOnly?: boolean }];
+  /** Desktop Save: replace only existing workspace text that still matches the original read bytes.
+   * Both strings are literal UTF-8 text, including any BOM and line endings. */
+  'fs:writeText': [{ sessionId: string; path: string; content: string; expectedContent: string; missionWorkspaceId?: string }, void];
   /** An image file as base64 for the Files panel preview; null outside the workspace or for a non-image path. */
   'fs:readImage': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceImage | null];
 
@@ -472,6 +492,38 @@ export interface IpcContract {
   'knowledge:graph': [{ sessionId: string }, KnowledgeGraph];
   /** Deletes one page without tombstoning it; rejecting is what stops a claim returning. */
   'knowledge:delete': [{ sessionId: string; id: string }, KnowledgeView];
+
+  /** Memory records, collections, the graph provider and the gateway for one session's project. */
+  'intelligence:view': [{ sessionId: string }, IntelligenceView];
+  /** Federated, permission-scoped evidence search: the planner the agents' tools use, for the panel. */
+  'intelligence:search': [{ sessionId: string; query: string; scope?: 'project' | 'collection'; limit?: number; includeHistorical?: boolean }, IntelligenceSearchResponse];
+  /** A bounded, cited context packet for one question. */
+  'intelligence:compile': [{ sessionId: string; query: string; budgetTokens?: number; scope?: 'project' | 'collection' }, ContextPacket];
+  /** Adds a record by hand: a lesson for the project, or a preference the user declares. */
+  'intelligence:memory:add': [{ sessionId: string; type: MemoryType; title: string; text: string; scope: 'project' | 'personal' }, IntelligenceView];
+  /** A person's decision about one record: verify, activate, mark uncertain, reject, expire or revoke. */
+  'intelligence:memory:decide': [{ sessionId: string; id: string; to: MemoryState; note?: string }, IntelligenceView];
+  /** Deletes a record, its index entry and anything promoted from it; the text is tombstoned. */
+  'intelligence:memory:forget': [{ sessionId: string; id: string }, IntelligenceView];
+  /** Writes a record into the project wiki as a human-reviewed page. */
+  'intelligence:memory:apply': [{ sessionId: string; id: string }, { pageId: string; view: IntelligenceView }];
+  /** This project's own records as a portable bundle; collection and personal memory stay behind. */
+  'intelligence:memory:export': [{ sessionId: string }, MemoryExportBundle];
+  'intelligence:memory:import': [{ sessionId: string; bundle: unknown }, { imported: number; skipped: number; view: IntelligenceView }];
+  /** Session-end reflection, on request: one captured episode plus candidate lessons. */
+  'intelligence:reflect': [{ sessionId: string }, { ok: boolean; captured: number; candidates: number; detail?: string; error?: string }];
+  /** Promotes a wiki page or a record into a collection or personal memory; the caller is the reviewer. */
+  'intelligence:promote': [{ sessionId: string; pageId?: string; recordId?: string; to: 'collection' | 'personal'; collectionId?: string }, IntelligenceView];
+  /** Approves or rejects a promotion an agent asked for. */
+  'intelligence:promotion:decide': [{ sessionId: string; id: string; decision: 'approve' | 'reject' }, IntelligenceView];
+  /** Creates a collection, or replaces an existing one's name, description and membership. */
+  'intelligence:collection:save': [{ sessionId: string; id?: string; name: string; description?: string; members: CollectionMember[] }, IntelligenceView];
+  /** Deletes a collection and revokes everything promoted into it. */
+  'intelligence:collection:delete': [{ sessionId: string; id: string }, IntelligenceView];
+  /** Builds the optional graph index for a project that opted in; never runs on its own. */
+  'intelligence:graph:index': [{ sessionId: string }, IntelligenceView];
+  /** Clears the derived graph cache; authoritative records are untouched. */
+  'intelligence:graph:clear': [{ sessionId: string }, IntelligenceView];
 
   'terminal:list': [void, TerminalInfo[]];
   /** Read-only plain-text screen of one terminal (remote P3.5): never attaches, pauses or resizes it. */

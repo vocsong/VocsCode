@@ -340,6 +340,108 @@ describe('per-folder new-session defaults', () => {
     expect(screen.getByLabelText('Branch prefix')).toBeTruthy();
   });
 
+  it('switches the folder from the header, re-applying that folder\'s choices but keeping the draft', async () => {
+    const OTHER = 'G:/other';
+    seedSettings(settingsWith({
+      folders: [ROOT, OTHER],
+      folderSessionDefaults: { [OTHER]: { harness: 'claude', permissionMode: 'plan', useWorktree: true, modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } } }
+    }));
+    render(<NewSessionDialog />);
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    expect(document.querySelector('.harness-card.active')?.textContent).toContain('Pi');
+    fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: 'Keep this draft' } });
+
+    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    const choices = screen.getAllByRole('menuitemradio');
+    // Folders without sessions list by name, each showing its full path; the current one is checked.
+    expect(choices.map((c) => c.querySelector('.folder-choice-name')?.textContent)).toEqual(['other', 'Vocs-Code']);
+    expect(choices.map((c) => c.querySelector('.folder-choice-path')?.textContent)).toEqual([OTHER, ROOT]);
+    expect(choices.map((c) => c.getAttribute('aria-checked'))).toEqual(['false', 'true']);
+    fireEvent.click(choices[0]);
+
+    await waitFor(() => expect(document.querySelector('.ns-root')?.textContent).toBe(OTHER));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.querySelector('.harness-card.active')?.textContent).toContain('Claude Agent SDK');
+    expect((screen.getByText('Permissions').closest('.field')!.querySelector('select') as HTMLSelectElement).value).toBe('plan');
+    expect((screen.getByPlaceholderText('What should the agent do?') as HTMLTextAreaElement).value).toBe('Keep this draft');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git:folderIsRepo', { projectRoot: OTHER }));
+    await waitFor(() => expect(start.disabled).toBe(false));
+    fireEvent.click(start);
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({
+      config: expect.objectContaining({ projectRoot: OTHER, harness: 'claude', permissionMode: 'plan', useWorktree: true }),
+      initialPrompt: 'Keep this draft'
+    })));
+  });
+
+  it('lists each folder once, most recently worked in first, even in the Recent sidebar view', async () => {
+    const at = (id: string, root: string, t: number) => ({ ...session(id, root), updatedAt: t, lastUserMessageAt: t });
+    seedSettings(settingsWith({ sidebarView: 'recent', folders: [ROOT, 'D:/Millie', 'G:/idle'] }));
+    // Interleaved recency used to come back as one entry per run of same-folder rows.
+    useStore.setState({ sessions: [at('a', 'D:/Millie', 5_000), at('b', ROOT, 4_000), at('c', 'D:/Millie', 3_000), at('d', ROOT, 2_000), at('e', 'D:/Millie', 1_000)] } as never);
+    render(<NewSessionDialog />);
+
+    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    const choices = screen.getAllByRole('menuitemradio');
+    expect(choices.map((c) => c.getAttribute('title'))).toEqual(['D:/Millie', ROOT, 'G:/idle']);
+    // Each row carries when it was last worked in; a folder without a session says so.
+    expect(choices.map((c) => c.querySelector('.folder-choice-meta')?.textContent === 'No sessions')).toEqual([false, false, true]);
+    expect(choices.filter((c) => c.getAttribute('aria-checked') === 'true').map((c) => c.getAttribute('title'))).toEqual([ROOT]);
+  });
+
+  it('filters the folders as you type and takes the top match on Enter', async () => {
+    seedSettings(settingsWith({ folders: [ROOT, 'G:/Agents/alpha', 'G:/Agents/beta', 'D:/Millie'] }));
+    render(<NewSessionDialog />);
+
+    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    const filter = screen.getByRole('textbox', { name: 'Filter folders' });
+    expect(document.activeElement).toBe(filter);
+    // Case and separator do not matter, and every term must match.
+    fireEvent.change(filter, { target: { value: 'g:\\AGENTS bet' } });
+    expect(screen.getAllByRole('menuitemradio').map((c) => c.getAttribute('title'))).toEqual(['G:/Agents/beta']);
+    fireEvent.change(filter, { target: { value: 'nowhere' } });
+    expect(screen.queryAllByRole('menuitemradio')).toEqual([]);
+    expect(screen.getByText(/No folder matches/)).toBeTruthy();
+    // The native picker stays reachable while nothing matches.
+    expect(screen.getByRole('menuitem', { name: 'Choose another folder…' })).toBeTruthy();
+
+    fireEvent.change(filter, { target: { value: 'agents' } });
+    fireEvent.keyDown(filter, { key: 'Enter' });
+    await waitFor(() => expect(document.querySelector('.ns-root')?.textContent).toBe('G:/Agents/alpha'));
+    expect(screen.queryByRole('menu')).toBeNull();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git:folderIsRepo', { projectRoot: 'G:/Agents/alpha' }));
+  });
+
+  it('picks a folder outside the list with the native folder picker', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'harness:models') return harnessModels();
+      if (channel === 'git:folderIsRepo') return { isRepo: false };
+      if (channel === 'app:pickFolder') return { path: 'D:/elsewhere' };
+      return {};
+    });
+    render(<NewSessionDialog />);
+    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Choose another folder…' }));
+
+    await waitFor(() => expect(document.querySelector('.ns-root')?.textContent).toBe('D:/elsewhere'));
+    expect(invoke).toHaveBeenCalledWith('app:pickFolder', { defaultPath: ROOT });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git:folderIsRepo', { projectRoot: 'D:/elsewhere' }));
+  });
+
+  it('closes the folder menu on Escape before it closes the dialog', async () => {
+    render(<NewSessionDialog />);
+    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    expect(screen.getByRole('menu')).toBeTruthy();
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(useStore.getState().openNewSession).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(useStore.getState().openNewSession).toHaveBeenCalledWith(false);
+  });
+
   it('starts a quick session on the folder\'s remembered choices', async () => {
     seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { harness: 'claude', permissionMode: 'plan', useWorktree: true, branchPrefix: 'chore', modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } } } }));
 

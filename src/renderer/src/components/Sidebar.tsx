@@ -1,22 +1,24 @@
 /** Session list grouped by project, with live status badges per harness. */
 import React, { useMemo, useRef, useState } from 'react';
-import type { AppSettings, SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID } from '../../../shared/harness-meta';
+import type { AppSettings, FolderStyle, SessionMeta, SidebarView } from '../../../shared/types';
 import { modelRefName } from '../../../shared/model-names';
+import { sessionTitleText } from '../../../shared/session-title';
 import { invoke, modKey } from '../api';
-import { basename, harnessShort, harnessTone, relTime } from '../format';
+import { basename, relTime } from '../format';
 import { archiveSession, removeFolder } from '../sessionActions';
 import { isTopLevelSession } from '../missions';
 import { activitySections } from '../activity';
 import { sortSessionRows } from '../sessionOrder';
 import { useStore, toastError } from '../store';
+import { useMinimalUi } from '../ui-mode';
 import { canSplit, paneShowing, SESSION_DRAG_TYPE } from '../panes';
 import { Resizer } from './Resizer';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { FolderBranch } from './FolderBranch';
 import { ActivityMenu } from './ActivityTray';
 import { ForkIntoDropdown } from './ForkInto';
-import { askConfirm, Badge, Button, Dropdown, Icon, Kbd, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
+import { SessionTitle } from './SessionTitle';
+import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
 
 /** Sessions in a folder whose last turn finished while nobody was looking. */
 const unseenIn = (list: SessionMeta[]): number => list.filter((s) => s.unseenAt !== undefined).length;
@@ -52,13 +54,32 @@ export interface SidebarNavFolder {
   sessionIds: string[];
 }
 
+/** The sidebar's list layout; anything but an explicit `recent` is the folder-grouped default. */
+export const sidebarViewOf = (settings: AppSettings | null): SidebarView => (settings?.sidebarView === 'recent' ? 'recent' : 'folders');
+
 /**
- * Sidebar display order (folders by saved order, sessions by sortSessionRows) mirrored as a pure
- * model so keyboard navigation (Ctrl+Arrow) matches what the sidebar renders. Always reflects the
- * default view: non-archived sessions, no search filter.
+ * The Recent view as nav entries: one flat recency order (sortSessionRows over every folder),
+ * cut into runs of consecutive rows from the same folder, so Ctrl+Shift+Arrow jumps to the next
+ * row that belongs to a different folder.
+ */
+function recentNavModel(visible: SessionMeta[]): SidebarNavFolder[] {
+  const runs: SidebarNavFolder[] = [];
+  for (const s of sortSessionRows(visible)) {
+    const last = runs[runs.length - 1];
+    if (last?.root === s.config.projectRoot) last.sessionIds.push(s.id);
+    else runs.push({ root: s.config.projectRoot, sessionIds: [s.id] });
+  }
+  return runs;
+}
+
+/**
+ * Sidebar display order mirrored as a pure model so keyboard navigation (Ctrl+Arrow) matches what
+ * the sidebar renders: folders by saved order with sessions by sortSessionRows, or — in the Recent
+ * view — one recency order across folders. Always reflects non-archived sessions, no search filter.
  */
 export function sidebarNavModel(sessions: SessionMeta[], settings: AppSettings | null): SidebarNavFolder[] {
   const visible = sessions.filter((s) => !s.archived && isTopLevelSession(s));
+  if (sidebarViewOf(settings) === 'recent') return recentNavModel(visible);
   const byProject = new Map<string, SessionMeta[]>();
   for (const s of visible) byProject.set(s.config.projectRoot, [...(byProject.get(s.config.projectRoot) ?? []), s]);
   const model = [...byProject.entries()].map(([root, list]) => ({
@@ -122,9 +143,16 @@ export function Sidebar() {
   const [showArchived, setShowArchived] = useState(false);
   // Drag-to-reorder state: which folder block is being dragged, and where it currently hovers.
   const [drag, setDrag] = useState<{ root: string; over: string | null; after: boolean } | null>(null);
+  const sidebarView = sidebarViewOf(settings);
+
+  const visible = useMemo(
+    () => sessions.filter((s) => isTopLevelSession(s) && (showArchived ? s.archived : !s.archived)),
+    [sessions, showArchived]
+  );
+  // Recent view: one list across every folder, by the same comparator a folder's rows use.
+  const recentRows = useMemo(() => (sidebarView === 'recent' ? sortSessionRows(visible) : []), [visible, sidebarView]);
 
   const groups = useMemo(() => {
-    const visible = sessions.filter((s) => isTopLevelSession(s) && (showArchived ? s.archived : !s.archived));
     const byProject = new Map<string, SessionMeta[]>();
     for (const s of visible) {
       const key = s.config.projectRoot;
@@ -152,7 +180,7 @@ export function Sidebar() {
     };
     groups.sort((a, b) => pos(a.root) - pos(b.root) || basename(a.root).localeCompare(basename(b.root)));
     return groups;
-  }, [sessions, settings, showArchived]);
+  }, [visible, settings, showArchived]);
 
   const folderStyles = settings?.folderStyles ?? {};
   const collapsed = settings?.collapsedFolders ?? [];
@@ -264,6 +292,10 @@ export function Sidebar() {
   const running = sessions.filter((s) => isTopLevelSession(s) && s.status === 'running').length;
   const done = activitySections(sessions, null).done.length;
   const plural = (n: number) => `${n} ${n === 1 ? 'session' : 'sessions'}`;
+  // Zen keeps only the icons of these links; their names move into tooltips.
+  const minimal = useMinimalUi();
+  const tip = (label: string) => (minimal ? label : undefined);
+  const pinned = useStore((s) => s.pins.left);
 
   return (
     <aside className="sidebar">
@@ -295,29 +327,78 @@ export function Sidebar() {
           )}
           <Button variant="ghost" size="sm" icon="search" className="btn-icon" onClick={() => useStore.getState().openSearch(true)} title="Search sessions (Ctrl+Shift+F)" aria-label="Search sessions" />
           <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
+          {/* Zen: hold the list open instead of folding back to the rail of dots. */}
+          {minimal && <Button variant={pinned ? 'subtle' : 'ghost'} size="sm" icon={pinned ? 'pinOff' : 'pin'} className="btn-icon" onClick={() => useStore.getState().togglePin('left')} title={pinned ? 'Unpin: fold back to the rail' : 'Pin open'} aria-label={pinned ? 'Unpin sidebar' : 'Pin sidebar'} aria-pressed={pinned} />}
         </div>
       </div>
       <div className="sidebar-nav">
-        <button type="button" className="sidebar-new" onClick={() => useStore.getState().openQuickSession(true)} title="Start a session in a recent folder">
-          <Icon name="sessionPlus" size={15} /> <span>New session</span> <Kbd>{modKey}+N</Kbd>
-        </button>
         <div className="sidebar-views">
-          <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} onClick={() => setView('analytics')}>
+          <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} title={tip('Analytics')} onClick={() => setView('analytics')}>
             <Icon name="chart" size={14} /> Analytics
           </button>
-          <button type="button" className={`sidebar-link ${view === 'skills' ? 'active' : ''}`} onClick={() => setView('skills')}>
+          <button type="button" className={`sidebar-link ${view === 'skills' ? 'active' : ''}`} title={tip('Skills')} onClick={() => setView('skills')}>
             <Icon name="puzzle" size={14} /> Skills
           </button>
-          <button type="button" className={`sidebar-link ${view === 'mcp' ? 'active' : ''}`} onClick={() => setView('mcp')}>
+          <button type="button" className={`sidebar-link ${view === 'mcp' ? 'active' : ''}`} title={tip('MCP')} onClick={() => setView('mcp')}>
             <Icon name="server" size={14} /> MCP
           </button>
         </div>
       </div>
+      {/* What the list shows, picked at the top of the sidebar: its layout (folder groups or one
+          recency order) and, beside it, which sessions (live or archived). The two are independent:
+          archived sessions list by project or by recent too. New session closes the row. */}
+      <div className="sidebar-viewswitch" role="group" aria-label="Session list view">
+        <Icon name={showArchived ? 'archive' : sidebarView === 'recent' ? 'list' : 'folder'} size={15} className="sidebar-viewswitch-icon" />
+        <div className="segmented" role="group" aria-label="Session list layout">
+          {([['folders', 'folder', 'Projects', 'Group sessions by project folder'], ['recent', 'list', 'Recent', 'Sort sessions by recent, across folders']] as const).map(([v, icon, label, title]) => (
+            <button
+              key={v}
+              type="button"
+              className={`segment ${sidebarView === v ? 'active' : ''}`}
+              data-testid={`sidebar-${v}`}
+              aria-pressed={sidebarView === v}
+              title={title}
+              onClick={() => {
+                if (sidebarView !== v) void invoke('settings:update', { sidebarView: v }).catch(toastError);
+              }}
+            >
+              <Icon name={icon} size={12} /> <span className="segment-label">{label}</span>
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          className={`segmented-toggle sidebar-archived ${showArchived ? 'active' : ''}`}
+          data-testid="sidebar-archived"
+          aria-pressed={showArchived}
+          aria-label="Archived"
+          title={showArchived ? 'Back to active sessions' : 'Show archived sessions'}
+          onClick={() => setShowArchived((v) => !v)}
+        >
+          {/* Icon only, like New session beside it, so Projects | Recent keeps room for its labels;
+              the name lives in aria-label and the tooltip. */}
+          <Icon name="archive" size={14} />
+        </button>
+        {/* Same as Ctrl+Shift+N: the full new-session dialog, seeded with the open session's folder
+            (the folder picker first when no session is open). An icon at the row's end keeps the
+            top of the sidebar to one line; the name and shortcut live in the tooltip. */}
+        <button
+          type="button"
+          className="segmented-toggle sidebar-new"
+          data-testid="sidebar-new"
+          aria-label="New session"
+          aria-keyshortcuts={`${modKey === 'Ctrl' ? 'Control' : 'Meta'}+Shift+N`}
+          title={`New session in this folder (${modKey}+Shift+N)`}
+          onClick={() => {
+            const st = useStore.getState();
+            void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot);
+          }}
+        >
+          <Icon name="sessionPlus" size={14} />
+        </button>
+      </div>
       <div className="sidebar-section">
         <span className="sidebar-section-label">{showArchived ? 'Archived sessions' : 'Sessions'}</span>
-        <button type="button" className={`sidebar-link sidebar-archived ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived((v) => !v)}>
-          <Icon name={showArchived ? 'arrowLeft' : 'clock'} size={13} /> {showArchived ? 'Show active' : 'Archived'}
-        </button>
       </div>
       <div
         className="sidebar-list"
@@ -336,8 +417,25 @@ export function Sidebar() {
           setDrag(null);
         }}
       >
-        {groups.length === 0 && <div className="sidebar-empty">{showArchived ? 'No archived sessions.' : 'No sessions yet. Create one to start.'}</div>}
-        {groups.map((g) => {
+        {(sidebarView === 'recent' ? recentRows.length === 0 : groups.length === 0) && (
+          <div className="sidebar-empty">{showArchived ? 'No archived sessions.' : 'No sessions yet. Create one to start.'}</div>
+        )}
+        {sidebarView === 'recent' && recentRows.map((s) => (
+          <SessionRow
+            key={s.id}
+            session={s}
+            folder={{ root: s.config.projectRoot, style: folderStyles[s.config.projectRoot] }}
+            active={s.id === activeId && view === 'chat'}
+            inPane={!!paneSessions && view === 'chat' && s.id !== activeId && paneSessions.some((p) => p.sessionId === s.id)}
+            customLabels={settings?.customLabels ?? []}
+            archiving={!!archiving[s.id]}
+            onSelect={() => void setActive(s.id).catch(toastError)}
+            toast={toast}
+            dnd={dnd}
+            dndHandlers={dndHandlers}
+          />
+        ))}
+        {sidebarView === 'folders' && groups.map((g) => {
           const isCollapsed = collapsed.includes(g.root);
           const dropMark = drag && drag.over === g.root && drag.root !== g.root ? (drag.after ? 'drop-after' : 'drop-before') : '';
           return (
@@ -417,7 +515,7 @@ export function Sidebar() {
         })}
       </div>
       <div className="sidebar-bottom">
-        <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
+        <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} title={tip('Settings')} onClick={() => setView('settings')}>
           <Icon name="settings" size={14} /> Settings
         </button>
         <UpdatePill />
@@ -469,8 +567,10 @@ type DndHandlers = {
   drop: (id: string) => void;
 };
 
-function SessionRow({ session: s, active, inPane = false, customLabels, archiving, onSelect, toast, dnd, dndHandlers }: {
+function SessionRow({ session: s, folder, active, inPane = false, customLabels, archiving, onSelect, toast, dnd, dndHandlers }: {
   session: SessionMeta;
+  /** Set in the Recent view, where no folder header says which project the row belongs to. */
+  folder?: { root: string; style?: FolderStyle };
   active: boolean;
   /** Shown in a split pane that is not the active one. */
   inPane?: boolean;
@@ -485,7 +585,8 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
   const renameAction = useRef<'idle' | 'committed' | 'cancelled'>('idle');
-  const h = HARNESS_BY_ID[s.config.harness];
+  // Zen's rail hides the title, so the row names itself on hover there.
+  const minimal = useMinimalUi();
   const startRename = () => {
     setTitle(s.title);
     renameAction.current = 'idle';
@@ -507,13 +608,17 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
       toast(e instanceof Error ? e.message : String(e), 'error');
     }
   };
-  const deleteRow = async () => {
+  // Confirmations open at the control that asked; from the right-click menu, whose item is gone by
+  // then, they open at the row.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const deleteRow = async (anchor: HTMLElement | null) => {
     if (s.mission) { toast('Archive the Mission to retain its artifacts. Use explicit managed cleanup after execution settles.', 'info'); return; }
     const ok = await askConfirm({
       title: `Delete session "${s.title}"?`,
       body: s.worktreeBranch ? `Its worktree and the branch ${s.worktreeBranch} are removed with it.` : 'Its transcript is removed. This cannot be undone.',
       confirmLabel: 'Delete',
-      danger: true
+      danger: true,
+      anchor
     });
     if (ok) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch });
   };
@@ -544,8 +649,8 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
     { separator: true },
     s.archived
       ? { label: 'Restore session', icon: 'restore', onSelect: () => void invoke('sessions:archive', { id: s.id, archived: false }) }
-      : { label: s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast) },
-    { label: s.mission ? 'Mission deletion unavailable — archive retains work' : 'Delete session', icon: 'trash', danger: true, disabled: !!s.mission, onSelect: () => !s.mission && void deleteRow() }
+      : { label: s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast, rowRef.current) },
+    { label: s.mission ? 'Mission deletion unavailable — archive retains work' : 'Delete session', icon: 'trash', danger: true, disabled: !!s.mission, onSelect: () => !s.mission && void deleteRow(rowRef.current) }
   ];
 
   // Any live row drags into the workspace to open it in a pane; only pinned rows also reorder.
@@ -554,9 +659,14 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
   const indicator = dnd.overId === s.id && dnd.dragId && dnd.dragId !== s.id ? (dnd.pos === 'before' ? ' drag-above' : ' drag-below') : '';
   return (
     <div
+      ref={rowRef}
       className={`session-row ${active ? 'active' : ''}${inPane ? ' in-pane' : ''}${s.unseenAt !== undefined ? ' unseen' : ''}${dragClass}${indicator}`}
       data-testid="session-row"
       data-session-id={s.id}
+      data-status={archiving ? 'archiving' : s.status}
+      data-harness={s.config.harness}
+      data-pinned={s.pinned ? '' : undefined}
+      title={minimal && !renaming ? sessionTitleText(s) : undefined}
       draggable={canDrag}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move';
@@ -596,36 +706,61 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
         </button>
       </div>
       <div className="session-main">
-        {renaming ? (
-          <input
-            className="session-rename"
-            autoFocus
-            onFocus={(e) => e.currentTarget.select()}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={(e) => {
-              e.stopPropagation();
-              void commit();
-            }}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === 'Enter') void commit();
-              if (e.key === 'Escape') cancelRename();
-            }}
-            onClick={(e) => e.stopPropagation()}
-            onDoubleClick={(e) => e.stopPropagation()}
-          />
-        ) : (
-          <div className="session-title">
-            {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
-            <span title="Click to rename" onClick={(e) => { e.stopPropagation(); startRename(); }}>{s.title}</span>
+        <div className="session-heading">
+          {renaming ? (
+            <input
+              className="session-rename"
+              aria-label="Rename session"
+              autoFocus
+              onFocus={(e) => e.currentTarget.select()}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onBlur={(e) => {
+                e.stopPropagation();
+                void commit();
+              }}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') void commit();
+                if (e.key === 'Escape') cancelRename();
+              }}
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <div className="session-title">
+              {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
+              <SessionTitle session={s} showProject={false} />
+            </div>
+          )}
+          <div className="row-actions" onClick={(e) => e.stopPropagation()}>
+            {s.archived ? (
+              <>
+                <button type="button" className="row-act-btn" title="Restore session" aria-label="Restore session" onClick={() => void invoke('sessions:archive', { id: s.id, archived: false })}>
+                  <Icon name="restore" size={15} />
+                </button>
+                <button type="button" className="row-act-btn danger" disabled={!!s.mission} title={s.mission ? 'Mission deletion unavailable; archive retains artifacts' : 'Delete session'} aria-label="Delete session" onClick={(e) => void deleteRow(e.currentTarget)}>
+                  <Icon name="trash" size={15} />
+                </button>
+              </>
+            ) : (
+              <>
+                <ForkIntoDropdown session={s} />
+                <button type="button" className="row-act-btn" title={s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={(e) => void archiveSession(s, toast, e.currentTarget)}>
+                  <Icon name="archive" size={15} />
+                </button>
+              </>
+            )}
           </div>
-        )}
+        </div>
         <div className="session-meta">
+          {folder && (
+            <span className="session-folder" data-testid="session-folder" title={folder.root} style={folder.style?.color ? { color: folder.style.color } : undefined}>
+              <Icon name={folder.style?.icon ?? 'folder'} size={11} />
+              <span className="session-folder-name">{basename(folder.root)}</span>
+            </span>
+          )}
           {s.mission && <Badge tone="purple">Mission</Badge>}
-          <span className={`session-harness tone-${harnessTone(s.config.harness)}`} title={h?.name}>
-            {harnessShort(s.config.harness)}
-          </span>
           {s.activeModel && (
             <span className="session-model" title={modelRefName(s.activeModel)}>
               {modelRefName(s.activeModel)}
@@ -649,25 +784,6 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
           </span>
           <span className="session-time">{relTime(s.updatedAt)}</span>
         </div>
-      </div>
-      <div className="row-actions" onClick={(e) => e.stopPropagation()}>
-        {s.archived ? (
-          <>
-            <button type="button" className="row-act-btn" title="Restore session" aria-label="Restore session" onClick={() => void invoke('sessions:archive', { id: s.id, archived: false })}>
-              <Icon name="restore" size={15} />
-            </button>
-            <button type="button" className="row-act-btn danger" disabled={!!s.mission} title={s.mission ? 'Mission deletion unavailable; archive retains artifacts' : 'Delete session'} aria-label="Delete session" onClick={() => void deleteRow()}>
-              <Icon name="trash" size={15} />
-            </button>
-          </>
-        ) : (
-          <>
-            <ForkIntoDropdown session={s} />
-            <button type="button" className="row-act-btn" title={s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveSession(s, toast)}>
-              <Icon name="archive" size={15} />
-            </button>
-          </>
-        )}
       </div>
     </div>
   );

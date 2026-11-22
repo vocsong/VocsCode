@@ -13,10 +13,11 @@ import { OnboardingProvider } from './OnboardingProvider';
 import './onboarding.css';
 
 const STEPS = ['Choose an agent', 'Connect', 'Models', 'Optional', 'Start'] as const;
-const SIMPLE: HarnessId[] = ['claude', 'codex', 'pi', 'native'];
+const SIMPLE: HarnessId[] = ['claude', 'codex', 'antigravity', 'pi', 'native'];
 const DESCRIPTIONS: Partial<Record<HarnessId, string>> = {
   claude: 'Use your Claude subscription through Claude Code. Its runtime and SDK are included with Vocs Code.',
   codex: 'Use your ChatGPT subscription through Codex. Its runtime is included with Vocs Code.',
+  antigravity: 'Use Gemini with your Google sign-in through the Antigravity CLI.',
   pi: 'A flexible agent with provider sign-ins or API keys. Install Pi and its prerequisites if missing.',
   native: 'Use an API key or a local model server. The agent itself is built in; no coding-agent CLI is needed.'
 };
@@ -53,7 +54,9 @@ export function OnboardingWizard({ initialHarness, onClose }: { initialHarness?:
   const providerConfigured = !!selectedProvider?.enabled && (!!selectedProvider.hasApiKey || source === 'environment' || source === 'local');
   const connectionConfigured = !!setup?.availability.available && (requiresApi ? providerConfigured : setup.availability.authenticated === true);
   const usableModel = selected ? !!models?.some((m) => m.id === selected.model && m.provider === selected.provider) : !requiresApi;
-  const checked = connectionConfigured && models !== null && models.length > 0 && !modelError && usableModel;
+  const antigravity = harness === 'antigravity';
+  const catalogChecked = models !== null && models.length > 0 && !modelError && usableModel;
+  const checked = connectionConfigured && (antigravity || catalogChecked);
 
   const loadProviders = async () => {
     const request = ++providerRequests.current;
@@ -103,7 +106,7 @@ export function OnboardingWizard({ initialHarness, onClose }: { initialHarness?:
       const providerResult = requiresApi ? await invoke('providers:refreshModels', { id: providerId }) : undefined;
       // For CLI agents, intersect the selected provider with the agent's own catalog rather than
       // assuming every model on a provider's API is usable by that coding agent.
-      let result = providerResult && (harness === 'native' || harness === 'cursor') ? providerResult : await invoke('harness:models', { harness });
+      let result = providerResult && (harness === 'native' || harness === 'cursor') ? providerResult : await invoke('harness:models', { harness, refresh: true });
       if (providerResult && harness !== 'native' && harness !== 'cursor') result = { models: result.models.filter((m) => m.provider === providerId), error: providerResult.error ?? result.error };
       if (request !== requests.current) return;
       setModels(result.models);
@@ -129,12 +132,12 @@ export function OnboardingWizard({ initialHarness, onClose }: { initialHarness?:
     finally { setSaving(false); }
   };
   const next = () => {
-    if (step === 1) { setStep(2); if (!models) void loadModels(); }
+    if (step === 1) { setStep(2); if (!antigravity && !models) void loadModels(); }
     else setStep((s) => Math.min(STEPS.length - 1, s + 1));
   };
   const apiProviders = useMemo(() => providers.filter((p) => harness === 'cursor' ? p.id === 'cursor' : harness === 'claude' ? p.id === 'anthropic' : harness === 'codex' || harness === 'codex-exec' ? p.id === 'openai' : p.kind !== 'cursor'), [providers, harness]);
   const utilityModels = useMemo(() => providers.filter((p) => p.enabled && (p.hasApiKey || access.some((a) => a.id === p.id && a.source !== 'none'))).flatMap((p) => p.models), [providers, access]);
-  const blockNext = saving || (step === 0 && !harness) || (step === 1 && (setupPending || (!connectionConfigured && !acceptUnverified))) || (step === 2 && (loadingModels || ((!models?.length || !usableModel || !!modelError) && !acceptUnverified)));
+  const blockNext = saving || (step === 0 && !harness) || (step === 1 && (setupPending || (!connectionConfigured && !acceptUnverified))) || (step === 2 && !antigravity && (loadingModels || (!catalogChecked && !acceptUnverified)));
 
   return <Modal title="Welcome to Vocs Code" width={820} onClose={() => { if (!saving) onClose?.(); }} footer={
     <div className="setup-footer">
@@ -166,6 +169,7 @@ export function OnboardingWizard({ initialHarness, onClose }: { initialHarness?:
           <h2>Connect {HARNESS_BY_ID[harness].name}</h2>
           {(harness === 'claude' || harness === 'codex' || harness === 'codex-exec') && <p className="callout">{harness === 'claude' ? 'Claude Code can use an eligible Claude subscription.' : 'Codex can use an eligible ChatGPT subscription.'} Use the sign-in below; an API key is not required for that route. If the runtime is already included and working, do not install another CLI or SDK.</p>}
           {harness === 'pi' && <p className="callout">Pi supports provider sign-ins through <code>/login</code>, including subscription routes offered by its installed version. Or add an API key below. After signing in, use <code>/model</code> in Pi or check models here.</p>}
+          {antigravity && <p className="callout">Sign in to Google to use your Antigravity account quota in interactive Vocs Code sessions. The Antigravity CLI keeps your sign-in.</p>}
           {harness === 'acp' && <p className="callout">ACP runs separately configured agents. The default preset uses DeepSeek Harness; install it below or add another command in Settings → ACP agents. Follow that agent’s own provider instructions. This generic check cannot verify its account.</p>}
           <HarnessSetup key={harness} harness={harness} refreshToken={refreshToken} onChange={(value, pending) => { setSetup(value); setSetupPending(!!pending); invalidateModels(); }} />
           {setup?.apiCredentialsMayOverrideLogin && <p className="callout warn">Codex also receives configured OpenAI API keys. Its CLI sign-in status alone does not prove session billing. For subscription-only use, review OpenAI keys in Settings → Providers &amp; keys and your environment; removing a key may affect other agents. This guide does not silently change that credential precedence.</p>}
@@ -176,6 +180,7 @@ export function OnboardingWizard({ initialHarness, onClose }: { initialHarness?:
         </div>}
         {step === 2 && <section aria-label="Choose a model">
           <h2>Choose the models this agent can offer</h2>
+          {antigravity ? <p>Start a session with Antigravity’s default Gemini model. The session model picker shows the Gemini models available to your Google account after the CLI connects.</p> : <>
           <p>A model catalog is not a guarantee of quota or paid access. This check does not send a prompt or run a coding session.</p>
           <Button icon="refresh" disabled={loadingModels} onClick={() => void loadModels()}>{loadingModels ? 'Checking models…' : 'Recheck models'}</Button>
           {loadingModels && <p role="status"><Spinner size={13} /> Loading the selected connection’s model catalog…</p>}
@@ -183,6 +188,7 @@ export function OnboardingWizard({ initialHarness, onClose }: { initialHarness?:
           {models && <><p role="status">{models.length} {modelError ? 'suggested' : 'catalog'} model{models.length === 1 ? '' : 's'}.</p><Field label="Default model" hint="Applies to new projects. Existing projects keep their remembered New Session choices."><ModelPicker models={models} selected={selected} clearOption={requiresApi ? undefined : { label: 'Let the agent choose its default' }} onSelect={(m) => setSelected(m ? { provider: m.provider, model: m.id } : undefined)} /></Field></>}
           {(modelError || !models?.length || !usableModel) && <Toggle label="Continue without verified model access" checked={acceptUnverified} onChange={setAcceptUnverified} />}
           <p className="muted small">If the catalog or a later session rejects a model, choose another one or return to the connection step. A subscription does not make every model in a fallback list available.</p>
+          </>}
         </section>}
         {step === 3 && <section aria-label="Optional features">
           <h2>Optional — keep the first session simple</h2>

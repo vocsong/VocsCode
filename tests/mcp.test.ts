@@ -381,6 +381,7 @@ describe('harness capabilities', () => {
       'codex-exec': 'inject',
       cursor: 'inherit',
       pi: 'inject',
+      antigravity: 'inject',
       acp: 'inject',
       native: 'client'
     });

@@ -26,14 +26,42 @@ availability/sign-in only; **Check for updates** checks CLI versions.
 | Workspace | General, Appearance, Shortcuts, Terminal, Voice |
 | Agent behavior | Session defaults, Instructions, Mission, Vesta & utility |
 | Connections | Vocs account, Providers & keys, Harnesses, Pi, ACP agents |
-| System | Import chats, Remote access, About & doctor |
+| System | Import chats, Remote access, Housekeep, About & doctor |
 
 General is the starting point for daily preferences and common destinations. Appearance owns the
-live theme preview and theme catalogue. Session defaults owns new-session defaults, compaction,
+interface mode (Standard, or the minimalist Zen layout), the live theme preview and the theme
+catalogue; the interface and the color theme are independent, and every theme works in both. See
+[Interface modes](INTERFACE-MODES.md). Session defaults owns new-session defaults, compaction,
 goals and worktree branch prefixes. Remembered per-project choices still take precedence for
 new-session harness, permission and effort defaults. Compaction is app-wide and can affect existing
 sessions at an idle boundary; the harness-native `/goal` preference updates existing sessions too.
 Auto-continue and iteration defaults are copied when a new goal is created.
+
+**Housekeep** configures `/housekeep` on the desktop. It protects sessions used in the last
+**7 days** by default, counting the latest session creation, update, view, or transcript activity. Save a whole
+number from 0 to 3650; 0 turns off only age protection, not the other protections. The age rule is
+checked again before archiving. A review without an override uses the current setting at that check.
+
+Run `/housekeep sessions` (or the built-in **Housekeep sessions** skill) to preview older sessions one
+by one. Add a whole number from 0 to 3650, such as `/housekeep 3`, to set the protection window for
+that review only. It applies through confirmation and does not change the saved setting. Review
+locally, or explicitly ask your configured utility model to assess short conversation
+excerpts. Results are recommendations and never archive anything before a separate confirmation.
+Sessions with local files, including Git-ignored files, are left alone. Clean worktrees go to the
+operating system’s Trash (Recycle Bin on Windows), never through permanent deletion. Existing
+branches and transcripts are retained. Housekeep is not available to paired browsers or agents.
+
+In the same dialog, choose **Scan worktrees and branches** under **Stranded worktrees and
+branches**. This is a read-only inventory of repositories known to this profile through saved
+project folders or sessions, including archived ones. It compares Git registrations with direct
+entries under `.vocs-code/worktrees`, legacy `.vocs-desk/worktrees`, and repo-relative
+`.claude/worktrees` and `.codex/worktrees` when present. It can also show retained local branches
+without a registered checkout when an archived session references them or when they use the
+`vocscode/` or legacy `harness/` naming convention. Git’s stale-registration flag is shown separately
+from whether the folder was found. A session that records the same branch elsewhere isn’t counted
+as a checkout path match. An unlinked folder or branch isn’t necessarily abandoned. The scan never
+reads checkout contents or scans home directories, never contacts a provider or Git remote, and
+never removes folders, prunes registrations, or deletes branches.
 
 - Search finds settings by topic and vocabulary, including controls inside other pages. Enter opens
   the first result; Down moves into results; Escape clears the query even from a focused result and
@@ -53,7 +81,10 @@ Auto-continue and iteration defaults are copied when a new goal is created.
 an important setting, including user-facing synonyms. Search only indexes static descriptive text:
 never configuration values, credentials, user files or model account details. An optional `anchor`
 should name the actual visible settings group. `openSettings()` remains the public deep-link entry;
-View → Theme opens Appearance directly.
+View → Theme opens Appearance directly; View also lists both interfaces, and the command palette offers
+"Switch to the … interface" for the one not in use. In Zen, hovering the icon rail or tabbing to a
+section opens the full menu over the settings page. The compact-pane section selector takes over
+at 650px and below.
 
 `SettingsPrimitives.tsx` provides titled, accessible groups and informational notes. Settings-specific
 styles live in `components/settings.css`, scoped to `.settings` so other app surfaces are unaffected.

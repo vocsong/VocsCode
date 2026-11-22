@@ -379,8 +379,8 @@ describe('Mission coordinator', () => {
     const worker = runtimes.get(first.sessionId)!;
     worker.usage({ inputTokens: 100, costUsd: 1 });
     await report(r, first.attemptId, { status: 'failed' }); worker.finish();
-    // Turn settlement commits the terminal attempt and its notice separately. Wait for both
-    // before reading the revision for Pause; this test is about usage recovery, not stale actions.
+    // Worker settlement commits the terminal status and mailbox notice separately.
+    // Wait for both before reading the revision used to pause.
     await wait(() => {
       const current = service.get(r.id);
       expect(current?.attempts[0].status).toBe('terminal');
@@ -772,11 +772,14 @@ describe('Mission coordinator', () => {
     const r = await start(); await plan(r);
     config.presets[1].enabled = false;
     await tool(r, 'mission_task_delegate', { taskId: 't1', presetId: 'standard', reason: 'Must be refused live' });
-    await wait(() => expect(service.get(r.id)?.operations.some((o) => o.payload.taskId === 't1' && o.state === 'failed')).toBe(true));
+    await wait(() => {
+      const current = service.get(r.id);
+      expect(current?.operations.some((o) => o.payload.taskId === 't1' && o.state === 'failed')).toBe(true);
+      expect(current?.mailbox.some((m) => /disabled|removed/i.test(m.text))).toBe(true);
+    });
     expect(sessions.list().filter((s) => s.mission?.role === 'worker')).toHaveLength(0);
     expect(service.get(r.id)?.blockers).toEqual([]);
     expect(service.get(r.id)?.status).toBe('running');
-    expect(service.get(r.id)?.mailbox.some((m) => /disabled|removed/i.test(m.text))).toBe(true);
     expect(capabilities.mock.calls.length).toBeGreaterThan(0);
   });
 

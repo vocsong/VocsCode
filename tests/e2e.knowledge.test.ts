@@ -38,11 +38,11 @@ async function launchApp(userData: string): Promise<Page> {
   return win;
 }
 
-/** Seeds one idle native session on disk, so the panel opens without a harness or a provider key. */
-async function seedSession(userData: string, project: string, id: string): Promise<void> {
-  const session = {
+/** An idle native session so the panel opens without a harness or a provider key. */
+function sessionFor(project: string, id: string, title = 'Knowledge panel'): SessionMeta {
+  return {
     id,
-    title: 'Knowledge panel',
+    title,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
@@ -52,16 +52,26 @@ async function seedSession(userData: string, project: string, id: string): Promi
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
     queued: 0
   } as SessionMeta;
-  await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
-  await fs.mkdir(path.join(userData, 'sessions', id), { recursive: true });
-  await fs.writeFile(path.join(userData, 'sessions', id, 'transcript.jsonl'), '');
 }
 
-/** Selects the seeded session and opens the Knowledge tab in the panel's lower half. */
-async function openKnowledge(win: Page): Promise<void> {
-  await win.locator('[data-testid="session-row"]').first().click();
-  await win.getByTestId('panel-bottom-knowledge').click();
-  await win.getByTestId('knowledge-tab').waitFor({ timeout: 30_000 });
+async function seedSessions(userData: string, ...sessions: SessionMeta[]): Promise<void> {
+  await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
+  await Promise.all(sessions.map(async ({ id }) => {
+    const dir = path.join(userData, 'sessions', id);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'transcript.jsonl'), '');
+  }));
+}
+
+/** Selects a session and opens the same Knowledge entry in either interface mode. */
+async function openKnowledge(win: Page, title?: string): Promise<void> {
+  const rows = win.getByTestId('session-row');
+  const row = title ? rows.filter({ hasText: title }) : rows.first();
+  // Zen restores the selected session with its sidebar collapsed to a rail. Do not click behind it.
+  if (!(await row.evaluate((el) => el.classList.contains('active')))) await row.click();
+  const knowledge = win.getByTestId('knowledge-tab');
+  if (!(await knowledge.isVisible())) await win.getByTestId('panel-bottom-knowledge').click();
+  await knowledge.waitFor({ timeout: 30_000 });
 }
 
 function pageMeta(over: Partial<KnowledgePageMeta>): KnowledgePageMeta {
@@ -118,7 +128,7 @@ describe.runIf(enabled)('project knowledge panel', () => {
     );
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
-    await seedSession(userData, project, 's_knowledge_e2e');
+    await seedSessions(userData, sessionFor(project, 's_knowledge_e2e'));
 
     const win = await launchApp(userData);
     await openKnowledge(win);
@@ -203,20 +213,19 @@ describe.runIf(enabled)('project knowledge panel', () => {
     // have one, because "generate from docs" has nothing to read.
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
-    await seedSession(userData, project, 's_knowledge_empty');
+    await seedSessions(userData, sessionFor(project, 's_knowledge_empty'));
 
     const win = await launchApp(userData);
     await openKnowledge(win);
 
-    const empty = win.getByText('No project wiki yet');
-    await empty.waitFor({ timeout: 10_000 });
-    // Opening the panel is also the passive seed's trigger, and a project with nothing to scan still
-    // gets a directory written by it. Wait for that to land, then take the directory away: the seed
-    // runs once per project, so from here only the button can bring the wiki back.
+    // Passive seeding can finish before first paint. Remove its completed output and reattach
+    // the renderer to the same host (whose once-per-project seed attempt has already run).
     await expect.poll(async () => fs.stat(path.join(wiki, '_scan.json')).then(() => true, () => false), { timeout: 20_000 }).toBe(true);
     await fs.rm(wiki, { recursive: true, force: true });
-    expect(await fs.stat(wiki).catch(() => null)).toBeNull();
-
+    await win.reload();
+    await openKnowledge(win);
+    const empty = win.getByText('No project wiki yet');
+    await empty.waitFor({ timeout: 10_000 });
     await win.getByTestId('knowledge-create').click();
     // The panel stops calling this project wiki-less, and the directory agents write into is there.
     await empty.waitFor({ state: 'detached', timeout: 10_000 });
@@ -226,4 +235,101 @@ describe.runIf(enabled)('project knowledge panel', () => {
     app = null;
     await fs.rm(tmp, { recursive: true, force: true });
   });
+
+  it('shares only an explicitly promoted lesson and keeps forgotten records gone after restart', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-intelligence-e2e-'));
+    const userData = path.join(tmp, 'userData');
+    const alpha = path.join(tmp, 'alpha-lab');
+    const beta = path.join(tmp, 'beta-lab');
+    const outside = path.join(tmp, 'outside-lab');
+    const lesson = 'Titanium grounding procedure';
+    try {
+      await Promise.all([userData, alpha, beta, outside].map((dir) => fs.mkdir(dir, { recursive: true })));
+      await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(alpha, { folders: [alpha, beta, outside], mcpDisabledBuiltins: ['gitnexus', 'cua-driver'] }));
+      await seedSessions(userData, sessionFor(alpha, 's_intel_alpha', 'Alpha lab session'), sessionFor(beta, 's_intel_beta', 'Beta lab session'), sessionFor(outside, 's_intel_outside', 'Outside lab session'));
+
+      let win = await launchApp(userData);
+      const tab = async (view: string) => { await win.getByTestId(`knowledge-view-${view}`).click(); };
+      const memoryRow = () => win.getByTestId('memory-row').filter({ hasText: lesson });
+      // Opening a project registers its real root, so only a project known on this machine is a
+      // possible member. Collection creation never adds the other roots implicitly.
+      await openKnowledge(win, 'Beta lab session');
+      await tab('collections');
+      await win.getByTestId('collections-view').getByText('beta-lab', { exact: true }).first().waitFor();
+      await openKnowledge(win, 'Alpha lab session');
+      await tab('sources');
+      expect(await win.getByTestId('graph-index').isDisabled()).toBe(true);
+      await tab('collections');
+      await win.getByTestId('collection-new-name').fill('Shared practices');
+      await win.getByTestId('collection-new-create').click();
+      const card = win.getByTestId('collection-card').filter({ hasText: 'Shared practices' });
+      const projects = card.getByLabel('Add project');
+      await projects.selectOption({ label: 'beta-lab' });
+      await card.getByTestId('collection-save').click();
+      await card.getByLabel('Sharing for beta-lab', { exact: true }).waitFor();
+
+      await tab('memory');
+      await win.getByTestId('memory-add').click();
+      const form = win.getByTestId('memory-add-form');
+      await form.getByLabel('Title').fill(lesson);
+      await form.getByRole('textbox').last().fill('Check the titanium grounding lead before calibrating the bench.');
+      await form.getByTestId('memory-add-save').click();
+      await memoryRow().waitFor();
+      expect(await memoryRow().getByTestId('memory-state').innerText()).toBe('verified');
+      await memoryRow().getByTestId('memory-promote').click();
+      await memoryRow().getByTestId('memory-promote-target').selectOption({ label: 'Shared practices' });
+      await memoryRow().getByTestId('memory-promote-confirm').click();
+      await expect.poll(() => memoryRow().count()).toBe(2);
+
+      await openKnowledge(win, 'Outside lab session');
+      await tab('memory');
+      await win.getByTestId('memory-add').waitFor();
+      expect(await memoryRow().count()).toBe(0);
+      await openKnowledge(win, 'Beta lab session');
+      await tab('memory');
+      await memoryRow().waitFor();
+      expect(await memoryRow().innerText()).toContain('alpha-lab');
+      const searchCollection = async () => {
+        await tab('evidence');
+        await win.getByTestId('evidence-scope').selectOption('collection');
+        await win.getByTestId('evidence-query').fill('titanium grounding');
+        await win.getByTestId('evidence-search').click();
+      };
+      await searchCollection();
+      await win.getByTestId('evidence-row').filter({ hasText: lesson }).waitFor();
+      await tab('memory');
+      await memoryRow().getByTestId('memory-revoke').click();
+      // Revocation is a retrieval contract, regardless of whether the audit view keeps a row.
+      await searchCollection();
+      await win.getByText(/No evidence matched/).waitFor();
+
+      await openKnowledge(win, 'Alpha lab session');
+      await tab('memory');
+      const original = memoryRow().and(win.locator('[data-scope="project"]'));
+      await original.getByTestId('memory-forget').click();
+      await original.getByTestId('memory-forget-confirm').click();
+      await memoryRow().waitFor({ state: 'detached' });
+
+      await app!.close();
+      app = null;
+      const settingsFile = path.join(userData, 'settings.json');
+      const saved = JSON.parse(await fs.readFile(settingsFile, 'utf8')) as Record<string, unknown>;
+      await fs.writeFile(settingsFile, JSON.stringify({ ...saved, uiMode: 'zen' }));
+      win = await launchApp(userData);
+      expect(await win.locator('html').getAttribute('data-ui')).toBe('zen');
+      await openKnowledge(win, 'Alpha lab session');
+      await tab('evidence');
+      await win.getByTestId('evidence-query').fill('titanium grounding');
+      await win.getByTestId('evidence-compile').click();
+      const packet = win.getByTestId('evidence-packet');
+      await packet.waitFor();
+      expect(await packet.innerText()).not.toContain(lesson);
+      await tab('collections');
+      await win.getByTestId('collection-card').filter({ hasText: 'Shared practices' }).waitFor();
+    } finally {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  }, 90_000);
 });

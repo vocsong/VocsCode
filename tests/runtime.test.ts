@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { AppSettings } from '../src/shared/types';
-import { MAX_CAPTURE_BYTES, RuntimeResolver, clearWhichCache, runCapture } from '../src/main/runtime';
+import { MAX_CAPTURE_BYTES, RuntimeResolver, clearWhichCache, codexShimExecutable, runCapture, spawnableCodex } from '../src/main/runtime';
 import { defaultSettings } from '../src/main/settings';
 
 const temporaryDirs: string[] = [];
@@ -155,5 +155,56 @@ describe('runCapture output limits', () => {
     expect(Buffer.byteLength(result.stdout)).toBe(MAX_CAPTURE_BYTES);
     expect(Buffer.byteLength(result.stderr)).toBe(MAX_CAPTURE_BYTES);
     expect(result.truncated).toBe(true);
+  });
+});
+
+// The exec SDK spawns its Codex binary without a shell, so an npm codex.cmd shim must be swapped
+// for the native binary it launches, never for the (often older) bundled one while that exists.
+describe('Codex exec spawnable binary', () => {
+  const triples: Record<string, string> = { 'win32-x64': 'x86_64-pc-windows-msvc', 'win32-arm64': 'aarch64-pc-windows-msvc', 'darwin-x64': 'x86_64-apple-darwin', 'darwin-arm64': 'aarch64-apple-darwin', 'linux-x64': 'x86_64-unknown-linux-musl', 'linux-arm64': 'aarch64-unknown-linux-musl' };
+  const triple = triples[`${process.platform}-${process.arch}`]!;
+  const platformPkg = `@openai/codex-${process.platform}-${process.arch}`;
+  const exeName = process.platform === 'win32' ? 'codex.exe' : 'codex';
+
+  async function npmRuntime(): Promise<{ root: string; shim: string; codexPkg: string }> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-codex-shim-'));
+    temporaryDirs.push(root);
+    const codexPkg = path.join(root, 'node_modules', '@openai', 'codex');
+    await fs.mkdir(path.join(codexPkg, 'bin'), { recursive: true });
+    await fs.writeFile(path.join(codexPkg, 'package.json'), JSON.stringify({ name: '@openai/codex', version: '0.0.0' }));
+    const shim = path.join(root, 'codex.cmd');
+    await fs.writeFile(shim, '@ECHO off\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n');
+    return { root, shim, codexPkg };
+  }
+
+  async function platformBinary(nodeModules: string): Promise<string> {
+    const pkg = path.join(nodeModules, ...platformPkg.split('/'));
+    const exe = path.join(pkg, 'vendor', triple, 'bin', exeName);
+    await fs.mkdir(path.dirname(exe), { recursive: true });
+    await fs.writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: platformPkg, version: '0.0.0' }));
+    await fs.writeFile(exe, '');
+    return exe;
+  }
+
+  it('keeps a directly launchable binary as resolved', () => {
+    const bin = { path: path.join(os.tmpdir(), exeName), source: 'system' as const };
+    expect(spawnableCodex(bin, undefined)).toBe(bin);
+    expect(spawnableCodex(null, undefined)).toBeNull();
+  });
+
+  it('finds the native binary in the platform package hoisted beside @openai/codex', async () => {
+    const { root, shim } = await npmRuntime();
+    const exe = await platformBinary(path.join(root, 'node_modules'));
+    expect(codexShimExecutable(shim)).toBe(exe);
+    expect(spawnableCodex({ path: shim, source: 'app-runtime' }, undefined)).toEqual({ path: exe, source: 'app-runtime' });
+  });
+
+  it('falls back to the bundled binary only when the shim launches nothing native', async () => {
+    const { shim } = await npmRuntime();
+    const appRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-codex-app-'));
+    temporaryDirs.push(appRoot);
+    expect(spawnableCodex({ path: shim, source: 'system' }, appRoot)).toBeNull();
+    const bundled = await platformBinary(path.join(appRoot, 'node_modules'));
+    expect(spawnableCodex({ path: shim, source: 'system' }, appRoot)).toEqual({ path: bundled, source: 'bundled' });
   });
 });

@@ -13,7 +13,7 @@ import type { CreateMissionRequest, MissionCodeRevision, MissionControlRequest, 
 import { MISSION_NOT_LINKED_MESSAGE, parseMissionCommand } from '../shared/mission-command';
 import { missionRevisionConflictMessage } from '../shared/mission-errors';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
-import { PUSH_CHANNELS, TEXT_EXPORT_MAX_BYTES } from '../shared/ipc';
+import { FILE_PREVIEW_MAX_BYTES, PUSH_CHANNELS, TEXT_EXPORT_MAX_BYTES } from '../shared/ipc';
 import { missionPlanMarkdown } from './mission/context';
 import { missionDeliveryBranch } from './mission/delivery';
 import type { TargetObservation } from './mission/workspaces';
@@ -23,18 +23,21 @@ import { createClaudeAgent, isPinnedModel, listClaudeAgents, setClaudeAgentModel
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment, RemoteConfig, SessionMeta, UserInput } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssueComments, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequestComments, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssueComments, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequest, gitPullRequestComments, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
+import type { IntelligenceContext, IntelligenceService } from './intelligence/service';
+import { isIntelligenceOwnerRequest, isMemoryState, isMemoryType } from '../shared/intelligence';
 import type { UpdateState } from '../shared/types';
 import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
 import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, clearCuaVersionCache, cuaBaseDef, cuaDefState, cuaInstallCommand, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
 import { listHarnessModels } from './harness/registry';
+import { ModelCatalogCache } from './model-catalog-cache';
 import { assertProviderEndpoint, fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { assertEndpointUrl } from '../shared/endpoint-policy';
 import { enrichModelsFromProviders } from './models/static-models';
-import type { RuntimeResolver } from './runtime';
+import type { RuntimeResolver, ToolName } from './runtime';
 import type { SearchIndex } from './search';
 import { clearWhichCache, clearRuntimeProbeCache, HARNESS_PACKAGES, runCapture, which } from './runtime';
 import { assertHarnessId, openHarnessLogin, readHarnessSetup, withAppCredentials } from './harness-setup';
@@ -50,12 +53,15 @@ import type { DesktopFocusTracker } from './desktop-focus';
 import type { ProcessTracker } from './process-tracker';
 import { relayUrl, signInAvailable } from './remote/relay-url';
 import { transcriptPage } from '../shared/transcript-page';
-import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile, validateWorkspaceFileTarget } from './workspace-files';
+import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile, validateWorkspaceFileTarget, writeWorkspaceText } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
 import { DictationService } from './dictation/service';
 import { localModel } from '../shared/dictation';
 import { discoverChatImports } from './chat-import';
+import { MAX_HOUSEKEEP_RECENT_DAYS } from '../shared/housekeep';
+import { configuredHousekeepReviewer, HousekeepService } from './housekeep';
+import { scanHousekeepInventory } from './housekeep-inventory';
 import { representsChatImport } from './chat-import-identity';
 import { isReservedSecretId, providerSecrets } from './secret-ids';
 
@@ -80,6 +86,8 @@ export interface DesktopBridge {
   openPath(p: string): Promise<void>;
   /** Opens the system file manager at `p`'s folder with `p` selected; never opens `p` itself. */
   showItemInFolder(p: string): void;
+  /** Optional trusted desktop operation; no permanent-delete fallback. */
+  trashItem?(p: string): Promise<void>;
   showOpenDialog(opts: OpenDialogOptions): Promise<{ canceled: boolean; filePaths: string[] }>;
   showSaveDialog(opts: SaveDialogOptions): Promise<{ canceled: boolean; filePath?: string }>;
   notify(title: string, body: string): Promise<void>;
@@ -108,6 +116,8 @@ export interface HandlerDeps {
   secrets: SecretStore;
   sessions: SessionManager;
   missions?: MissionHandlerService;
+  /** Reserves desktop preview saves against Mission workspace capture/reconciliation. */
+  withWorkspaceWrite?: (cwd: string, write: () => Promise<void>) => Promise<void>;
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
@@ -115,6 +125,9 @@ export interface HandlerDeps {
   search: SearchIndex;
   /** Layer 2 project knowledge (wiki store + jobs); present when wired up in index.ts. */
   knowledge?: KnowledgeService;
+  /** Memory lifecycle, collections and scoped retrieval; present when wired up in index.ts. */
+  intelligence?: IntelligenceService;
+  revokeMemoryGrants?: () => void;
   /** Best-effort GitNexus freshness queue; absent in tests/hosts that do not run the built-in. */
   gitnexusIndexer?: Pick<GitnexusIndexer, 'schedule' | 'index'>;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
@@ -154,6 +167,9 @@ export interface HandlerRegistry {
 
 /** A handler holding the host process this long has already frozen the UI; say so. */
 const SLOW_HANDLER_MS = 1000;
+
+/** The CLI whose catalog `harness:models` reads, so a switched runtime misses the model cache. */
+const HARNESS_BINARY: Partial<Record<HarnessId, ToolName>> = { claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi', antigravity: 'agy' };
 
 const missionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/, 'Invalid Mission/session identifier');
 const missionKeySchema = z.string().min(1).max(200);
@@ -249,10 +265,35 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       log: deps.log,
       push: (status) => deps.push(PUSH_CHANNELS.dictationStatus, status)
     }));
+  let housekeepSettingsWrites = 0;
+  const housekeep = new HousekeepService({
+    sessions,
+    settings: () => settings.get(),
+    savingRecentDays: () => housekeepSettingsWrites > 0,
+    // Partial registry hosts may not have a desktop bridge; without Trash, removal fails closed.
+    trashDirectory: deps.desktop?.trashItem?.bind(deps.desktop),
+    hasTerminalOrView: id => deps.desktopFocus?.state().sessionId === id || !!deps.desktopFocus?.isViewing(id) || terminals.list().some(terminal => terminal.sessionId === id),
+    runningOwners: deps.processes && (async () => {
+      try {
+        const snapshot = await deps.processes!.list();
+        return snapshot.error ? null : new Set(snapshot.processes.flatMap(process => process.owner.sessionId ? [process.owner.sessionId] : []));
+      } catch { return null; }
+    }),
+    authorize: async id => { if (missionOwnershipPossible()) await assertOrdinarySession(id); },
+    reviewer: () => configuredHousekeepReviewer(settings.get(), { getSecret: providerSecrets(id => secrets.get(id)), log: deps.log })
+  });
   const handlers = new Map<IpcChannel, (req: never) => unknown>();
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
   let availabilityGeneration = 0;
   const invalidateAvailability = () => { availabilityGeneration++; availabilityCache.clear(); clearRuntimeProbeCache(); };
+  // Built on first use: a registry that never lists models must not need a userData path.
+  let modelCatalogCache: ModelCatalogCache | undefined;
+  const modelCatalog = (): ModelCatalogCache => {
+    if (modelCatalogCache) return modelCatalogCache;
+    let dir: string | undefined;
+    try { dir = deps.desktop.userDataPath(); } catch { dir = undefined; }
+    return (modelCatalogCache = new ModelCatalogCache(dir, { log: deps.log }));
+  };
 
   function handle<K extends IpcChannel>(channel: K, fn: (req: IpcRequest<K>) => Promise<IpcResponse<K>> | IpcResponse<K>): void {
     handlers.set(channel, fn as (req: never) => unknown);
@@ -292,7 +333,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' | 'desktop' = 'user'): Promise<unknown> {
     if (channel.startsWith('vocsAccount:') && actor !== 'desktop') throw new Error('Vocs account sign-in requires the local desktop owner.');
     if (channel.startsWith('control:') && actor !== 'desktop') throw new Error('External control grants require the local desktop owner.');
+    if (channel.startsWith('housekeep:') && actor !== 'desktop') throw new Error('Housekeep requires the local desktop owner.');
+    if (isIntelligenceOwnerRequest(channel, req) && actor !== 'desktop') throw new Error('Intelligence settings and memory management require the local desktop owner.');
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
+    if (channel === 'harness:antigravityQuota' && actor !== 'desktop') throw new Error('Antigravity quota requires the local desktop owner.');
+    if (channel === 'fs:writeText' && actor !== 'desktop') throw new Error('Saving workspace text requires the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
     if (!fn) {
       deps.log('warn', `ipc: unknown channel ${channel}`);
@@ -530,8 +575,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   function guardMissionBoundary(channel: string, input: unknown, actor: 'user' | 'agent'): Promise<void> | undefined {
     if (actor === 'agent' && (channel.startsWith('missions:') || channel === 'app:fileSaveAs')) throw new Error('User export and Mission actions cannot originate from an agent tool.');
     const req = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    if (actor === 'agent' && channel === 'sessions:send' && typeof req.id === 'string' && sessions.get(req.id)?.config.harness === 'antigravity') {
+      throw new Error('Antigravity sessions are driven by direct user prompts.');
+    }
     if (channel === 'sessions:create') {
       const config = req.config && typeof req.config === 'object' ? req.config as Record<string, unknown> : {};
+      if (actor === 'agent' && config.harness === 'antigravity') throw new Error('Antigravity sessions are driven by direct user prompts.');
       if (['mission', 'missionId', 'missionRole', 'ownership', 'activeAttemptId'].some((key) => key in req || key in config)) throw new Error('Mission ownership is host-only; use missions:create.');
     }
     if (MISSION_TERMINAL_IO.has(channel)) {
@@ -794,7 +843,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   handle('settings:get', () => settings.get());
   handle('settings:update', async (patch) => {
-    const next = await settings.update(patch);
+    const changesHousekeep = !!patch && typeof patch === 'object' && Object.hasOwn(patch, 'housekeepRecentDays');
+    if (changesHousekeep) housekeepSettingsWrites++;
+    const next = await settings.update(patch).finally(() => { if (changesHousekeep) housekeepSettingsWrites--; });
+    if (patch?.intelligence && next.intelligence?.gateway === false) deps.revokeMemoryGrants?.();
     // Keys only: provider entries carry custom headers, and window bounds change every drag.
     const keys = patch && typeof patch === 'object' ? Object.keys(patch).filter((k) => k !== 'windowBounds') : [];
     if (keys.length) deps.log('debug', `settings updated: ${keys.join(', ')}`);
@@ -844,11 +896,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     assertProviderSecretId(providerId);
     await secrets.set(providerId, apiKey);
     await syncProviderKeyFlags();
+    await modelCatalog().clear();
   });
   handle('secrets:clear', async ({ providerId }) => {
     assertProviderSecretId(providerId);
     await secrets.clear(providerId);
     await syncProviderKeyFlags();
+    await modelCatalog().clear();
   });
   handle('secrets:has', ({ providerId }) => !isReservedSecretId(providerId) && secrets.has(providerId));
   handle('secrets:status', () => secrets.status);
@@ -945,11 +999,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return readHarnessSetup(runtime, settings.get(), harness);
   });
   handle('harness:login', async (input) => {
-    const { harness, device } = z.strictObject({ harness: z.enum(['claude', 'codex', 'pi']), device: z.boolean().optional() }).parse(input);
+    const { harness, device } = z.strictObject({ harness: z.enum(['claude', 'codex', 'pi', 'antigravity']), device: z.boolean().optional() }).parse(input);
     const result = await openHarnessLogin(runtime, harness, device);
     invalidateAvailability();
+    await modelCatalog().clear(harness);
     return result;
   });
+  handle('harness:antigravityQuota', () => runtime.antigravityQuota());
   handle('harness:availability', async (req) => {
     if (req?.id !== undefined) assertHarnessId(req.id);
     if (req?.refresh) invalidateAvailability();
@@ -972,10 +1028,20 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     );
     return out;
   });
-  handle('harness:models', async ({ harness }) => {
+  handle('harness:models', async ({ harness, refresh }) => {
     assertHarnessId(harness);
     const current = settings.get();
-    const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: providerSecrets((id) => secrets.get(id)) });
+    // Discovery spawns the CLI or calls the vendor, so a clean catalog is reused for a week unless
+    // the user asks for a recheck. The fingerprint is what discovery reads besides keys (a key
+    // change clears the cache): a new endpoint, override or binary misses instead of going stale.
+    const binary = HARNESS_BINARY[harness];
+    const fingerprint = JSON.stringify([harness, current.modelOverrides, current.providers, current.binaries, current.claude, binary ? runtime.resolve(binary)?.path ?? null : null]);
+    const result = await modelCatalog().get(
+      harness,
+      fingerprint,
+      () => listHarnessModels({ harness, settings: current, runtime, getApiKey: providerSecrets((id) => secrets.get(id)) }),
+      { refresh: refresh === true }
+    );
     return { ...result, models: enrichModelsFromProviders(result.models, current.providers) };
   });
   handle('harness:install', async ({ id }) => {
@@ -983,6 +1049,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     deps.log('info', `installing ${id} into the app runtime directory`);
     const r = await runtime.install(id);
     invalidateAvailability();
+    // A new runtime can list models the old one did not.
+    await modelCatalog().clear();
     // npm's output is the renderer's to show in full; the log keeps the verdict and the tail of a failure.
     if (r.ok) deps.log('info', `installed ${id}`);
     else deps.log('warn', `install of ${id} failed: ${r.log.trim().split('\n').slice(-5).join(' | ').slice(0, 600)}`);
@@ -1038,7 +1106,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const mcpScope = (sessionId: string) => {
     const m = sessions.get(sessionId);
     if (!m) throw new Error('Session not found');
-    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness };
+    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, managed: !!m.mission, readOnly: m.config.permissionMode === 'plan' };
   };
   handle('mcp:stores', () => globalStoreInfo());
   handle('mcp:project', ({ sessionId }) => projectInfo(mcpScope(sessionId)));
@@ -1303,6 +1371,29 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (archived) await terminals.closeForSession(id);
     return sessions.setArchived(id, archived, removeWorktree, forceWorktree);
   });
+  const housekeepIds = z.array(missionIdSchema).max(4096);
+  const housekeepPreviewId = z.string().uuid();
+  let scanningHousekeepInventory: ReturnType<typeof scanHousekeepInventory> | undefined;
+  handle('housekeep:inventory', input => {
+    z.undefined().parse(input); // Only the current profile supplies the scope, never the renderer.
+    return scanningHousekeepInventory ??= scanHousekeepInventory(settings.get().folders, sessions.list({ refreshGit: false }))
+      .finally(() => { scanningHousekeepInventory = undefined; });
+  });
+  handle('housekeep:preview', input => {
+    const { protectedIds, recentDaysOverride } = z.strictObject({
+      protectedIds: housekeepIds,
+      recentDaysOverride: z.number().int().min(0).max(MAX_HOUSEKEEP_RECENT_DAYS).optional()
+    }).parse(input);
+    return housekeep.preview(protectedIds, recentDaysOverride);
+  });
+  handle('housekeep:assess', input => {
+    const { previewId } = z.strictObject({ previewId: housekeepPreviewId }).parse(input);
+    return housekeep.assess(previewId);
+  });
+  handle('housekeep:apply', input => {
+    const { previewId, ids, protectedIds } = z.strictObject({ previewId: housekeepPreviewId, ids: housekeepIds.min(1), protectedIds: housekeepIds }).parse(input);
+    return housekeep.apply(previewId, ids, protectedIds);
+  });
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
   handle('sessions:markViewed', (input) => sessions.markViewed(missionIdSchema.parse(z.strictObject({ id: z.string() }).parse(input).id)));
@@ -1496,13 +1587,32 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       missionIdSchema.parse(workspaceId);
       if (!mission || !isLead(session, mission)) throw new Error('Only the owning Mission lead can select a Mission workspace.');
     }
-    if (!mission || !isLead(session, mission)) return { cwd: session.cwd };
+    if (!mission || !isLead(session, mission)) return { cwd: session.cwd, session };
     const workspace = workspaceId === undefined ? mission.workspaces.find((w) => w.role === 'integration' && w.cleanedAt === undefined) : mission.workspaces.find((w) => w.id === workspaceId && w.cleanedAt === undefined);
     if (!workspace) throw new Error('Mission workspace is unavailable or cleaned. No integration result is ready yet.');
     const cwd = await fs.realpath(workspace.path);
     // Provisioning records canonical roots. A replaced root/junction cannot redirect inspection.
     if (pathKey(cwd) !== pathKey(workspace.path) || !(await fs.stat(cwd)).isDirectory()) throw new Error('Mission workspace path changed; reconcile before inspecting it.');
-    return { cwd, mission, workspace };
+    return { cwd, mission, workspace, session };
+  }
+  function assertPreviewWriteScope(scope: Awaited<ReturnType<typeof missionReadScope>>): void {
+    const mission = scope.mission ?? missionFor(scope.session);
+    if (!mission) return;
+    requireLead(scope.session, mission);
+    if (scope.workspace?.role !== 'lead' || scope.workspace.ownerSessionId !== scope.session.id ||
+        !mission.executionAuthorization || scope.session.mission?.sourceAccess === 'read_only' ||
+        scope.session.archived || mission.archived || mission.status !== 'running' || mission.phase !== 'executing') {
+      throw new Error('Only the active Mission lead’s own executing workspace is editable.');
+    }
+  }
+  async function assertPreviewWriteTarget(scope: Awaited<ReturnType<typeof missionReadScope>>, target: string): Promise<void> {
+    if (!scope.workspace) {
+      // An ordinary session can overlap a managed worktree; containing a path is not enough.
+      if (missionOwnershipPossible()) await assertOrdinaryWorkspace(target);
+      return;
+    }
+    const owners = await workspaceOwners(target);
+    if (!owners.length || owners.some(owner => owner.mission.id !== scope.mission.id || owner.workspace.id !== scope.workspace.id)) denyMissionControl();
   }
   async function missionDiff(sessionId: string, workspaceId?: string, file?: string, staged?: boolean): Promise<{ diff: string; error?: string }> {
     const scope = await missionReadScope(sessionId, workspaceId);
@@ -1654,6 +1764,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:pruneWorktrees', ({ sessionId }) => gitPruneWorktrees(cwdOf(sessionId)));
   handle('git:fetchPrune', ({ sessionId }) => gitFetchPrune(cwdOf(sessionId)));
   handle('git:pullRequests', ({ sessionId }) => gitPullRequests(cwdOf(sessionId)));
+  handle('git:pullRequest', (input) => {
+    const { sessionId, url } = z.strictObject({ sessionId: z.string(), url: z.string() }).parse(input);
+    if (!sessions.get(sessionId)) throw new Error('Session not found');
+    return gitPullRequest(url);
+  });
   handle('git:issues', ({ sessionId }) => gitIssues(cwdOf(sessionId)));
   handle('git:issueComments', ({ sessionId, number }) => gitIssueComments(cwdOf(sessionId), number));
   handle('git:prComments', ({ sessionId, number }) => gitPullRequestComments(cwdOf(sessionId), number));
@@ -1689,8 +1804,42 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await walk(root, '', 0);
     return out;
   });
-  handle('fs:read', async ({ sessionId, path: p, maxBytes, missionWorkspaceId }) => readWorkspaceFile((await missionReadScope(sessionId, missionWorkspaceId)).cwd, p, maxBytes));
+  handle('fs:read', async ({ sessionId, path: p, maxBytes, missionWorkspaceId }) => {
+    const scope = await missionReadScope(sessionId, missionWorkspaceId);
+    return readWorkspaceFile(scope.cwd, p, maxBytes, async target => {
+      try {
+        validateWorkspaceFileTarget(p);
+        assertPreviewWriteScope(scope);
+        await assertPreviewWriteTarget(scope, target);
+        return true;
+      } catch {
+        return false; // Inspection remains available even if this scope cannot write.
+      }
+    });
+  });
   handle('fs:readImage', async ({ sessionId, path: p, missionWorkspaceId }) => readWorkspaceImage((await missionReadScope(sessionId, missionWorkspaceId)).cwd, p));
+  handle('fs:writeText', async (input) => {
+    const text = z.string().max(FILE_PREVIEW_MAX_BYTES, 'Text exceeds the preview size limit.');
+    const { sessionId, path: target, content, expectedContent, missionWorkspaceId } = z.strictObject({
+      sessionId: missionIdSchema, path: z.string(), content: text, expectedContent: text, missionWorkspaceId: missionIdSchema.optional()
+    }).parse(input);
+    const relative = validateWorkspaceFileTarget(target);
+    const scope = await missionReadScope(sessionId, missionWorkspaceId);
+    assertPreviewWriteScope(scope);
+    const write = async () => {
+      const current = await missionReadScope(sessionId, missionWorkspaceId);
+      if (current.cwd !== scope.cwd || current.workspace?.id !== scope.workspace?.id || current.mission?.id !== scope.mission?.id) {
+        throw new Error('Workspace changed. Reload the preview before saving.');
+      }
+      assertPreviewWriteScope(current);
+      sessions.assertNotHousekeeping?.(sessionId);
+      await writeWorkspaceText(current.cwd, relative, content, expectedContent, {
+        canonicalRoot: current.workspace ? current.cwd : undefined,
+        authorizeTarget: target => assertPreviewWriteTarget(current, target)
+      });
+    };
+    return deps.withWorkspaceWrite ? deps.withWorkspaceWrite(scope.cwd, write) : write();
+  });
 
   // Layer 2 project knowledge. Every channel resolves its scope from the session, never from a
   // renderer-supplied path, so a client cannot read or write another project's wiki.
@@ -1720,12 +1869,15 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!k || typeof q !== 'string' || !q.trim()) return [];
     return k.search(knowledgeScopeOf(sessionId), q, { limit: typeof limit === 'number' ? limit : undefined, includeHistorical: includeHistorical === true });
   });
-  handle('knowledge:review', ({ sessionId, id, action, note }) => {
+  handle('knowledge:review', async ({ sessionId, id, action, note }) => {
     const k = knowledgeOf();
     if (!k) throw new Error('Project knowledge is unavailable in this run');
     if (action !== 'accept' && action !== 'reject') throw new Error('Unknown review action');
     const scope = knowledgeScopeOf(sessionId);
-    return k.review(scope, id, action, { by: 'human', ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {}) }).then(() => k.view(scope));
+    const withdraw = deps.intelligence && action === 'reject' && (await k.store.read(scope, id))?.meta.scope === 'repo';
+    await k.review(scope, id, action, { by: 'human', ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {}) });
+    if (withdraw && !(await k.store.read(scope, id))) await deps.intelligence?.retireWikiPromotions({ sessionId, ...scope }, id);
+    return k.view(scope);
   });
   handle('knowledge:reviewAll', async ({ sessionId }) => {
     const k = knowledgeOf();
@@ -1756,16 +1908,140 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!k) throw new Error('Project knowledge is unavailable in this run');
     if (typeof id !== 'string' || !id) throw new Error('A page id is required');
     const scope = knowledgeScopeOf(sessionId);
+    const withdraw = deps.intelligence && (await k.store.read(scope, id))?.meta.scope === 'repo';
     // A delete that found nothing must not report success: the panel would claim a page is gone
     // while it is still served to every agent.
     if (!(await k.remove(scope, id))) throw new Error(`Nothing to delete: ${id} is not in this project's wiki.`);
+    if (withdraw) await deps.intelligence?.retireWikiPromotions({ sessionId, ...scope }, id);
     return k.view(scope);
+  });
+
+  // The intelligence core. As with knowledge, the project, checkout and branch always come from
+  // the session the app holds: a renderer can name a session, never a path or a project id.
+  const intelligenceOf = (): IntelligenceService => {
+    if (!deps.intelligence) throw new Error('Memory and collections are unavailable in this run');
+    return deps.intelligence;
+  };
+  const intelligenceContextOf = (sessionId: string): IntelligenceContext => {
+    const id = missionIdSchema.parse(sessionId);
+    return { sessionId: id, ...knowledgeScopeOf(id) };
+  };
+  const recordId = (id: unknown): string => {
+    if (typeof id !== 'string' || !/^mem_[0-9a-z]{6,40}$/.test(id)) throw new Error('A memory record id is required');
+    return id;
+  };
+  handle('intelligence:view', ({ sessionId }) => intelligenceOf().view(intelligenceContextOf(sessionId)));
+  handle('intelligence:search', ({ sessionId, query, scope, limit, includeHistorical }) => {
+    if (typeof query !== 'string' || !query.trim()) throw new Error('A question is required');
+    return intelligenceOf().search(intelligenceContextOf(sessionId), {
+      query: query.slice(0, 500),
+      scope: scope === 'collection' ? 'collection' : 'project',
+      ...(typeof limit === 'number' ? { limit } : {}),
+      includeHistorical: includeHistorical === true
+    });
+  });
+  handle('intelligence:compile', ({ sessionId, query, budgetTokens, scope }) => {
+    if (typeof query !== 'string' || !query.trim()) throw new Error('A question is required');
+    return intelligenceOf().compile(intelligenceContextOf(sessionId), { query: query.slice(0, 500), ...(typeof budgetTokens === 'number' ? { budgetTokens } : {}), scope: scope === 'collection' ? 'collection' : 'project' });
+  });
+  handle('intelligence:memory:add', async ({ sessionId, type, title, text, scope }) => {
+    if (!isMemoryType(type) || type === 'working') throw new Error('Unknown memory type');
+    if (typeof title !== 'string' || !title.trim() || typeof text !== 'string' || !text.trim()) throw new Error('A record needs a title and text');
+    if (scope !== 'project' && scope !== 'personal') throw new Error('A record is added to this project or to personal memory');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.addRecord(ctx, { type, title, text, scope });
+    return i.view(ctx);
+  });
+  handle('intelligence:memory:decide', async ({ sessionId, id, to, note }) => {
+    if (!isMemoryState(to)) throw new Error('Unknown memory state');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.decide(ctx, recordId(id), to, typeof note === 'string' && note.trim() ? { note: note.trim() } : {});
+    return i.view(ctx);
+  });
+  handle('intelligence:memory:forget', async ({ sessionId, id }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    // A forget that removed nothing must not report success: the panel would show a record as gone
+    // while it is still recalled.
+    if (!(await i.forget(ctx, recordId(id), 'human')).forgotten) throw new Error('Nothing was forgotten: that record is no longer there.');
+    return i.view(ctx);
+  });
+  handle('intelligence:memory:apply', async ({ sessionId, id }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    const { pageId } = await i.applyToWiki(ctx, recordId(id));
+    return { pageId, view: await i.view(ctx) };
+  });
+  handle('intelligence:memory:export', ({ sessionId }) => intelligenceOf().exportMemory(intelligenceContextOf(sessionId)));
+  handle('intelligence:memory:import', async ({ sessionId, bundle }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    const result = await i.importMemory(ctx, bundle);
+    return { ...result, view: await i.view(ctx) };
+  });
+  handle('intelligence:reflect', ({ sessionId }) => {
+    const ctx = intelligenceContextOf(sessionId);
+    const m = sessions.get(ctx.sessionId);
+    if (!m || m.mission) throw new Error('Reflection is only available for ordinary sessions.');
+    return intelligenceOf().reflect(ctx, { title: m.title }, 'manual');
+  });
+  handle('intelligence:promote', async ({ sessionId, pageId, recordId: record, to, collectionId }) => {
+    if (to !== 'collection' && to !== 'personal') throw new Error('Promote to a collection or to personal memory');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.promote(ctx, {
+      ...(typeof pageId === 'string' && pageId ? { pageId } : {}),
+      ...(typeof record === 'string' && record ? { recordId: recordId(record) } : {}),
+      to,
+      ...(typeof collectionId === 'string' && collectionId ? { collectionId } : {})
+    });
+    return i.view(ctx);
+  });
+  handle('intelligence:promotion:decide', async ({ sessionId, id, decision }) => {
+    if (decision !== 'approve' && decision !== 'reject') throw new Error('Unknown decision');
+    if (typeof id !== 'string' || !id) throw new Error('A promotion request id is required');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.decidePromotion(ctx, id, decision);
+    return i.view(ctx);
+  });
+  handle('intelligence:collection:save', async ({ sessionId, id, name, description, members }) => {
+    if (typeof name !== 'string' || !name.trim()) throw new Error('A collection needs a name');
+    const list = (Array.isArray(members) ? members : [])
+      .filter((m): m is { projectId: string; share: 'promoted' | 'wiki' } => !!m && typeof m.projectId === 'string')
+      .map((m) => ({ projectId: m.projectId, share: m.share === 'wiki' ? ('wiki' as const) : ('promoted' as const) }));
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.saveCollection({ ...(typeof id === 'string' && id ? { id } : {}), name, ...(typeof description === 'string' ? { description } : {}), members: list });
+    return i.view(ctx);
+  });
+  handle('intelligence:collection:delete', async ({ sessionId, id }) => {
+    if (typeof id !== 'string' || !id) throw new Error('A collection id is required');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    if (!(await i.deleteCollection(id))) throw new Error('That collection no longer exists.');
+    return i.view(ctx);
+  });
+  handle('intelligence:graph:index', async ({ sessionId }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.graphIndex(ctx);
+    return i.view(ctx);
+  });
+  handle('intelligence:graph:clear', async ({ sessionId }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.graphClear(ctx);
+    return i.view(ctx);
   });
 
   handle('terminal:list', () => terminals.list());
   handle('terminal:screen', ({ terminalId, lines }) => terminals.screenText(String(terminalId ?? ''), typeof lines === 'number' ? lines : undefined));
   handle('terminal:shells', () => terminals.shells());
   handle('terminal:create', ({ sessionId, shell, cols, rows }) => {
+    sessions.assertNotHousekeeping?.(sessionId);
     const info = terminals.create(sessionId, { shell, cols, rows });
     // The guard just cleared this session's cwd (or nothing could own it); keystrokes reuse that.
     const session = sessions.get(sessionId);

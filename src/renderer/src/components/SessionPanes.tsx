@@ -7,13 +7,14 @@
  * follow state, and a pane re-renders only when its own session's transcript or metadata changes.
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { harnessShort } from '../format';
+import { sessionTitleText } from '../../../shared/session-title';
 import { isTopLevelSession } from '../missions';
 import { MIN_PANE_PX, SESSION_DRAG_TYPE, dropZoneAt, visiblePaneSessions, type DropZone, type PaneLayout, type SessionPane } from '../panes';
 import { sortSessionRows } from '../sessionOrder';
 import { toastError, useStore } from '../store';
 import { Composer } from './Composer';
 import { Header } from './Header';
+import { SessionTitle } from './SessionTitle';
 import { Transcript } from './Transcript';
 import { Button, StatusDot } from './ui';
 
@@ -25,9 +26,10 @@ export function SessionPanes({ empty }: { empty: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
   const split = layout.panes.length > 1;
+  const minTotal = layout.panes.length * MIN_PANE_PX[layout.orientation];
 
   // Too little room for every pane at its minimum: show only the active one rather than squeezing
-  // two unreadable chats. The others stay mounted, so nothing is lost when the window grows again.
+  // two unreadable views. The others stay mounted, so nothing is lost when the window grows again.
   useEffect(() => {
     const el = ref.current;
     if (!el || !split || typeof ResizeObserver === 'undefined') {
@@ -36,13 +38,13 @@ export function SessionPanes({ empty }: { empty: React.ReactNode }) {
     }
     const check = () => {
       const size = layout.orientation === 'horizontal' ? el.clientWidth : el.clientHeight;
-      setNarrow(size > 0 && size < layout.panes.length * MIN_PANE_PX[layout.orientation]);
+      setNarrow(size > 0 && size < minTotal);
     };
     check();
     const ro = new ResizeObserver(check);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [split, layout.orientation, layout.panes.length]);
+  }, [split, layout.orientation, minTotal]);
 
   // What is on screen decides whether a finished turn was seen (useSessionViewing). Another view
   // replacing the panes unmounts them, so nothing counts as visible then.
@@ -130,7 +132,7 @@ function PaneView({ pane, active, split, size, empty }: { pane: SessionPane; act
       className={`pane${active ? ' active' : ''}`}
       data-pane-id={pane.id}
       data-testid="session-pane"
-      aria-label={split ? `${session?.title ?? 'Empty pane'}${active ? ' (active pane)' : ''}` : undefined}
+      aria-label={split ? `${session ? sessionTitleText(session) : 'Empty pane'}${active ? ' (active pane)' : ''}` : undefined}
       style={split ? { flexGrow: grow(size) } : undefined}
       onPointerDownCapture={focus}
       onFocusCapture={focus}
@@ -177,11 +179,11 @@ function PanePicker({ pane }: { pane: SessionPane }) {
       <p className="muted small">Pick one below, click one in the sidebar, or drag it here. Each pane keeps its own session running.</p>
       {choices.length > 0 ? (
         <div className="pane-picker-list" role="list">
-          {choices.map((s) => (
-            <button key={s.id} type="button" role="listitem" className="pane-picker-item" onClick={() => open(s.id)}>
-              <StatusDot status={s.status} />
-              <span className="pane-picker-name">{s.title}</span>
-              <span className="muted small">{harnessShort(s.config.harness)}{s.worktreeBranch ? ` · ${s.worktreeBranch}` : ''}</span>
+          {choices.map((session) => (
+            <button key={session.id} type="button" role="listitem" className="pane-picker-item" onClick={() => open(session.id)}>
+              <StatusDot status={session.status} />
+              <SessionTitle session={session} className="pane-picker-name" />
+              {session.worktreeBranch && <span className="muted small pane-picker-branch" title={session.worktreeBranch}>{session.worktreeBranch}</span>}
             </button>
           ))}
         </div>

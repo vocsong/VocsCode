@@ -3,16 +3,20 @@ import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, CuaSettings, FolderSessionDefaults, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, PermissionMode, ProviderConfig } from '../shared/types';
 import { MCP_BUILTIN_IDS, isCuaPermissionMode } from '../shared/types';
 import type { KnowledgeSettings } from '../shared/knowledge';
+import { DEFAULT_INTELLIGENCE_SETTINGS, resolveIntelligenceSettings } from '../shared/intelligence';
 import { normalizeBranchPrefix, normalizeCustomBranchPrefixes } from '../shared/branch-prefix';
 import { assertEndpointUrl } from '../shared/endpoint-policy';
 import { isAutoCompactionThreshold } from '../shared/compaction';
 import { DEFAULT_DICTATION, DICTATION_IDLE_MINUTES, localModel, type DictationSettings } from '../shared/dictation';
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
+import { DEFAULT_HOUSEKEEP_RECENT_DAYS, normalizeHousekeepRecentDays } from '../shared/housekeep';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigError, validateMissionConfig, validateMissionProjectOverride, type MissionCapabilityResolver, type MissionProjectOverride } from '../shared/mission-config';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
-import { isThemeId } from '../shared/themes';
+import { DEFAULT_PALETTE, migrateTheme } from '../shared/themes';
+import { DEFAULT_TYPOGRAPHY, normalizeTypography } from '../shared/typography';
+import { DEFAULT_UI_MODE, isUiModeId } from '../shared/ui-modes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
 import { mcpIdIssues } from '../shared/mcp-ids';
@@ -209,10 +213,14 @@ export function defaultSettings(): AppSettings {
     mission: createDefaultMissionConfig(),
     missionProjects: {},
     theme: 'system',
+    palette: DEFAULT_PALETTE,
+    typography: { ...DEFAULT_TYPOGRAPHY },
+    uiMode: DEFAULT_UI_MODE,
     defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
     autoCompactionThreshold: undefined,
+    housekeepRecentDays: DEFAULT_HOUSEKEEP_RECENT_DAYS,
     defaultModelByHarness: {},
     folderSessionDefaults: {},
     favoriteModels: [],
@@ -228,6 +236,7 @@ export function defaultSettings(): AppSettings {
     cua: { enabled: true, mode: 'standard' },
     mcpProjectState: {},
     knowledge: { prime: true, autoDistill: true },
+    intelligence: structuredClone(DEFAULT_INTELLIGENCE_SETTINGS),
     dictation: structuredClone(DEFAULT_DICTATION),
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
@@ -241,6 +250,7 @@ export function defaultSettings(): AppSettings {
     customBranchPrefixes: [],
     folderOrder: [],
     collapsedFolders: [],
+    sidebarView: 'folders',
     customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25, preferHarness: true },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] },
@@ -503,9 +513,15 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
   const merged: AppSettings = {
     ...d,
     ...stored,
-    // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
-    theme: isThemeId(stored.theme) ? stored.theme : d.theme,
+    // Mode and palette are stored apart; a legacy single-variant theme id is split into both, and
+    // anything this build does not know falls back to System + Default.
+    ...migrateTheme(stored.theme, stored.palette),
+    // Unknown fonts fall back to the default, sizes are clamped, custom family names are kept as typed.
+    typography: normalizeTypography(stored.typography),
+    // Same for an interface mode this build does not know: the full layout is always safe.
+    uiMode: isUiModeId(stored.uiMode) ? stored.uiMode : d.uiMode,
     autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,
+    housekeepRecentDays: normalizeHousekeepRecentDays(stored.housekeepRecentDays),
     // An effort level removed from the app (or a harness-specific value written by an older build) falls back to the harness default.
     defaultEffort: isEffortLevel(stored.defaultEffort) ? stored.defaultEffort : undefined,
     binaries: { ...d.binaries, ...(stored.binaries ?? {}) },
@@ -519,6 +535,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    sidebarView: stored.sidebarView === 'recent' ? 'recent' : 'folders',
     gitSetupSkipped: Array.isArray(stored.gitSetupSkipped) ? stored.gitSetupSkipped.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
     customLabels: normalizeCustomLabels(stored.customLabels),
@@ -538,6 +555,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
       : [],
     mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),
     knowledge: normalizeKnowledgeSettings(stored.knowledge),
+    // Field by field, so a hand-edited file can switch nothing on that the type does not allow.
+    intelligence: resolveIntelligenceSettings(stored.intelligence),
     dictation: normalizeDictationSettings(stored.dictation),
     providers: [],
     acpAgents: []
@@ -590,7 +609,7 @@ export class SettingsStore {
       this.settings = normalizeSettings({ ...stored, mission: undefined, missionProjects: undefined });
     }
     if (stored === undefined) this.log('info', 'no settings.json yet; using defaults');
-    else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme}`);
+    else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme} palette=${this.settings.palette}`);
     return this.settings;
   }
 

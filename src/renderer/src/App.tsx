@@ -1,17 +1,19 @@
 /** Top-level layout: sidebar, transcript, composer and the right-hand panel. */
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { invoke } from './api';
 import { useActiveSession, useStore, toastError } from './store';
 import { Vesta } from './components/Vesta';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
+import { FilePreviewPane } from './components/FilePreviewPane';
+import { HousekeepDialog } from './components/HousekeepDialog';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { QuickSessionPicker } from './components/QuickSessionPicker';
 import { RightPanel } from './components/RightPanel';
 import { SearchModal } from './components/SearchModal';
 import { SettingsView } from './components/SettingsView';
-import { nextFolderTarget, nextSessionTarget, sidebarNavModel, Sidebar } from './components/Sidebar';
+import { nextFolderTarget, nextSessionTarget, sidebarNavModel, sidebarViewOf, Sidebar } from './components/Sidebar';
 import { McpView } from './components/McpView';
 import { SkillsView } from './components/SkillsView';
 import { SessionPanes } from './components/SessionPanes';
@@ -21,12 +23,22 @@ import { Welcome } from './components/Welcome';
 import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
-import { applyTheme } from './theme';
+import { applyTheme, applyTypography, applyUiMode } from './theme';
 import { isTopLevelSession, pauseMissionSession } from './missions';
 import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
 import { activeComposer } from './panes';
+import { GitPanelCache } from './git-panel-cache';
+import { canHousekeepHere, HOUSEKEEP_OPEN, type HousekeepOpenOptions } from './housekeep';
 
 export function App() {
+  const [gitPanelCache] = useState(() => new GitPanelCache());
+  const [housekeepOpen, setHousekeepOpen] = useState<HousekeepOpenOptions | null>(null);
+  useEffect(() => {
+    if (!canHousekeepHere()) return;
+    const open = (event: WindowEventMap[typeof HOUSEKEEP_OPEN]) => setHousekeepOpen(event.detail);
+    window.addEventListener(HOUSEKEEP_OPEN, open);
+    return () => window.removeEventListener(HOUSEKEEP_OPEN, open);
+  }, []);
   const booted = useStore((s) => s.booted);
   const bootError = useStore((s) => s.bootError);
   const boot = useStore((s) => s.boot);
@@ -35,6 +47,8 @@ export function App() {
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const panelOpen = useStore((s) => s.panelOpen);
+  // Zen's pins (pins.ts); the classes mean nothing to the Standard layout.
+  const pins = useStore((s) => s.pins);
   const newSessionOpen = useStore((s) => s.newSessionOpen);
   const onboardingOpen = useStore((s) => s.onboardingOpen);
   const onboardingDismissed = useStore((s) => s.onboardingDismissed);
@@ -43,6 +57,12 @@ export function App() {
   const paletteOpen = useStore((s) => s.paletteOpen);
   const searchOpen = useStore((s) => s.searchOpen);
   const session = useActiveSession();
+  // An empty active split still needs a right edge for a preview from the other pane.
+  const previewSession = useStore((s) => session ? undefined : s.sessions.find((x) => x.id === s.layout.filePreview?.sessionId));
+  const panelSession = session ?? previewSession;
+  const hasFilePreview = useStore((s) => !!s.layout.filePreview);
+  const showPanel = (panelOpen || hasFilePreview) && !!panelSession && view === 'chat';
+  const previewOnly = showPanel && !panelOpen;
   // Tell main (and through it, paired browsers) which session this window is on.
   useReportDesktopFocus();
   useSessionViewing();
@@ -52,8 +72,16 @@ export function App() {
   }, [boot]);
 
   useEffect(() => {
-    applyTheme(settings?.theme ?? 'system');
-  }, [settings?.theme]);
+    applyTheme(settings?.theme ?? 'system', settings?.palette);
+  }, [settings?.theme, settings?.palette]);
+
+  useEffect(() => {
+    applyTypography(settings?.typography);
+  }, [settings?.typography]);
+
+  useEffect(() => {
+    applyUiMode(settings?.uiMode);
+  }, [settings?.uiMode]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -103,7 +131,8 @@ export function App() {
         const model = sidebarNavModel(st.sessions, st.settings);
         const target = e.shiftKey ? nextFolderTarget(model, st.activeId, down) : nextSessionTarget(model, st.activeId, down);
         if (target) {
-          const collapsed = st.settings?.collapsedFolders ?? [];
+          // A collapsed folder hides the row only in the folder view; the Recent view lists it anyway.
+          const collapsed = sidebarViewOf(st.settings) === 'folders' ? st.settings?.collapsedFolders ?? [] : [];
           if (collapsed.includes(target.root)) void invoke('settings:update', { collapsedFolders: collapsed.filter((r) => r !== target.root) });
           void st.setActive(target.sessionId).catch(toastError);
           // The sidebar row may not be in view (long list, or folder just expanded above).
@@ -184,7 +213,7 @@ export function App() {
   return (
     <div className="shell">
       <TitleBar />
-      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
+      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${showPanel && panelOpen ? '' : 'no-panel'} ${previewOnly ? 'panel-preview-only' : ''} ${pins.left ? 'pin-left' : ''} ${pins.right ? 'pin-right' : ''}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
         {sidebarOpen && <Sidebar />}
         <main className="main">
@@ -200,13 +229,15 @@ export function App() {
             <SessionPanes empty={<Welcome />} />
           )}
         </main>
-        {panelOpen && session && view === 'chat' && <RightPanel session={session} />}
+        {showPanel && <RightPanel session={panelSession} gitPanelCache={gitPanelCache} />}
+        <FilePreviewPane visible={showPanel} />
       </div>
       {newSessionOpen && <NewSessionDialog />}
       {(onboardingOpen || (!settings.onboardingDone && !onboardingDismissed)) && <OnboardingWizard initialHarness={onboardingHarness ?? undefined} onClose={() => useStore.getState().dismissOnboarding()} />}
       {quickSessionOpen && <QuickSessionPicker />}
       {paletteOpen && <CommandPalette />}
       {searchOpen && <SearchModal />}
+      {housekeepOpen && <HousekeepDialog key={housekeepOpen.recentDaysOverride ?? 'configured'} {...housekeepOpen} onClose={() => setHousekeepOpen(null)} />}
       <ConfirmHost />
       <ContextMenuHost />
       {settings.onboardingDone && <Vesta />}

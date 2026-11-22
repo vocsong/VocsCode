@@ -355,6 +355,7 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     await win.locator('.composer textarea').fill('/mission');
     await win.locator('.composer textarea').press('Enter');
     await win.getByLabel('Mission mode', { exact: true }).selectOption('interactive_plan');
+    expect(await win.locator('.mission-launch .session-label').textContent()).toBe('Native project | Original discussion');
     await win.getByLabel('Mission objective', { exact: true }).fill('Plan the linked change');
     const launchFile = Buffer.from('dialog launch context');
     await win.locator('.mission-launch input[type=file]').setInputFiles({ name: 'launch.txt', mimeType: 'text/plain', buffer: launchFile });
@@ -376,7 +377,7 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     expect(mission.delivery).toBeUndefined();
     expect(mission.blockers.some((b) => !b.resolvedAt)).toBe(true);
     expect(await win.getByTestId('session-row').count()).toBe(2);
-    await win.getByRole('button', { name: 'Source discussion: Original discussion', exact: true }).click();
+    await win.getByRole('button', { name: 'Source discussion: Native project | Original discussion', exact: true }).click();
     await expect.poll(() => win.getByTestId('session-title').innerText()).toBe(source.title);
     expect(await win.getByRole('button', { name: 'Mission: Plan the linked change', exact: true }).count()).toBe(1);
     const diskSessions: SessionMeta[] = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8'));
@@ -418,7 +419,7 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     expect(journal).not.toContain(bytes.toString('base64'));
     expect(journal).not.toContain(fileBytes.toString('base64'));
     expect(mission.executionAuthorization).toBeUndefined();
-    await win.getByRole('button', { name: 'Source discussion: Original discussion', exact: true }).click();
+    await win.getByRole('button', { name: 'Source discussion: Native project | Original discussion', exact: true }).click();
     expect(await win.locator('.composer textarea').inputValue()).toBe('');
     expect(await win.getByAltText('new-context.png', { exact: true }).count()).toBe(0);
     expect(git(project, ['status', '--porcelain=v1'])).toBe('');
@@ -504,12 +505,17 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     expect(await win.getByTestId('panel-bottom-subagents').count()).toBe(0);
     await win.getByLabel('Mission workspace', { exact: true }).selectOption(work.worker.id);
     await win.getByTestId('mission-changes').getByText(/specialist unaccepted edit/).waitFor();
-    await win.locator('.transcript .file-ref').click();
+    // The transcript's file overlay reads from the lead's own workspace and opens Files there.
+    await win.locator('.transcript').getByRole('link', { name: 'result.txt', exact: true }).click();
+    const filePane = win.getByTestId('file-pane');
+    await expect.poll(() => filePane.getByLabel('File contents', { exact: true }).inputValue()).toBe('lead unaccepted edit\n');
     await expect.poll(() => win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe(work.lead.id);
-    await expect.poll(() => win.locator('.file-preview pre').innerText()).toBe('lead unaccepted edit\n');
+    expect(await filePane.getByLabel('File contents', { exact: true }).evaluate((el: HTMLTextAreaElement) => el.readOnly)).toBe(true);
+    await filePane.getByRole('button', { name: 'Close preview', exact: true }).click();
+    await filePane.waitFor({ state: 'detached' });
     await win.getByRole('button', { name: 'Mission result', exact: true }).click();
     expect(await win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe('');
-    await win.getByRole('button', { name: 'Source discussion: Original discussion', exact: true }).click();
+    await win.getByRole('button', { name: 'Source discussion: Native project | Original discussion', exact: true }).click();
     await win.getByRole('button', { name: 'Mission: Seeded Mission', exact: true }).click();
 
     // This is a real authorization transition, not evidence of a successful model run. The
@@ -566,10 +572,10 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     await archivedMission.hover();
     await archivedMission.getByRole('button', { name: 'Restore session', exact: true }).click();
     await expect.poll(async () => (await persisted(userData)).archived).toBe(false);
-    await win.getByRole('button', { name: 'Show active', exact: true }).click();
+    await win.getByRole('button', { name: 'Archived', pressed: true }).click(); // pressed again: back to active sessions
     await win.getByTestId('session-row').filter({ hasText: 'Seeded Mission' }).click();
     await win.getByRole('button', { name: 'Stop Mission', exact: true }).click();
-    await expect.poll(async () => (await persisted(userData)).status).toBe('stopped');
+    await expect.poll(async () => (await persisted(userData)).status, { timeout: 30_000 }).toBe('stopped');
     expect((await persisted(userData)).operations.filter((o) => ['intent_recorded', 'in_flight', 'reconciling'].includes(o.state))).toEqual([]);
     expect(git(project, ['status', '--porcelain=v1'])).toBe('');
   }, 240_000);

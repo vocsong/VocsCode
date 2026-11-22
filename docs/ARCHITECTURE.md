@@ -5,16 +5,17 @@ Technical reference moved out of the README. For the friendly overview, read the
 ## Source layout
 
 ```
-src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps);
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette, interface modes (no runtime deps);
                   mission*.ts hold the Mission record, preset/config and command contracts
 src/main
-  harness/        one adapter per harness → normalized SessionEvent stream
+  harness/        adapters → normalized SessionEvent stream
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
     codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
     codex-exec.ts SDK fallback
     cursor.ts     @cursor/sdk, local runtime; sandbox + plan-mode allowlist instead of approvals
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
-    acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
+    acp.ts        Agent Client Protocol client (Google Antigravity and generic ACP agents)
+    antigravity.ts  Antigravity CLI settings, account probe and quota decoding
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
   mission/        durable Mission coordination (service/state/store), scoped tools, scheduling,
                   workspaces, verification, delivery and restart recovery (docs/MISSIONS.md)
@@ -24,6 +25,9 @@ src/main
                   the app started (sampled tree under main, saved for the next run), who it works for, and ending it;
                   the Windows table reader (and per-session Job Objects) is resources/processes/windows-process-snapshot.ps1
   models/         provider clients and model discovery, with offline catalogs and pricing
+  model-catalog-cache.ts   <userData>/model-catalog-cache.json: each harness's last clean
+                  `harness:models` discovery, reused for 7 days while its settings/runtime fingerprint
+                  matches; Recheck passes `refresh`, and a sign-in, install or key change clears it
   dictation/      composer voice to text: a provider's transcription endpoint (cloud.ts), or whisper.cpp's
                   server downloaded into <userData>/dictation and run on loopback while in use (local.ts)
   util/           fs and async helpers shared by the adapters (no Electron imports)
@@ -40,12 +44,16 @@ src/main
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
+    SessionTitle.tsx  shared desktop and web session label with a harness pill and project | session name
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
     mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
+  ui-mode.ts      the interface mode (Standard or Zen) as React reads it; theme.ts applies it as <html data-ui>
+  ui-zen.css      the Zen layout: CSS over the standard component tree, so a switch never remounts anything (docs/INTERFACE-MODES.md)
   store.ts        session state; api.ts wraps the preload bridge
-  panes.ts        the split view's pane model (which session each pane shows); components/SessionPanes.tsx renders it
+  panes.ts        the split view's session pane model and the separate, transient file drawer target; components/SessionPanes.tsx renders the split
+  file-open.ts    where a session's files are read from (Mission workspaces) and how outside paths are only revealed; components/FilePreviewPane.tsx previews
 src/web           the browser shell at code.vocs.io/app (plain Vite build into relay/public/app)
   transport/      RelayTransport (window.harness over the e2e session, local `can` gate) + mirror backend + IndexedDB vault
   shell/          WebApp root, connection state, account probe, viewport keyboard inset
@@ -62,12 +70,30 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 
 ## Transcript collapse
 
-`Transcript.tsx` keeps replies outside **Worked** and collapses tool calls, progress commentary and
-thinking. Explicit assistant phases take precedence. When a harness has not labelled a message,
-the renderer infers commentary from a later tool call, but only up to the next user message,
-turn footer, or `subagent_result` lookup. Pi can look up a background result after replying and
-before emitting a turn footer; that lookup still collapses, but does not hide the earlier reply.
-The same rule applies when reopening a saved transcript.
+`Transcript.tsx` (`groupTranscript`) keeps everything written for the reader on screen and collapses
+only machinery. Every assistant row that carries prose is a message and is never collapsed,
+whatever `phase` its harness gave it and whether or not a tool call follows. The steps between two
+messages — tool calls, approvals, plans, with the thinking and info-level notices among them —
+collapse into one **Worked** header per stretch, so a turn reads message, work, message, work,
+answer. User rows, turn footers and warnings/errors always stay visible.
+
+The adapters differ in what they emit, and the renderer is where that is evened out, so a turn
+looks the same on every harness and when a saved transcript is reopened:
+
+- **Phase.** Codex app-server labels prose `commentary` or `final`, Codex exec labels all of it
+  `final`, the other adapters label nothing. Phase does not decide visibility; only `plan` is
+  styled.
+- **Thinking.** Claude, Cursor, Pi, ACP and native put reasoning on the row of the prose it
+  precedes; the Codex adapters emit it as a row of its own. Either way it is one collapsed
+  "Thinking" toggle, open only while it streams: reasoning that leads into a message sits directly
+  above that message, reasoning among steps collapses with them.
+- **Empty rows.** A row with no prose and no visible thinking (Pi leaves one for a tool-only
+  message; any row with thinking hidden) makes no row.
+
+A header needs a step behind it: thinking or a notice with no step beside it stays a row of its
+own, never a "Worked" over nothing. Work in flight stays open until the next message starts. The
+turn's duration is shown on a header only when the turn worked in a single stretch; otherwise it
+stays on the turn footer.
 
 ## Transcript file references
 
@@ -85,6 +111,15 @@ Absolute paths outside the session are never remapped into it. Mission resolutio
 use the same selected workspace; no sibling checkout or project-root fallback is allowed.
 Transports without `fs:resolve` retain exact-path opening.
 
+## Transcript pull request links
+
+In a desktop session with the Git panel, a GitHub PR overview link opens Git → PR and shows the
+linked request's description and conversation. `git:pullRequest` validates the URL in the main
+process and uses `gh pr view` with the canonical URL, independent of the session's checkout and
+its 100-item PR list. The link preview offers **Open on GitHub** and leaves merge actions with
+the repo's own PR rows. Pending results are discarded when the preview closes or its session
+loses the Git panel.
+
 ## Harness matrix
 
 | Harness | Engine | Approvals | Models | MCP |
@@ -94,6 +129,7 @@ Transports without `fs:resolve` retain exact-path opening.
 | **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | all pages of Codex's dynamic `model/list` via a short-lived app-server probe (static fallback only) | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |
 | **Pi** | `pi --mode rpc` + bundled approvals and MCP-bridge extensions | interactive | pi's registry plus the app's bundled catalogs for every provider pi already lists (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, OpenCode Go, Ollama, custom) | injected — the bridge extension registers each MCP tool with pi |
+| **Google Antigravity** | Google's `agy acp` over stdio, using the saved Google sign-in | every mode: the CLI's strict tool policy routes each tool call to the ACP client policy; Plan also sets the vendor `plan` mode | account-advertised Gemini models and thinking levels after connection | stdio servers injected through `session/new.mcpServers` |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
@@ -134,11 +170,13 @@ option with no level the app models stays unknown too.
 The desktop composer footer stays on one row, including narrow split panes. Its model pill uses
 catalog display text (or the model id), with the full `provider/model` identity in its accessible
 label, tooltip and menu. The menu shows Favourite models, the available Reasoning Effort levels,
-and Fast Mode On/Off together; More models opens the searchable catalog. Permissions remain visible.
-Steer is primary while running, with Queue in its adjacent menu; queue-only harnesses get one Queue
-button. Composer options holds dictation's Cloud/Local selector, attachments, cost/context details
-and queued-message counts. Container queries move the inline attachment/context/count controls into
-that menu at narrow widths without changing send or permission semantics.
+and Fast Mode On/Off together; More models opens the searchable catalog. Model and permission
+buttons fit their labels. Their popups align to the button's left edge unless the edge of the
+composer leaves too little room. Steer is primary while running, with Queue in its adjacent menu;
+queue-only harnesses get one Queue button. Composer options holds dictation's Cloud/Local selector,
+attachments, cost/context details and queued-message counts. Narrow widths rely on that menu for
+secondary controls, but the context meter stays visible while Usage is selected so it can close the
+panel again.
 
 **Fast mode is a separate, per-session premium-speed preference**, not a reasoning level. The
 New Session dialog and composer's model menu expose `SessionConfig.fastMode` (off by default), with a
@@ -203,6 +241,10 @@ names a model wins instead, which is why `_FORCE` is withheld the moment one doe
 tab's **Models** view lists every type with the model it will run on, edits that one field, and
 writes the definition that overrides a built-in the user chooses to replace.
 
+Codex app-server can stream subagent threads on the same connection as their parent. The adapter
+uses the owning thread ID for turn status, transcript items, and token usage. Activity about a
+subagent belongs in the parent transcript when Codex emits the item on the parent thread.
+
 Context reduction differs the same way. Most engines take an app-requested `compact()` at an idle
 boundary between turns. Claude's CLI instead reduces context from inside the turn that needs it, so
 its adapter exposes `setAutoCompactionWindow(tokens)`: the app hands over the token window that the
@@ -223,7 +265,7 @@ audit is requested only once the goal is achieved and verified.
 Layering is enforced by convention and by `tsconfig` project boundaries:
 
 - `src/shared` — types, IPC contract, harness metadata, diff parser. **No runtime deps, no Electron imports**; importable from every process.
-- `src/main` — all privileged work. `harness/` holds one adapter per harness; `models/` provider clients; `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
+- `src/main` — all privileged work. `harness/` holds the adapters, `models/` holds provider clients, and `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
 - `src/preload` — the only bridge. Renderer calls go through `window.harness`; channels and payloads are defined once in `src/shared/ipc.ts`.
 - `src/renderer` — React 19 + zustand. **Never touches Node or Electron directly.** `terminal/host.ts` keeps xterm.js instances alive outside React.
 - `src/web` — the browser shell. It may import `src/renderer/src`, `src/shared` and `relay/src/web-client.ts`; it must **never** import `src/main`, Electron or `terminal/host` (xterm). It binds its own `window.harness` before any renderer module loads (`install-transport.ts`).
@@ -234,6 +276,8 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - Project instructions are read once per harness. `AGENTS.md`, `CLAUDE.md` and `.vocs-code/INSTRUCTIONS.md` are the app's instruction files (`src/main/harness/project-instructions.ts`); an engine that discovers one itself keeps it, and the adapter adds only what that engine does not read. The Claude adapter, whose CLI reads `CLAUDE.md` alone, appends `AGENTS.md` (only where the directory has no Claude document) and `.vocs-code/INSTRUCTIONS.md` to its system prompt, so no file is ever handed over twice.
 - The app's own instruction layer is user-scoped and additive (`src/main/app-instructions.ts`, one file per scope under `<userData>/instructions/`): `global.md` is added to every session and a harness family's file (`pi.md`, `claude.md`, `codex.md`, …) after it, never instead of it. It is *not* a harness's global file — `APPEND_SYSTEM.md`, `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` stay untouched and keep applying through their own engine, and this layer can only add to the engine's prompt, never override it. Delivery follows the capability: the three harnesses with `systemPrompt: true` (pi, claude, native) get it through `sessionAppendPrompt`, and the rest through `SessionManager.withSessionPreamble` on their first message (`pendingAppInstructions`), because their engines own the prompt.
 - Split view: panes are views, not sessions. `store.layout` names a session per pane; transcripts, drafts, streaming and the agent process stay keyed by session, so a session on screen twice, or a pane that starts a process, cannot exist. `activeId` is always the active pane's session (a store subscription enforces it), which is how the global panels — Changes, Files, Git, Goal, Usage, Terminal — follow the active pane without knowing panes exist. Window-wide keys (Ctrl+F, terminal-to-composer inserts, composer focus) act on the active pane only. A split is remembered in the renderer's `localStorage`; a single pane leaves nothing behind, so the one-pane boot is unchanged.
+- File previews extend left from the Files panel, over the conversation without reflowing the split. Transcript mentions, Files rows, and Markdown links use `store.revealFile` to open the same transient `layout.filePreview` target, which is never persisted and closes when its session leaves the split. Text opens as source; Markdown has a rendered toggle. On desktop, explicit Save compares the file's current bytes to the editor's baseline before writing through the session-scoped `fs:writeText` handler. Images, binary, and truncated previews aren't editable. Folders open in the Files browser; paths outside the session folder are only revealed in the system file manager (`file-open.ts`), never previewed or edited.
+- A coloured link always opens something. Markdown links render as `http(s)` links, as `data-file` references (`file-refs.ts` reads `file://`, percent-encoded, Codex `/G:/…:12` and `#L10-L20` targets), or as plain text (`.md-link-text`) when nothing here can open the target.
 - The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
 - Local images in assistant Markdown resolve against that session's checkout (`cwd`, not the main project root or renderer URL). Sanitized HTML carries inert references; the desktop loads bounded image bytes through the existing session-scoped `fs:readImage` handler, which also rejects symlink escapes. Never loosen the Markdown URI allowlist or CSP to expose filesystem paths. Missing, oversized and denied images show an unavailable caption; web Markdown continues to omit images.
 - Every process the app starts is tracked for the Processes panel without the spawning code knowing about it. `SessionManager` wraps each adapter in `ownedAdapter`, so a ChildProcess created during any adapter call (an SDK's CLI, MCP servers, tool shells) is claimed for that session through Node's `child_process` diagnostics channel; terminals come from `TerminalManager.activity()`; descendants inherit the owner. An app-wide process that a session's call may start lazily must be spawned under `withProcessOwner({ label })` (as the shared GitNexus server and Vesta are), or it is attributed to whichever session asked first. On Windows each session's processes also join a per-session Job Object (no limits, breakaway allowed, never kills), so a process started through a launcher that exits at once (`Start-Process` from a tool shell) is still listed under its session, flagged detached; Mission sessions and Job-owned shells are never put into one, so Mission's own Job ownership is untouched. Processes are named by PID *and* creation time everywhere; ending one re-checks a fresh sample, and the panel is desktop-only (not a remote channel).
@@ -287,17 +331,67 @@ Touch all of these: add an adapter in `src/main/harness/<id>.ts`, register the c
 descriptor/capabilities in `src/shared/harness-meta.ts`, and wire detection/install/doctor in
 `src/main/runtime.ts`. Permission modes must map through the shared model (see the table below).
 
-## Permission mode mapping
+Antigravity and the generic ACP choice share one adapter. Antigravity uses the CLI's strict tool
+policy and sets the vendor session mode explicitly. Plan uses `plan` and denies mutations through
+the ACP callback. Every other mode uses `default`, so each tool call reaches the ACP client policy
+and Ask, Accept edits, Auto and Full access are enforced there. Antigravity only ever receives
+one-time grants (`allow_once`): its "always" options would persist into the CLI's own settings and
+outlive the app's mode. Google permits auto-approval in a session a person drives; what consumer
+sign-in rules out is automated prompting (see below). The app keeps the
+ACP session identifier for resume and receives context usage through `usage_update`.
+The account route only accepts human-driven turns. The app goal loop, Missions and external
+controllers cannot dispatch Antigravity prompts. [Google ACP guidance](https://antigravity.google/docs/ide/extensions/acp/) · [Interactive use and quota](https://github.com/google-antigravity/antigravity-cli/issues/1493#issuecomment-6814901159)
 
-| Mode | Claude | Codex | Pi (extension) | ACP client policy | Native |
+## Permission tiers
+
+Vocs Code owns the meaning of its five tiers; every harness is driven to match them. The contract
+(✅ runs, ❓ asks, ⛔ denied):
+
+| Action | Plan | Ask | Accept edits | Auto | Full access |
 | --- | --- | --- | --- | --- | --- |
-| Ask | `default` + prompt | `untrusted` (every non-read-only command asks), workspace-write | confirm bash/edit/write | prompt | prompt |
-| Accept edits | `acceptEdits` | `untrusted`, auto-accept in-workspace file changes | confirm bash only | allow in-workspace edits | allow edits |
-| Plan | `plan` | read-only sandbox, decline writes | block mutations | reject mutations | read-only tools |
-| Auto | `default` + auto-allow safe | `on-request`, workspace-write with network | confirm dangerous only | allow unless dangerous | allow unless dangerous |
-| Full access | `bypassPermissions` | `never` + danger-full-access | never ask | allow always | allow |
+| Read, search, web read | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Edits inside the project | ⛔ | ❓ | ✅ | ✅ | ✅ |
+| Shell, ordinary | ⛔ | ❓ | ❓ | ✅ | ✅ |
+| Shell, dangerous (`isDangerousCommand`) | ⛔ | ❓ | ❓ | ❓ | ✅ |
+| Anything outside the project (real path, links followed) | ⛔ | ❓ | ❓ | ❓ | ✅ |
+| Third-party MCP tools | ⛔ | ❓ | ❓ | ✅ | ✅ |
+| Vocs Code's own read-only tools (`BUILTIN_READ_ONLY_TOOLS`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping curl into a shell, …) and any write outside the project directory always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`.
+- **The tier wins over vendor settings.** An allow rule in a vendor's own settings cannot skip a
+  tier, and "Allow for session" is kept by the app: keyed per tool name, never covering a dangerous
+  command or anything outside the project, cleared on every tier change, and never handed to the
+  vendor as an "always" or "for session" rule.
+- **Vocs Code's own tools.** `src/shared/builtin-tools.ts` lists the read-only tools of the servers
+  the app ships (vocs-memory, GitNexus, CUA). Trust keys on the server's app-set provenance or its
+  reserved built-in id, never on a name or annotation a server supplies. A tool not on the list
+  follows the tier. Add a new built-in server there and every harness picks it up.
+- **One decision function.** `gateAction` and `requiresPathApproval` in
+  `src/main/harness/permissions.ts`; Pi's extension runs inside Pi and keeps pinned mirrors in
+  `resources/pi/`.
+- **Only offered tiers run.** A harness only ever runs a tier it offers
+  (`capabilities.permissionModes`). The main process refuses an explicit choice it does not offer —
+  on create, on a mode switch and from remote control — and gives an inherited one (saved defaults,
+  a cross-harness fork, a session saved before this rule) the closest stricter tier it does offer,
+  never a looser one (`closestPermissionMode` in `src/shared/harness-meta.ts`). Where a harness can
+  only approximate a tier, `capabilities.permissionModeNotes` says how, beside the tier in the picker.
+
+How each harness is driven (✓ exact, ≈ closest match, — not offered):
+
+| Harness | Plan | Ask | Accept edits | Auto | Full access |
+| --- | --- | --- | --- | --- | --- |
+| Claude | ✓ CLI `plan` + app gate | ✓ app gate on every call (`PreToolUse`, so settings allow rules cannot skip it) | ✓ | ✓ app gate | ✓ app gate allows everything; the CLI stays in `default`, so switching is live |
+| Codex app-server | ✓ read-only sandbox, every request declined | ✓ `untrusted` + app gate | ✓ | ✓ `untrusted` + app gate, workspace-write sandbox with network underneath | ✓ `never` + danger-full-access |
+| Codex exec | ✓ read-only sandbox | — | — | ≈ workspace-write sandbox; cannot ask | ✓ danger-full-access |
+| Cursor | ✓ `plan` + read-only tool allowlist | — | — | ≈ Cursor sandbox; cannot ask | ✓ sandbox off |
+| Pi | ✓ extension gate | ✓ | ✓ | ✓ | ✓ |
+| Native | ✓ mutating tools hidden | ✓ | ✓ | ✓ | ✓ |
+| Antigravity | ✓ vendor `plan` + client policy | ✓ client policy, one-time grants | ✓ | ✓ | ✓ |
+| Generic ACP | ✓ client policy | ≈ the app only sees calls the agent asks about | ≈ | ≈ | ✓ one-time grants |
+
+Known gaps: under ACP the permission request does not name the MCP tool, so Plan cannot tell
+Vocs Code's read-only tools from others and rejects both. Cursor and Codex exec have no approval
+channel, so their Auto is the vendor sandbox, where a dangerous command that stays inside the
+sandbox runs without asking.
 
 ## Security notes
 

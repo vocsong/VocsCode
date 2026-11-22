@@ -1,0 +1,1109 @@
+/*
+ * Zen interface (Settings → Appearance → Interface; shared/ui-modes.ts).
+ *
+ * One calm column. Sessions are a rail of dots: the rail is the left edge of the full session
+ * list, clipped, so hovering it slides the list open over the conversation without reflowing
+ * anything. The conversation sits in a centered column, the composer floats as a pill, and the side
+ * panel is a drawer that floats beside the column. Chrome stays quiet until it is reached for.
+ *
+ * Everything here is scoped to `:root[data-ui='zen']` and only restyles the standard component
+ * tree, so switching modes never remounts a session, a draft, a terminal or a panel. Colors still
+ * come from the active theme.
+ */
+
+/* Tokens. `[data-palette][data-scheme]` lifts these above the data-driven palette blocks
+   (html:root[data-palette][data-scheme], specificity 0,3,1). */
+:root[data-ui='zen'][data-palette][data-scheme] {
+  --border: color-mix(in srgb, var(--fg) 7%, transparent);
+  --border-strong: color-mix(in srgb, var(--fg) 13%, transparent);
+  --radius: 14px;
+  --radius-sm: 9px;
+  --radius-lg: 20px;
+  --reading: 700px;
+  --conversation-gutter: clamp(12px, 3%, 32px);
+  --shadow-sm: none;
+  --shadow-card: 0 0 0 1px var(--border), 0 16px 44px -24px rgb(0 0 0 / 0.5);
+  --shadow: 0 0 0 1px var(--border), 0 24px 60px -22px rgb(0 0 0 / 0.55);
+  --zen-rail: 52px;
+  --zen-glyph: 26px;
+}
+/* Transcript width: Zen's one column, narrower or wider (TRANSCRIPT_WIDTHS in shared/typography.ts). */
+:root[data-ui='zen'][data-width='narrow'][data-palette][data-scheme] {
+  --reading: 600px;
+}
+:root[data-ui='zen'][data-width='wide'][data-palette][data-scheme] {
+  --reading: 860px;
+}
+
+/* ---------- Title bar: only the menu, the place you are and Vesta ---------- */
+:root[data-ui='zen'] .titlebar {
+  background: var(--bg);
+  box-shadow: none;
+}
+:root[data-ui='zen'] .titlebar-lead .menubar-compact {
+  order: -1;
+  margin-left: 0;
+}
+/* Back and forward wait at the end of the lead until the bar is pointed at. */
+:root[data-ui='zen'] .titlebar-lead > .titlebar-btn:not(:first-child) {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+:root[data-ui='zen'] .titlebar:hover .titlebar-lead > .titlebar-btn:not(:first-child),
+:root[data-ui='zen'] .titlebar-lead > .titlebar-btn:focus-visible {
+  opacity: 1;
+}
+:root[data-ui='zen'] .titlebar-search {
+  width: auto;
+  max-width: min(460px, 100%);
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-faint);
+  padding: 0 12px;
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .titlebar-search:hover {
+  border-color: transparent;
+  background: var(--bg-hover);
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .titlebar-search > .icon,
+:root[data-ui='zen'] .titlebar-search .kbd {
+  display: none;
+}
+:root[data-ui='zen'] .titlebar-vesta {
+  font-size: 0;
+  gap: 0;
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+  border-color: transparent;
+  background: transparent;
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .titlebar-vesta.open {
+  background: var(--accent-soft);
+}
+
+/* The one-button menu's tabs (base styles in styles.css) take Zen's round shape. */
+:root[data-ui='zen'] .menubar-tab {
+  border-radius: 999px;
+}
+
+/* ---------- Layout: rail, column, floating drawer ---------- */
+:root[data-ui='zen'] .app {
+  grid-template-columns: var(--zen-rail) minmax(0, 1fr);
+}
+:root[data-ui='zen'] .app.no-sidebar {
+  grid-template-columns: minmax(0, 1fr);
+}
+/* A pinned sidebar is the open list, owning its column instead of opening over the conversation. */
+:root[data-ui='zen'] .app.pin-left:not(.no-sidebar) {
+  grid-template-columns: var(--sidebar) minmax(0, 1fr);
+}
+:root[data-ui='zen'] .sidebar-backdrop {
+  display: none;
+}
+:root[data-ui='zen'] .main {
+  transition: padding-right 0.22s ease;
+}
+/* The side panel's drawer is wider than the Standard panel: it opens over the column, so it can afford
+   the room. Resizer.tsx drags with the same 560px floor. */
+:root[data-ui='zen'] .app {
+  --zen-panel: min(max(var(--panel), 560px), calc(100vw - 2 * var(--zen-rail) - 160px));
+}
+:root[data-ui='zen'] .app:not(.no-sidebar) {
+  --file-drawer-left: var(--zen-rail);
+}
+:root[data-ui='zen'] .app.pin-left:not(.no-sidebar) {
+  --file-drawer-left: var(--sidebar);
+}
+/* The column keeps clear of the right rail; a pinned drawer pushes it over like a pinned sidebar. */
+:root[data-ui='zen'] .app:not(.no-panel) > .main {
+  padding-right: var(--zen-rail);
+}
+:root[data-ui='zen'] .app.pin-right:not(.no-panel) > .main {
+  padding-right: calc(var(--zen-panel) + var(--zen-rail));
+}
+
+/* ---------- Sidebar: a rail of dots that opens on hover ---------- */
+:root[data-ui='zen'] .sidebar {
+  /* Out of the drawer it is at narrow widths in the standard layout: the rail fits anywhere. */
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: auto;
+  width: var(--zen-rail);
+  /* Over the conversation when open, under the title bar so its menus drop over the rail. */
+  z-index: 29;
+  /* clip, not hidden: a hidden box still scrolls, so focusing a button past the closed rail (focus
+     handed back when a dialog closes) slid the whole rail sideways and left it showing row ends. */
+  overflow: clip;
+  background: var(--bg);
+  border-right: none;
+  box-shadow: none;
+  transition: width 0.2s ease 0.08s, box-shadow 0.2s ease 0.08s, background-color 0.2s ease 0.08s;
+}
+/* A confirmation anchored in the rail (archive, delete) holds it open: its transparent backdrop takes
+   the hover away, and a rail that folded shut would leave the dialog pointing at nothing. */
+:root[data-ui='zen'] .sidebar:hover,
+:root[data-ui='zen'] .sidebar:has(:focus-visible),
+:root[data-ui='zen'] .sidebar:has([data-dialog-anchor]),
+:root[data-ui='zen'] body.resizing .sidebar,
+:root[data-ui='zen'] .app.pin-left .sidebar {
+  width: var(--sidebar);
+  background: var(--bg-elev);
+  border-radius: 0 18px 18px 0;
+  box-shadow: 0 0 0 1px var(--border), 24px 0 60px -30px rgb(0 0 0 / 0.6);
+  transition-delay: 0.14s;
+}
+/* Pinned, it sits beside the conversation rather than over it: no lift, and no delay. */
+:root[data-ui='zen'] .app.pin-left .sidebar {
+  box-shadow: 0 0 0 1px var(--border);
+  transition-delay: 0s;
+}
+/* Every row keeps its full-width layout; the rail is just its left edge, so opening never reflows. */
+:root[data-ui='zen'] .sidebar > :not(.resizer),
+:root[data-ui='zen'] .sidebar-nav > * {
+  flex-shrink: 0;
+  width: var(--sidebar);
+}
+/* …except the session list, which takes the height the rest leaves and scrolls when it holds more
+   sessions than fit. (Not shrinking it let the list grow past the window, clipping its end.) */
+:root[data-ui='zen'] .sidebar > .sidebar-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+:root[data-ui='zen'] .sidebar-nav,
+:root[data-ui='zen'] .sidebar-section {
+  display: contents;
+}
+:root[data-ui='zen'] .sidebar-section-label {
+  display: none;
+}
+:root[data-ui='zen'] .sidebar-top {
+  order: 0;
+  padding: 10px 10px 10px 0;
+}
+:root[data-ui='zen'] .brand {
+  gap: 0;
+  font-weight: 600;
+  font-size: 14px;
+}
+:root[data-ui='zen'] .brand > .icon {
+  width: var(--zen-rail);
+  height: 20px;
+}
+:root[data-ui='zen'] .sidebar-views .sidebar-link,
+:root[data-ui='zen'] .sidebar-bottom .sidebar-link {
+  justify-content: flex-start;
+  gap: 0;
+  width: var(--sidebar);
+  padding: 8px 12px 8px 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--fg-muted);
+  font-size: 13px;
+  font-weight: 450;
+}
+:root[data-ui='zen'] .sidebar-views .sidebar-link > .icon,
+:root[data-ui='zen'] .sidebar-bottom .sidebar-link > .icon {
+  width: var(--zen-rail);
+  height: 16px;
+  color: inherit;
+}
+:root[data-ui='zen'] .sidebar-views .sidebar-link:hover,
+:root[data-ui='zen'] .sidebar-bottom .sidebar-link:hover,
+:root[data-ui='zen'] .sidebar-link.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+  box-shadow: none;
+}
+/* Keep the transcript's themed scrollbar: `scrollbar-width: thin` would replace it with native
+   chrome. The list keeps its full width, so the closed rail clips the scrollbar without reflow. */
+:root[data-ui='zen'] .sidebar-list {
+  order: 2;
+  padding: 8px 0;
+  overflow-x: hidden;
+}
+:root[data-ui='zen'] .sidebar-views {
+  order: 3;
+  flex-direction: column;
+  gap: 0;
+}
+/* Projects | Recent, Archived and New session sit right under the brand, above the list they shape.
+   Closed, the rail shows what the list holds (archive, list or folder icon); open, the choices sit
+   beside it. */
+:root[data-ui='zen'] .sidebar-viewswitch {
+  order: 1;
+  width: var(--sidebar);
+  padding: 2px 12px 6px 0;
+}
+:root[data-ui='zen'] .sidebar-viewswitch-icon {
+  display: block;
+  flex-shrink: 0;
+  width: var(--zen-rail);
+  /* Cancels the row gap, so the switch starts where every other row's text does. */
+  margin-right: -6px;
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .sidebar-viewswitch .segmented,
+:root[data-ui='zen'] .sidebar-viewswitch .segmented-toggle:not(.active) {
+  background: none;
+}
+:root[data-ui='zen'] .sidebar-viewswitch .sidebar-new:hover {
+  background: var(--bg-hover);
+  box-shadow: none;
+}
+/* The open rail is narrow: the layout segments drop their icons (the rail icon beside them already
+   shows the layout), so both labels fit beside the Archived and New session icons. */
+:root[data-ui='zen'] .sidebar-viewswitch .segment {
+  padding: 4px 8px;
+}
+:root[data-ui='zen'] .sidebar-viewswitch .segment > .icon {
+  display: none;
+}
+:root[data-ui='zen'] .sidebar-bottom {
+  order: 4;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0 0 10px;
+  border-top: none;
+}
+:root[data-ui='zen'] .sidebar-bottom .update-pill {
+  margin: 4px 12px 0 14px;
+}
+:root[data-ui='zen'] .app:not(.pin-left) .sidebar:not(:hover):not(:has(:focus-visible)):not(:has([data-dialog-anchor])) .update-pill {
+  /* Collapsed, a pending update is a dot under the gear rather than a cut-off pill. */
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  margin: 2px 0 0 21px;
+  font-size: 0;
+  border-radius: 50%;
+}
+:root[data-ui='zen'] .sidebar-empty {
+  padding: 20px 12px 20px var(--zen-rail);
+  text-align: left;
+}
+/* A folder is a short rule in the rail and its name beside it. */
+:root[data-ui='zen'] .project-group {
+  margin-bottom: 10px;
+}
+:root[data-ui='zen'] .project-header {
+  position: relative;
+  padding: 8px 10px 4px var(--zen-rail);
+  font-weight: 500;
+  color: var(--fg-faint);
+}
+:root[data-ui='zen'] .project-header::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--zen-glyph) - 7px);
+  top: 50%;
+  width: 14px;
+  height: 1px;
+  margin-top: 2px;
+  background: var(--border-strong);
+}
+:root[data-ui='zen'] .project-fold-btn {
+  display: none;
+}
+/* A session is a dot in the rail: its harness's hue, ringed when open, pulsing while it works. */
+:root[data-ui='zen'] .session-row {
+  gap: 0;
+  margin-right: 10px;
+  padding: 5px 8px 5px 0;
+  border-radius: 0 10px 10px 0;
+  --zen-dot: color-mix(in srgb, var(--harness-ink, var(--fg-faint)) 60%, var(--harness-fill, var(--fg-faint)));
+}
+:root[data-ui='zen'] .session-row.active {
+  background: var(--bg-hover);
+  box-shadow: none;
+}
+:root[data-ui='zen'] .session-row.in-pane {
+  box-shadow: none;
+}
+:root[data-ui='zen'] .session-pin {
+  align-self: center;
+  justify-content: center;
+  width: var(--zen-rail);
+  margin: 0;
+}
+:root[data-ui='zen'] .session-pin .row-act-btn {
+  display: none;
+}
+:root[data-ui='zen'] .session-pin::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--zen-dot);
+  opacity: 0.5;
+  transition: opacity 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+:root[data-ui='zen'] .session-row:hover .session-pin::before {
+  opacity: 0.9;
+}
+:root[data-ui='zen'] .session-row[data-pinned] .session-pin::before {
+  border-radius: 2px;
+}
+:root[data-ui='zen'] .session-row.in-pane .session-pin::before {
+  opacity: 0.85;
+}
+:root[data-ui='zen'] .session-row.active .session-pin::before {
+  opacity: 1;
+  transform: scale(1.3);
+  box-shadow: 0 0 0 3px var(--bg), 0 0 0 4.5px var(--zen-dot);
+}
+:root[data-ui='zen'] .session-row.unseen .session-pin::before {
+  opacity: 1;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+:root[data-ui='zen'] .session-row:is([data-status='running'], [data-status='starting']) .session-pin::before {
+  opacity: 1;
+  background: var(--blue);
+  animation: zen-breathe 1.6s ease-in-out infinite;
+}
+:root[data-ui='zen'] .session-row[data-status='awaiting'] .session-pin::before {
+  opacity: 1;
+  background: var(--red);
+  animation: zen-breathe 0.9s ease-in-out infinite;
+}
+:root[data-ui='zen'] .session-row:is([data-status='error'], [data-status='archiving']) .session-pin::before {
+  opacity: 1;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--red);
+}
+:root[data-ui='zen'] .session-row[data-status='archiving'] .session-pin::before {
+  box-shadow: inset 0 0 0 1.5px var(--amber);
+}
+@keyframes zen-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.5);
+  }
+}
+/* Keep the title, hover actions and status on one line so hover cannot shift the scroll position. */
+:root[data-ui='zen'] .session-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+:root[data-ui='zen'] .session-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+:root[data-ui='zen'] .session-title {
+  font-weight: 450;
+  color: var(--fg-muted);
+  overflow: hidden;
+}
+:root[data-ui='zen'] .session-row.active .session-title,
+:root[data-ui='zen'] .session-row.unseen .session-title {
+  font-weight: 550;
+  color: var(--fg);
+}
+:root[data-ui='zen'] .session-unseen-dot {
+  display: none;
+}
+:root[data-ui='zen'] .session-meta {
+  flex: 0 1 auto;
+  max-width: 40%;
+  margin: 0;
+  min-height: 0;
+}
+:root[data-ui='zen'] .session-meta > :not(.session-side):not(.session-folder) {
+  display: none;
+}
+/* The Recent view keeps the row's folder name (no icon) beside its status: no header names it. */
+:root[data-ui='zen'] .session-folder {
+  /* Shrinks before the status pill does, so a label like MERGED stays readable. */
+  flex: 0 4 auto;
+  min-width: 28px;
+  font-size: 11.5px;
+}
+:root[data-ui='zen'] .session-folder-name {
+  max-width: 84px;
+}
+:root[data-ui='zen'] .session-folder > .icon {
+  display: none;
+}
+:root[data-ui='zen'] .session-side,
+:root[data-ui='zen'] .session-side > .dropdown {
+  flex-shrink: 1;
+  min-width: 0;
+}
+:root[data-ui='zen'] .session-status {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+:root[data-ui='zen'] .sidebar > .resizer {
+  display: none;
+}
+:root[data-ui='zen'] .sidebar:hover > .resizer,
+:root[data-ui='zen'] body.resizing .sidebar > .resizer,
+:root[data-ui='zen'] .app.pin-left .sidebar > .resizer {
+  display: block;
+}
+
+/* ---------- Session pane ---------- */
+:root[data-ui='zen'] .header {
+  border-bottom: none;
+  background: transparent;
+  padding: 0 14px 0 20px;
+}
+:root[data-ui='zen'] .header-title {
+  min-height: 42px;
+}
+/* The title bar already names a lone session; a split names each pane. */
+:root[data-ui='zen'] .panes:not(.split) .header-name {
+  visibility: hidden;
+}
+:root[data-ui='zen'] .header-name {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .header-crumbs,
+:root[data-ui='zen'] .header-divider,
+:root[data-ui='zen'] .header-status {
+  display: none;
+}
+:root[data-ui='zen'] .header-changes {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-ui='zen'] .header-changes > span:not(.add):not(.del) {
+  display: none;
+}
+/* While the side panel's rail is showing it stands in for the panel toggle and the changes chip. */
+:root[data-ui='zen'] .app:not(.no-panel) .header-changes,
+:root[data-ui='zen'] .app:not(.no-panel) .header-panel-toggle {
+  display: none;
+}
+:root[data-ui='zen'] .header .btn {
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .header-actions,
+:root[data-ui='zen'] .header-title > .btn {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+:root[data-ui='zen'] .header:hover .header-actions,
+:root[data-ui='zen'] .header:hover .header-title > .btn,
+:root[data-ui='zen'] .header:focus-within .header-actions,
+:root[data-ui='zen'] .header:focus-within .header-title > .btn,
+:root[data-ui='zen'] .header-title > .btn.btn-subtle {
+  opacity: 1;
+}
+:root[data-ui='zen'] .header-title > .btn:last-child {
+  opacity: 0.6;
+}
+:root[data-ui='zen'] .pane-divider {
+  background: var(--border);
+}
+:root[data-ui='zen'] .pane-divider:hover {
+  background: var(--border);
+}
+
+/* ---------- Transcript: one quiet reading column ---------- */
+:root[data-ui='zen'] .transcript {
+  --transcript-gap: 10px;
+  padding-block: 24px 32px;
+}
+:root[data-ui='zen'] .md {
+  /* A step above Standard, kept relative so Text & fonts still moves it. */
+  font-size: calc(var(--content-size) + 1px);
+  line-height: calc(var(--content-leading) + 0.1);
+}
+/* Your words open each stretch of the transcript: a full-width tinted band with an accent rule,
+   so they stand out from the answers when you scroll back looking for them. */
+:root[data-ui='zen'] .msg-user {
+  align-items: stretch;
+  padding-top: 22px;
+}
+:root[data-ui='zen'] .msg-user .msg-bubble {
+  max-width: 100%;
+  padding: 12px 16px 12px 18px;
+  border-radius: 4px 14px 14px 4px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+  font-size: calc(var(--content-size) + 2px);
+  font-weight: 500;
+  line-height: calc(var(--content-leading) - 0.05);
+  color: var(--fg);
+}
+:root[data-ui='zen'] .msg-user-meta {
+  padding-left: 18px;
+}
+/* Times are there when you look for them: pointing at (or tabbing into) a row brings its time back. */
+:root[data-ui='zen'] .stamp {
+  opacity: 0;
+}
+:root[data-ui='zen'] :is(.msg, .tool-head, .tool-group-head, .work-head, .info-line, .approval-head, .plan-title):is(:hover, :focus-within) .stamp {
+  opacity: 1;
+}
+/* The work chip is sized to what it says, so its hidden time takes no room until it shows. */
+:root[data-ui='zen'] .msg-stamp {
+  line-height: 26px;
+}
+:root[data-ui='zen'] .work-time {
+  display: none;
+}
+:root[data-ui='zen'] .work-head:is(:hover, :focus-visible) .work-time {
+  display: inline;
+}
+:root[data-ui='zen'] .pinned-prompt {
+  top: 10px;
+  width: calc(100% - 64px);
+  border-color: transparent;
+  border-radius: 4px 12px 12px 4px;
+}
+:root[data-ui='zen'] .msg-plan {
+  border-left-width: 2px;
+}
+/* A turn's work is a whisper: its time, steps and files as bare numbers. */
+:root[data-ui='zen'] .work-head {
+  gap: 6px;
+  padding: 3px 10px 3px 8px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg-faint);
+}
+:root[data-ui='zen'] .work-head:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+:root[data-ui='zen'] .work-label,
+:root[data-ui='zen'] .work-stat {
+  font-size: 0;
+  font-weight: 450;
+  color: var(--fg-faint);
+}
+:root[data-ui='zen'] .work-label::after,
+:root[data-ui='zen'] .work-stat::after,
+:root[data-ui='zen'] .work-stat::before {
+  font-size: 12px;
+}
+:root[data-ui='zen'] .work-label::after,
+:root[data-ui='zen'] .work-stat::after {
+  content: attr(data-short) / '';
+}
+:root[data-ui='zen'] .work-head:hover .work-label {
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .work-body {
+  border-left-width: 1px;
+}
+:root[data-ui='zen'] .plan-card {
+  border-color: transparent;
+  background: var(--bg-sunken);
+  border-radius: 16px;
+}
+:root[data-ui='zen'] .codeblock {
+  border: none;
+  border-radius: 14px;
+}
+:root[data-ui='zen'] .md code {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+:root[data-ui='zen'] .md pre code {
+  background: none;
+}
+/* The end of a turn says nothing unless it went wrong; pointing at it brings the numbers back. */
+:root[data-ui='zen'] .turn-footer {
+  padding: 0 0 18px;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+:root[data-ui='zen'] .turn-footer:hover,
+:root[data-ui='zen'] .turn-footer:is(.turn-failed, .turn-interrupted) {
+  opacity: 1;
+}
+:root[data-ui='zen'] .turn-footer.turn-completed > .turn-label {
+  display: none;
+}
+:root[data-ui='zen'] .turn-footer.turn-completed > .turn-time {
+  margin-left: 2px;
+}
+:root[data-ui='zen'] .approval {
+  border-radius: 18px;
+}
+:root[data-ui='zen'] .jump-bottom {
+  border-color: transparent;
+}
+
+/* ---------- Composer: a floating pill whose controls wait for you ---------- */
+:root[data-ui='zen'] .pane > .composer {
+  padding-block-end: 24px;
+}
+:root[data-ui='zen'] .pane .composer-box {
+  border: none;
+  border-radius: 26px;
+  background: var(--bg-elev);
+  box-shadow: 0 0 0 1px var(--border), 0 18px 48px -22px rgb(0 0 0 / 0.55);
+}
+:root[data-ui='zen'] .pane .composer-box:focus-within {
+  border: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), 0 0 0 5px var(--accent-soft), 0 18px 48px -22px rgb(0 0 0 / 0.55);
+}
+:root[data-ui='zen'] .pane .composer-box textarea {
+  padding: 15px 22px 4px;
+  font-size: calc(var(--content-size) + 1px);
+  min-height: 48px;
+}
+:root[data-ui='zen'] .pane .composer-actions {
+  padding: 0 10px 9px 12px;
+}
+:root[data-ui='zen'] .composer-actions {
+  --zen-reveal: 0;
+}
+/* Typing is not reaching for them: only pointing at the pill, tabbing into its controls, an open
+   menu or a live recording brings them back. */
+:root[data-ui='zen'] .composer-box:hover .composer-actions,
+:root[data-ui='zen'] .composer-actions:focus-within,
+:root[data-ui='zen'] .composer-actions:has(.open),
+:root[data-ui='zen'] .composer-actions:has(.is-recording) {
+  --zen-reveal: 1;
+}
+/* .run-controls is display: contents (it has no box to fade), so its children fade instead. */
+:root[data-ui='zen'] .composer-actions > :not(.run-controls),
+:root[data-ui='zen'] .composer-actions > .run-controls > * {
+  opacity: var(--zen-reveal);
+  transition: opacity 0.18s ease;
+}
+/* Send, steer, stop and the queue count never hide. */
+:root[data-ui='zen'] .composer-actions > :is(.composer-send-group, .btn, .queued-hint) {
+  opacity: 1;
+}
+:root[data-ui='zen'] .composer-actions .pill {
+  border-color: transparent;
+  background: transparent;
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .composer-actions .pill:hover,
+:root[data-ui='zen'] .composer-actions .pill.open {
+  background: var(--bg-hover);
+}
+:root[data-ui='zen'] .btn.send-btn {
+  width: 34px;
+  height: 34px;
+}
+:root[data-ui='zen'] .composer-send-group:has(.dropdown) > .btn,
+:root[data-ui='zen'] .composer-send-group .composer-send-options {
+  border-radius: 999px;
+}
+
+/* ---------- Side panel: a rail of icons on the right whose drawer slides out ---------- */
+/* The left rail's mirror. Closed, the panel is its rail: one series of icons — the workspace views,
+   a rule, the live services — on the window's right edge. Hovering it, focusing into it, a peek
+   (something asked for the panel) or a pin slides the drawer out to its left, showing one view at a
+   time: the half picked last (`data-focus`). Every part keeps its full-width layout; the panel only
+   grows from its right edge, so opening never reflows a diff or refits a terminal. */
+:root[data-ui='zen'] .panel {
+  position: fixed;
+  top: var(--titlebar);
+  right: 0;
+  bottom: 0;
+  z-index: 34;
+  display: block;
+  width: var(--zen-rail);
+  border: none;
+  /* clip, not hidden, for the same reason as the sidebar: a hidden box still scrolls sideways. */
+  overflow: clip;
+  background: var(--bg);
+  box-shadow: none;
+  transition: width 0.2s ease 0.08s, box-shadow 0.2s ease 0.08s, background-color 0.2s ease 0.08s;
+}
+/* Held open while it is pointed at, while you work in it (typing in the terminal or a commit message,
+   or a keyboard focus ring), while one of its menus or confirmations is open, on a peek, or pinned. */
+:root[data-ui='zen'] .panel:is(:hover, :has(:focus-visible), :has(input:focus, textarea:focus, select:focus, [contenteditable='true']:focus), :has([aria-haspopup][aria-expanded='true']), :has([data-dialog-anchor]), [data-peek], [data-pinned], [data-file-preview]),
+:root[data-ui='zen'] body.resizing .panel {
+  width: calc(var(--zen-panel) + var(--zen-rail));
+  background: var(--bg-elev);
+  border-radius: var(--panel-left-radius, 18px) 0 0 var(--panel-left-radius, 18px);
+  box-shadow: 0 0 0 1px var(--border), -24px 0 60px -30px rgb(0 0 0 / 0.6);
+  transition-delay: var(--panel-open-delay, 0.14s);
+}
+/* Keep the side panel open while the sibling editor extends from its left edge. */
+:root[data-ui='zen'] .panel[data-file-preview] {
+  --panel-left-radius: 0px;
+  --panel-open-delay: 0s;
+}
+:root[data-ui='zen'] .file-pane {
+  --file-panel-edge: calc(var(--zen-panel) + var(--zen-rail));
+}
+/* Pinned, it sits beside the conversation rather than over it: no lift, and no delay. */
+:root[data-ui='zen'] .panel[data-pinned] {
+  box-shadow: 0 0 0 1px var(--border);
+  transition-delay: 0s;
+}
+:root[data-ui='zen'] .panel-rail {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--zen-rail);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+/* The rule between the workspace views and the live services: a folder's rule on the left rail. */
+:root[data-ui='zen'] .panel-rail-rule {
+  flex-shrink: 0;
+  width: 14px;
+  height: 1px;
+  margin: 8px 0;
+  background: var(--border-strong);
+}
+:root[data-ui='zen'] .panel-head,
+:root[data-ui='zen'] .panel > .panel-section {
+  position: absolute;
+  right: var(--zen-rail);
+  width: var(--zen-panel);
+}
+:root[data-ui='zen'] .panel-head {
+  top: 0;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 18px;
+}
+:root[data-ui='zen'] .panel-head-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .panel-head .btn {
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .panel > .panel-section {
+  top: 48px;
+  bottom: 8px;
+  border-top: none;
+}
+/* One view at a time. The other half stays mounted (a terminal keeps its size), just out of sight. */
+:root[data-ui='zen'] .panel[data-focus='top'] > .panel-bottom,
+:root[data-ui='zen'] .panel[data-focus='bottom'] > .panel-top {
+  visibility: hidden;
+  pointer-events: none;
+}
+:root[data-ui='zen'] .panel[data-focus='bottom'] > .panel-bottom > .panel-body {
+  display: flex;
+}
+:root[data-ui='zen'] .panel > .resizer-split,
+:root[data-ui='zen'] .panel > .resizer-panel {
+  display: none;
+}
+:root[data-ui='zen'] .panel:is(:hover, [data-pinned], [data-file-preview]) > .resizer-panel,
+:root[data-ui='zen'] body.resizing .panel > .resizer-panel {
+  display: block;
+}
+:root[data-ui='zen'] .panel-tab {
+  position: relative;
+  flex-shrink: 0;
+  align-self: center;
+  justify-content: center;
+  gap: 0;
+  width: 34px;
+  min-width: 0;
+  height: 34px;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 0;
+  color: var(--fg-faint);
+}
+:root[data-ui='zen'] .panel-tab > .icon {
+  width: 16px;
+  height: 16px;
+}
+:root[data-ui='zen'] .panel-tab:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+:root[data-ui='zen'] .panel-tab.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+:root[data-ui='zen'] .panel-tab.active::after {
+  display: none;
+}
+:root[data-ui='zen'] .panel-tab.active > .icon {
+  color: inherit;
+}
+/* What the rail says without opening: uncommitted changes, a live goal, processes left running. */
+:root[data-ui='zen'] .panel-tab > .panel-rail-dot,
+:root[data-ui='zen'] .panel-tab > .dot-live {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  margin: 0;
+  border-radius: 50%;
+}
+:root[data-ui='zen'] .panel-tab > .panel-rail-dot {
+  background: var(--accent);
+}
+:root[data-ui='zen'] .panel-tab .panel-tab-count {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  margin: 0;
+  font-size: 10px;
+}
+
+/* ---------- Welcome ---------- */
+:root[data-ui='zen'] .welcome {
+  gap: 18px;
+}
+:root[data-ui='zen'] .welcome-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--accent);
+  box-shadow: 0 0 0 1px var(--border);
+}
+:root[data-ui='zen'] .welcome-title {
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+:root[data-ui='zen'] .welcome-sub,
+:root[data-ui='zen'] .welcome-keys {
+  display: none;
+}
+:root[data-ui='zen'] .welcome-actions .btn {
+  border-radius: 999px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .welcome-actions .btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+:root[data-ui='zen'] .welcome-actions .btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* ---------- Settings: an icon rail that opens over the page ---------- */
+/* A narrow window keeps Settings' own compact layout (a section select over the page). */
+@container settings (min-width: 651px) {
+  :root[data-ui='zen'] .settings-shell {
+    --zen-settings-rail: 64px;
+    grid-template-columns: var(--zen-settings-rail) minmax(0, 1fr);
+  }
+  :root[data-ui='zen'] .settings-nav {
+    position: relative;
+    z-index: 1;
+    width: var(--zen-settings-rail);
+    padding-inline: 12px;
+    border-right: none;
+    background: var(--bg);
+    /* A focused search can extend past the rail while the section list is closed. */
+    overflow: visible;
+    transition: width 0.2s ease 0.08s, box-shadow 0.2s ease 0.08s, background-color 0.2s ease 0.08s;
+  }
+  :root[data-ui='zen'] .settings-nav:is(:hover, :has(.settings-title .btn:focus-visible, .settings-link:focus-visible)) {
+    --zen-settings-labels: visible;
+    --zen-settings-search-opacity: 1;
+    --zen-settings-search-border: var(--border);
+    --zen-settings-scrollbar: thin;
+    width: 234px;
+    background: var(--bg-elev);
+    border-radius: 0 18px 18px 0;
+    box-shadow: var(--shadow);
+    transition-delay: 0.14s;
+  }
+  :root[data-ui='zen'] .settings-title > span,
+  :root[data-ui='zen'] .settings-nav-label,
+  :root[data-ui='zen'] .settings-nav-footer,
+  :root[data-ui='zen'] .settings-link > span {
+    /* Keep the icon rows in place while their text is revealed. */
+    min-width: 0;
+    overflow: clip;
+    white-space: nowrap;
+    visibility: var(--zen-settings-labels, hidden);
+  }
+  :root[data-ui='zen'] .settings-title .btn {
+    flex-shrink: 0;
+    border-radius: 999px;
+  }
+  :root[data-ui='zen'] .settings-search {
+    position: relative;
+    width: 100%;
+    min-height: 36px;
+    padding: 0 11px;
+    border-color: var(--zen-settings-search-border, transparent);
+    border-radius: 999px;
+    background: transparent;
+    overflow: hidden;
+    transition: width 0.18s ease, box-shadow 0.18s ease;
+  }
+  :root[data-ui='zen'] .settings-search input {
+    position: absolute;
+    inset: 0;
+    padding-left: 36px;
+    opacity: var(--zen-settings-search-opacity, 0);
+    cursor: text;
+  }
+  :root[data-ui='zen'] .settings-search:is(:focus-within, :has(input:not(:placeholder-shown))) {
+    --zen-settings-search-opacity: 1;
+    width: 280px;
+    background: var(--bg-elev);
+    box-shadow: var(--shadow);
+  }
+  :root[data-ui='zen'] .settings-search:has(.btn) input {
+    padding-right: 34px;
+  }
+  :root[data-ui='zen'] .settings-search .btn {
+    position: relative;
+    margin-left: auto;
+  }
+  :root[data-ui='zen'] .settings-nav-groups {
+    padding-top: 4px;
+    scrollbar-width: var(--zen-settings-scrollbar, none);
+  }
+  :root[data-ui='zen'] .settings-nav-group + .settings-nav-group {
+    margin-top: 6px;
+  }
+  :root[data-ui='zen'] .settings-nav-label {
+    padding-bottom: 4px;
+  }
+  :root[data-ui='zen'] .settings-link {
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 999px;
+  }
+  :root[data-ui='zen'] .settings-nav-footer {
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+  :root[data-ui='zen'] .settings-link.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+    box-shadow: none;
+  }
+  :root[data-ui='zen'] .settings-link.active::before {
+    display: none;
+  }
+}
+:root[data-ui='zen'] .settings-page-header {
+  border-bottom: none;
+  padding-top: 34px;
+  padding-bottom: 6px;
+}
+:root[data-ui='zen'] .settings-page-header,
+:root[data-ui='zen'] .settings-body {
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+}
+:root[data-ui='zen'] .settings-breadcrumb,
+:root[data-ui='zen'] .settings-save-hint,
+:root[data-ui='zen'] .settings-theme-preview,
+:root[data-ui='zen'] .settings-overview {
+  display: none;
+}
+:root[data-ui='zen'] .settings-page-header h1 {
+  font-weight: 450;
+}
+:root[data-ui='zen'] .settings-group {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  border-top: 1px solid var(--border);
+}
+:root[data-ui='zen'] .settings-group-heading {
+  border-bottom: none;
+  padding-left: 0;
+  padding-right: 0;
+}
+:root[data-ui='zen'] .settings-group-icon {
+  display: none;
+}
+:root[data-ui='zen'] .settings-group-content {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* ---------- Overlays: soft, round, blurred ---------- */
+:root[data-ui='zen'] .modal-backdrop {
+  background: rgb(0 0 0 / 0.28);
+  backdrop-filter: blur(6px);
+}
+:root[data-ui='zen'] .modal-backdrop.is-anchored {
+  background: transparent;
+  backdrop-filter: none;
+}
+/* Undimmed, the borderless dialog needs the open rail's hairline to stand off what is under it. */
+:root[data-ui='zen'] .modal.is-anchored {
+  box-shadow: 0 0 0 1px var(--border), var(--shadow);
+}
+:root[data-ui='zen'] .modal,
+:root[data-ui='zen'] .palette {
+  border: none;
+  border-radius: 22px;
+}
+:root[data-ui='zen'] .dropdown-menu,
+:root[data-ui='zen'] .activity-tray {
+  border: none;
+}
+:root[data-ui='zen'] .btn {
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .badge {
+  background: transparent;
+  padding: 0 2px;
+}
+:root[data-ui='zen'] .toasts {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  align-items: center;
+}
+:root[data-ui='zen'] .toast {
+  border: none;
+  border-radius: 999px;
+  padding: 9px 16px;
+}
+:root[data-ui='zen'] .toast-error {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 40%, transparent), var(--shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-ui='zen'] .sidebar,
+  :root[data-ui='zen'] .panel,
+  :root[data-ui='zen'] .main,
+  :root[data-ui='zen'] .settings-search {
+    transition: none;
+  }
+  :root[data-ui='zen'] .session-pin::before {
+    animation: none;
+  }
+}

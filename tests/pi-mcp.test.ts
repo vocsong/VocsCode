@@ -2,6 +2,7 @@
  * Offline tests for the pi MCP bridge. The stdio path runs a real MCP server — the fixture in
  * tests/fixtures — with this process's own node binary, so nothing here needs the network.
  */
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -15,13 +16,14 @@ import { PiMcpConnection } from '../resources/pi/mcp-client';
 import vocsCodeMcp, { closeMcpBridge, mcpReadOnlyToolNames, mcpToolNames, parseMcpConfig, promptSnippetFor, registerMcpTools, sanitizeToolName, toolNameFor } from '../resources/pi/vocs-code-mcp';
 import { MissionToolBroker } from '../src/main/mission/tools';
 import { gitnexusBaseDef } from '../src/main/mcp/gitnexus';
-import { vocsMemoryBaseDef } from '../src/main/mcp/memory';
+import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, vocsMemoryBaseDef } from '../src/main/mcp/memory';
 import { reduceMission, type MissionMutation } from '../src/main/mission/state';
 import { missionFixture } from './support/mission-fixture';
 import { PiOfflineRunner, piIntegrationPaths, type PiEvent } from './pi-offline-runner';
 
 const FIXTURE = path.resolve('tests/fixtures/mcp-echo-server.mjs');
 const MEMORY_SERVER = path.resolve('resources/mcp/vocs-memory.mjs');
+const GATEWAY_PROBE = path.resolve('tests/fixtures/mcp-memory-gateway-probe.mjs');
 const STAMP = 'VOCSMCP9137';
 
 type Pi = Parameters<typeof vocsCodeMcp>[0];
@@ -296,6 +298,111 @@ describe('vocsCodeMcp extension', () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe('Pi ephemeral memory gateway', () => {
+  const url = 'http://127.0.0.1:9/tools';
+  const token = 'pi-memory-test-token';
+  const probe = { transport: 'stdio', command: process.execPath, args: [GATEWAY_PROBE] } as const;
+  const memory = { ...vocsMemoryBaseDef(), ...probe, env: { [MEMORY_GATEWAY_URL_ENV]: url, [MEMORY_GATEWAY_TOKEN_ENV]: token } };
+
+  it('scrubs the launch envelope before spawning either server and shares the authenticated connection with children', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'vocs-pi-mcp-gateway-'));
+    const file = path.join(dir, 'mcp.json');
+    const legacy = { ...memory, env: { ...memory.env, [MEMORY_GATEWAY_TOKEN_ENV]: 'stale-file-token' } };
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await writeFile(file, JSON.stringify({ servers: [legacy, { ...probe, id: 'other' }] }));
+      vi.stubEnv('VOCS_CODE_MCP_CONFIG', file);
+      vi.stubEnv('VOCS_CODE_MISSION_POLICY', undefined);
+      vi.stubEnv('VOCS_CODE_MCP_EPHEMERAL', JSON.stringify({ servers: [memory] }));
+      vi.stubEnv(MEMORY_GATEWAY_TOKEN_ENV, 'stale-ambient-token');
+      vi.stubEnv(MEMORY_GATEWAY_URL_ENV, 'stale-ambient-url');
+      const parent = makePi();
+      const child = makePi();
+      await vocsCodeMcp(parent.pi);
+      expect(process.env.VOCS_CODE_MCP_EPHEMERAL).toBeUndefined();
+      expect(process.env[MEMORY_GATEWAY_TOKEN_ENV]).toBeUndefined();
+      expect(process.env[MEMORY_GATEWAY_URL_ENV]).toBeUndefined();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('skipping file-configured memory gateway'));
+      expect(JSON.stringify(log.mock.calls)).not.toContain('stale-file-token');
+      await registerMcpTools(child.pi);
+      expect(parent.tools.map((tool) => tool.name).sort()).toEqual(['mcp__other__probe', 'mcp__vocs_memory__probe']);
+      expect(child.tools[0]).toBe(parent.tools[0]);
+      // The probe marks itself read-only, but trust comes only from the built-in read-only allowlist.
+      expect(await mcpReadOnlyToolNames()).toEqual(new Set());
+      const input = { terms: ['test'], scope: 'branch' };
+      for (const [name, expected] of [
+        ['mcp__vocs_memory__probe', { gateway: url, digest: createHash('sha256').update(token).digest('hex') }],
+        ['mcp__other__probe', { gateway: null, digest: null }]
+      ] as const) {
+        const result = await child.tools.find((tool) => tool.name === name)!.execute('call', input);
+        expect(JSON.parse(result.content[0].text!)).toEqual({ ...expected, inheritedEnvelope: false, input });
+      }
+    } finally {
+      closeMcpBridge();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: 'missing provenance', servers: [{ ...memory, builtin: undefined }] },
+    { label: 'alias', servers: [{ ...memory, id: 'vocs_memory' }] },
+    { label: 'non-stdio transport', servers: [{ ...memory, transport: 'http', url }] },
+    { label: 'incomplete auth', servers: [{ ...memory, env: { [MEMORY_GATEWAY_TOKEN_ENV]: token } }] },
+    { label: 'extra server', servers: [memory, { ...probe, id: 'other' }] },
+    { label: 'ordinary Mission injection', servers: [{ id: 'vocs-mission', transport: 'http', url, headers: { Authorization: `Bearer ${token}` } }] }
+  ])('consumes and refuses an invalid ordinary envelope ($label)', async ({ servers }) => {
+    vi.stubEnv('VOCS_CODE_MISSION_POLICY', undefined);
+    vi.stubEnv('VOCS_CODE_MCP_EPHEMERAL', JSON.stringify({ servers }));
+    const connect = vi.spyOn(PiMcpConnection, 'connect');
+    await expect(mcpToolNames()).rejects.toThrow('Invalid ephemeral memory MCP configuration.');
+    expect(connect).not.toHaveBeenCalled();
+    expect(process.env.VOCS_CODE_MCP_EPHEMERAL).toBeUndefined();
+  });
+
+  it.runIf(process.env.VOCS_CODE_PI_INTEGRATION === '1')('keeps the real Pi shell scrubbed and reconnects after an extension reload', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'vocs-pi-gateway-reload-'));
+    const mcpConfig = path.join(cwd, 'mcp.json');
+    const reload = path.join(cwd, 'reload.ts');
+    let runner: PiOfflineRunner | undefined;
+    try {
+      await writeFile(mcpConfig, JSON.stringify({ servers: [{ ...probe, id: 'other' }] }));
+      await writeFile(reload, 'export default (pi) => pi.registerCommand("offline-reload-mcp", { handler: (_args, ctx) => ctx.reload() });');
+      vi.stubEnv('VOCS_CODE_MISSION_POLICY', undefined);
+      vi.stubEnv('VOCS_CODE_MCP_EPHEMERAL', JSON.stringify({ servers: [memory] }));
+      runner = new PiOfflineRunner({ cwd, agentDir: path.join(cwd, 'agent'), mcpConfig, extraArgs: ['--no-session', '-e', reload] });
+      await runner.ready();
+      const input = { terms: ['test'] };
+      const probeCalls = [
+        { id: 'memory', name: 'mcp__vocs_memory__probe', arguments: input },
+        { id: 'other', name: 'mcp__other__probe', arguments: input },
+        { id: 'shell', name: 'bash', arguments: { command: 'if [ -z "$VOCS_CODE_MCP_EPHEMERAL$VOCS_MEMORY_GATEWAY_URL$VOCS_MEMORY_GATEWAY_TOKEN" ]; then printf scrubbed; else printf inherited; fi' } }
+      ];
+      for (const phase of ['start', 'reload']) {
+        if (phase === 'reload') await runner.request('prompt', { message: '/offline-reload-mcp' });
+        const events = await runner.prompt(probeCalls);
+        const results = events.filter((e) => e.type === 'tool_execution_end');
+        expect(results).toHaveLength(3);
+        expect(results.every((e) => e.isError === false)).toBe(true);
+        const text = (id: string) => results.find((e) => e.toolCallId === id)?.result.content[0].text;
+        expect(JSON.parse(text('memory'))).toEqual({ gateway: url, digest: createHash('sha256').update(token).digest('hex'), inheritedEnvelope: false, input });
+        expect(JSON.parse(text('other'))).toEqual({ gateway: null, digest: null, inheritedEnvelope: false, input });
+        expect(text('shell')).toBe('scrubbed');
+      }
+      expect(JSON.stringify(runner.events) + runner.stderr).not.toContain(token);
+    } finally {
+      await runner?.close();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('does not extend the managed envelope to memory servers', async () => {
+    managedMission(memory);
+    await expect(mcpToolNames()).rejects.toThrow('Required ephemeral Mission MCP configuration is missing or invalid.');
+    expect(process.env.VOCS_CODE_MCP_EPHEMERAL).toBeUndefined();
+  });
 });
 
 describe('MCP image content at extension execute', () => {

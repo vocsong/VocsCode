@@ -1,8 +1,10 @@
 /** Binds the transport-agnostic handler registry (handlers.ts) to Electron's ipcMain and pushes events to the renderer window. */
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
+import { isIntelligenceOwnerRequest } from '../shared/intelligence';
 import { createHandlerRegistry, type DesktopBridge, type HandlerDeps, type HandlerRegistry, type MissionHandlerService } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
+import type { IntelligenceService } from './intelligence/service';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
 import type { SecretStore } from './secrets';
@@ -23,12 +25,16 @@ export interface IpcDeps {
   secrets: SecretStore;
   sessions: SessionManager;
   missions?: MissionHandlerService;
+  withWorkspaceWrite?: HandlerDeps['withWorkspaceWrite'];
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
   search: SearchIndex;
   /** Layer 2 project knowledge; absent in tests that do not exercise it. */
   knowledge?: KnowledgeService;
+  /** Memory lifecycle, collections and scoped retrieval; absent in tests that do not exercise it. */
+  intelligence?: IntelligenceService;
+  revokeMemoryGrants?: () => void;
   /** Passive built-in GitNexus freshness queue. */
   gitnexusIndexer?: GitnexusIndexer;
   /** The app's own instruction layer, shared with the session manager. */
@@ -71,6 +77,7 @@ function desktopBridge(deps: IpcDeps): DesktopBridge {
       await shell.openPath(p);
     },
     showItemInFolder: (p) => shell.showItemInFolder(p),
+    trashItem: (p) => shell.trashItem(p),
     showOpenDialog: (opts) => dialog.showOpenDialog(deps.getWindow() ?? (undefined as unknown as BrowserWindow), opts as unknown as Electron.OpenDialogOptions),
     showSaveDialog: (opts) => dialog.showSaveDialog(deps.getWindow() ?? (undefined as unknown as BrowserWindow), opts as unknown as Electron.SaveDialogOptions),
     notify: async (title, body) => {
@@ -127,11 +134,14 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     secrets: deps.secrets,
     sessions: deps.sessions,
     missions: deps.missions,
+    withWorkspaceWrite: deps.withWorkspaceWrite,
     terminals: deps.terminals,
     runtime: deps.runtime,
     analytics: deps.analytics,
     search: deps.search,
     knowledge: deps.knowledge,
+    intelligence: deps.intelligence,
+    revokeMemoryGrants: deps.revokeMemoryGrants,
     gitnexusIndexer: deps.gitnexusIndexer,
     appInstructions: deps.appInstructions,
     remote: deps.remote,
@@ -149,9 +159,18 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     desktop: desktopBridge(deps)
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
-    if (channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel === 'harness:login') {
+    const intelligenceOwner = isIntelligenceOwnerRequest(channel, req);
+    if (intelligenceOwner || channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'harness:antigravityQuota' || channel === 'fs:writeText') {
       const contents = deps.getWindow()?.webContents;
-      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) throw new Error(channel.startsWith('vocsAccount:') ? 'Vocs account sign-in requires the local desktop owner.' : channel === 'harness:login' ? 'Harness sign-in requires the local desktop owner.' : 'External control grants require the local desktop owner.');
+      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {
+        if (intelligenceOwner) throw new Error('Intelligence settings and memory management require the local desktop owner.');
+        if (channel.startsWith('vocsAccount:')) throw new Error('Vocs account sign-in requires the local desktop owner.');
+        if (channel.startsWith('housekeep:')) throw new Error('Housekeep requires the local desktop owner.');
+        if (channel === 'harness:login') throw new Error('Harness sign-in requires the local desktop owner.');
+        if (channel === 'harness:antigravityQuota') throw new Error('Antigravity quota requires the local desktop owner.');
+        if (channel === 'fs:writeText') throw new Error('Saving workspace text requires the local desktop owner.');
+        throw new Error('External control grants require the local desktop owner.');
+      }
       const frame = event.senderFrame;
       if (channel.startsWith('control:local:') && (!deps.localControlDocument || !frame || frame.detached ||
         frame.url.split('#', 1)[0] !== deps.localControlDocument ||

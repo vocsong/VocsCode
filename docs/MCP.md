@@ -331,6 +331,13 @@ harness in the way that keeps it out of command lines — `env` for stdio, `env`
 which is visible in the process list), `headers` inside the JSON-RPC payload for Claude
 and ACP. Log lines redact resolved values.
 
+**Memory gateway.** The `vocs-memory` capability is bound to the running session and checkout,
+not to a project name supplied in a tool call. With the gateway on, the stdio process forwards
+only to the app's loopback listener and cannot fall back to a disk reader. Stop revokes the
+capability; switching the gateway off restores legacy mode for new ordinary wiki sessions only.
+Membership, promotion approvals and Forget are desktop-owner operations. See [Local Knowledge
+and Memory](INTELLIGENCE.md) for tool availability and data scope.
+
 **Tool calls stay behind the existing gates.** Claude's `canUseTool` already treats
 `mcp__*` as mutating (it is not in `READ_ONLY_TOOLS`), so MCP tools prompt below Full
 access — keep that. The native loop does the same, with one exception: the app's own

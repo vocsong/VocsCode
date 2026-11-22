@@ -19,7 +19,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
-import type { GitBranchOverview, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, SessionMeta } from '../src/shared/types';
+import type { GitBranchOverview, GitIssue, GitIssueList, GitPullRequest, GitPullRequestDetail, GitPullRequestList, SessionMeta } from '../src/shared/types';
 
 const session = (): SessionMeta => ({
   id: 's1',
@@ -53,6 +53,7 @@ const PR: GitPullRequest = {
 };
 
 let prs: GitPullRequest[] = [];
+let linkedPr: Promise<GitPullRequestDetail>;
 
 const ISSUE: GitIssue = {
   number: 12,
@@ -73,11 +74,13 @@ beforeEach(() => {
   prs = [];
   issues = [];
   // Reset the module-level store, activeId included, so each test's assertions stand on their own.
-  useStore.setState({ panelTab: 'branches', toasts: [], activeId: null });
+  useStore.setState({ panelTab: 'branches', toasts: [], activeId: null, gitPullRequestPreview: null });
+  linkedPr = Promise.resolve({ error: 'Could not reach GitHub.' });
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
   invokeMock.mockImplementation((channel: string) => {
     if (channel === 'git:branchesOverview') return Promise.resolve(OVERVIEW);
     if (channel === 'git:pullRequests') return Promise.resolve({ prs: [...prs], fetchedAt: Date.now() } satisfies GitPullRequestList);
+    if (channel === 'git:pullRequest') return linkedPr;
     if (channel === 'git:issues') return Promise.resolve({ issues: [...issues], fetchedAt: Date.now() } satisfies GitIssueList);
     if (channel === 'git:issueComments') return Promise.resolve({ comments: [{ author: 'octocat', body: 'Me **too**', createdAt: Date.now() - 7_200_000, url: 'https://github.com/o/r/issues/12#issuecomment-1' }] });
     if (channel === 'git:prComments') return Promise.resolve({ comments: [{ author: 'reviewer', body: 'Looks **good**', createdAt: Date.now() - 3_600_000, url: 'https://github.com/o/r/pull/7#issuecomment-1', authorAssociation: 'MEMBER' }] });
@@ -130,6 +133,20 @@ async function openIssueList(withConfirm = false) {
 }
 
 describe('Git panel PR detail dialog', () => {
+  it('keeps a dismissed link preview closed when the PR arrives late', async () => {
+    const current = session();
+    useStore.setState({ activeId: current.id, view: 'chat' });
+    let resolvePr!: (result: GitPullRequestDetail) => void;
+    linkedPr = new Promise((resolve) => { resolvePr = resolve; });
+    render(<RightPanel session={current} />);
+    await act(async () => { useStore.getState().openPullRequestLink(current.id, PR.url); });
+    expect(within(screen.getByRole('dialog')).getByText('Loading pull request…')).toBeTruthy();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await act(async () => { resolvePr({ pr: PR, comments: [] }); });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'app:openExternal')).toHaveLength(0);
+  });
+
   it('opens the pull request details from the row, body and metadata included', async () => {
     const row = await openPrList();
     expect(screen.queryByRole('dialog')).toBeNull();

@@ -12,6 +12,26 @@ export function relTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
+const startOfDay = (ts: number): number => new Date(ts).setHours(0, 0, 0, 0);
+
+/**
+ * When a transcript item happened, as short as it can be while still unambiguous: the time alone
+ * today, the weekday within the last week, the date before that, and the year once it differs.
+ */
+export function fmtStamp(ts: number, now = Date.now()): string {
+  const time: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+  const days = Math.round((startOfDay(now) - startOfDay(ts)) / 86_400_000);
+  if (days === 0) return new Date(ts).toLocaleTimeString(undefined, time);
+  if (days > 0 && days < 7) return new Date(ts).toLocaleString(undefined, { weekday: 'short', ...time });
+  const year = new Date(ts).getFullYear() === new Date(now).getFullYear() ? {} : { year: 'numeric' as const };
+  return new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', ...year, ...time });
+}
+
+/** The full date and time to the second, for a timestamp's tooltip. */
+export function fmtStampFull(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'medium' });
+}
+
 export function fmtCost(usd: number | undefined): string {
   if (!usd) return '$0.00';
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
@@ -57,33 +77,10 @@ export function speedOfTurns(turns: { status: string; durationMs?: number; usage
   return acc;
 }
 
-/** Last path segment for both Windows and POSIX separators. */
-export function basename(p: string): string {
-  const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
-  return parts[parts.length - 1] || p;
-}
+export { basename, harnessShort } from '../../shared/session-title';
 
 export function clamp(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
-}
-
-/** Short display name for a harness id (sidebar badges, menus, analytics). */
-export function harnessShort(id: string): string {
-  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', cursor: 'Cursor', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
-}
-
-/** Badge tone per harness, so the header label matches the sidebar session row. */
-export function harnessTone(id: string): 'neutral' | 'green' | 'amber' | 'red' | 'blue' | 'purple' {
-  const tones: Record<string, 'neutral' | 'green' | 'amber' | 'red' | 'blue' | 'purple'> = {
-    claude: 'amber',
-    codex: 'green',
-    'codex-exec': 'green',
-    cursor: 'blue',
-    pi: 'purple',
-    acp: 'blue',
-    native: 'neutral'
-  };
-  return tones[id] ?? 'neutral';
 }
 
 /** A byte count as `512 KB`, `48 MB` or `1.2 GB`. */

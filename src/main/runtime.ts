@@ -1,7 +1,10 @@
 import { promises as fs, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import type { AppSettings, HarnessAvailability, HarnessBinarySource, HarnessId, HarnessUpdate } from '../shared/types';
+import { ANTIGRAVITY_MIN_VERSION, type AntigravityQuota } from '../shared/harness-setup';
+import { antigravityAccountEnv, ANTIGRAVITY_QUOTA_ARGS, ANTIGRAVITY_SIGN_IN_MESSAGE, checkAntigravityAccount, parseAntigravityQuota } from './harness/antigravity';
 import { killTree, spawnTool } from './harness/spawn';
 import { exists } from './util/fs';
 
@@ -22,7 +25,7 @@ export interface RuntimePaths {
   appRoot: string;
 }
 
-export type ToolName = 'claude' | 'codex' | 'pi' | 'dsh' | 'npx' | 'gemini';
+export type ToolName = 'claude' | 'codex' | 'pi' | 'dsh' | 'npx' | 'gemini' | 'agy';
 
 /**
  * Resolved PATH scans are memoized per command: one boot performs dozens of lookups (every git/gh
@@ -268,6 +271,49 @@ export function bundledCodexPath(appRoot: string): string | null {
   return null;
 }
 
+/**
+ * The native binary an npm `codex.cmd` shim launches. Unlike Claude's shim, Codex's runs
+ * `node …\@openai\codex\bin\codex.js`, which spawns the platform package's binary; this resolves it
+ * the way that launcher does (the platform package beside the package, then its own vendor dir).
+ */
+export function codexShimExecutable(shim: string): string | null {
+  const triple = codexTargetTriple();
+  if (!triple) return null;
+  try {
+    const script = /"%dp0%\\([^"%]*@openai\\codex\\bin\\codex\.js)"/i.exec(readFileSync(shim, 'utf8'))?.[1];
+    if (!script) return null;
+    const pkgRoot = path.dirname(path.dirname(path.join(path.dirname(shim), ...script.split('\\'))));
+    const exe = isWin ? 'codex.exe' : 'codex';
+    const candidates: string[] = [];
+    try {
+      const req = createRequire(path.join(pkgRoot, 'package.json'));
+      candidates.push(path.join(path.dirname(req.resolve(`@openai/codex-${process.platform}-${process.arch}/package.json`)), 'vendor', triple, 'bin', exe));
+    } catch { /* platform package not installed beside it */ }
+    candidates.push(path.join(pkgRoot, 'vendor', triple, 'bin', exe));
+    for (const candidate of candidates) {
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch { /* try next */ }
+    }
+  } catch { /* unreadable shim */ }
+  return null;
+}
+
+/**
+ * The Codex executable a shell-less spawn can start. The exec SDK spawns `codexPathOverride`
+ * directly, which fails with EINVAL for a `.cmd`/`.bat` shim on Windows, so a shim is swapped for
+ * the native binary behind it, and the bundled binary stands in only when that cannot be found.
+ * Codex exec must list its models from this same binary: an app-runtime install is often newer
+ * than the bundled one and lists models the bundled binary does not know (the backend rejects them).
+ */
+export function spawnableCodex(bin: ResolvedBinary | null, appRoot: string | undefined): ResolvedBinary | null {
+  if (!bin || !/[.](cmd|bat)$/i.test(bin.path)) return bin;
+  const behind = codexShimExecutable(bin.path);
+  if (behind) return { path: behind, source: bin.source };
+  const bundled = appRoot ? bundledCodexPath(appRoot) : null;
+  return bundled ? { path: bundled, source: 'bundled' } : null;
+}
+
 function codexTargetTriple(): string | null {
   const { platform, arch } = process;
   if (platform === 'linux') return arch === 'x64' ? 'x86_64-unknown-linux-musl' : arch === 'arm64' ? 'aarch64-unknown-linux-musl' : null;
@@ -338,7 +384,9 @@ export class RuntimeResolver {
       tool === 'claude' ? bundledClaudePath(this.paths.appRoot) : tool === 'codex' ? bundledCodexPath(this.paths.appRoot) : null;
     if (preferBundled) return bundled ? { path: bundled, source: 'bundled' } : null;
 
-    const sys = which(tool, this.appRuntimeBin());
+    const sys = which(tool, this.appRuntimeBin()) ?? (tool === 'agy' ? which(isWin
+      ? path.join(process.env.LOCALAPPDATA || path.join(homedir(), 'AppData', 'Local'), 'agy', 'bin', 'agy.exe')
+      : path.join(homedir(), '.local', 'bin', 'agy')) : null);
     // The Claude Agent SDK spawns the executable directly; an npm .cmd/.bat shim cannot be
     // spawned without a shell on Windows. Never report it as available, even if the bundled
     // binary has gone missing or the user requested system-only mode.
@@ -450,6 +498,26 @@ export class RuntimeResolver {
           };
         return { available: false, detail: 'Neither dsh nor npx found.', installHint: 'npm install -g @deepseek-ai/dsh' };
       }
+      case 'antigravity': {
+        const bin = this.resolve('agy');
+        const installHint = `Install Google Antigravity CLI ${ANTIGRAVITY_MIN_VERSION} or newer.`;
+        if (!bin) return { available: false, detail: 'Antigravity CLI (agy) was not found.', installHint };
+        const probe = await probeOnce(bin.path, ['--version'], 8_000);
+        const version = probe.code === 0 ? parseVersion(probe.stdout) : null;
+        const binary = { binaryPath: bin.path, source: bin.source, version: version ?? undefined };
+        if (!version || compareVersions(version, ANTIGRAVITY_MIN_VERSION) < 0) {
+          return { ...binary, available: false, detail: version ? installHint : 'Antigravity CLI could not start. Check the agy executable path.', installHint };
+        }
+        let authenticated: HarnessAvailability['authenticated'] = 'unknown';
+        try {
+          await fs.mkdir(this.paths.appRuntimeDir, { recursive: true });
+          authenticated = await checkAntigravityAccount(bin.path, this.paths.appRuntimeDir);
+        } catch { /* A failed account probe does not make the CLI missing. */ }
+        return {
+          ...binary, available: true, authenticated,
+          detail: authenticated === true ? 'Google sign-in detected.' : authenticated === false ? ANTIGRAVITY_SIGN_IN_MESSAGE : 'Antigravity CLI is installed. Sign-in could not be verified.'
+        };
+      }
       case 'cursor': {
         // The SDK ships with the app; only credentials are user-supplied. Cursor reads them from
         // CURSOR_API_KEY or ~/.cursor/sdk/auth.json (Cursor.auth.login()), same as our key store.
@@ -465,6 +533,19 @@ export class RuntimeResolver {
       case 'native':
         return { available: true, detail: 'Built in. Add an API key under Settings → Providers.', authenticated: 'unknown' };
     }
+  }
+
+  /** Reads the vendor's account quota on demand. The fixed slash command never runs inference. */
+  async antigravityQuota(): Promise<AntigravityQuota> {
+    const status = await this.availability('antigravity');
+    if (!status.available || !status.binaryPath) throw new Error(status.detail);
+    if (status.authenticated === false) throw new Error(ANTIGRAVITY_SIGN_IN_MESSAGE);
+    const result = await runCapture(status.binaryPath, [...ANTIGRAVITY_QUOTA_ARGS], {
+      cwd: this.paths.appRuntimeDir, env: antigravityAccountEnv(), timeoutMs: 15_000
+    });
+    const quota = result.code === 0 && !result.truncated ? parseAntigravityQuota(result.stdout) : undefined;
+    if (!quota) throw new Error('Antigravity did not return account quota. Check your Google sign-in and retry.');
+    return quota;
   }
 
   /** Installs a harness CLI into the app runtime dir with npm. */

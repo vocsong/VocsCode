@@ -1,0 +1,81 @@
+.session-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38em;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.session-label-project,
+.session-label-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-label-project {
+  flex: none;
+  max-width: clamp(4em, 50%, 16em);
+}
+
+.session-label-separator {
+  flex: none;
+  color: var(--fg-muted);
+}
+
+.harness-pill {
+  display: inline-block;
+  flex: none;
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: var(--harness-ink, #344054);
+  background-color: var(--harness-fill, #e3e8f0);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.4;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+
+/* Shared by the desktop and browser pills and the marker on Zen's session rail. */
+:is(.harness-pill, .session-row)[data-harness='claude'] {
+  --harness-ink: #7c3a0a;
+  --harness-fill: #f9ddbf;
+}
+
+:is(.harness-pill, .session-row)[data-harness='codex'] {
+  --harness-ink: #165541;
+  --harness-fill: #c9ebdc;
+}
+
+:is(.harness-pill, .session-row)[data-harness='codex-exec'] {
+  --harness-ink: #84284e;
+  --harness-fill: #f5cee0;
+}
+
+:is(.harness-pill, .session-row)[data-harness='cursor'] {
+  --harness-ink: #204e90;
+  --harness-fill: #cddfff;
+}
+
+:is(.harness-pill, .session-row)[data-harness='pi'] {
+  --harness-ink: #5d388a;
+  --harness-fill: #e9d7fb;
+}
+
+:is(.harness-pill, .session-row)[data-harness='antigravity'] {
+  --harness-ink: #5f5300;
+  --harness-fill: #f3e9a6;
+}
+
+:is(.harness-pill, .session-row)[data-harness='acp'] {
+  --harness-ink: #06545a;
+  --harness-fill: #c3eaeb;
+}
+
+:is(.harness-pill, .session-row)[data-harness='native'] {
+  --harness-ink: #344054;
+  --harness-fill: #e3e8f0;
+}

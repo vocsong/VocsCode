@@ -6,7 +6,7 @@ import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, TranscriptItem, 
 import { errorMessage, shortId, truncate } from '../util/async';
 import { fastModeSupport } from '../../shared/fast-mode';
 import { toCodex } from '../mcp/effective';
-import { bundledCodexPath } from '../runtime';
+import { bundledCodexPath, spawnableCodex, type ResolvedBinary } from '../runtime';
 import { applyCodexMcpSuppression, readCodexMcpServers } from './codex-mcp-config';
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
@@ -62,9 +62,11 @@ export class CodexExecAdapter implements HarnessAdapter {
   async start(): Promise<void> {
     const meta = this.ctx.session();
     // The SDK spawns codexPathOverride directly, which fails with EINVAL for npm .cmd shims on
-    // Windows; in that case let the SDK use its own bundled @openai/codex binary.
+    // Windows, so a shim is replaced by the native binary behind it. Falling back to the SDK's
+    // bundled binary here once ran an older Codex than the one the model picker listed.
     const bin = this.ctx.runtime.resolve('codex');
-    const override = bin && !/[.](cmd|bat)$/i.test(bin.path) ? bin.path : undefined;
+    const exe = this.executable();
+    const override = exe?.path;
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     const key = await this.ctx.getApiKey('openai');
@@ -93,7 +95,7 @@ export class CodexExecAdapter implements HarnessAdapter {
       }
     }
     const config = Object.keys(mcpServers).length ? { mcp_servers: mcpServers } : undefined;
-    this.ctx.log('info', `codex exec SDK: ${override ? `${override} (${bin?.source} runtime)` : bin ? `SDK-bundled binary (${bin.path} is a shim the SDK cannot spawn)` : 'SDK-bundled binary'}${config ? `, ${mcp.length} MCP server(s)` : ''}`);
+    this.ctx.log('info', `codex exec SDK: ${exe ? `${exe.path} (${exe.source} runtime${bin && bin.path !== exe.path ? `, in place of the shim ${bin.path}` : ''})` : 'SDK-bundled binary'}${config ? `, ${mcp.length} MCP server(s)` : ''}`);
     this.codexOptions = { codexPathOverride: override, env, config };
     this.configureFastMode(this.fastMode);
     this.effort = this.ctx.effort();
@@ -329,8 +331,13 @@ export class CodexExecAdapter implements HarnessAdapter {
     this.thread = null;
   }
 
+  /** The binary this adapter runs; its model catalog is the one turns are sent to. */
+  private executable(): ResolvedBinary | null {
+    return spawnableCodex(this.ctx.runtime.resolve('codex'), this.ctx.runtime.runtimePaths?.appRoot);
+  }
+
   async listModels(): Promise<ModelInfo[]> {
-    const bin = this.ctx.runtime.resolve('codex');
+    const bin = this.executable();
     if (!bin) return CODEX_STATIC_MODELS;
     try {
       const models = await listCodexModels(bin.path, (model) => {

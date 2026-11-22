@@ -65,7 +65,7 @@ function fixture(harness: HarnessId, fastMode?: boolean, model = harness === 'cl
 function track<T extends { dispose(): Promise<void> }>(adapter: T): T { adapters.push(adapter); return adapter; }
 function turns(events: SessionEvent[]) { return events.filter((e) => e.type === 'item.upsert' && e.item.kind === 'turn'); }
 function completeCodex(status = 'completed') {
-  mocks.notifications.get('turn/completed')!({ turn: { id: 'turn', status, error: null } });
+  mocks.notifications.get('turn/completed')!({ threadId: 'thread', turn: { id: 'turn', status, error: null } });
 }
 function params(provider = OPENAI, model = GPT.model, fastMode = true): StepParams {
   return { provider, model, fastMode, apiKey: 'test', system: 'test', history: [{ role: 'user', text: 'hello' }], tools: [], signal: new AbortController().signal, onText: vi.fn(), onReasoning: vi.fn() };
@@ -200,9 +200,9 @@ describe('terminal Fast-mode status boundaries', () => {
     const { ctx, meta, events } = fixture('codex', true);
     const adapter = track(new CodexAppServerAdapter(ctx));
     await adapter.send({ text: 'hello', mode: 'now' });
-    mocks.notifications.get('error')!({ error: { message: 'Fast account access rejected' }, willRetry: false });
+    mocks.notifications.get('error')!({ threadId: 'thread', error: { message: 'Fast account access rejected' }, willRetry: false });
     expect(meta.fastModeStatus).toMatchObject({ state: 'unavailable', detail: 'Fast account access rejected' });
-    mocks.notifications.get('turn/completed')!({ turn: { id: 'turn', status: 'failed', error: { message: 'Fast account access rejected' } } });
+    mocks.notifications.get('turn/completed')!({ threadId: 'thread', turn: { id: 'turn', status: 'failed', error: { message: 'Fast account access rejected' } } });
     expect(turns(events)).toMatchObject([{ item: { status: 'failed' } }]);
     expect(adapter.busy).toBe(false);
   });
@@ -266,7 +266,7 @@ describe('Codex runtime-advertised Fast capabilities', () => {
     else expect(mocks.codex).toHaveBeenLastCalledWith(expect.objectContaining({ config: expect.objectContaining({ service_tier: 'priority', features: { fast_mode: true } }) }));
     await adapter.send({ text: 'hello', mode: 'now' });
     if (harness === 'codex') {
-      mocks.notifications.get('thread/tokenUsage/updated')!({ tokenUsage: { total: { inputTokens: 200_000, cachedInputTokens: 100_000, cacheWriteInputTokens: 0, outputTokens: 100_000, reasoningOutputTokens: 0 }, last: { totalTokens: 300_000 }, modelContextWindow: 1_000_000 } });
+      mocks.notifications.get('thread/tokenUsage/updated')!({ threadId: 'thread', tokenUsage: { total: { inputTokens: 200_000, cachedInputTokens: 100_000, cacheWriteInputTokens: 0, outputTokens: 100_000, reasoningOutputTokens: 0 }, last: { totalTokens: 300_000 }, modelContextWindow: 1_000_000 } });
       completeCodex();
       expect(turns(events)[0]).toMatchObject({ item: { costUsd: 3.55 } });
     }

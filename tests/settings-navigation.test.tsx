@@ -116,6 +116,51 @@ describe('task-oriented settings navigation', () => {
     expect(screen.getByLabelText(/Default harness/)).toBeTruthy();
   });
 
+  it('finds /housekeep in Settings and focuses the recent-session protection field group', () => {
+    render(<SettingsView />);
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: '/housekeep' } });
+    fireEvent.click(screen.getByRole('button', { name: /Recent session protection/ }));
+    expect(nav('Housekeep').getAttribute('aria-current')).toBe('page');
+    expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Recent session protection' }));
+    const days = screen.getByRole<HTMLInputElement>('spinbutton', { name: 'Protect sessions used in the last (days)' });
+    expect(days.value).toBe('7');
+    expect(screen.getByText(/0 disables only the age guard/)).toBeTruthy();
+  });
+
+  it('deep-links to Housekeep, rejects invalid drafts, and saves both inclusive bounds', async () => {
+    openSettings('housekeep');
+    render(<SettingsView />);
+    expect(screen.getByRole('heading', { name: 'Housekeep', level: 1 })).toBeTruthy();
+    const days = screen.getByRole<HTMLInputElement>('spinbutton', { name: 'Protect sessions used in the last (days)' });
+    for (const value of ['', '-1', '1.5', '3651']) {
+      fireEvent.change(days, { target: { value } });
+      fireEvent.blur(days);
+      expect(days.value).toBe('7');
+      expect(screen.getByRole('alert').textContent).toContain('That value wasn’t saved');
+    }
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    fireEvent.change(days, { target: { value: '0' } });
+    expect(invokeMock).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.blur(days);
+      useStore.setState((s) => ({ settings: { ...s.settings!, housekeepRecentDays: 0 } }));
+    });
+    expect(days.value).toBe('0');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'settings:update', { housekeepRecentDays: 0 });
+
+    fireEvent.change(days, { target: { value: '3650' } });
+    await act(async () => {
+      fireEvent.keyDown(days, { key: 'Enter' });
+      useStore.setState((s) => ({ settings: { ...s.settings!, housekeepRecentDays: 3650 } }));
+    });
+    fireEvent.blur(days);
+    expect(days.value).toBe('3650');
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'settings:update', { housekeepRecentDays: 3650 });
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps provider model drafts when filtering cards in and out', async () => {
     useStore.setState({ settings: { ...useStore.getState().settings!, providers: [
       { id: 'fixture', name: 'Fixture provider', kind: 'ollama', enabled: true, hasApiKey: false, models: [] },

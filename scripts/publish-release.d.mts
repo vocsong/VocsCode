@@ -6,7 +6,7 @@ export interface ReleaseGitHub {
   getRelease(tag: string): Promise<GitHubRelease | null>;
   listAssets(releaseId: number): Promise<GitHubAsset[]>;
   hashAsset(assetId: number): Promise<{ size: number; sha256: string }>;
-  editRelease(releaseId: number, patch: { body?: string; draft?: boolean }): Promise<unknown>;
+  editRelease(releaseId: number, patch: { tag_name: string; body?: string; draft?: boolean }): Promise<unknown>;
   deleteAsset(assetId: number): Promise<unknown>;
   uploadAsset(releaseId: number, asset: ReleaseAsset): Promise<unknown>;
 }

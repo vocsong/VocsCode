@@ -1,7 +1,7 @@
 /**
  * The model pill reads provider/model with the reasoning effort beside it in a lighter weight, and
  * opens the full model identity, Effort and Fast controls.
- * Permissions stay visible; the context ring opens Usage. Secondary details live in menus.
+ * Permissions stay visible; the context ring toggles Usage. Secondary details live in menus.
  */
 import React from 'react';
 import type { ModelInfo, SessionMeta } from '../../../shared/types';
@@ -13,6 +13,7 @@ import { setSessionEffort } from '../sessionActions';
 import { effortOptions, permissionOptions } from '../session-controls';
 import { useSessionModels } from '../models';
 import { useStore } from '../store';
+import { useMinimalUi } from '../ui-mode';
 import { Dropdown, Icon, MenuItem } from './ui';
 import { ModelMenu } from './ModelMenu';
 
@@ -31,7 +32,9 @@ export function SessionControls({ session }: { session: SessionMeta }) {
   const effort = session.activeEffort ?? session.config.effort ?? undefined;
   // Keep the complete identity/settings accessible even when the compact label truncates.
   const effortLabel = h.capabilities.effort && effortLevels.length ? effort ?? 'default' : undefined;
-  const fastLabel = session.config.fastMode ? `Fast ${session.fastModeStatus?.state ?? 'requested'}` : undefined;
+  // The visual cue marks the saved preference, not the runtime's reported tier.
+  const fastSelected = session.config.fastMode;
+  const fastLabel = fastSelected ? `Fast ${session.fastModeStatus?.state ?? 'requested'}` : undefined;
   const modelDetail = [modelRefName(current) ?? 'default model', effortLabel && `Effort: ${effortLabel}`, fastLabel].filter(Boolean).join(' · ');
 
   const setModel = async (m: ModelInfo) => {
@@ -47,9 +50,10 @@ export function SessionControls({ session }: { session: SessionMeta }) {
       <Dropdown
         align="left"
         trigger={(open) => (
-          <button type="button" className={`pill pill-model ${open ? 'open' : ''}`} title="Model" aria-label={`Model: ${modelDetail}`}>
+          <button type="button" className={`pill pill-model${fastSelected ? ' is-fast' : ''}${open ? ' open' : ''}`} title="Model" aria-label={`Model: ${modelDetail}`}>
+            <Icon name={fastSelected ? 'bolt' : 'sparkles'} size={13} />
             {/* Provider first: the same model can be reached through more than one provider. */}
-            <Icon name="sparkles" size={13} /> <span className="pill-text" title={modelRefName(current)}>{current ? modelName(current.provider, currentInfo?.displayName ?? current.model) : 'Default model'}</span>
+            <span className="pill-text" title={modelRefName(current)}>{current ? modelName(current.provider, currentInfo?.displayName ?? current.model) : 'Default model'}</span>
             {effortLabel && <span className="pill-effort">{effortLabel}</span>}
             <Icon name="chevron" size={12} />
           </button>
@@ -82,7 +86,6 @@ export function SessionControls({ session }: { session: SessionMeta }) {
       {modeLabel && (
         <Dropdown
           align="left"
-          width={300}
           trigger={(open) => (
             <button type="button" className={`pill run-permission mode-${mode} ${open ? 'open' : ''}`} title="Permission mode" aria-label={`Permission mode: ${modeLabel.short}`}>
               <Icon name="shield" size={13} /> <span className="pill-text">{modeLabel.short}</span> <Icon name="chevron" size={12} />
@@ -107,6 +110,9 @@ export function SessionControls({ session }: { session: SessionMeta }) {
 
 /** Context stays glanceable; spend and token details are in the options menu / Usage panel. */
 export function SessionMeter({ session }: { session: SessionMeta }) {
+  const minimal = useMinimalUi();
+  // Zen's panel is a rail whose drawer shows one view: Usage is open when the drawer is out on it.
+  const usageOpen = useStore((s) => s.panelOpen && s.panelTab === 'usage' && (!minimal || (s.panelFocus === 'top' && (s.panelPeek || s.pins.right))));
   const ctxPct = session.usage.contextWindow && session.usage.contextTokens ? Math.min(100, Math.round((session.usage.contextTokens / session.usage.contextWindow) * 100)) : null;
   const r = 6;
   const c = 2 * Math.PI * r;
@@ -114,9 +120,18 @@ export function SessionMeter({ session }: { session: SessionMeta }) {
     <button
       type="button"
       className={`session-meter ${ctxPct !== null && ctxPct >= 80 ? 'session-meter-high' : ''}`}
-      title={`${fmtCost(session.usage.costUsd)} · Input ${fmtTokens(session.usage.inputTokens)} · Output ${fmtTokens(session.usage.outputTokens)} · Cache read ${fmtTokens(session.usage.cacheReadTokens)}${ctxPct !== null ? ` · Context ${ctxPct}%` : ''} — open Usage`}
+      title={`${fmtCost(session.usage.costUsd)} · Input ${fmtTokens(session.usage.inputTokens)} · Output ${fmtTokens(session.usage.outputTokens)} · Cache read ${fmtTokens(session.usage.cacheReadTokens)}${ctxPct !== null ? ` · Context ${ctxPct}%` : ''} — ${usageOpen ? 'close' : 'open'} Usage`}
       aria-label="Session usage"
-      onClick={() => useStore.getState().setPanelTab('usage')}
+      aria-expanded={usageOpen}
+      // A press here does not count as one outside the panel's peek: this button opens and closes it.
+      data-panel-trigger=""
+      onClick={() => {
+        const { setPanelTab, togglePanel, endPanelPeek, pins } = useStore.getState();
+        // Zen closes the drawer back to its rail, never the whole rail; a pinned drawer stays out.
+        if (!usageOpen) setPanelTab('usage');
+        else if (!minimal) togglePanel(false);
+        else if (!pins.right) endPanelPeek();
+      }}
     >
       {ctxPct !== null && (
         <span className="session-meter-ring" aria-hidden>

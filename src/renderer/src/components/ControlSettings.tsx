@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import type { ControlOwnerState, ControlScope } from '../../../shared/control';
-import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
-import type { HarnessId, PermissionMode } from '../../../shared/types';
+import { CONTROL_HARNESSES, type ControlOwnerState, type ControlScope } from '../../../shared/control';
+import { HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
+import type { PermissionMode } from '../../../shared/types';
 import { invoke } from '../api';
 import { Button, Field } from './ui';
 
@@ -20,7 +20,7 @@ export function ControlSettings() {
   const [controllerId, setControllerId] = useState('');
   const [projects, setProjects] = useState<string[]>([]);
   const [scopes, setScopes] = useState<ControlScope[]>(['control:discover']);
-  const [harness, setHarness] = useState<HarnessId>('pi');
+  const [harness, setHarness] = useState<typeof CONTROL_HARNESSES[number]>('pi');
   const [mode, setMode] = useState<PermissionMode>('ask');
   const [ack, setAck] = useState(false);
   useEffect(() => { let live = true; void invoke('control:get', undefined).then((value) => { if (live) setState(value); }).catch(() => { if (live) setError('External control settings are available only on the local desktop.'); }); return () => { live = false; }; }, []);
@@ -52,7 +52,7 @@ export function ControlSettings() {
         <fieldset disabled={busy}><legend>Allowed actions</legend>
           {(Object.keys(labels) as ControlScope[]).map((scope) => <label key={scope} style={{ display: 'block' }}><input type="checkbox" checked={scopes.includes(scope)} onChange={() => setScopes(toggle(scopes, scope))} /> {labels[scope]}</label>)}
         </fieldset>
-        <Field label="Approved harness"><select aria-label="Approved harness" value={harness} onChange={(event) => setHarness(event.target.value as HarnessId)}>{HARNESSES.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></Field>
+        <Field label="Approved harness"><select aria-label="Approved harness" value={harness} onChange={(event) => setHarness(event.target.value as typeof harness)}>{CONTROL_HARNESSES.map((id) => <option key={id} value={id}>{HARNESS_BY_ID[id].name}</option>)}</select></Field>
         <Field label="Approved permission mode"><select aria-label="Approved permission mode" value={mode} onChange={(event) => setMode(event.target.value as PermissionMode)}>{(Object.keys(PERMISSION_MODE_LABELS) as PermissionMode[]).map((id) => <option key={id} value={id}>{PERMISSION_MODE_LABELS[id].label}</option>)}</select></Field>
         <p className="muted">New sessions inherit the project’s remembered defaults. A different harness or permission mode is rejected, never silently widened. Security approvals and secret questions remain owner-only. Grants expire after 30 days.</p>
         <label style={{ display: 'block' }}><input type="checkbox" checked={ack} onChange={(event) => setAck(event.target.checked)} /> I approve these actions and the harness’s existing access on this computer.</label>

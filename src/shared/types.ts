@@ -3,9 +3,12 @@
  * Keep this file free of Node/Electron/DOM imports.
  */
 import type { TerminalSettings } from './terminal';
-import type { ThemeId } from './themes';
+import type { PaletteId, ThemeMode } from './themes';
+import type { TypographySettings } from './typography';
+import type { UiModeId } from './ui-modes';
 import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
+import type { IntelligenceSettings } from './intelligence';
 import type { DictationSettings } from './dictation';
 import type { ReliabilityReport } from './analytics/reliability';
 import type { CodeOutputReport } from './analytics/code-output';
@@ -31,7 +34,7 @@ export interface SubagentRunUpdate {
   error?: string;
 }
 
-export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
+export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'antigravity' | 'native';
 
 /** App-level permission modes, mapped per harness (see harness-meta.ts). */
 export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
@@ -814,14 +817,10 @@ export interface SessionMeta {
   /** Stable provenance for local chat imports; also prevents importing the same conversation twice. */
   importedFrom?: { source: 'claude' | 'codex'; sessionId: string };
   title: string;
-  /**
-   * The title is still the truncated-prompt stand-in, so the one-shot title model may replace it.
-   * A session created from a dialog prompt or a goal is named before its first message is sent, so
-   * the title alone cannot say whether anyone chose it: without this flag such a session keeps its
-   * six-word cut of the prompt forever. Cleared by a real title, by a rename, or by `title` given
-   * at creation. Absent on sessions written before it existed.
-   */
+  /** The title is a temporary stand-in, eligible for opening-prompt naming. */
   titleIsPlaceholder?: boolean;
+  /** Whether the app owns the title. Absent for older titles of unknown origin. */
+  titleIsAutomatic?: boolean;
   createdAt: number;
   updatedAt: number;
   /**
@@ -1230,6 +1229,11 @@ export interface HarnessCapabilities {
   systemPrompt: boolean;
   /** Which app-level permission modes are meaningful. */
   permissionModes: PermissionMode[];
+  /**
+   * Where this harness can only approximate a tier, what differs from the tier's Vocs Code meaning.
+   * Shown beside the tier wherever it is picked.
+   */
+  permissionModeNotes?: Partial<Record<PermissionMode, string>>;
   /** Whether model selection is provider-scoped (native) or harness-provided list. */
   modelSource: 'harness' | 'providers' | 'acp-config';
 }
@@ -1277,12 +1281,25 @@ export interface FolderSessionDefaults {
   acpAgent?: string;
 }
 
+/** Sidebar session list layout: `folders` groups rows under project folders; `recent` is one flat list, most recent first. */
+export type SidebarView = 'folders' | 'recent';
+
 export interface AppSettings {
   /** User-approved execution presets. Missing on older settings means Mission is unconfigured. */
   mission?: MissionConfig;
   missionProjects?: Record<string, MissionProjectOverride>;
   version: 1;
-  theme: ThemeId;
+  /**
+   * Light/dark mode: System, Light or Dark (shared/themes.ts). Kept under the `theme` key so
+   * settings.json stays readable by older builds; a legacy palette id here is migrated on load.
+   */
+  theme: ThemeMode;
+  /** Color palette, applied in the mode above. Absent means Default. */
+  palette?: PaletteId;
+  /** Text & fonts: interface size, font roles, text sizes, line spacing, transcript width (shared/typography.ts). */
+  typography?: TypographySettings;
+  /** Interface layout, independent of the color theme (shared/ui-modes.ts). Absent means Standard. */
+  uiMode?: UiModeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   /** Remote access (docs/REMOTE-ACCESS.md): outbound relay connection, off by default. */
@@ -1290,6 +1307,8 @@ export interface AppSettings {
   defaultEffort?: EffortLevel;
   /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
   autoCompactionThreshold?: AutoCompactionThreshold;
+  /** Days of recent-use protection for /housekeep; 0 disables only the age guard. */
+  housekeepRecentDays?: number;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
   /**
    * New-session choices remembered per project folder; a folder with no record starts on the
@@ -1308,6 +1327,7 @@ export interface AppSettings {
     dsh?: string;
     npx?: string;
     gemini?: string;
+    agy?: string;
     editor?: string;
     /** Explicit `cua-driver` path (empty = auto-detect on PATH or in Cua's install dirs). */
     cua?: string;
@@ -1355,6 +1375,8 @@ export interface AppSettings {
   folderOrder?: string[];
   /** Project roots whose sidebar folder block is collapsed. */
   collapsedFolders?: string[];
+  /** How the sidebar lists sessions: grouped under their folders, or one list across folders by recency. */
+  sidebarView?: SidebarView;
   /** Extra keyboard shortcuts keyed by canonical accelerator (e.g. 'Ctrl+Alt+A'); see shared/shortcuts.ts. */
   customShortcuts?: Record<string, ShortcutCommand>;
   /**
@@ -1376,6 +1398,8 @@ export interface AppSettings {
   gitSetupSkipped?: string[];
   /** Layer 2 project knowledge: always-on digest priming and automatic distillation after git events. */
   knowledge?: KnowledgeSettings;
+  /** Memory lifecycle, the tool gateway, project collections and the optional graph provider. */
+  intelligence?: IntelligenceSettings;
   /** Voice to text in the composer: cloud transcription or whisper.cpp on this machine. */
   dictation?: DictationSettings;
 }
@@ -1471,7 +1495,7 @@ export interface GitPrInfo {
   title?: string;
 }
 
-/** One pull request of the session's GitHub repo, as `gh pr list` reports it (PR view of the Git panel). */
+/** One GitHub pull request shown in the Git panel. */
 export interface GitPullRequest {
   number: number;
   title: string;
@@ -1503,6 +1527,11 @@ export interface GitPullRequestList {
   ghMissing?: boolean;
   error?: string;
 }
+
+/** The PR and conversation loaded on demand when a transcript links to it. */
+export type GitPullRequestDetail =
+  | { pr: GitPullRequest; comments: GitComment[]; error?: never }
+  | { pr?: never; comments?: never; error: string };
 
 /** One issue of the session's GitHub repo, as `gh issue list` reports it (Issues view of the Git panel). */
 export interface GitIssue {

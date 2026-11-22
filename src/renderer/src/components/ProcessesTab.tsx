@@ -13,6 +13,7 @@ import { describeProcess, groupProcesses, processKey, rootsOf, type ProcessGroup
 import { invoke } from '../api';
 import { basename, fmtBytes, fmtUptime } from '../format';
 import { useStore } from '../store';
+import { SessionTitle } from './SessionTitle';
 import { Button, Icon, Spinner } from './ui';
 
 const POLL_MS = 2_000;
@@ -130,9 +131,9 @@ export function ProcessesTab({ session }: { session: SessionMeta }) {
         </div>
       )}
       {groups.map((group) => {
-        const owner = group.sessionId ? sessionsById.get(group.sessionId) : undefined;
-        const title =
-          group.kind === 'orphaned' ? 'Left behind' : group.kind === 'app' ? 'Vocs Code' : owner?.title || 'Deleted session';
+        const owner = group.kind === 'session' && group.sessionId ? sessionsById.get(group.sessionId) : undefined;
+        const label = owner ? <SessionTitle session={owner} /> :
+          group.kind === 'orphaned' ? 'Left behind' : group.kind === 'app' ? 'Vocs Code' : 'Deleted session';
         const detail =
           group.kind === 'orphaned'
             ? 'Nothing in Vocs Code will stop these'
@@ -148,12 +149,12 @@ export function ProcessesTab({ session }: { session: SessionMeta }) {
               <Icon name={group.kind === 'orphaned' ? 'alert' : group.kind === 'app' ? 'cube' : 'terminal'} size={13} />
               <span className="process-group-label">
                 <span className="process-group-title">
-                  {group.kind === 'session' && owner && owner.id !== session.id ? (
+                  {owner && owner.id !== session.id ? (
                     <button type="button" className="process-session-link" onClick={() => void setActive(owner.id)} title="Open this session">
-                      {title}
+                      {label}
                     </button>
                   ) : (
-                    title
+                    label
                   )}
                   {group.sessionId === session.id && <span className="muted small"> (this session)</span>}
                 </span>
@@ -181,7 +182,7 @@ export function ProcessesTab({ session }: { session: SessionMeta }) {
                 const key = processKey(p);
                 // A label belongs to the root the app started (a terminal tab, an app service), never to its children.
                 const name = p.owner.label ? (p.owner.terminalId ? `Terminal · ${p.owner.label}` : p.owner.label) : describeProcess(p);
-                const formerOwner = group.kind === 'orphaned' && depth === 0 && p.owner.sessionId ? sessionsById.get(p.owner.sessionId)?.title : undefined;
+                const formerOwner = group.kind === 'orphaned' && depth === 0 && p.owner.sessionId ? sessionsById.get(p.owner.sessionId) : undefined;
                 const detached = group.kind === 'session' && p.orphaned && depth === 0;
                 return (
                   <li key={key} className="process-row" style={{ paddingLeft: 8 + Math.min(depth, 6) * 14 }} title={p.command ?? p.name} data-testid="process-row" data-pid={p.pid}>
@@ -198,8 +199,8 @@ export function ProcessesTab({ session }: { session: SessionMeta }) {
                         {p.name} · {p.pid}
                         {p.startedAt ? ` · ${fmtUptime(list.sampledAt - p.startedAt)}` : ''}
                         {p.previousRun && depth === 0 ? ' · earlier run' : ''}
-                        {formerOwner ? ` · from ${formerOwner}` : ''}
                       </span>
+                      {formerOwner && <span className="process-meta muted small row gap6">from <SessionTitle session={formerOwner} /></span>}
                     </span>
                     <span className="process-stats muted small mono">{fmtCpu(p.cpu)}</span>
                     <span className="process-stats muted small mono">{fmtBytes(p.memory)}</span>

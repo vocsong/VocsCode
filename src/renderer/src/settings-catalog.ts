@@ -24,8 +24,10 @@ export const SETTINGS_PAGES = [
     { label: 'Notifications', description: 'Desktop alerts when a turn finishes or needs your approval.', keywords: 'notification unfocused background', anchor: 'general-notifications' },
     { label: 'External editor', description: 'Choose the command used by Open in editor.', keywords: 'vscode code editor command', anchor: 'general-editor' },
   ] },
-  { id: 'appearance', label: 'Appearance', icon: 'palette', group: 'Workspace', description: 'Find your focus with a theme that feels right.', saveHint: 'Theme changes apply immediately', topics: [
-    { label: 'Color theme', description: 'System, light, dark and expressive themes with a live preview.', keywords: 'colors colour midnight navy abyss blueprint admiral nebula ultraviolet magma solarium blossom citrine cappuccino meadow porcelain lavender evergreen graphite ember lagoon fjord claret contrast', anchor: 'appearance-theme' },
+  { id: 'appearance', label: 'Appearance', icon: 'palette', group: 'Workspace', description: 'Find your focus with a layout and a theme that feel right.', saveHint: 'Interface and theme changes apply immediately', topics: [
+    { label: 'Interface', description: 'Standard, or the minimalist Zen layout.', keywords: 'layout minimal minimalist zen focus compact clean simple distraction ui ux chrome', anchor: 'appearance-interface' },
+    { label: 'Color theme', description: 'Light or dark mode, and twenty palettes that each come in both, with a live preview.', keywords: 'colors colour palette mode system light dark night appearance default graphite slate stone midnight navy abyss fjord admiral evergreen meadow lagoon citrine ember cappuccino solarium claret ultraviolet blossom dusk nebula blueprint porcelain lavender magma contrast', anchor: 'appearance-theme' },
+    { label: 'Text & fonts', description: 'Interface size, interface, transcript and code fonts, text sizes, line spacing and transcript width.', keywords: 'font fonts typeface typography size zoom scale bigger smaller text size line spacing line height leading width narrow normal wide reading column monospace code font serif ligatures', anchor: 'appearance-typography' },
   ] },
   { id: 'shortcuts', label: 'Shortcuts', icon: 'keyboard', group: 'Workspace', description: 'Less reaching for the mouse. More staying in flow.', saveHint: 'Use Add to save a new shortcut', topics: [
     { label: 'Custom shortcuts', description: 'Bind your own key combinations to common actions.', keywords: 'keyboard hotkeys bindings command', anchor: 'shortcuts-custom' },
@@ -63,12 +65,12 @@ export const SETTINGS_PAGES = [
   ] },
   { id: 'providers', label: 'Providers & keys', icon: 'key', group: 'Connections', description: 'Connect your models. Keep credentials in the OS keychain, not in configuration.', saveHint: 'Keys and new providers have explicit Save actions', topics: [
     { label: 'Providers & API keys', description: 'Enable providers, save or test keys and configure endpoints.', keywords: 'openai anthropic openrouter deepseek ollama lmstudio api key secrets base url custom', anchor: 'providers-catalog' },
-    { label: 'Harness logins', description: 'Refresh models, check agent login status and available CLI updates.', keywords: 'login authentication credentials updates codex claude pi catalog reload', anchor: 'providers-logins' },
+    { label: 'Harness logins', description: 'Refresh models, check agent login status and available CLI updates.', keywords: 'login authentication credentials updates codex claude pi catalog reload google antigravity gemini quota', anchor: 'providers-logins' },
     { label: 'Model capability overrides', description: 'Correct whether a model accepts image attachments.', keywords: 'vision images models override capability', anchor: 'providers-overrides' },
   ] },
   { id: 'harnesses', label: 'Harnesses', icon: 'cpu', group: 'Connections', description: 'Your agent runtimes, in one place. Check availability, install and configure.', saveHint: AUTO, topics: [
-    { label: 'Installed runtimes', description: 'Availability and installation for all seven agent harnesses.', keywords: 'agents sdk runtime cli install update cursor native claude codex pi acp', anchor: 'harnesses-installed' },
-    { label: 'Runtime configuration', description: 'Bundled vs system runtimes, binary paths and extra arguments.', keywords: 'binary path override extra arguments npx dsh gemini runtime', anchor: 'harnesses-config' },
+    { label: 'Installed runtimes', description: 'Availability and installation for agent harnesses.', keywords: 'agents sdk runtime cli install update cursor native claude codex pi acp antigravity', anchor: 'harnesses-installed' },
+    { label: 'Runtime configuration', description: 'Bundled vs system runtimes, binary paths and extra arguments.', keywords: 'binary path override extra arguments npx dsh gemini agy antigravity runtime', anchor: 'harnesses-config' },
   ] },
   { id: 'pi', label: 'Pi', icon: 'puzzle', group: 'Connections', description: 'Fine-tune Pi’s own configuration, extensions and agent tools.', saveHint: 'File editors have explicit Save actions', topics: [
     { label: 'Pi configuration', description: 'Models, packages, prompts, skills and extension settings.', keywords: 'packages extensions subagents concurrency skills prompts compaction retry thinking steering followup pi' },
@@ -78,6 +80,9 @@ export const SETTINGS_PAGES = [
   ] },
   { id: 'import', label: 'Import chats', icon: 'download', group: 'System', description: 'Bring your earlier conversations along, without changing the originals.', saveHint: 'Review your selection before importing', topics: [
     { label: 'Import chat history', description: 'Scan and import existing Claude Code and Codex conversations.', keywords: 'history migration import chats scan conversations' },
+  ] },
+  { id: 'housekeep', label: 'Housekeep', icon: 'archive', group: 'System', description: 'Choose how recently used sessions are protected when you run /housekeep.', saveHint: 'Changes save when you leave the field or press Enter', topics: [
+    { label: 'Recent session protection', description: 'Keep recently used sessions out of cleanup.', keywords: '/housekeep archive age guard protect sessions days', anchor: 'housekeep-recent' },
   ] },
   { id: 'remote', label: 'Remote access', icon: 'globe', group: 'System', description: 'Your workspace, wherever you are. You stay in control of who can connect.', saveHint: 'Access changes require explicit actions', topics: [
     { label: 'Browser access & pairing', description: 'Connect this computer, pair a browser and manage devices.', keywords: 'phone mobile qr github login relay pair remote devices view only offline mirror', anchor: 'remote-browser' },

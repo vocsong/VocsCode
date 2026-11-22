@@ -1,3 +1,5 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import type { ApprovalOption, FileChange, PermissionMode } from '../../shared/types';
 import type { ApprovalDraft } from './types';
 import { isDangerousCommand } from './types';
@@ -54,6 +56,39 @@ export function isOutsideWorkspace(cwd: string, target: string | undefined, path
   const abs = pathMod.resolve(cwd, target);
   const rel = pathMod.relative(pathMod.resolve(cwd), abs);
   return rel.startsWith('..') || pathMod.isAbsolute(rel);
+}
+
+/**
+ * True when `target` lies outside `cwd` once symlinks and junctions are followed; the check every
+ * harness uses for "anything outside the project". Missing descendants are resolved through their
+ * nearest existing ancestor. Uncertainty prompts.
+ */
+export async function requiresPathApproval(cwd: string, target: string): Promise<boolean> {
+  const outside = (root: string, file: string) => {
+    const rel = path.relative(root, file);
+    return rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  };
+  const absolute = path.resolve(cwd, target);
+  if (outside(path.resolve(cwd), absolute)) return true;
+  try {
+    const root = await fs.realpath(cwd);
+    const missing: string[] = [];
+    let ancestor = absolute;
+    for (;;) {
+      try {
+        await fs.lstat(ancestor);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) return true;
+        missing.unshift(path.basename(ancestor));
+        ancestor = parent;
+        continue;
+      }
+      // A dangling link or inaccessible realpath throws rather than authorizing its descendants.
+      return outside(root, path.join(await fs.realpath(ancestor), ...missing));
+    }
+  } catch { return true; }
 }
 
 export function commandApproval(command: string, cwd?: string, extra?: Partial<ApprovalDraft>): ApprovalDraft {

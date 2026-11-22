@@ -66,6 +66,27 @@ afterEach(() => {
 });
 
 describe('NewSessionDialog', () => {
+  it('asks main for its cached catalog on open and harness switches, and rediscovers only on Recheck', async () => {
+    render(<NewSessionDialog />);
+    const modelCalls = () => invoke.mock.calls.filter(([channel]) => channel === 'harness:models').map(([, req]) => req as { harness: string; refresh?: boolean });
+    await waitFor(() => expect(modelCalls()).toHaveLength(1));
+    expect(modelCalls()[0]).toMatchObject({ harness: 'claude' });
+    expect(modelCalls()[0].refresh).toBeUndefined();
+
+    const recheck = screen.getByRole('button', { name: 'Recheck models and sign-in' }) as HTMLButtonElement;
+    await waitFor(() => expect(recheck.disabled).toBe(false));
+    fireEvent.click(recheck);
+    await waitFor(() => expect(modelCalls()).toHaveLength(2));
+    expect(modelCalls()[1]).toMatchObject({ harness: 'claude', refresh: true });
+
+    // The recheck was for that harness only: the next switch is served from the cache again.
+    await waitFor(() => expect(recheck.disabled).toBe(false));
+    fireEvent.click([...document.querySelectorAll('.harness-card')].find((card) => card.textContent?.startsWith('Pi'))!);
+    await waitFor(() => expect(modelCalls()).toHaveLength(3));
+    expect(modelCalls()[2]).toMatchObject({ harness: 'pi' });
+    expect(modelCalls()[2].refresh).toBeUndefined();
+  });
+
   it.each(['codex', 'codex-exec', 'cursor', 'acp'] as const)('labels %s additions as first-message session instructions and submits them', async (harness) => {
     useStore.setState({ settings: { ...settings, defaultHarness: harness } });
     render(<NewSessionDialog />);
@@ -111,6 +132,37 @@ describe('NewSessionDialog', () => {
         expect.objectContaining({ initialPrompt: 'Fix the flaky test' }),
       ),
     );
+  });
+
+  it('puts focus in the first prompt when it opens, not in the model search', async () => {
+    render(<NewSessionDialog />);
+    const prompt = screen.getByRole('textbox', { name: 'First prompt (optional)' });
+    expect(document.activeElement).toBe(prompt);
+    // Still there once the model list has loaded and every mount effect has run.
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    expect(document.activeElement).toBe(prompt);
+  });
+
+  it('heads Fast mode like the selects beside it, with the switch under the heading', () => {
+    render(<NewSessionDialog />);
+    const group = screen.getByRole('group', { name: 'Fast mode' });
+    const toggle = screen.getByRole('checkbox', { name: 'Fast mode' });
+    const heading = group.querySelector(':scope > .field-label');
+    expect(heading?.textContent).toBe('Fast mode');
+    expect(heading!.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(group.querySelector('.toggle-label')).toBeNull();
+  });
+
+  it('shows every harness card as one name line over one status line', () => {
+    useStore.setState({ availability: { claude: { available: true, authenticated: true, authMethod: 'subscription' } } } as never);
+    render(<NewSessionDialog />);
+    const cards = [...document.querySelectorAll('.harness-card')];
+    expect(cards.length).toBeGreaterThan(1);
+    for (const card of cards) {
+      expect([...card.children].map((c) => c.className)).toEqual(['harness-card-name', 'harness-card-status']);
+    }
+    const claude = cards.find((c) => c.textContent?.startsWith('Claude Agent SDK'))!;
+    expect(claude.querySelector('.harness-card-status .badge')?.getAttribute('title')).toBe('Subscription sign-in detected');
   });
 
   it('shows Enter as the start shortcut', () => {

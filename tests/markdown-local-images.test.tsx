@@ -6,6 +6,7 @@ import { StrictMode } from 'react';
 import { Transcript } from '../src/renderer/src/components/Transcript';
 import { useStore } from '../src/renderer/src/store';
 import { renderMarkdown } from '../src/renderer/src/markdown';
+import { singlePaneLayout } from '../src/renderer/src/panes';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { WorkspaceImage } from '../src/shared/image-files';
 
@@ -100,7 +101,8 @@ describe('assistant workspace markdown images', () => {
 
   it.each(['{Enter}', ' '])('previews a linked image with %s without opening its enclosing link', async (key) => {
     const user = userEvent.setup();
-    useStore.setState({ fileReveal: null });
+    // The session is on screen, so activating the enclosing link would open the file drawer.
+    useStore.setState({ fileReveal: null, layout: singlePaneLayout('worktree') });
     mount('<a data-file="notes.md" role="link" tabindex="0">![Linked screenshot](shot.png)</a>');
     const preview = await screen.findByRole('button', { name: 'Preview Linked screenshot' });
     preview.focus();
@@ -111,6 +113,7 @@ describe('assistant workspace markdown images', () => {
     await user.tab();
     expect(document.activeElement).toBe(close);
     expect(useStore.getState().fileReveal).toBeNull();
+    expect(useStore.getState().layout.filePreview).toBeUndefined();
     expect(invoke.mock.calls.every(([channel]) => channel === 'fs:readImage')).toBe(true);
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).toBeNull();
@@ -118,6 +121,7 @@ describe('assistant workspace markdown images', () => {
     await user.click(preview);
     expect(screen.getByRole('dialog', { name: 'Image preview' })).toBeTruthy();
     expect(useStore.getState().fileReveal).toBeNull();
+    expect(useStore.getState().layout.filePreview).toBeUndefined();
     expect(reads()).toHaveLength(1);
   });
 

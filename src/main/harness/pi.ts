@@ -20,6 +20,7 @@ import { questionResponse } from '../../shared/question-response';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { installPiAgentOverrides } from '../pi-agents';
+import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, VOCS_MEMORY_SERVER_ID } from '../mcp/memory';
 import { mergePiCatalog } from '../models/pi-catalog';
 import { estimateCostUsd } from '../models/static-models';
 import { fastModePricing } from './native/fast-mode-pricing';
@@ -344,27 +345,26 @@ export class PiAdapter implements HarnessAdapter {
         log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
       });
 
-      // The MCP bridge extension reads this file and registers each server's tools with pi.
-      const mcpServers = await this.ctx.mcpServers();
-      const missionServers = mcpServers.filter((server) => server.def.id === MISSION_SERVER_ID);
-      if (mission && (missionServers.length !== 1 || missionServers[0].def.transport !== 'http' || !missionServers[0].def.headers?.Authorization)) {
+      const mcpServers = (await this.ctx.mcpServers()).map(({ def }) => def);
+      const missionServers = mcpServers.filter((server) => server.id === MISSION_SERVER_ID);
+      if (mission && (missionServers.length !== 1 || missionServers[0].transport !== 'http' || !missionServers[0].headers?.Authorization)) {
         throw new Error('Managed Mission requires its authenticated MCP bridge.');
       }
       if (!mission && missionServers.length) throw new Error('Mission MCP bridge requires a managed session.');
-      this.missionSecrets = missionServers.flatMap((server) => Object.values(server.def.headers ?? {}).flatMap((value) => [value, value.replace(/^Bearer /, '')]));
+      this.missionSecrets = missionServers.flatMap((server) => Object.values(server.headers ?? {}).flatMap((value) => [value, value.replace(/^Bearer /, '')]));
+      // The bridge consumes the gateway definition from the launch environment, never the file.
+      // Also exclude incomplete gateway definitions rather than persisting any part of them.
+      const gatewayMemory = mcpServers.filter((server) => server.id === VOCS_MEMORY_SERVER_ID
+        && (server.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || server.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined));
+      const ephemeral = mission ? missionServers : gatewayMemory;
+      const persisted = mcpServers.filter((server) => server.id !== MISSION_SERVER_ID && !gatewayMemory.includes(server));
       const args = ['--mode', 'rpc',
         ...(mission ? ['--no-extensions', '--no-approve', '-e', this.ctx.runtime.resource('pi', 'vocs-code-mission.ts')] : []),
         '-e', ext, '-e', toolsExt, ...(!mission ? ['-e', this.ctx.runtime.resource('pi', 'vocs-code-fast-mode.ts'), '-e', subagentsExt] : []), '--session-dir', sessionDir];
-      let mcpConfigFile: string | null = null;
-      if (mcpServers.length) {
-        args.push('-e', mcpExt);
-        const persisted = mcpServers.filter((server) => server.def.id !== MISSION_SERVER_ID);
-        const file = path.join(sessionDir, 'mcp.json');
-        if (persisted.length) {
-          mcpConfigFile = file;
-          await fs.writeFile(file, JSON.stringify({ servers: persisted.map((r) => r.def) }, null, 2) + '\n', 'utf8');
-        } else if (mission) await fs.rm(file, { force: true });
-      }
+      if (persisted.length || ephemeral.length) args.push('-e', mcpExt);
+      const mcpConfigFile = path.join(sessionDir, 'mcp.json');
+      if (persisted.length) await fs.writeFile(mcpConfigFile, JSON.stringify({ servers: persisted }, null, 2) + '\n', 'utf8');
+      else await fs.rm(mcpConfigFile, { force: true }); // A resumed/disabled session may still have the older generated file.
       if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
       if (meta.config.model) {
         if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
@@ -389,16 +389,17 @@ export class PiAdapter implements HarnessAdapter {
       // Explicit on every launch: resume and inherited parent env cannot restore stale Fast mode.
       env.VOCS_CODE_FAST_MODE = this.fastModeRequested ? '1' : '0';
       // Never inherit another session's broker capability, mode or MCP config.
-      delete env.VOCS_CODE_MISSION_POLICY;
-      delete env.VOCS_CODE_MCP_EPHEMERAL;
-      delete env.VOCS_CODE_MCP_CONFIG;
+      const reservedEnv = ['VOCS_CODE_MISSION_POLICY', 'VOCS_CODE_MCP_EPHEMERAL', 'VOCS_CODE_MCP_CONFIG', MEMORY_GATEWAY_URL_ENV, MEMORY_GATEWAY_TOKEN_ENV];
+      for (const key of Object.keys(env)) {
+        if (reservedEnv.includes(process.platform === 'win32' ? key.toUpperCase() : key)) delete env[key];
+      }
       if (mission) {
         delete env.VOCS_CODE_SUBAGENT_DIR;
         env.VOCS_CODE_PERMISSION_MODE = permissionMode;
         env.VOCS_CODE_MISSION_POLICY = JSON.stringify({ role: mission.role, sourceAccess: mission.sourceAccess, requestedTools: mission.requestedTools, questionId: mission.questionId });
-        env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: missionServers.map((server) => server.def) });
       }
-      if (mcpConfigFile) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
+      if (ephemeral.length) env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: ephemeral });
+      if (persisted.length) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
       for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
         if (!env[envKey]) {
           const key = await this.ctx.getApiKey(pid);

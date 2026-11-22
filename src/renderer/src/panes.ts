@@ -6,6 +6,9 @@
  * pane never starts or duplicates anything. The store keeps `activeId` equal to the active pane's
  * session, which is how every global panel (Changes, Files, Git, Terminal…) follows the active pane.
  *
+ * The file preview is transient and separate from the panes: it does not affect their size or focus,
+ * is not remembered across a restart, and closes when its owning session leaves the layout.
+ *
  * Panes are a flat row (or column) today. A four-pane grid would nest two of these; the functions
  * here are pure so that change stays inside this module and its tests.
  */
@@ -13,6 +16,22 @@
 export type PaneOrientation = 'horizontal' | 'vertical';
 /** Where a new pane lands relative to the one it splits. */
 export type PaneSide = 'before' | 'after';
+
+/** One file in one session's folder. */
+export interface FilePreviewTarget {
+  /** The session whose folder holds the file; the preview closes when that session leaves the layout. */
+  sessionId: string;
+  /** Workspace-relative path, already checked to stay inside the session folder. */
+  path: string;
+  /** 1-based line to bring into view. */
+  line?: number;
+  /** An exact path (a Files row, a chosen match): read as is, without the shortened-name lookup. */
+  exact?: boolean;
+  /** Mission sessions: the workspace the file is read from; undefined is the integration result. */
+  missionWorkspaceId?: string;
+  /** Tells two opens of the same path apart, so clicking a link again reloads the file. */
+  nonce: number;
+}
 
 export interface SessionPane {
   id: string;
@@ -27,6 +46,8 @@ export interface PaneLayout {
   activePaneId: string;
   /** Share of the container each pane takes, in pane order; sums to 1. */
   sizes: number[];
+  /** The current Files preview, not part of the split or its saved layout. */
+  filePreview?: FilePreviewTarget;
 }
 
 /** How many panes the workspace holds at once. Raising it is all a three-pane row needs. */
@@ -55,6 +76,16 @@ export function activePane(layout: PaneLayout): SessionPane {
   return layout.panes.find((p) => p.id === layout.activePaneId) ?? layout.panes[0]!;
 }
 
+/** The panes that show a session or wait for one. */
+export function sessionPanes(layout: PaneLayout): SessionPane[] {
+  return layout.panes;
+}
+
+/** A session pane can only close while another one remains. */
+export function canClosePane(layout: PaneLayout, paneId: string): boolean {
+  return layout.panes.length > 1 && layout.panes.some((p) => p.id === paneId);
+}
+
 /** The sessions actually on screen: every pane's, or only the active pane's when the split is too
  *  narrow to show the others (SessionPanes hides them then). Empty panes show no session. */
 export function visiblePaneSessions(layout: PaneLayout, narrow: boolean): string[] {
@@ -67,7 +98,32 @@ export function paneShowing(layout: PaneLayout, sessionId: string): SessionPane 
 }
 
 export function canSplit(layout: PaneLayout): boolean {
-  return layout.panes.length < MAX_PANES;
+  return sessionPanes(layout).length < MAX_PANES;
+}
+
+/** Removes a pane, keeping the others' shares in proportion. */
+function removePane(layout: PaneLayout, paneId: string): PaneLayout {
+  const keep = layout.panes.map((p) => p.id !== paneId);
+  const panes = layout.panes.filter((_, i) => keep[i]);
+  const sizes = layout.sizes.filter((_, i) => keep[i]);
+  const total = sizes.reduce((a, b) => a + b, 0);
+  return { ...layout, panes, sizes: total > 0 && sizes.length === panes.length ? sizes.map((s) => s / total) : evenSizes(panes.length) };
+}
+
+/** Opens or retargets the preview only while its owner has a pane, without changing the split. */
+export function openFilePreview(layout: PaneLayout, target: FilePreviewTarget): PaneLayout {
+  if (!paneShowing(layout, target.sessionId)) return layout;
+  return { ...layout, filePreview: target };
+}
+
+export function closeFilePreview(layout: PaneLayout): PaneLayout {
+  if (!layout.filePreview) return layout;
+  const { filePreview: _, ...split } = layout;
+  return split;
+}
+
+function pruneFilePreview(layout: PaneLayout): PaneLayout {
+  return layout.filePreview && !paneShowing(layout, layout.filePreview.sessionId) ? closeFilePreview(layout) : layout;
 }
 
 /**
@@ -81,9 +137,10 @@ export function openSession(layout: PaneLayout, sessionId: string | null): PaneL
   }
   const active = activePane(layout);
   if (active.sessionId === sessionId) return layout;
-  return { ...layout, panes: layout.panes.map((p) => (p.id === active.id ? { ...p, sessionId } : p)) };
+  return pruneFilePreview({ ...layout, panes: layout.panes.map((p) => (p.id === active.id ? { ...p, sessionId } : p)) });
 }
 
+/** Makes a session pane active. */
 export function focusPane(layout: PaneLayout, paneId: string): PaneLayout {
   if (layout.activePaneId === paneId || !layout.panes.some((p) => p.id === paneId)) return layout;
   return { ...layout, activePaneId: paneId };
@@ -96,24 +153,28 @@ export function focusPane(layout: PaneLayout, paneId: string): PaneLayout {
 export function splitPane(layout: PaneLayout, paneId: string, orientation: PaneOrientation, sessionId: string | null = null, side: PaneSide = 'after'): PaneLayout {
   const at = layout.panes.findIndex((p) => p.id === paneId);
   if (at < 0 || !canSplit(layout)) return layout;
-  // A row cannot hold a column yet; a single pane can turn either way.
-  if (layout.panes.length > 1 && orientation !== layout.orientation) return layout;
+  // A row cannot hold a column yet; a single session pane can turn either way.
+  if (sessionPanes(layout).length > 1 && orientation !== layout.orientation) return layout;
   if (sessionId && paneShowing(layout, sessionId)) return layout;
   const pane: SessionPane = { id: nextPaneId(layout.panes), sessionId };
   const panes = [...layout.panes];
   panes.splice(side === 'after' ? at + 1 : at, 0, pane);
-  return { orientation, panes, activePaneId: pane.id, sizes: evenSizes(panes.length) };
+  return { ...layout, orientation, panes, activePaneId: pane.id, sizes: evenSizes(panes.length) };
 }
 
-/** Removes a pane from the layout. The session it showed keeps running; the last pane cannot close. */
+/**
+ * Removes a pane from the layout. The session it showed keeps running; the last session pane cannot
+ * close, and a file preview goes with the session it belongs to.
+ */
 export function closePane(layout: PaneLayout, paneId: string): PaneLayout {
-  const at = layout.panes.findIndex((p) => p.id === paneId);
-  if (at < 0 || layout.panes.length <= 1) return layout;
-  const panes = layout.panes.filter((p) => p.id !== paneId);
-  const sizes = layout.sizes.filter((_, i) => i !== at);
-  const total = sizes.reduce((a, b) => a + b, 0);
-  const activePaneId = layout.activePaneId === paneId ? panes[Math.max(0, at - 1)]!.id : layout.activePaneId;
-  return { ...layout, panes, activePaneId, sizes: total > 0 && sizes.length === panes.length ? sizes.map((s) => s / total) : evenSizes(panes.length) };
+  if (!canClosePane(layout, paneId)) return layout;
+  let activePaneId = layout.activePaneId;
+  if (activePaneId === paneId) {
+    const slots = sessionPanes(layout);
+    const at = slots.findIndex((p) => p.id === paneId);
+    activePaneId = (slots[at - 1] ?? slots.find((p) => p.id !== paneId))!.id;
+  }
+  return pruneFilePreview({ ...removePane(layout, paneId), activePaneId });
 }
 
 /**
@@ -130,7 +191,7 @@ export function dropOnPane(layout: PaneLayout, paneId: string, sessionId: string
     if (source && p.id === source.id) return { ...p, sessionId: target.sessionId };
     return p;
   });
-  return { ...layout, panes, activePaneId: target.id };
+  return pruneFilePreview({ ...layout, panes, activePaneId: target.id });
 }
 
 /** Sets the pane shares, normalised and clamped so no pane collapses to nothing. */
@@ -150,10 +211,10 @@ export function withoutSessions(layout: PaneLayout, gone: (sessionId: string) =>
   let next = layout;
   for (const pane of layout.panes) {
     if (!pane.sessionId || !gone(pane.sessionId)) continue;
-    if (next.panes.length > 1) next = closePane(next, pane.id);
+    if (sessionPanes(next).length > 1) next = closePane(next, pane.id);
     else next = { ...next, panes: next.panes.map((p) => (p.id === pane.id ? { ...p, sessionId: replacement } : p)) };
   }
-  return next;
+  return pruneFilePreview(next);
 }
 
 /** The drag payload a sidebar session row carries, so a pane can tell it from a file drop. */
@@ -167,8 +228,9 @@ export function dropZoneAt(layout: PaneLayout, rect: { left: number; top: number
   if (!canSplit(layout) || rect.width <= 0 || rect.height <= 0) return 'center';
   const fx = (x - rect.left) / rect.width;
   const fy = (y - rect.top) / rect.height;
-  const horizontal = layout.panes.length === 1 || layout.orientation === 'horizontal';
-  const vertical = layout.panes.length === 1 || layout.orientation === 'vertical';
+  const single = sessionPanes(layout).length === 1;
+  const horizontal = single || layout.orientation === 'horizontal';
+  const vertical = single || layout.orientation === 'vertical';
   const edges: [DropZone, number, boolean][] = [['left', fx, horizontal], ['right', 1 - fx, horizontal], ['top', fy, vertical], ['bottom', 1 - fy, vertical]];
   const nearest = edges.filter(([, d, ok]) => ok && d < 0.25).sort((a, b) => a[1] - b[1])[0];
   return nearest ? nearest[0] : 'center';
@@ -216,13 +278,15 @@ export function restoreLayout(raw: string | null, exists: (sessionId: string) =>
   return { orientation: v.orientation, panes, activePaneId, sizes: sizes.map((s) => s / total) };
 }
 
-/** Remembers a split for the next launch; a single pane leaves nothing behind, so boot stays as it was. */
+/** Remembers a split for the next launch, excluding the preview and any empty panes. A single pane
+ *  leaves nothing behind, so boot stays as it was. */
 export function saveLayout(layout: PaneLayout, storage: Pick<Storage, 'setItem' | 'removeItem'> | undefined = globalThis.localStorage): void {
   if (!storage) return;
   try {
+    const { orientation, activePaneId } = layout;
     const panes = layout.panes.filter((p) => p.sessionId);
     if (panes.length < 2) storage.removeItem(STORAGE_KEY);
-    else storage.setItem(STORAGE_KEY, JSON.stringify({ ...layout, panes, sizes: layout.panes.map((p, i) => (p.sessionId ? layout.sizes[i] : null)).filter((s) => s !== null) }));
+    else storage.setItem(STORAGE_KEY, JSON.stringify({ orientation, panes, activePaneId, sizes: layout.panes.map((p, i) => (p.sessionId ? layout.sizes[i] : null)).filter((s) => s !== null) }));
   } catch {
     // A full or disabled storage only costs the restore on next launch.
   }

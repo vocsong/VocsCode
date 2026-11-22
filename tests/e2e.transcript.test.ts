@@ -1,9 +1,9 @@
 /**
- * Electron end-to-end for the transcript's layers of collapse: a turn's tool calls, commentary and
- * thinking sit behind one "Worked for …" header, the answer stays visible, commands render as
- * compact rows that expand into a shell panel. The session and transcript are seeded on disk, so
- * no harness and no provider key are involved. Requires `npm run build` first; gated by
- * VOCS_CODE_E2E_UI=1.
+ * Electron end-to-end for the transcript's layers of collapse: every assistant message stays on
+ * screen, the steps between two messages sit behind a "Worked …" header, thinking stays behind its
+ * own toggle, and commands render as compact rows that expand into a shell panel. The session and
+ * transcript are seeded on disk, so no harness and no provider key are involved. Requires
+ * `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -27,7 +27,7 @@ afterAll(async () => {
 const SID = 's_transcript_e2e';
 const T = Date.now() - 600_000;
 
-/** A finished turn with work, followed by a turn with a reply and a background follow-up. */
+/** A finished turn that worked in two stretches around a message, then a turn with a reply and a background follow-up. */
 function transcript(): TranscriptItem[] {
   return [
     { id: 'u1', kind: 'user', ts: T, text: 'Resolve the npm run update EBUSY failure.' },
@@ -87,7 +87,7 @@ function transcript(): TranscriptItem[] {
     // intervening user row recorded on disk. The lookup must not hide the already-sent reply.
     { id: 'lookup', kind: 'tool', ts: T + 60_002, name: 'subagent_result', hint: 'agent', status: 'done' },
     { id: 'f3', kind: 'assistant', ts: T + 60_003, text: 'The background review also confirmed the update can be retried.' },
-    { id: 'turn2', kind: 'turn', ts: T + 60_004, status: 'completed' }
+    { id: 'turn2', kind: 'turn', ts: T + 60_004, status: 'completed', durationMs: 42_000 }
   ];
 }
 
@@ -112,7 +112,7 @@ async function completionTimes(win: Page) {
 }
 
 describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
-  it('keeps answers visible, expands work and commands, and preserves completion times after restart', async () => {
+  it('keeps every message visible, expands work and commands, and preserves completion times after restart', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-transcript-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -148,25 +148,56 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await expectQuietWindow(app);
     await fs.mkdir(shots, { recursive: true });
 
-    // Collapsed: the answer and the worked header are on screen, the work itself is not.
+    // Collapsed: every message and the worked headers are on screen, the steps themselves are not.
     const work = win.locator('.work-head');
     await work.first().waitFor({ timeout: 30_000 });
-    expect(await work.first().innerText()).toContain('Worked for 3m 17s');
-    const replies = await win.locator('.msg-assistant .md').allInnerTexts();
-    expect(replies).toEqual([expect.stringContaining('Done'), expect.stringContaining('Retry npm run update'), expect.stringContaining('The background review also confirmed')]);
-    expect(await work.count()).toBe(2);
+    const messages = win.locator('.msg-assistant .md');
+    const replies = await messages.allInnerTexts();
+    expect(replies).toEqual([
+      expect.stringContaining('find the exact processes first'),
+      expect.stringContaining('A blanket kill would be unsafe'),
+      expect.stringContaining('Done'),
+      expect.stringContaining('Retry npm run update'),
+      expect.stringContaining('The background review also confirmed')
+    ]);
+    // One header per stretch of steps. A turn that worked in two stretches leaves its duration on
+    // the turn row; a turn with one stretch shows it on that header.
+    expect(await work.count()).toBe(3);
+    // What each header says, apart from the time it started (every header carries one).
+    const says = (i: number) => work.nth(i).locator('.work-label, .work-stat').allInnerTexts();
+    expect(await says(0)).toEqual(['Worked', '1 step']);
+    expect(await says(1)).toEqual(['Worked', '3 steps']);
+    expect(await work.locator('.work-time').count()).toBe(3);
+    expect(await work.nth(2).innerText()).toContain('Worked for 42.0s');
+    expect(await win.locator('.turn-footer').first().innerText()).toContain('3m 17s');
     const originalTimes = await completionTimes(win);
     expect(await win.locator('.tool-card').count()).toBe(0);
-    expect(await win.locator('.thinking-toggle').count()).toBe(0);
+    // The first message's thinking is one closed toggle on the message, not text on screen.
+    expect(await win.locator('.thinking-toggle').count()).toBe(1);
+    expect(await win.locator('.thinking-body').count()).toBe(0);
     await win.screenshot({ path: path.join(shots, 'transcript-01-collapsed.png') });
 
-    // Expanded by the user: commentary and command rows appear, thinking stays collapsed.
-    await work.first().click();
-    expect(await win.locator('.msg-assistant').filter({ hasText: 'blanket kill' }).count()).toBe(1);
+    const [replyBottom, summary, followUpTop] = await Promise.all([
+      messages.filter({ hasText: 'Retry npm run update' }).evaluate((el) => el.getBoundingClientRect().bottom),
+      work.nth(2).evaluate((el) => {
+        const { top, bottom } = el.getBoundingClientRect();
+        return { top, bottom };
+      }),
+      messages.filter({ hasText: 'The background review also confirmed' }).evaluate((el) => el.getBoundingClientRect().top)
+    ]);
+    for (const gap of [summary.top - replyBottom, followUpTop - summary.bottom]) {
+      expect(gap).toBeGreaterThanOrEqual(0);
+      expect(gap).toBeLessThanOrEqual(12);
+    }
+
+    // Expanded by the user: each stretch shows its own command rows, and nothing else moves.
+    await work.nth(0).click();
+    expect(await win.locator('.tool-card').count()).toBe(1);
+    await expect(win.locator('.tool-card .tool-name').first().innerText()).resolves.toBe('Ran');
+    await work.nth(1).click();
     expect(await win.locator('.tool-card').count()).toBe(2);
-    await expect(win.locator('.tool-name').first().innerText()).resolves.toBe('Ran');
     expect(await win.locator('.tool-group-head').innerText()).toContain('Ran 2 commands');
-    expect(await win.locator('.thinking-toggle').count()).toBe(1);
+    expect(await win.locator('.msg-assistant').filter({ hasText: 'blanket kill' }).evaluate((element) => !!element.closest('.work-group'))).toBe(false);
     expect(await win.locator('.thinking-body').count()).toBe(0);
     await win.screenshot({ path: path.join(shots, 'transcript-02-expanded.png') });
 
@@ -182,7 +213,7 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     expect(await shell.locator('.shell-foot').innerText()).toContain('done');
     await win.screenshot({ path: path.join(shots, 'transcript-03-shell.png') });
 
-    // Thinking opens on its own click, not with the work group.
+    // Thinking opens on its own click, not with the work around it.
     await win.locator('.thinking-toggle').click();
     expect(await win.locator('.thinking-body').innerText()).toContain('Enumerate electron processes');
 
@@ -195,6 +226,8 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await expectQuietWindow(app);
     expect(await completionTimes(reopened)).toEqual(originalTimes);
     expect(await reopened.getByText('Retry npm run update.', { exact: false }).isVisible()).toBe(true);
+    expect(await reopened.getByText('A blanket kill would be unsafe', { exact: false }).isVisible()).toBe(true);
+    expect(await reopened.locator('.work-head').count()).toBe(3);
     expect(await reopened.locator('.work-body').count()).toBe(0);
   }, 180_000);
 
@@ -305,5 +338,103 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await win.emulateMedia({ colorScheme: 'dark' });
     expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await card.screenshot({ path: path.join(shots, 'question-card-dark-narrow.png') });
+  }, 120_000);
+
+  it('pins your message for the stretch being read and jumps back to it on click', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-pinned-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { uiMode: 'zen', theme: 'dark', windowBounds: { width: 1280, height: 860 } }));
+
+    const sid = 's_pinned_e2e';
+    const session: SessionMeta = {
+      id: sid,
+      title: 'Pinned prompt',
+      createdAt: T,
+      updatedAt: T,
+      config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
+      cwd: project,
+      status: 'idle',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 3 }
+    };
+    // Every answer is taller than the window, so each prompt scrolls out of view while it is read.
+    const answer = (n: number) => Array.from({ length: 40 }, (_, i) => `Answer ${n}, paragraph ${i + 1}: the reply goes on long enough that its own question has long since scrolled away.`).join('\n\n');
+    const prompts = ['First prompt: find the flaky test.', 'Second prompt: now fix the flake.', 'Third prompt: ship it.'];
+    const items: TranscriptItem[] = prompts.flatMap((text, i) => [
+      { id: `u${i + 1}`, kind: 'user', ts: T + i * 10, text },
+      { id: `a${i + 1}`, kind: 'assistant', ts: T + i * 10 + 1, text: answer(i + 1) },
+      { id: `t${i + 1}`, kind: 'turn', ts: T + i * 10 + 2, status: 'completed', durationMs: 4000 }
+    ] satisfies TranscriptItem[]);
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+    await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
+    await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
+
+    const packaged = process.env.HARNESS_E2E_EXE;
+    app = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+      env: isolatedEnv(userData),
+      timeout: 60_000
+    });
+    const win: Page = await app.firstWindow();
+    await win.waitForSelector('.brand', { timeout: 60_000 });
+    await expectQuietWindow(app);
+    await win.locator('.msg-user').first().waitFor({ timeout: 30_000 });
+    await fs.mkdir(shots, { recursive: true });
+
+    const pinned = win.locator('.pinned-prompt');
+    const pinnedText = () => pinned.count().then((n) => (n ? pinned.innerText() : ''));
+    /** Scroll so this answer's top sits `into` pixels above the transcript's top edge. */
+    const readInto = (index: number, into: number) =>
+      win.locator('.msg-assistant').nth(index).evaluate((el, by) => {
+        const t = el.closest('.transcript')!;
+        t.scrollTop += el.getBoundingClientRect().top - t.getBoundingClientRect().top + by;
+      }, into);
+    /** Where a prompt's bubble sits relative to the transcript's top edge. */
+    const promptOffset = (text: string) =>
+      win.locator('.msg-user .msg-bubble', { hasText: text }).evaluate((el) => el.getBoundingClientRect().top - el.closest('.transcript')!.getBoundingClientRect().top);
+
+    // Your messages stand out from the answers: a tinted band, not bare text.
+    const band = await win.locator('.msg-user .msg-bubble').first().evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(band).not.toBe('rgba(0, 0, 0, 0)');
+
+    // Opened at the bottom: the latest prompt has scrolled away, so it floats at the top.
+    await expect.poll(pinnedText, { timeout: 10_000 }).toContain('Third prompt');
+    // The bar fades in; capture it settled, and opaque over the text scrolling beneath it.
+    await win.waitForTimeout(300);
+    expect(await pinned.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+    await win.screenshot({ path: path.join(shots, 'transcript-05-pinned-latest.png') });
+
+    // Reading the middle of the second answer pins the second prompt instead.
+    await readInto(1, 600);
+    await expect.poll(pinnedText, { timeout: 10_000 }).toContain('Second prompt');
+
+    // A click goes back to that message: it lands just under the top edge and the bar gives way.
+    await pinned.click();
+    await expect.poll(() => pinned.count(), { timeout: 10_000 }).toBe(0);
+    const landed = await promptOffset('Second prompt');
+    expect(landed).toBeGreaterThanOrEqual(0);
+    expect(landed).toBeLessThanOrEqual(60);
+    await win.screenshot({ path: path.join(shots, 'transcript-06-pinned-jumped.png') });
+
+    // At the very top the first prompt is on screen itself: nothing to pin.
+    await win.locator('.transcript').evaluate((el) => { el.scrollTop = 0; });
+    await expect.poll(() => pinned.count(), { timeout: 10_000 }).toBe(0);
+
+    // The Standard interface pins the same way.
+    await win.evaluate(() => document.documentElement.setAttribute('data-ui', 'standard'));
+    await readInto(0, 600);
+    await expect.poll(pinnedText, { timeout: 10_000 }).toContain('First prompt');
+    await win.waitForTimeout(300);
+    await win.screenshot({ path: path.join(shots, 'transcript-07-pinned-standard.png') });
+    await pinned.click();
+    await expect.poll(() => pinned.count(), { timeout: 10_000 }).toBe(0);
+    const landedStandard = await promptOffset('First prompt');
+    expect(landedStandard).toBeGreaterThanOrEqual(0);
+    expect(landedStandard).toBeLessThanOrEqual(60);
+    await win.screenshot({ path: path.join(shots, 'transcript-08-pinned-standard-jumped.png') });
   }, 120_000);
 });

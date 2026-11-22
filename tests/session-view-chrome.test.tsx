@@ -53,11 +53,13 @@ afterEach(async () => {
 });
 
 describe('title bar', () => {
-  it('names the open session and opens the command palette', () => {
-    useStore.setState({ sessions: [session('s1', { title: 'Add rate limiting' })], activeId: 's1' });
+  it('names the open session with its harness and project and opens the command palette', () => {
+    useStore.setState({ sessions: [session('s1', { title: 'Add rate limiting', cwd: 'G:/worktrees/limit' })], activeId: 's1' });
     const { container } = render(<TitleBar />);
     const search = container.querySelector('.titlebar-search') as HTMLElement;
-    expect(search.textContent).toContain('Add rate limiting');
+    expect(search.querySelector('.harness-pill[data-harness="native"]')?.textContent).toBe('Native');
+    expect(search.querySelector('.titlebar-search-text')?.textContent).toBe('Native a | Add rate limiting');
+    expect(search.title).toMatch(/^Native a \| Add rate limiting · Vocs Code/);
     expect(search.textContent).toContain('Ctrl+K');
     fireEvent.click(search);
     expect(useStore.getState().paletteOpen).toBe(true);
@@ -80,23 +82,49 @@ describe('title bar', () => {
 });
 
 describe('sidebar navigation', () => {
-  it('leads with New session, which opens the quick folder picker', () => {
+  it('ends the list switch row with a New session icon, which opens the Ctrl+Shift+N dialog on the open session’s folder', async () => {
+    useStore.setState({ sessions: [session('s1')], activeId: 's1', newSessionOpen: false, newSessionRoot: null });
     const { container } = render(<Sidebar />);
-    const button = container.querySelector('.sidebar-nav .sidebar-new') as HTMLElement;
-    expect(button.textContent).toContain('New session');
-    fireEvent.click(button);
-    expect(useStore.getState().quickSessionOpen).toBe(true);
+    const button = screen.getByRole('button', { name: 'New session' });
+    // One compact row: the icon is the last control beside Projects | Recent and Archived, not a row of its own.
+    const row = container.querySelector('.sidebar-viewswitch') as HTMLElement;
+    expect(row.lastElementChild).toBe(button);
+    expect(button.textContent?.trim()).toBe('');
+    expect(button.title).toBe('New session in this folder (Ctrl+Shift+N)');
+    expect(button.getAttribute('aria-keyshortcuts')).toBe('Control+Shift+N');
+    expect(container.querySelectorAll('.sidebar-nav .sidebar-new')).toHaveLength(0);
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(useStore.getState()).toMatchObject({ newSessionOpen: true, newSessionRoot: 'G:/proj/a', newSessionKind: 'normal', quickSessionOpen: false });
+    expect(invokeMock).not.toHaveBeenCalledWith('app:pickFolder', expect.anything());
   });
 
-  it('keeps the views at the top, the Archived toggle on the Sessions heading and Settings at the foot', () => {
+  it('asks for a folder first when no session is open, like Ctrl+Shift+N', async () => {
+    invokeMock.mockImplementation(async (channel: string) => (channel === 'app:pickFolder' ? { path: 'G:/proj/b' } : {}));
+    useStore.setState({ settings: { ...settings, recentProjects: ['G:/proj/a'] } as AppSettings, newSessionOpen: false, newSessionRoot: null });
+    const { container } = render(<Sidebar />);
+    await act(async () => {
+      fireEvent.click(container.querySelector('.sidebar-new') as HTMLElement);
+    });
+    expect(invokeMock).toHaveBeenCalledWith('app:pickFolder', expect.anything());
+    expect(useStore.getState()).toMatchObject({ newSessionOpen: true, newSessionRoot: 'G:/proj/b', quickSessionOpen: false });
+  });
+
+  it('keeps the views at the top, the Archived toggle beside the list layout switch and Settings at the foot', () => {
     const { container } = render(<Sidebar />);
     const labels = (selector: string) => [...container.querySelectorAll(selector)].map((el) => el.textContent?.trim());
     expect(labels('.sidebar-views .sidebar-link')).toEqual(['Analytics', 'Skills', 'MCP']);
     expect(labels('.sidebar-bottom .sidebar-link')).toEqual(['Settings']);
     expect(container.querySelector('.sidebar-section-label')?.textContent).toBe('Sessions');
-    fireEvent.click(screen.getByRole('button', { name: 'Archived' }));
+    const archived = screen.getByRole('button', { name: 'Archived' });
+    expect(archived.closest('.sidebar-viewswitch')).not.toBeNull();
+    fireEvent.click(archived);
     expect(container.querySelector('.sidebar-section-label')?.textContent).toBe('Archived sessions');
-    expect(screen.getByRole('button', { name: 'Show active' })).toBeTruthy();
+    // A pressed toggle, not a relabelled link: pressing it again returns to active sessions.
+    expect(screen.getByRole('button', { name: 'Archived', pressed: true })).toBe(archived);
+    fireEvent.click(archived);
+    expect(container.querySelector('.sidebar-section-label')?.textContent).toBe('Sessions');
     fireEvent.click(screen.getByRole('button', { name: 'Analytics' }));
     expect(useStore.getState().view).toBe('analytics');
   });

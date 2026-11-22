@@ -7,6 +7,7 @@ import { resolveNewSessionDefaults } from '../../../../shared/session-defaults';
 import { FileAttachmentChips, readAttachments } from '../../attachments';
 import { createMission, missionLaunchConfig } from '../../missions';
 import { useStore } from '../../store';
+import { SessionTitle } from '../SessionTitle';
 import { openSettings } from '../SettingsView';
 import { Button, Field, Modal, Spinner } from '../ui';
 import { missionHarnessWarning, MissionSupportNotice } from './MissionSupport';
@@ -63,7 +64,7 @@ export function MissionLaunch({ choices }: { choices: React.ReactNode }) {
     <div className="mission-ui mission-launch">
       <MissionSupportNotice />
       <p className="muted small">{root} · Automatically managed isolated worktrees. Source discussion and ordinary session defaults stay unchanged.</p>
-      {source && <p>Linked from: {source.title}</p>}
+      {source && <p>Linked from: <SessionTitle session={source} /></p>}
       <Field label="Mission mode"><select aria-label="Mission mode" value={mode} onChange={(e) => setMode(e.target.value as MissionMode)}><option value="autonomous">Autonomous</option><option value="interactive_plan">Plan together</option></select></Field>
       <p className="muted small">{mode === 'autonomous' ? 'Investigate, implement, verify and deliver within your permissions; no routine plan approval.' : 'Investigate and clarify one question at a time. Implementation waits for your approval of the proposed revision.'}</p>
       <Field label="Principal engineer (T5 only)"><select aria-label="Principal engineer (T5 only)" value={override} onChange={(e) => setOverride(e.target.value)}><option value="">{config?.defaultLeadPresetId ? `Project default · ${presetLabel(config.presets.find((p) => p.id === config.defaultLeadPresetId))}` : 'No default principal engineer configured'}</option>{leads.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.model.provider}/{p.model.model}{isMissionHarnessSupported(p.harnessId) ? '' : ` · ${MISSION_HARNESS_UNSUPPORTED_LABEL}`}</option>)}</select></Field>

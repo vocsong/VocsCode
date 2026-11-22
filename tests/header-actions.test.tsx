@@ -75,18 +75,16 @@ describe('header actions', () => {
     expect(container.querySelector('[aria-label="More"]')).toBeNull();
   });
 
-  it('shows the harness label right after the session title, with the session row tone', () => {
-    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
-    const title = container.querySelector('.header-title') as HTMLElement;
-    const label = title.querySelector('.badge') as HTMLElement;
-    expect(label).toBeTruthy();
-    expect(label.textContent).toContain('Claude');
-    // Same tone class the sidebar session row uses for this harness.
-    expect(label.classList.contains('badge-amber')).toBe(true);
-    // Next to the name it qualifies, ahead of the folder and branch crumbs.
-    expect(title.querySelector('[data-testid="session-title"]')?.nextElementSibling).toBe(label);
-    // The second row of pills it used to lead is gone.
-    expect(container.querySelector('.header-pills')).toBeNull();
+  it('shows the harness, project and session name in the header of a worktree session', () => {
+    const { container } = setup({
+      config: { harness: 'claude', projectRoot: 'G:\\proj\\a\\', permissionMode: 'ask' },
+      cwd: 'G:\\proj\\a\\.vocs-code\\worktrees\\topic'
+    });
+    const title = container.querySelector('.header-title .session-label');
+    expect(title?.textContent).toBe('Claude a | Header session');
+    expect(title?.firstElementChild?.matches('.harness-pill[data-harness="claude"]')).toBe(true);
+    expect(screen.getByTestId('session-title').title).toBe('Header session');
+    expect(screen.getByRole('button', { name: 'Open session folder' }).textContent?.trim()).toBe('topic');
   });
 
   it('toggles thinking from the actions group, ahead of the panel toggle in the same row', () => {
@@ -139,6 +137,9 @@ describe('header actions', () => {
     // Confirmation dialog first; nothing is archived until confirmed.
     expect(invokeMock).not.toHaveBeenCalledWith('sessions:archive', expect.anything());
     expect(document.querySelector('.modal')).toBeTruthy();
+    // It pops up at the button rather than centred.
+    expect(document.querySelector('.modal')?.classList.contains('is-anchored')).toBe(true);
+    expect(container.querySelector('[aria-label="Archive session"]')?.hasAttribute('data-dialog-anchor')).toBe(true);
   });
 
   it('sums the changed files into one button that opens Changes', async () => {
