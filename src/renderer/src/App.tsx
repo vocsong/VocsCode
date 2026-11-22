@@ -37,6 +37,8 @@ export function App() {
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const panelOpen = useStore((s) => s.panelOpen);
+  // Zen's pins (pins.ts); the classes mean nothing to the Standard layout.
+  const pins = useStore((s) => s.pins);
   const newSessionOpen = useStore((s) => s.newSessionOpen);
   const onboardingOpen = useStore((s) => s.onboardingOpen);
   const onboardingDismissed = useStore((s) => s.onboardingDismissed);
@@ -191,7 +193,7 @@ export function App() {
   return (
     <div className="shell">
       <TitleBar />
-      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
+      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'} ${pins.left ? 'pin-left' : ''} ${pins.right ? 'pin-right' : ''}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
         {sidebarOpen && <Sidebar />}
         <main className="main">

@@ -14,6 +14,7 @@ import * as panes from './panes';
 import type { DropZone, FilePreviewTarget, PaneLayout, PaneOrientation, PaneSide } from './panes';
 import { workspaceRelativePath } from './file-refs';
 import { fileScope, showOutsideFile } from './file-open';
+import { loadPins, savePins, type PinSide, type Pins } from './pins';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
 /** The Git panel's inner view: the repo, its worktrees, or the two GitHub lists. */
@@ -111,6 +112,19 @@ interface State {
    */
   panelBottomOpened: PanelBottomTab[];
   /**
+   * Which half of the panel was asked for last. Standard shows both halves; Zen's drawer shows one
+   * view at a time, and this picks it.
+   */
+  panelFocus: 'top' | 'bottom';
+  /**
+   * Zen: something other than the pointer asked for the panel (a file link, the branch crumb, a
+   * shortcut), so its drawer slides out without being hovered. It folds back when the pointer leaves
+   * the drawer or a press lands outside it.
+   */
+  panelPeek: boolean;
+  /** Zen: sides held open instead of folding back to their rails (see pins.ts). */
+  pins: Pins;
+  /**
    * The Git panel's inner view. It lives here for the same reason `panelBottomOpened` does: the panel
    * unmounts and mounts again on a session switch — opening a session from a PR row does exactly that —
    * and a local state would drop the user back on Branches every time.
@@ -196,6 +210,8 @@ interface State {
   openPullRequestLink(sessionId: string, url: string): boolean;
   closePullRequestPreview(): void;
   setPanelBottomTab(t: PanelBottomTab): void;
+  endPanelPeek(): void;
+  togglePin(side: PinSide): void;
   /**
    * Opens a path a session names (workspace-relative, shortened, or absolute inside its folder). A
    * file previews in the split view beside its session; a folder opens in the Files tab; a path
@@ -435,6 +451,9 @@ export const useStore = create<State>((set, get) => ({
   panelTab: 'changes',
   panelBottomTab: 'mcp',
   panelBottomOpened: [],
+  panelFocus: 'top',
+  panelPeek: false,
+  pins: loadPins(),
   gitPanelView: 'branches',
   gitPullRequestPreview: null,
   fileReveal: null,
@@ -993,7 +1012,7 @@ export const useStore = create<State>((set, get) => ({
     if (!get().missions[missionId]) await get().loadMission(missionId);
     const record = get().missions[missionId];
     if (!record) { get().toast(get().missionErrors[missionId] ?? 'Mission unavailable', 'error'); return; }
-    set({ missionInspector: { missionId, sessionId, itemId }, panelOpen: true, panelTab: 'goal' });
+    set({ missionInspector: { missionId, sessionId, itemId }, panelOpen: true, panelTab: 'goal', panelFocus: 'top', panelPeek: true });
     await get().setActive(record.leadSessionId);
     await get().loadTranscript(sessionId);
   },
@@ -1011,12 +1030,15 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({ sidebarOpen: !s.sidebarOpen }));
   },
   togglePanel(open) {
-    set((s) => ({ panelOpen: open ?? !s.panelOpen }));
+    set((s) => {
+      const panelOpen = open ?? !s.panelOpen;
+      return { panelOpen, panelPeek: panelOpen };
+    });
   },
   setPanelTab(tab) {
     // MCP moved to the lower half; asking for that tab opens the half instead of an empty top pane.
-    if (tab === 'mcp') set((s) => ({ panelBottomTab: 'mcp', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'mcp'), panelOpen: true }));
-    else set({ panelTab: tab, panelOpen: true });
+    if (tab === 'mcp') get().setPanelBottomTab('mcp');
+    else set({ panelTab: tab, panelOpen: true, panelFocus: 'top', panelPeek: true });
   },
   setGitPanelView(gitPanelView) {
     set({ gitPanelView });
@@ -1026,7 +1048,7 @@ export const useStore = create<State>((set, get) => ({
     const link = parseGitHubPullRequestUrl(url);
     if (!link) return false;
     const preview = { sessionId, url, number: link.number, detail: null };
-    set({ panelOpen: true, panelTab: 'branches', gitPanelView: 'prs', gitPullRequestPreview: preview });
+    set({ panelOpen: true, panelTab: 'branches', panelFocus: 'top', panelPeek: true, gitPanelView: 'prs', gitPullRequestPreview: preview });
     // A different link, dismissal, or session switch takes precedence over this response.
     const settle = (detail: GitPullRequestDetail) => {
       set((s) => s.gitPullRequestPreview === preview ? { gitPullRequestPreview: { ...preview, detail } } : s);
@@ -1038,7 +1060,15 @@ export const useStore = create<State>((set, get) => ({
     set({ gitPullRequestPreview: null });
   },
   setPanelBottomTab(panelBottomTab) {
-    set((s) => ({ panelBottomTab, panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, panelBottomTab), panelOpen: true }));
+    set((s) => ({ panelBottomTab, panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, panelBottomTab), panelOpen: true, panelFocus: 'bottom', panelPeek: true }));
+  },
+  endPanelPeek() {
+    set((s) => (s.panelPeek ? { panelPeek: false } : {}));
+  },
+  togglePin(side) {
+    const pins = { ...get().pins, [side]: !get().pins[side] };
+    savePins(pins);
+    set({ pins });
   },
   revealFile(sessionId, path, line, opts = {}) {
     const st = get();
@@ -1062,7 +1092,7 @@ export const useStore = create<State>((set, get) => ({
     const clean = rel.replace(/\/+$/, '');
     if (/[\\/]$/.test(target) || clean === '') {
       // A folder is something to browse: the Files tab opens on it.
-      set({ fileReveal: { sessionId, path: target }, panelTab: 'files', panelOpen: true });
+      set({ fileReveal: { sessionId, path: target }, panelTab: 'files', panelOpen: true, panelFocus: 'top', panelPeek: true });
       return;
     }
     const file: FilePreviewTarget = {
@@ -1080,7 +1110,7 @@ export const useStore = create<State>((set, get) => ({
     set((s) => (s.fileReveal ? { fileReveal: null } : {}));
   },
   revealSubagentRun(sessionId, runId) {
-    set((s) => ({ subagentReveal: { sessionId, runId }, panelBottomTab: 'subagents', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'subagents'), panelOpen: true }));
+    set((s) => ({ subagentReveal: { sessionId, runId }, panelBottomTab: 'subagents', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'subagents'), panelOpen: true, panelFocus: 'bottom', panelPeek: true }));
   },
   consumeSubagentReveal() {
     set((s) => (s.subagentReveal ? { subagentReveal: null } : {}));

@@ -10,6 +10,8 @@
  *   composer's controls wait for the pointer while Send never hides;
  * - a confirmation asked from the rail (archiving a worktree session) opens at its button and holds
  *   the rail open until it is answered;
+ * - the side panel is one rail of icons on the right whose drawer slides out on hover or a peek and
+ *   shows one view at a time, and either side pins open (the column moves aside) across a restart;
  * - the choice survives a restart;
  * - both modes make room for tables and the composer without widening prose or scrolling the pane sideways.
  * Sessions, transcripts and a git checkout are seeded on disk, so no harness or provider key is
@@ -342,7 +344,8 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     const row = transcriptView.locator('.transcript-row').filter({ hasText: LAYOUT_PROSE });
     const prose = row.getByText(LAYOUT_PROSE, { exact: false });
     await prose.waitFor({ timeout: 30_000 });
-    if (await win.locator('.panel').count()) await pane.getByRole('button', { name: 'Toggle panel', exact: true }).click();
+    // Ctrl+J in both modes: in Zen the side panel's rail stands in for the header's toggle.
+    if (await win.locator('.panel').count()) await win.keyboard.press('Control+j');
     await win.locator('.panel').waitFor({ state: 'hidden' });
     await park(win);
     await win.evaluate(() => document.fonts.ready.then(() => undefined));
@@ -603,6 +606,108 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     // Cancelled: the session is still listed, not archived.
     expect(await row.count()).toBe(1);
   }, 120_000);
+
+  it('folds the side panel into one rail on the right whose drawer shows a view at a time, and pins either side open across a restart', async ({ onTestFinished }) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-panel-'));
+    onTestFinished(() => fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 }));
+    const { userData } = await seed(tmp, 'zen');
+    let win = await launch(userData);
+    await expect.poll(() => uiMode(win)).toBe('zen');
+    await clickDot(win, FIRST);
+    await win.locator('.work-head').waitFor({ timeout: 30_000 });
+    const panelWidth = () => rect(win, '.panel').then((r) => r.width);
+    const sidebarWidth = () => rect(win, '.sidebar').then((r) => r.width);
+    const title = () => win.locator('.panel-head-title').textContent();
+    const visibility = (half: 'top' | 'bottom') => style(win, `.panel > .panel-${half}`, 'visibility');
+    // The Standard panel is 420px; Zen's drawer opens over the column, so it gets 560.
+    const OPEN = 52 + 560;
+
+    // Closed, the panel is a 52px rail on the window's right edge: one series of icons, six workspace
+    // views and five live services, with no tab strips. It stands in for the header's panel toggle
+    // and changes chip, and carries the fixture's uncommitted change as a dot.
+    await park(win);
+    await expect.poll(panelWidth).toBe(52);
+    const rail = await rect(win, '.panel');
+    expect(rail.x + rail.width).toBe(1280);
+    expect(await win.locator('.panel-rail .panel-tab').count()).toBe(11);
+    expect(await win.locator('.panel .panel-tabs').count()).toBe(0);
+    expect(await win.locator('.pane.active .header-panel-toggle').isVisible()).toBe(false);
+    expect(await win.locator('.pane.active .header-changes').isVisible()).toBe(false);
+    await win.getByTestId('panel-changes-dot').waitFor();
+    // The column's padding animates in once the session (and so the rail) is showing: let it settle.
+    await expect.poll(() => rect(win, '.pane.active').then((r) => r.x + r.width)).toBe(1280 - 52);
+    const pane = await rect(win, '.pane.active');
+    await shot(win, 'zen-panel-rail');
+
+    // Hovering the rail slides the drawer out over the conversation: the pane does not move.
+    await win.mouse.move(1280 - 26, 400);
+    await expect.poll(panelWidth).toBe(OPEN);
+    expect(await rect(win, '.pane.active')).toEqual(pane);
+    // One view at a time: a workspace view, then a live service, each taking the whole drawer.
+    await win.getByTestId('panel-top-files').click();
+    await expect.poll(title).toBe('Files');
+    expect(await visibility('top')).toBe('visible');
+    expect(await visibility('bottom')).toBe('hidden');
+    await win.getByTestId('panel-bottom-processes').click();
+    await expect.poll(title).toBe('Processes');
+    expect(await visibility('top')).toBe('hidden');
+    expect(await visibility('bottom')).toBe('visible');
+    await win.getByTestId('panel-top-changes').click();
+    await expect.poll(title).toBe('Changes');
+    await win.locator('.panel .file-row', { hasText: 'server.ts' }).waitFor();
+    await win.waitForTimeout(300);
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'ui-modes-zen-panel-open.png') });
+    // Pointer and focus gone (a mouse click leaves no focus ring), it folds back to the rail.
+    await park(win);
+    await expect.poll(panelWidth).toBe(52);
+
+    // A peek: the composer's usage meter opens the drawer on Usage without the rail being hovered;
+    // a press elsewhere folds it back.
+    const meter = win.locator('.pane.active .session-meter');
+    await win.locator('.pane.active .composer-box').hover();
+    await meter.click();
+    await expect.poll(panelWidth).toBe(OPEN);
+    await expect.poll(title).toBe('Usage');
+    expect(await meter.getAttribute('aria-expanded')).toBe('true');
+    await win.mouse.click(300, 300);
+    await expect.poll(panelWidth).toBe(52);
+    expect(await meter.getAttribute('aria-expanded')).toBe('false');
+
+    // Pinned, the drawer stays out without the pointer, and the column moves out of its way.
+    await win.mouse.move(1280 - 26, 400);
+    await expect.poll(panelWidth).toBe(OPEN);
+    await win.getByRole('button', { name: 'Pin side panel', exact: true }).click();
+    await park(win);
+    await win.waitForTimeout(600);
+    expect(await panelWidth()).toBe(OPEN);
+    await expect.poll(() => rect(win, '.pane.active').then((r) => r.x + r.width)).toBeLessThanOrEqual(1280 - OPEN);
+    // The sidebar pins the same way, owning its column instead of opening over the conversation.
+    await win.mouse.move(26, 420);
+    await expect.poll(sidebarWidth).toBe(280);
+    await win.getByRole('button', { name: 'Pin sidebar', exact: true }).click();
+    await park(win);
+    await win.waitForTimeout(600);
+    expect(await sidebarWidth()).toBe(280);
+    await expect.poll(() => rect(win, '.pane.active').then((r) => r.x)).toBeGreaterThanOrEqual(280);
+    await shot(win, 'zen-pinned');
+
+    // Both pins survive a restart; unpinned, each side folds back to its rail.
+    await app!.close();
+    app = null;
+    win = await launch(userData);
+    await expect.poll(() => uiMode(win)).toBe('zen');
+    await win.locator(`[data-session-id="${FIRST}"] .session-pin`).click();
+    await win.locator('.work-head').waitFor({ timeout: 30_000 });
+    await park(win);
+    await expect.poll(sidebarWidth).toBe(280);
+    await expect.poll(panelWidth).toBe(OPEN);
+    await win.getByRole('button', { name: 'Unpin side panel', exact: true }).click();
+    await win.getByRole('button', { name: 'Unpin sidebar', exact: true }).click();
+    await park(win);
+    await expect.poll(panelWidth).toBe(52);
+    await expect.poll(sidebarWidth).toBe(52);
+  }, 180_000);
 
   it('reopens in the interface it was closed in', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-restart-'));
