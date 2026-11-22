@@ -3,7 +3,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import type { AppSettings, FolderStyle, SessionMeta, SidebarView } from '../../../shared/types';
 import { modelRefName } from '../../../shared/model-names';
 import { sessionTitleText } from '../../../shared/session-title';
-import { invoke, modKey } from '../api';
+import { invoke, isMac, modKey } from '../api';
 import { basename, relTime } from '../format';
 import { archiveSession, removeFolder } from '../sessionActions';
 import { isTopLevelSession } from '../missions';
@@ -429,7 +429,7 @@ export function Sidebar() {
             inPane={!!paneSessions && view === 'chat' && s.id !== activeId && paneSessions.some((p) => p.sessionId === s.id)}
             customLabels={settings?.customLabels ?? []}
             archiving={!!archiving[s.id]}
-            onSelect={() => void setActive(s.id).catch(toastError)}
+            onSelect={(pane) => void setActive(s.id, pane).catch(toastError)}
             toast={toast}
             dnd={dnd}
             dndHandlers={dndHandlers}
@@ -504,7 +504,7 @@ export function Sidebar() {
                   inPane={!!paneSessions && view === 'chat' && s.id !== activeId && paneSessions.some((p) => p.sessionId === s.id)}
                   customLabels={settings?.customLabels ?? []}
                   archiving={!!archiving[s.id]}
-                  onSelect={() => void setActive(s.id).catch(toastError)}
+                  onSelect={(pane) => void setActive(s.id, pane).catch(toastError)}
                   toast={toast}
                   dnd={dnd}
                   dndHandlers={dndHandlers}
@@ -577,7 +577,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
   customLabels: string[];
   /** An archive request is in flight; the status pill shows a blinking Archiving state meanwhile. */
   archiving: boolean;
-  onSelect: () => void;
+  onSelect: (pane?: 'right') => void;
   toast: (t: string, k?: 'info' | 'success' | 'error') => void;
   dnd: DndState;
   dndHandlers: DndHandlers;
@@ -638,7 +638,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
   const openToSide = (): ContextMenuItem[] => {
     const st = useStore.getState();
     if (s.mission?.role === 'worker' || !canSplit(st.layout) || paneShowing(st.layout, s.id) || !st.activeId) return [];
-    return [{ label: 'Open to the side', icon: 'splitRight', onSelect: () => st.splitPane('horizontal', { sessionId: s.id }) }];
+    return [{ label: 'Open to the side', icon: 'splitRight', hint: `${modKey}+click`, onSelect: () => onSelect('right') }];
   };
   /** Right-click menu for a session row; it mirrors the inline actions plus rename and delete. */
   const rowMenu = (): ContextMenuItem[] => [
@@ -682,7 +682,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
         // The rename field keeps the native editing menu (cut/copy/paste/undo).
         if (!isEditableTarget(e.target)) showContextMenu(e, rowMenu());
       }}
-      onClick={onSelect}
+      onClick={(e) => onSelect((isMac ? e.metaKey : e.ctrlKey) ? 'right' : undefined)}
       onDoubleClick={(e) => {
         e.stopPropagation();
         startRename();
