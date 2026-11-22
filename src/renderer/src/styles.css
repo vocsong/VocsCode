@@ -2342,6 +2342,27 @@ h4 {
 .run-controls .pill-model > .icon:first-child {
   color: var(--accent);
 }
+.run-controls .pill-model.is-fast {
+  position: relative;
+  isolation: isolate;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+/* A brief glint behind the label, with a rest between sweeps. */
+@media (prefers-reduced-motion: no-preference) {
+  .run-controls .pill-model.is-fast::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: linear-gradient(110deg, transparent 32%, color-mix(in srgb, var(--accent) 24%, transparent) 50%, transparent 68%);
+    animation: model-fast-charge 4s ease-in-out infinite;
+  }
+  @keyframes model-fast-charge {
+    from { transform: translateX(-100%); }
+    22%, to { transform: translateX(100%); }
+  }
+}
 /* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */
 .pill-effort {
   flex: none;
