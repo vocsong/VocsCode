@@ -431,7 +431,6 @@ async function main(): Promise<void> {
     secrets: { get: (key) => secrets.get(key), set: (key, value) => secrets.set(key, value) },
     pushState: () => pushAll(PUSH_CHANNELS.remoteState, remoteHost!.state()),
     log,
-    broadcast: (channel, payload) => void remoteHost?.broadcastPush(channel, payload),
     audit: remoteAudit,
     // Read live: toggling view-only must apply to an already-connected browser without a reconnect.
     viewOnly: () => settings.get().remote?.viewOnly === true,
@@ -475,6 +474,7 @@ async function main(): Promise<void> {
     processes,
     broadcast: (channel, payload) => {
       webServer?.broadcast(channel, payload);
+      void remoteHost?.broadcastPush(channel, payload);
     },
     getWindow: () => mainWindow,
     log
@@ -517,13 +517,6 @@ async function main(): Promise<void> {
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
   // buttons over it, so their colors have to follow the theme.
   nativeTheme.on('updated', applyChrome);
-
-  // GPU and utility processes share the window's fate; a dead one explains a blank or malformed
-  // window, and without a line here it is invisible. Normal exits are not news.
-  app.on('child-process-gone', (_event, details) => {
-    if (details.reason === 'clean-exit') return;
-    log('error', `child process gone: ${details.type} ${details.reason} (exit ${details.exitCode})`);
-  });
 
   // No native menu bar: File/Edit/View/Help live in the custom title bar. macOS keeps its
   // application menu because the system requires one for the app menu and standard shortcuts.
@@ -580,7 +573,10 @@ async function main(): Promise<void> {
       safe('terminal shutdown', terminals?.shutdown(deadline)),
       safe('search close', search?.close()),
       safe('web server stop', webServer?.stop()),
-      safe('vesta shutdown', registry.shutdown()),
+      safe('remote mirror stop', Promise.resolve().then(() => remoteMirror?.stop())),
+      safe('remote host stop', Promise.resolve().then(() => remoteHost?.stop())),
+      safe('control settle', control?.settle()),
+      safe('registry shutdown', registry.shutdown()),
       safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop())),
       safe('process tracker close', processes.close())
     ]);
@@ -843,8 +839,9 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
       .update({ windowBounds: { x: b.x, y: b.y, width: b.width, height: b.height } })
       .catch((e) => log('warn', `could not save window bounds: ${describeError(e)}`));
   };
-  win.on('resize', debounce(saveBounds, 500));
-  win.on('move', debounce(saveBounds, 500));
+  const debouncedSaveBounds = debounce(saveBounds, 500);
+  win.on('resize', debouncedSaveBounds);
+  win.on('move', debouncedSaveBounds);
 
   // A renderer that dies leaves a blank window and, without this, no record of why. Reload it
   // (bounded) so a one-off crash self-heals and a crash loop says so in the log instead of
@@ -862,7 +859,6 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
     // -3 is ERR_ABORTED: an in-page navigation (hash, redirect) that is not a failure.
     if (isMainFrame && errorCode !== -3) log('error', `renderer failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
   });
-  win.webContents.on('preload-error', (_event, preloadPath, error) => log('error', `preload script failed (${preloadPath}): ${error.stack ?? error.message}`));
 
   // A reload drops every xterm instance; stop streaming to it and let paused shells run until it re-attaches.
   win.webContents.on('did-start-loading', () => terminals?.detachAll());

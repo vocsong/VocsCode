@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { gateAction, isOutsideWorkspace } from '../src/main/harness/permissions';
 import { globToRegExp } from '../src/main/harness/native/tools';
@@ -189,9 +190,27 @@ describe('permission gate hardening', () => {
   it('detects paths outside the workspace on Windows and POSIX', () => {
     const cwd = process.platform === 'win32' ? 'C:\\proj' : '/proj';
     expect(isOutsideWorkspace(cwd, 'src/a.ts', path)).toBe(false);
+    expect(isOutsideWorkspace(cwd, '..env', path)).toBe(false);
     expect(isOutsideWorkspace(cwd, '../other/a.ts', path)).toBe(true);
     expect(isOutsideWorkspace(cwd, process.platform === 'win32' ? 'C:\\Windows\\x.txt' : '/etc/passwd', path)).toBe(true);
     expect(isOutsideWorkspace(cwd, undefined, path)).toBe(false);
+  });
+  it('detects symlink and Windows directory junction escapes outside the workspace', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'vocs-perm-escape-'));
+    try {
+      const workspace = path.join(base, 'workspace');
+      const external = path.join(base, 'external');
+      fs.mkdirSync(workspace, { recursive: true });
+      fs.mkdirSync(external, { recursive: true });
+      fs.writeFileSync(path.join(external, 'secret.txt'), 'secret');
+      const escapeLink = path.join(workspace, 'escape');
+      fs.symlinkSync(external, escapeLink, process.platform === 'win32' ? 'junction' : 'dir');
+      expect(isOutsideWorkspace(workspace, 'escape/secret.txt', path)).toBe(true);
+      expect(isOutsideWorkspace(workspace, 'escape/new-file.txt', path)).toBe(true);
+      expect(isOutsideWorkspace(workspace, 'legit/new-file.txt', path)).toBe(false);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 

@@ -223,6 +223,7 @@ export class PiAgentRuntime implements VestaRuntime {
     this.opts.log('info', `spawning pi for Vesta: ${this.opts.bin} in ${this.opts.cwd}`);
     const child = withProcessOwner({ label: 'Vesta' }, () => (this.opts.spawn ?? spawnTool)(this.opts.bin, args, { cwd: this.opts.cwd, env }));
     this.child = child;
+    child.stdin?.on('error', (e) => this.opts.log('debug', `[vesta pi] stdin error: ${errorMessage(e)}`));
     const splitter = new LineSplitter((line) => this.handleLine(line));
     child.stdout?.on('data', (d: Buffer) => splitter.push(d));
     const err = new LineSplitter((line) => {

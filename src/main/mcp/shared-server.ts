@@ -32,17 +32,18 @@ export async function freePort(): Promise<number> {
   });
 }
 
-/** POSTs a minimal MCP initialize until the endpoint answers. */
-async function waitForMcp(url: string, timeoutMs: number): Promise<boolean> {
+/** POSTs a minimal MCP initialize until the endpoint answers or `isStopped()` turns true. */
+async function waitForMcp(url: string, timeoutMs: number, isStopped: () => boolean): Promise<boolean> {
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', clientInfo: { name: 'vocs-code', version: '1.0.0' }, capabilities: {} } });
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !isStopped()) {
     try {
       const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body });
       if (res.ok || res.status < 500) return true;
     } catch {
       /* not listening yet */
     }
+    if (isStopped()) return false;
     await new Promise((r) => setTimeout(r, 500));
   }
   return false;
@@ -85,6 +86,7 @@ export class SharedGitnexusServer {
       this.opts.log?.('warn', `gitnexus shared: no free port (${e instanceof Error ? e.message : String(e)})`);
       return null;
     }
+    if (this.stopped) return null;
     const args = [...this.opts.baseArgs, '--port', String(port), '--host', '127.0.0.1'];
     let child: ChildProcess;
     try {
@@ -107,7 +109,7 @@ export class SharedGitnexusServer {
     child.on('error', (e) => this.opts.log?.('warn', `gitnexus shared: ${e.message}`));
 
     const url = `http://127.0.0.1:${port}/api/mcp`;
-    const ready = await waitForMcp(url, this.opts.startupTimeoutMs ?? 45_000);
+    const ready = await waitForMcp(url, this.opts.startupTimeoutMs ?? 45_000, () => this.stopped);
     if (!ready) {
       this.opts.log?.('warn', `gitnexus shared: did not become ready on ${url}`);
       await this.stopChild(child);

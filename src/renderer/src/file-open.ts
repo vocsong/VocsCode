@@ -20,6 +20,21 @@ export interface FileScope {
   missionWorkspaceId?: string;
 }
 
+/** Latest live lead workspace for `sessionId` (or any live lead workspace), matching MissionService.leadWorkspace(). */
+export function activeLeadWorkspace(mission: MissionRecord | undefined, sessionId: string) {
+  if (!mission) return undefined;
+  const workspaces = mission.workspaces;
+  for (let i = workspaces.length - 1; i >= 0; i--) {
+    const w = workspaces[i];
+    if (w.role === 'lead' && !w.cleanedAt && w.ownerSessionId === sessionId) return w;
+  }
+  for (let i = workspaces.length - 1; i >= 0; i--) {
+    const w = workspaces[i];
+    if (w.role === 'lead' && !w.cleanedAt) return w;
+  }
+  return undefined;
+}
+
 /**
  * The folder a session's files live in. An ordinary session reads its own cwd. A Mission lead reads
  * a Mission workspace: `workspace` names one ('' is the integration result), and without it a file
@@ -27,7 +42,7 @@ export interface FileScope {
  */
 export function fileScope(session: SessionMeta, mission: MissionRecord | undefined, workspace?: string): FileScope {
   if (!session.mission || !mission) return { root: session.cwd };
-  const lead = mission.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission.workspaces.find((w) => w.role === 'lead');
+  const lead = activeLeadWorkspace(mission, session.id);
   const id = workspace === undefined ? lead?.id : workspace || undefined;
   const chosen = (id ? mission.workspaces.find((w) => w.id === id) : undefined) ?? mission.workspaces.find((w) => w.role === 'integration');
   return { root: chosen?.path ?? session.cwd, missionWorkspaceId: id };

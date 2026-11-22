@@ -274,6 +274,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     const ctx = parentCtx;
     const ask = async (): Promise<ApprovalChoice> => {
       if (!ctx?.ui || typeof ctx.ui.select !== 'function') return 'Deny';
+      const nonce = process.env.VOCS_CODE_PI_NONCE;
       const payload = JSON.stringify({
         tool: event.toolName,
         toolCallId: event.toolCallId,
@@ -281,6 +282,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
         summary: decision.summary,
         runId: run.id,
         agent: run.agent.name,
+        ...(nonce ? { nonce } : {}),
       });
       const choice = (await ctx.ui.select(APPROVAL_MARKER + payload, APPROVAL_OPTIONS)) as ApprovalChoice | undefined;
       return choice === 'Allow once' || choice === 'Allow for session' ? choice : 'Deny';
@@ -298,7 +300,8 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       const decision = await decideToolCall({ tool: call.toolName, input: call.input, cwd: parentCtx?.cwd ?? process.cwd(), mode, sessionAllowed, readOnlyMcp: await mcpReadOnlyToolNames() });
       if (decision.action === 'allow') return undefined;
       const blocked = (reason: string) => {
-        parentCtx?.ui?.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: call.toolCallId, toolName: call.toolName, runId: run.id }), 'info');
+        const nonce = process.env.VOCS_CODE_PI_NONCE;
+        parentCtx?.ui?.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: call.toolCallId, toolName: call.toolName, runId: run.id, ...(nonce ? { nonce } : {}) }), 'info');
         return { block: true, reason };
       };
       if (decision.action === 'block') return blocked(decision.reason);

@@ -103,6 +103,7 @@ class StdioTransport implements PiTransport {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     });
+    this.child.stdin?.on('error', () => { /* child exit handled by exit/error listeners */ });
     this.child.stdout?.setEncoding('utf8');
     this.child.stdout?.on('data', (chunk: string) => this.push(chunk));
     this.child.stderr?.setEncoding('utf8');

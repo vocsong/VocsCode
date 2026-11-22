@@ -170,7 +170,7 @@ export class RemoteHost {
       secrets: { get(key: string): Promise<string | undefined>; set(key: string, value: string): Promise<void> };
       pushState: () => void;
       log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
-      broadcast: (channel: string, payload: unknown) => void;
+      broadcast?: (channel: string, payload: unknown) => void;
       /** P4 audit trail; absent in unit tests, in which case records are dropped. */
       audit?: RemoteAudit;
       /** P4 view-only policy, read live so a toggle applies without a reconnect. */
@@ -287,6 +287,20 @@ export class RemoteHost {
     // A mirror clear still owed is retried on the next connect or upload, not while paused.
     this.cancelMirrorClearRetry();
     this.push();
+  }
+
+  /** App-quit teardown: closes the socket and cancels timers without recording a user disable audit entry. */
+  stop(): void {
+    this.generation++;
+    this.ws?.close();
+    this.ws = null;
+    this.sessions.clear();
+    this.forgetAllClients();
+    this.incoming.clear();
+    this.pairingAttempt++;
+    this.clearPairing();
+    this.signingIn = undefined;
+    this.cancelMirrorClearRetry();
   }
 
   /** Loads or creates this computer's identity for `relayUrl`, without connecting. */

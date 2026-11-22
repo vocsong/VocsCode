@@ -102,6 +102,7 @@ export class ProcessTracker {
   private latest: { list: ProcessList; tracked: Map<string, TrackedProcess>; raw: RawProcess[] } | null = null;
   private inflight: Promise<ProcessList> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private soonTimer: ReturnType<typeof setTimeout> | null = null;
   private stopObserving: (() => void) | null = null;
   private savedSignature = '';
@@ -123,7 +124,13 @@ export class ProcessTracker {
       this.timer = setInterval(() => void this.refresh().catch(() => undefined), this.opts.intervalMs ?? 10_000);
       this.timer.unref?.();
     }
-    setTimeout(() => void this.refresh().catch(() => undefined), 2_000).unref?.();
+    if (!this.startupTimer) {
+      this.startupTimer = setTimeout(() => {
+        this.startupTimer = null;
+        if (!this.closed) void this.refresh().catch(() => undefined);
+      }, 2_000);
+      this.startupTimer.unref?.();
+    }
   }
 
   /** Attributes a process the app just started; bound to its creation time on the next sample. */
@@ -256,7 +263,9 @@ export class ProcessTracker {
     this.stopObserving?.();
     this.stopObserving = null;
     if (this.timer) clearInterval(this.timer);
+    if (this.startupTimer) clearTimeout(this.startupTimer);
     if (this.soonTimer) clearTimeout(this.soonTimer);
+    this.startupTimer = null;
     this.soonTimer = null;
     this.timer = null;
     this.opts.source.close();

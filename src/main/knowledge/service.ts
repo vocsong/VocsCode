@@ -607,14 +607,19 @@ function snippetFor(body: string, terms: string[]): string | undefined {
   if (!flat) return undefined;
   const lower = flat.toLowerCase();
   let at = -1;
+  let matched = terms[0] ?? '';
   for (const term of terms) {
     at = lower.indexOf(term);
-    if (at >= 0) break;
+    if (at >= 0) {
+      matched = term;
+      break;
+    }
   }
   if (at < 0) return flat.slice(0, 160);
   const start = Math.max(0, at - 70);
   const end = Math.min(flat.length, at + 110);
-  return `${start > 0 ? '…' : ''}${flat.slice(start, at)}\u0001${flat.slice(at, at + Math.min(terms[0].length, flat.length - at))}\u0002${flat.slice(at + Math.min(terms[0].length, flat.length - at), end)}${end < flat.length ? '…' : ''}`;
+  const span = Math.min(matched.length, flat.length - at);
+  return `${start > 0 ? '…' : ''}${flat.slice(start, at)}\u0001${flat.slice(at, at + span)}\u0002${flat.slice(at + span, end)}${end < flat.length ? '…' : ''}`;
 }
 
 /** Published copies drop proposal-only fields and keep the provenance intact. */

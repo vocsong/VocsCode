@@ -4,10 +4,11 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fullRunReason } from './test-changed-scope.mjs';
+import { resolveVitestBin } from './vitest-bin.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const base = process.env.VOCS_CODE_TEST_BASE || 'origin/develop';
-const vitest = path.join(root, 'node_modules', 'vitest', 'vitest.mjs');
+const vitest = resolveVitestBin(import.meta.url);
 
 function git(...args) {
   const run = spawnSync('git', args, { cwd: root, encoding: 'utf8' });

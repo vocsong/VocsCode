@@ -6,6 +6,7 @@ import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, Suba
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName, UNKNOWN_MODEL_KEY } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
+import { writeText } from '../util/fs';
 import { quoteWin, shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
 import { launchOwnedWindowsJob, spawnIndependentWindowsSupervisor, windowsJobCommandLine, WINDOWS_SUPERVISOR_STARTUP_MS, type OwnedWindowsJob } from '../owned-windows-job';
 import { which } from '../runtime';
@@ -381,7 +382,7 @@ export class PiAdapter implements HarnessAdapter {
 
       this.modeFile = path.join(sessionDir, 'permission-mode.txt');
       const permissionMode = mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
-      await fs.writeFile(this.modeFile, permissionMode, 'utf8');
+      await writeText(this.modeFile, permissionMode);
       this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
       // Managed presets use Pi's actual thinking selection, never a catalog-driven payload override.
       await this.writeEffortConfig(mission ? undefined : intendedEffort, meta.config.model);
@@ -443,6 +444,8 @@ export class PiAdapter implements HarnessAdapter {
       throw error;
     }
     this.child = child;
+    // Writing after the child exits emits EPIPE on stdin; handle it so it never becomes an uncaught exception.
+    child.stdin?.on('error', (e) => { if (this.child === child) this.ctx.log('debug', `[pi] stdin error: ${errorMessage(e)}`); });
     const splitter = new LineSplitter((line) => { if (this.child === child) this.handleLine(line); });
     child.stdout?.on('data', (d: Buffer) => splitter.push(d));
     const err = new LineSplitter((line) => this.ctx.log('debug', `[pi] ${this.redactMissionSecrets(line)}`));
@@ -1094,29 +1097,47 @@ export class PiAdapter implements HarnessAdapter {
           return;
         }
         if (title.startsWith(PI_APPROVAL_MARKER)) {
-          let payload: { tool: string; toolCallId?: string; input: Record<string, unknown>; summary?: string } = { tool: 'tool', input: {} };
+          let payload: { tool?: unknown; toolCallId?: string; input?: unknown; summary?: string; nonce?: unknown };
           try {
-            payload = JSON.parse(title.slice(PI_APPROVAL_MARKER.length));
+            const parsed = JSON.parse(title.slice(PI_APPROVAL_MARKER.length)) as unknown;
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+            payload = parsed as typeof payload;
           } catch {
-            /* keep default */
+            this.ctx.log('warn', 'pi: malformed approval payload; denying');
+            respond({ value: 'Deny' });
+            return;
           }
-          const command = typeof payload.input?.command === 'string' ? (payload.input.command as string) : undefined;
-          const isEdit = payload.tool === 'edit' || payload.tool === 'write';
+          if (this.extensionNonce && payload.nonce !== this.extensionNonce) {
+            this.ctx.log('warn', 'pi: approval payload nonce mismatch; denying');
+            respond({ value: 'Deny' });
+            return;
+          }
+          if (typeof payload.tool !== 'string' || !payload.tool) {
+            this.ctx.log('warn', 'pi: approval payload missing tool name; denying');
+            respond({ value: 'Deny' });
+            return;
+          }
+          const input = payload.input && typeof payload.input === 'object' && !Array.isArray(payload.input)
+            ? (payload.input as Record<string, unknown>)
+            : {};
+          const tool = payload.tool;
+          const command = typeof input.command === 'string' ? input.command : undefined;
+          const isEdit = tool === 'edit' || tool === 'write';
           const decision = await this.ctx.requestApproval({
             kind: command ? 'command' : isEdit ? 'file_change' : 'tool',
-            title: command ? 'pi wants to run a command' : `pi wants to use ${payload.tool}`,
-            toolName: payload.tool,
+            title: command ? 'pi wants to run a command' : `pi wants to use ${tool}`,
+            toolName: tool,
             toolItemId: payload.toolCallId,
             command,
             cwd: this.ctx.session().cwd,
-            input: payload.input,
+            input,
             description: payload.summary,
-            changes: isEdit ? [{ path: toolPath(payload.input) ?? '', kind: 'update' }] : undefined,
+            changes: isEdit ? [{ path: toolPath(input) ?? '', kind: 'update' }] : undefined,
             options: OPTIONS_ALLOW_DENY
           });
           const map: Record<string, string> = { allow: 'Allow once', allow_session: 'Allow for session', deny: 'Deny' };
           const value = map[decision.optionId] ?? 'Deny';
-          if (value === 'Deny') this.markToolDeclined(payload.toolCallId, payload.tool);
+          if (value === 'Deny') this.markToolDeclined(payload.toolCallId, tool);
           respond({ value });
           return;
         }
@@ -1167,7 +1188,11 @@ export class PiAdapter implements HarnessAdapter {
         if (req.message && this.handleExtensionNotification(req.message)) return;
         if (req.message?.startsWith(PI_BLOCK_MARKER)) {
           try {
-            const block = JSON.parse(req.message.slice(PI_BLOCK_MARKER.length)) as { toolCallId?: unknown; toolName?: unknown };
+            const block = JSON.parse(req.message.slice(PI_BLOCK_MARKER.length)) as { toolCallId?: unknown; toolName?: unknown; nonce?: unknown };
+            if (this.extensionNonce && block.nonce !== this.extensionNonce) {
+              this.ctx.log('warn', 'pi: tool-block notification nonce mismatch; ignoring');
+              return;
+            }
             this.markToolDeclined(block.toolCallId, block.toolName);
           } catch {
             this.ctx.log('warn', 'pi: malformed tool-block notification');
@@ -1506,7 +1531,7 @@ export class PiAdapter implements HarnessAdapter {
     const supported = provider?.models.find((m) => m.id === model?.model)?.supportedEfforts;
     const payload = model && effort && supported?.includes(effort) ? { provider: model.provider, model: model.model, effort } : null;
     try {
-      await fs.writeFile(this.effortFile, JSON.stringify(payload), 'utf8');
+      await writeText(this.effortFile, JSON.stringify(payload));
     } catch (e) {
       this.ctx.log('warn', `failed to write pi reasoning effort file: ${errorMessage(e)}`);
     }
@@ -1518,7 +1543,7 @@ export class PiAdapter implements HarnessAdapter {
     // The approvals extension re-reads this file before every tool call.
     if (!this.modeFile) return;
     try {
-      await fs.writeFile(this.modeFile, this.ctx.session().mission?.sourceAccess === 'read_only' ? 'plan' : mode, 'utf8');
+      await writeText(this.modeFile, this.ctx.session().mission?.sourceAccess === 'read_only' ? 'plan' : mode);
     } catch (e) {
       // Surface the failure: silently keeping the old mode active would grant or withhold
       // permissions behind the user's back.
@@ -1633,6 +1658,7 @@ export async function listPiModels(piPath: string, extraEnv: NodeJS.ProcessEnv =
     }
   });
   child.stdout?.on('data', (b: Buffer) => splitter.push(b));
+  child.stdin?.on('error', () => { /* child exit handled by close/error listeners */ });
   child.on('error', (e) => d.reject(e));
   child.on('close', () => d.reject(new Error('pi exited before answering')));
   child.stdin?.write(JSON.stringify({ id: 'm1', type: 'get_available_models' }) + '\n');

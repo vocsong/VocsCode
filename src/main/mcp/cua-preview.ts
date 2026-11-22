@@ -78,5 +78,6 @@ export class CuaPreviewSession {
   private armIdle(): void {
     if (this.idle) clearTimeout(this.idle);
     this.idle = setTimeout(() => void this.close(), IDLE_CLOSE_MS);
+    this.idle.unref?.();
   }
 }

@@ -154,9 +154,15 @@ describe('cross-harness fork context', () => {
     expect(sent[0].text).toBe('continue');
   });
 
-  it.each(['codex', 'codex-exec'] as const)('hands prior conversation to a fresh same-harness %s fork without resuming the source thread', async (harness) => {
+  it.each([
+    ['codex', { codexThreadId: 'source-thread' }],
+    ['codex-exec', { codexThreadId: 'source-thread' }],
+    ['pi', { piSessionFile: '/tmp/pi-session.jsonl' }],
+    ['cursor', { cursorAgentId: 'cursor-agent-1' }],
+    ['acp', { acpSessionId: 'acp-session-1' }]
+  ] as const)('hands prior conversation to a fresh same-harness %s fork without resuming the source session', async (harness, harnessRef) => {
     sent.length = 0;
-    const src = { ...source(harness), worktreeBranch: undefined, harnessRef: { codexThreadId: 'source-thread' } };
+    const src = { ...source(harness), worktreeBranch: undefined, harnessRef };
     const { manager } = makeManager(src, conversation);
     const fork = (await manager.fork(src.id))!;
     expect(fork.harnessRef).toEqual({});
@@ -167,6 +173,13 @@ describe('cross-harness fork context', () => {
     expect(sent[0].text.endsWith('continue the fork')).toBe(true);
     await manager.send(fork.id, { text: 'next question' });
     expect(sent[1].text).toBe('next question');
+  });
+
+  it('clears cursorAgentId when moving a Cursor session to another directory', async () => {
+    const src = { ...source('cursor'), worktreeBranch: undefined, harnessRef: { cursorAgentId: 'cursor-agent-1' } };
+    const { manager } = makeManager(src, conversation);
+    const moved = await manager.moveTo(src.id, path.resolve(src.cwd, '..', 'other-dir'));
+    expect(moved.harnessRef.cursorAgentId).toBeUndefined();
   });
 
   it('hands the conversation to a same-harness fork that moved to its own worktree', async () => {

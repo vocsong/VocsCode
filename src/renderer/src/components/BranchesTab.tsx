@@ -384,7 +384,7 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
     if (ok) void act(invoke('git:removeWorktree', { sessionId: session.id, path: wt.path }), `Removed ${basename(wt.path)}`);
   };
 
-  const staleAt = Date.now() - STALE_DAYS * 86_400_000;
+  const staleAt = useMemo(() => Date.now() - STALE_DAYS * 86_400_000, [data]);
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return (data?.branches ?? [])

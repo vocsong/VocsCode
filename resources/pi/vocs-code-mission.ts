@@ -128,7 +128,8 @@ export default function vocsCodeMission(pi: Pi): void {
       if (!reason && plan && (MUTATING.has(name) || name.startsWith(MCP_PREFIX))) reason = PLAN_REASON;
     }
     if (!reason) return undefined; // Normal file/shell/MCP approvals still run after this gate.
-    ctx.ui.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: event.toolCallId, toolName: name }), 'info');
+    const nonce = process.env.VOCS_CODE_PI_NONCE;
+    ctx.ui.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: event.toolCallId, toolName: name, ...(nonce ? { nonce } : {}) }), 'info');
     return { block: true, reason };
   });
   pi.on('session_shutdown', (_event, ctx) => {

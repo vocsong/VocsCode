@@ -714,6 +714,7 @@ export const useStore = create<State>((set, get) => ({
 
   reset() {
     storeGeneration++;
+    pendingDeltas.length = 0;
     transcriptLoads.clear();
     transcriptEarlier.clear();
     bufferedEvents.clear();
@@ -729,8 +730,13 @@ export const useStore = create<State>((set, get) => ({
       bootError: null,
       settings: null,
       sessions: [],
+      archiving: {},
+      missions: {},
+      missionErrors: {},
+      missionInspector: null,
       activeId: null,
       layout: panes.singlePaneLayout(),
+      visibleSessionIds: [],
       transcripts: {},
       loaded: {},
       transcriptErrors: {},
@@ -745,6 +751,16 @@ export const useStore = create<State>((set, get) => ({
       activeTerminal: {},
       drafts: {},
       composerHistory: {},
+      composerInsert: null,
+      gitPullRequestPreview: null,
+      fileReveal: null,
+      subagentReveal: null,
+      searchJump: null,
+      toasts: [],
+      changesVersion: 0,
+      agent: undefined,
+      agentPrefill: null,
+      processSummary: null,
       desktopFocus: null,
       remoteAccess: { viewOnly: false },
       history: [],
@@ -768,8 +784,10 @@ export const useStore = create<State>((set, get) => ({
       pendingDeltas.push(env);
       if (!flushScheduled) {
         flushScheduled = true;
+        const generation = storeGeneration;
         requestAnimationFrame(() => {
           flushScheduled = false;
+          if (storeGeneration !== generation) return;
           const batch = pendingDeltas.splice(0);
           if (!batch.length) return;
           set((s) => {
