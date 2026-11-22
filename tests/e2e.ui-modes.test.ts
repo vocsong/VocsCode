@@ -12,6 +12,8 @@
  *   the rail open until it is answered;
  * - the side panel is one rail of icons on the right whose drawer slides out on hover or a peek and
  *   shows one view at a time, and either side pins open (the column moves aside) across a restart;
+ * - every message, thought and step carries its time: always on in Standard, and in Zen only on
+ *   the row the pointer is over;
  * - the choice survives a restart;
  * - both modes make room for tables and the composer without widening prose or scrolling the pane sideways.
  * Sessions, transcripts and a git checkout are seeded on disk, so no harness or provider key is
@@ -78,6 +80,20 @@ function transcript(): TranscriptItem[] {
     { id: 't2', kind: 'tool', ts: T + 2, name: 'shell', hint: 'execute', summary: 'npm test', status: 'done', exitCode: 0, durationMs: 4200, output: '6 passed' },
     { id: 'f1', kind: 'assistant', ts: T + 3, text: 'Rate limiting is in place on every `/v1` route.', phase: 'final' },
     { id: 'turn1', kind: 'turn', ts: T + 4, status: 'completed', durationMs: 154_000, costUsd: 0.61, usage: { inputTokens: 48_200, outputTokens: 6_100 } }
+  ];
+}
+
+/** One of everything that carries a time: your message, reasoning alone, steps (one with nothing to open), a notice, a reply. */
+function stampTranscript(): TranscriptItem[] {
+  const at = (seconds: number) => T + seconds * 1000;
+  return [
+    { id: 'u1', kind: 'user', ts: at(0), text: 'Add rate limiting to the public API.' },
+    { id: 'r1', kind: 'assistant', ts: at(2), text: '', thinking: 'The router lives in src/server.ts.' },
+    { id: 't1', kind: 'tool', ts: at(4), name: 'Edit', hint: 'edit', summary: 'src/server.ts', status: 'done', durationMs: 900, changes: [{ path: 'src/server.ts', kind: 'update', diff: '--- a/src/server.ts\n+++ b/src/server.ts\n@@ -1 +1,2 @@\n export const port = 3000;\n+export const limit = 100;' }] },
+    { id: 'i1', kind: 'info', ts: at(6), level: 'info', text: 'Context compacted.' },
+    { id: 't3', kind: 'tool', ts: at(8), name: 'Read', hint: 'read', summary: 'src/limits.ts', status: 'done' },
+    { id: 'f1', kind: 'assistant', ts: at(10), text: 'Rate limiting is in place on every `/v1` route.', thinking: 'All green.', phase: 'final' },
+    { id: 'turn1', kind: 'turn', ts: at(12), status: 'completed', durationMs: 12_000 }
   ];
 }
 
@@ -432,6 +448,70 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await win.keyboard.press('ArrowRight');
     await expect.poll(scrollLeft, { message: 'the focused table scrolls with the keyboard' }).toBeGreaterThan(before);
     expect(await transcriptView.evaluate((el) => el.scrollLeft)).toBe(0);
+  });
+
+  it.for(['standard', 'zen'])('times every message, thought and step: always in Standard, on hover in %s', { timeout: 120_000 }, async (mode, { onTestFinished }) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-stamps-'));
+    onTestFinished(() => fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 }));
+    const { userData } = await seed(tmp, mode, 0, stampTranscript());
+    const win = await launch(userData);
+    // Zen animates the main area when its rail closes; click and measure the settled layout.
+    await win.emulateMedia({ reducedMotion: 'reduce' });
+    await expect.poll(() => uiMode(win)).toBe(mode);
+    if (mode === 'zen') await clickDot(win, FIRST);
+    else await win.locator(`[data-session-id="${FIRST}"]`).click();
+    if (await win.locator('.panel').count()) await win.keyboard.press('Control+j');
+    await win.locator('.panel').waitFor({ state: 'hidden' });
+    // This transcript is short, so the usual parking spot sits on its rows: point at the title bar.
+    const away = () => win.mouse.move(640, 12);
+    await away();
+
+    const pane = win.locator('.pane.active .transcript');
+    await pane.locator('.work-head').click();
+    const stamps = {
+      user: pane.locator('[data-item-id="u1"] .stamp'),
+      thinking: pane.locator('[data-item-id="r1"] .msg-stamp'),
+      edit: pane.locator('[data-item-id="t1"] .tool-time'),
+      notice: pane.locator('[data-item-id="i1"] .info-time'),
+      read: pane.locator('[data-item-id="t3"] .tool-time'),
+      reply: pane.locator('[data-item-id="f1"] .msg-stamp')
+    };
+    const opacity = (locator: Locator) => locator.evaluate((el) => getComputedStyle(el).opacity);
+    for (const [name, locator] of Object.entries(stamps)) {
+      expect(await locator.count(), `${name} has one time`).toBe(1);
+      const id = await locator.evaluate((el) => el.closest('[data-item-id]')!.getAttribute('data-item-id'));
+      expect(await locator.getAttribute('datetime'), `${name} is its own item's time`).toBe(new Date(stampTranscript().find((i) => i.id === id)!.ts).toISOString());
+    }
+    // One column of times: a step with nothing to open keeps its chevron's place, and notices and
+    // replies float into the same column, so a reply's time costs no line of its own.
+    const right = (locator: Locator) => locator.evaluate((el) => Math.round(el.getBoundingClientRect().right));
+    expect(await right(stamps.read)).toBe(await right(stamps.edit));
+    for (const name of ['notice', 'thinking', 'reply'] as const) expect(await right(stamps[name]), `${name} lines up with the steps`).toBe(await right(stamps.edit));
+    const workTime = pane.locator('.work-head .work-time');
+
+    await away();
+    if (mode === 'standard') {
+      for (const [name, locator] of Object.entries(stamps)) expect(await opacity(locator), `${name} shows`).toBe('1');
+      expect(await workTime.isVisible()).toBe(true);
+      await fs.mkdir(shots, { recursive: true });
+      await win.screenshot({ path: path.join(shots, 'ui-modes-standard-timestamps.png') });
+      return;
+    }
+    // Zen: out of sight until a row is pointed at; then only that row's time comes back.
+    for (const [name, locator] of Object.entries(stamps)) await expect.poll(() => opacity(locator), { message: `${name} hides` }).toBe('0');
+    expect(await workTime.isVisible()).toBe(false);
+    await pane.locator('[data-item-id="t1"] .tool-head').hover();
+    await expect.poll(() => opacity(stamps.edit)).toBe('1');
+    expect(await opacity(stamps.read)).toBe('0');
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'ui-modes-zen-timestamps-hover.png') });
+    await pane.locator('[data-item-id="f1"] .msg-assistant').hover();
+    await expect.poll(() => opacity(stamps.reply)).toBe('1');
+    await expect.poll(() => opacity(stamps.edit)).toBe('0');
+    await pane.locator('.work-head').hover();
+    await expect.poll(() => workTime.isVisible()).toBe(true);
+    await pane.locator('[data-item-id="u1"] .msg-bubble').hover();
+    await expect.poll(() => opacity(stamps.user)).toBe('1');
   });
 
   it('edits a session label and title while its Zen row actions are showing', async ({ onTestFinished }) => {

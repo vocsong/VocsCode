@@ -2,7 +2,7 @@ import React, { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, u
 import type { ApprovalDecision, ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke, isWeb } from '../api';
 import { useCanInvoke, useTranscriptCapabilities } from '../capabilities';
-import { fmtCost, fmtDuration, fmtRate, fmtTokens } from '../format';
+import { fmtCost, fmtDuration, fmtRate, fmtStamp, fmtStampFull, fmtTokens } from '../format';
 import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
 import { MISSION_MANAGED_REASON } from '../missions';
@@ -366,7 +366,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
     const selection = window.getSelection()?.toString() ?? '';
     const block = e.target instanceof Element ? e.target.closest<HTMLElement>('.msg, .tool-card, .info-line') : null;
     // A message's own body, not its meta row: the timestamp and the action buttons are chrome.
-    const body = block?.querySelector<HTMLElement>('.msg-text, .md') ?? block;
+    const body = block?.querySelector<HTMLElement>('.msg-text, .md, .info-text') ?? block;
     const blockText = body ? (body.innerText ?? body.textContent ?? '').trim() : '';
     const items: ContextMenuItem[] = [];
     if (selection.trim()) items.push({ label: 'Copy selection', icon: 'copy', hint: 'Ctrl+C', onSelect: () => void copyText(selection, 'Selection') });
@@ -459,6 +459,21 @@ function PinnedPrompt({ item, onJump }: { item: Extract<TranscriptItem, { kind: 
   );
 }
 
+/**
+ * When a message, step or thought happened. Standard shows it quietly on every row; Zen keeps it
+ * out of sight until the row is pointed at (ui-zen.css). The tooltip carries the full date to the
+ * second, plus whatever `detail` the row adds (how long a step took, when an approval was answered).
+ */
+export function Stamp({ ts, className = '', detail }: { ts: number; className?: string; detail?: string }) {
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const full = fmtStampFull(ts);
+  return (
+    <time className={`stamp ${className}`} dateTime={new Date(ts).toISOString()} title={detail ? `${full} · ${detail}` : full}>
+      {fmtStamp(ts)}
+    </time>
+  );
+}
+
 /** One transcript row; `dataItemId` anchors deep-search jumps to the exact item. */
 const Item = memo(function Item({ item, sessionId, canEdit, showThinking, onImageExpand, dataItemId }: { item: TranscriptItem; sessionId: string; canEdit: boolean; showThinking: boolean; onImageExpand: OnImageExpand; dataItemId?: string }) {
   return (
@@ -537,7 +552,8 @@ function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, s
     case 'info':
       return (
         <div className={`info-line info-${item.level}`}>
-          {item.pending ? <Spinner size={13} /> : <Icon name={item.level === 'error' ? 'alert' : item.level === 'warn' ? 'alert' : 'info'} size={13} />} <span>{item.text}</span>
+          {item.pending ? <Spinner size={13} /> : <Icon name={item.level === 'error' ? 'alert' : item.level === 'warn' ? 'alert' : 'info'} size={13} />} <span className="info-text">{item.text}</span>
+          <Stamp ts={item.ts} className="info-time" />
         </div>
       );
     case 'turn':
@@ -576,6 +592,7 @@ function PlanCard({ item }: { item: Extract<TranscriptItem, { kind: 'plan' }> })
             <span style={{ width: `${Math.round((done / total) * 100)}%` }} />
           </span>
         )}
+        <Stamp ts={item.ts} className="plan-time" />
       </div>
       <ul>
         {item.entries.map((e, i) => (
@@ -598,7 +615,6 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
   const [draft, setDraft] = useState(item.text);
   const [rerunning, setRerunning] = useState(false);
   const toast = useStore((s) => s.toast);
-  const timestamp = new Date(item.ts).toLocaleString(undefined, { weekday: 'long', hour: 'numeric', minute: '2-digit' });
 
   const copy = async () => {
     try {
@@ -675,7 +691,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
         ) : null}
       </div>
       <div className="msg-user-meta">
-        <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{timestamp}</time>
+        <Stamp ts={item.ts} />
         <button type="button" className="msg-action" title="Copy message" aria-label="Copy message" onClick={() => void copy()}><Icon name="copy" size={14} /></button>
         {sessionId && (canEdit || managed) && <button type="button" className="msg-action" title={managed ? MISSION_MANAGED_REASON : 'Edit and rerun message'} aria-label={managed ? 'Rewind unavailable for Mission' : 'Edit and rerun message'} onClick={() => !managed && setEditing(true)} disabled={rerunning || managed}><Icon name="edit" size={14} /></button>}
       </div>
@@ -702,6 +718,9 @@ function AssistantMessage({ item, sessionId, showThinking, onImageExpand }: { it
   const expanded = open ?? thinkingLive;
   return (
     <div className={`msg msg-assistant ${item.phase === 'plan' ? 'msg-plan' : ''}`}>
+      {/* One time per row, floated into the right-hand column the step times share, so it costs no
+          height: on the reasoning toggle's line when there is one, else beside the first line of prose. */}
+      <Stamp ts={item.ts} className="msg-stamp" />
       {item.thinking && showThinking && (
         <div className={`thinking ${expanded ? 'open' : ''}`}>
           <button type="button" className="thinking-toggle" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
@@ -860,6 +879,7 @@ export function WorkGroup({ chunk, sessionId, canEdit = false, showThinking, onI
         <span className="work-label" data-short={running ? '…' : durationMs ? fmtDuration(durationMs) : '✓'}>{running ? 'Working…' : durationMs ? `Worked for ${fmtDuration(durationMs)}` : 'Worked'}</span>
         {tools.length > 0 && <span className="work-stat work-steps" data-short={String(tools.length)}>{tools.length} step{tools.length === 1 ? '' : 's'}</span>}
         {files.size > 0 && <span className="work-stat work-files" data-short={`±${files.size}`}>{files.size} file{files.size === 1 ? '' : 's'} changed</span>}
+        <Stamp ts={entries[0]!.ts} className="work-time" />
         {running ? <Spinner size={12} /> : null}
         {failed ? <Badge tone="red">{failed} failed</Badge> : null}
         <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} className="work-chevron" />
@@ -902,6 +922,7 @@ export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, o
         <span className="spacer" />
         {failed ? <Badge tone="red">{failed} failed</Badge> : null}
         {running ? <Spinner size={12} /> : totalMs ? <span className="muted small">{fmtDuration(totalMs)}</span> : null}
+        {commands[0] && <Stamp ts={commands[0].ts} className="tool-time" />}
         <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
       </button>
       {expanded && (
@@ -985,7 +1006,9 @@ function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptIte
             open run
           </span>
         ) : null}
-        {hasBody && <Icon name={open ? 'chevron' : 'chevronRight'} size={12} />}
+        <Stamp ts={item.ts} className="tool-time" detail={item.durationMs ? `took ${fmtDuration(item.durationMs)}` : undefined} />
+        {/* Held in place without a body too, so the times line up in one column down the steps. */}
+        <Icon name={open ? 'chevron' : 'chevronRight'} size={12} className={hasBody ? undefined : 'tool-chevron-none'} />
       </button>
       {showBody && (
         <div className="tool-body">
@@ -1066,6 +1089,7 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
           <span className="approval-title">{req.title}</span>
           {req.description && <span className="approval-desc">{req.description}</span>}
         </span>
+        <Stamp ts={item.ts} className="approval-time" detail={item.decidedAt ? `answered ${fmtStampFull(item.decidedAt)}` : undefined} />
         <HarnessPill harness={req.harness} />
         {decided && <Badge tone={/deny|reject|cancel/.test(decisionKind) ? 'red' : 'green'}>{labelFor(req, item.decision!.optionId)}</Badge>}
       </div>

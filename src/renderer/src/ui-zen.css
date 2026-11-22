@@ -535,6 +535,23 @@
 :root[data-ui='zen'] .msg-user-meta {
   padding-left: 18px;
 }
+/* Times are there when you look for them: pointing at (or tabbing into) a row brings its time back. */
+:root[data-ui='zen'] .stamp {
+  opacity: 0;
+}
+:root[data-ui='zen'] :is(.msg, .tool-head, .tool-group-head, .work-head, .info-line, .approval-head, .plan-title):is(:hover, :focus-within) .stamp {
+  opacity: 1;
+}
+/* The work chip is sized to what it says, so its hidden time takes no room until it shows. */
+:root[data-ui='zen'] .msg-stamp {
+  line-height: 26px;
+}
+:root[data-ui='zen'] .work-time {
+  display: none;
+}
+:root[data-ui='zen'] .work-head:is(:hover, :focus-visible) .work-time {
+  display: inline;
+}
 :root[data-ui='zen'] .pinned-prompt {
   top: 10px;
   width: calc(100% - 64px);

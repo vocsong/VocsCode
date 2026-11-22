@@ -12,6 +12,26 @@ export function relTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
+const startOfDay = (ts: number): number => new Date(ts).setHours(0, 0, 0, 0);
+
+/**
+ * When a transcript item happened, as short as it can be while still unambiguous: the time alone
+ * today, the weekday within the last week, the date before that, and the year once it differs.
+ */
+export function fmtStamp(ts: number, now = Date.now()): string {
+  const time: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+  const days = Math.round((startOfDay(now) - startOfDay(ts)) / 86_400_000);
+  if (days === 0) return new Date(ts).toLocaleTimeString(undefined, time);
+  if (days > 0 && days < 7) return new Date(ts).toLocaleString(undefined, { weekday: 'short', ...time });
+  const year = new Date(ts).getFullYear() === new Date(now).getFullYear() ? {} : { year: 'numeric' as const };
+  return new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', ...year, ...time });
+}
+
+/** The full date and time to the second, for a timestamp's tooltip. */
+export function fmtStampFull(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'medium' });
+}
+
 export function fmtCost(usd: number | undefined): string {
   if (!usd) return '$0.00';
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
