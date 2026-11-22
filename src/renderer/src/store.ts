@@ -172,8 +172,8 @@ interface State {
   historyIndex: number;
 
   boot(): Promise<void>;
-  /** Opens a session in the active pane, or focuses the pane already showing it. */
-  setActive(id: string | null): Promise<void>;
+  /** Opens a session in the active pane (or focuses it where shown), unless explicitly opened to the right. */
+  setActive(id: string | null, pane?: 'right'): Promise<void>;
   /** Makes a pane active, so its session becomes the context for the global panels. */
   focusPane(paneId: string): void;
   /** Splits a pane (the active one by default); the new pane is active and shows `sessionId` or a picker. */
@@ -545,14 +545,18 @@ export const useStore = create<State>((set, get) => ({
     return bootInFlight;
   },
 
-  async setActive(id) {
+  async setActive(id, pane) {
     const target = id ? get().sessions.find((session) => session.id === id) : undefined;
     if (target?.mission?.role === 'worker') {
       await get().inspectMissionSession(target.mission.missionId, target.id);
       return;
     }
     if (target?.mission) void get().loadMission(target.mission.missionId);
-    set((s) => ({ activeId: id, view: 'chat', layout: panes.openSession(s.layout, id) }));
+    set((s) => ({
+      activeId: id,
+      view: 'chat',
+      layout: pane === 'right' && id ? panes.openSessionOnRight(s.layout, id) : panes.openSession(s.layout, id)
+    }));
     pushHistory(set, get, { view: 'chat', sessionId: id });
     if (id) await get().loadTranscript(id);
   },

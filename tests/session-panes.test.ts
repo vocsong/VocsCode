@@ -13,6 +13,7 @@ import {
   MAX_PANES,
   openFilePreview,
   openSession,
+  openSessionOnRight,
   restoreLayout,
   resizePanes,
   saveLayout,
@@ -56,6 +57,34 @@ describe('session pane model', () => {
     expect(activePane(focused).sessionId).toBe('s_a');
     // Already active and already shown: nothing changes at all.
     expect(openSession(focused, 's_a')).toBe(focused);
+  });
+
+  it('opens a different session to the right of a lone session without creating empty or duplicate splits', () => {
+    const start = singlePaneLayout('s_a');
+    const layout = openSessionOnRight(start, 's_b');
+    expect(layout.orientation).toBe('horizontal');
+    expect(shown(layout)).toEqual(['s_a', 's_b']);
+    expect(activePane(layout)).toBe(layout.panes[1]);
+    expect(openSessionOnRight(start, 's_a')).toBe(start);
+    expect(shown(openSessionOnRight(singlePaneLayout(), 's_b'))).toEqual(['s_b']);
+  });
+
+  it('reuses the right pane and keeps its size even when the left pane is active', () => {
+    const layout = focusPane(resizePanes(two(), [0.6, 0.4]), 'pane-1');
+    const replaced = openSessionOnRight(layout, 's_c');
+    expect(shown(replaced)).toEqual(['s_a', 's_c']);
+    expect(activePane(replaced).id).toBe(layout.panes[1]!.id);
+    expect(replaced.sizes).toEqual([0.6, 0.4]);
+    expect(openSessionOnRight(replaced, 's_c')).toBe(replaced);
+  });
+
+  it('turns a stack side by side and swaps rather than duplicating its first session', () => {
+    const layout = resizePanes(two('s_a', 's_b', 'vertical'), [0.6, 0.4]);
+    const swapped = openSessionOnRight(layout, 's_a');
+    expect(swapped.orientation).toBe('horizontal');
+    expect(shown(swapped)).toEqual(['s_b', 's_a']);
+    expect(activePane(swapped)).toBe(swapped.panes[1]);
+    expect(swapped.sizes).toEqual([0.6, 0.4]);
   });
 
   it('caps the workspace at MAX_PANES and refuses to show one session twice through a split', () => {
