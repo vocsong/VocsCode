@@ -141,7 +141,8 @@ describe('harness model catalog refresh', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: `Refresh ${name} models` })));
 
     const expectedHarnesses = harness === 'codex' ? ['codex', 'codex-exec'] : [harness];
-    expect(modelCalls().map(([, payload]) => payload)).toEqual(expectedHarnesses.map((id) => ({ harness: id })));
+    // An explicit refresh must bypass main's 7-day catalog cache, or it would only replay it.
+    expect(modelCalls().map(([, payload]) => payload)).toEqual(expectedHarnesses.map((id) => ({ harness: id, refresh: true })));
     for (const id of expectedHarnesses as HarnessId[]) {
       expect(useStore.getState().modelCatalog[id]).toEqual({ models: newModels, loading: false });
     }
