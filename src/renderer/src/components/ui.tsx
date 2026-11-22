@@ -187,6 +187,8 @@ export function Dropdown({
       };
       if (e.key === 'ArrowDown') focusAt(current === -1 ? 0 : current + 1);
       else if (e.key === 'ArrowUp') focusAt(current === -1 ? items.length - 1 : current - 1);
+      // A text field inside the menu keeps Home/End for its caret.
+      else if (current === -1 && document.activeElement instanceof HTMLInputElement) return;
       else if (e.key === 'Home') focusAt(0);
       else if (e.key === 'End') focusAt(items.length - 1);
     };
@@ -197,9 +199,12 @@ export function Dropdown({
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
-  // Moving focus into the menu keeps arrow keys and screen readers on the open items.
+  // Moving focus into the menu keeps arrow keys and screen readers on the open items. A menu that
+  // leads with its own control (a filter box) marks it `data-menu-autofocus` to take focus instead.
   useEffect(() => {
-    if (open) menuRef.current?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR)?.focus();
+    if (!open) return;
+    const menu = menuRef.current;
+    (menu?.querySelector<HTMLElement>('[data-menu-autofocus]') ?? menu?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR))?.focus();
   }, [open]);
   const rendered = trigger(open);
   const triggerNode =
