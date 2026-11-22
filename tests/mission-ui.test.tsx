@@ -749,7 +749,7 @@ describe('Mission navigation, inspection and workspace safety', () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('fs:list', { sessionId: 'lead', relPath: undefined, missionWorkspaceId: undefined }));
     act(() => useStore.getState().revealFile('lead', 'tools.ts'));
     expect(useStore.getState().layout.filePreview).toMatchObject({ sessionId: 'lead', path: 'tools.ts', missionWorkspaceId: 'lead-workspace' });
-    expect((await screen.findByRole<HTMLTextAreaElement>('textbox', { name: 'File contents' })).value).toBe('lead workspace preview');
+    expect((await screen.findByRole('textbox', { name: 'File contents' })).textContent).toBe('lead workspace preview');
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:resolve')).toEqual([
       ['fs:resolve', { sessionId: 'lead', path: 'tools.ts', missionWorkspaceId: 'lead-workspace' }]
     ]);
