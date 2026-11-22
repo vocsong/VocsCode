@@ -283,14 +283,15 @@ h4 {
 .panes-vertical.split > .pane {
   min-height: 200px;
 }
-/* Keep the selected pane outlined after the one-shot glow, without shifting content or catching clicks. */
+/* Keep a thin outline and a soft inner glow while selected, without shifting content or catching clicks. */
 .panes.split:not(.narrow) > .pane.active::after {
   content: '';
   position: absolute;
   inset: 0;
   z-index: 4;
   pointer-events: none;
-  border: 2px solid var(--accent);
+  border: 1px solid var(--accent);
+  box-shadow: inset 0 0 9px color-mix(in srgb, var(--accent) 24%, transparent);
 }
 @media (prefers-reduced-motion: no-preference) {
   .panes.split:not(.narrow) > .pane.active::after {
@@ -299,10 +300,7 @@ h4 {
 }
 @keyframes pane-focus-pulse {
   from {
-    box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 18px color-mix(in srgb, var(--accent) 55%, transparent);
-  }
-  to {
-    box-shadow: inset 0 0 0 0 transparent, inset 0 0 0 transparent;
+    box-shadow: inset 0 0 26px color-mix(in srgb, var(--accent) 80%, transparent);
   }
 }
 .panes.split > .pane:not(.active) > .header .header-name {
