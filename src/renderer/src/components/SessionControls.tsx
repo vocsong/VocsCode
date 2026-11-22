@@ -13,6 +13,7 @@ import { setSessionEffort } from '../sessionActions';
 import { effortOptions, permissionOptions } from '../session-controls';
 import { useSessionModels } from '../models';
 import { useStore } from '../store';
+import { useMinimalUi } from '../ui-mode';
 import { Dropdown, Icon, MenuItem } from './ui';
 import { ModelMenu } from './ModelMenu';
 
@@ -109,7 +110,9 @@ export function SessionControls({ session }: { session: SessionMeta }) {
 
 /** Context stays glanceable; spend and token details are in the options menu / Usage panel. */
 export function SessionMeter({ session }: { session: SessionMeta }) {
-  const usageOpen = useStore((s) => s.panelOpen && s.panelTab === 'usage');
+  const minimal = useMinimalUi();
+  // Zen's panel is a rail whose drawer shows one view: Usage is open when the drawer is out on it.
+  const usageOpen = useStore((s) => s.panelOpen && s.panelTab === 'usage' && (!minimal || (s.panelFocus === 'top' && (s.panelPeek || s.pins.right))));
   const ctxPct = session.usage.contextWindow && session.usage.contextTokens ? Math.min(100, Math.round((session.usage.contextTokens / session.usage.contextWindow) * 100)) : null;
   const r = 6;
   const c = 2 * Math.PI * r;
@@ -120,10 +123,14 @@ export function SessionMeter({ session }: { session: SessionMeta }) {
       title={`${fmtCost(session.usage.costUsd)} · Input ${fmtTokens(session.usage.inputTokens)} · Output ${fmtTokens(session.usage.outputTokens)} · Cache read ${fmtTokens(session.usage.cacheReadTokens)}${ctxPct !== null ? ` · Context ${ctxPct}%` : ''} — ${usageOpen ? 'close' : 'open'} Usage`}
       aria-label="Session usage"
       aria-expanded={usageOpen}
+      // A press here does not count as one outside the panel's peek: this button opens and closes it.
+      data-panel-trigger=""
       onClick={() => {
-        const { panelOpen, panelTab, setPanelTab, togglePanel } = useStore.getState();
-        if (panelOpen && panelTab === 'usage') togglePanel(false);
-        else setPanelTab('usage');
+        const { setPanelTab, togglePanel, endPanelPeek, pins } = useStore.getState();
+        // Zen closes the drawer back to its rail, never the whole rail; a pinned drawer stays out.
+        if (!usageOpen) setPanelTab('usage');
+        else if (!minimal) togglePanel(false);
+        else if (!pins.right) endPanelPeek();
       }}
     >
       {ctxPct !== null && (

@@ -77,19 +77,95 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
   const bottomIdle = opened.length === 0;
   // Zen draws the tabs as icons alone; the name moves to a tooltip.
   const minimal = useMinimalUi();
+  // Zen: one rail of icons on the window's right edge and a drawer that shows one view at a time —
+  // the half asked for last. The drawer slides out on hover or focus, on a peek (something asked for
+  // the panel), or stays out while pinned.
+  const focus = useStore((s) => (s.panelFocus === 'bottom' && s.panelBottomOpened.includes(s.panelBottomTab) ? 'bottom' : 'top'));
+  const peek = useStore((s) => s.panelPeek);
+  const pinned = useStore((s) => s.pins.right);
+  const togglePin = useStore((s) => s.togglePin);
+  const changesVersion = useStore((s) => s.changesVersion);
+  const { data: summary } = useGitSummary(session.id, changesVersion);
+  const changed = summary?.isRepo ? (summary.files ?? []).length : 0;
+  const ref = useRef<HTMLElement>(null);
+  // A peek ends when a press lands outside the panel (or the pointer leaves it, below) — except on a
+  // control that opens and closes the panel itself (`data-panel-trigger`), which decides on its click.
+  useEffect(() => {
+    if (!peek) return;
+    const end = (e: PointerEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest('[data-panel-trigger]') || (target && ref.current?.contains(target))) return;
+      useStore.getState().endPanelPeek();
+    };
+    document.addEventListener('pointerdown', end, true);
+    return () => document.removeEventListener('pointerdown', end, true);
+  }, [peek]);
+  const topLabel = (id: PanelTab, label: string) => (session.mission && id === 'goal' ? 'Mission' : session.mission && id === 'changes' ? 'Mission result' : label);
+  const selectTop = (id: PanelTab) => {
+    if (session.mission && id === 'changes') setWorkspace({ sessionId: session.id, id: '' });
+    setTab(id);
+  };
+  const bottomTabs = BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents');
+  const processCount = orphanedProcesses > 0 && (
+    <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} running on ${orphanedProcesses === 1 ? 'its' : 'their'} own: nothing in Vocs Code will stop ${orphanedProcesses === 1 ? 'it' : 'them'}`}>
+      {orphanedProcesses}
+    </span>
+  );
+  const currentTop = TABS.find((t) => t.id === tab);
+  const currentLabel = focus === 'bottom' ? BOTTOM_TABS.find((t) => t.id === bottomTab)?.label : currentTop && topLabel(currentTop.id, currentTop.label);
   return (
-    <aside className={`panel ${bottomIdle ? 'panel-bottom-idle' : ''}`}>
-      <div className="panel-section panel-top">
-        <div className="panel-tabs">
-          {TABS.map((t) => (
-            <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} title={minimal ? t.label : undefined} onClick={() => { if (session.mission && t.id === 'changes') setWorkspace({ sessionId: session.id, id: '' }); setTab(t.id); }}>
-              <Icon name={t.icon} size={13} /> {session.mission && t.id === 'goal' ? 'Mission' : session.mission && t.id === 'changes' ? 'Mission result' : t.label}
-              {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
-            </button>
-          ))}
-          <span className="spacer" />
-          <Button variant="ghost" size="sm" icon="x" onClick={() => togglePanel(false)} aria-label="Close panel" />
+    <aside
+      ref={ref}
+      className={`panel ${bottomIdle ? 'panel-bottom-idle' : ''}`}
+      data-focus={minimal ? focus : undefined}
+      data-peek={minimal && peek ? '' : undefined}
+      data-pinned={minimal && pinned ? '' : undefined}
+      onPointerLeave={peek ? () => useStore.getState().endPanelPeek() : undefined}
+    >
+      {minimal && (
+        <nav className="panel-rail" aria-label="Side panel">
+          {TABS.map((t) => {
+            const label = topLabel(t.id, t.label);
+            const active = focus === 'top' && tab === t.id;
+            return (
+              <button key={t.id} type="button" className={`panel-tab ${active ? 'active' : ''}`} title={t.id === 'changes' && changed > 0 ? `${label} · ${changed} changed file${changed === 1 ? '' : 's'}` : label} aria-label={label} aria-current={active ? 'true' : undefined} data-testid={`panel-top-${t.id}`} onClick={() => selectTop(t.id)}>
+                <Icon name={t.icon} size={13} />
+                {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
+                {t.id === 'changes' && changed > 0 && <span className="panel-rail-dot" data-testid="panel-changes-dot" />}
+              </button>
+            );
+          })}
+          <span className="panel-rail-rule" aria-hidden />
+          {bottomTabs.map((t) => {
+            const active = focus === 'bottom' && bottomTab === t.id;
+            return (
+              <button key={t.id} type="button" className={`panel-tab ${active ? 'active' : ''}`} title={t.label} aria-label={t.label} aria-current={active ? 'true' : undefined} data-testid={`panel-bottom-${t.id}`} onClick={() => openBottom(t.id)}>
+                <Icon name={t.icon} size={13} />
+                {t.id === 'processes' && processCount}
+              </button>
+            );
+          })}
+        </nav>
+      )}
+      {minimal && (
+        <div className="panel-head">
+          <span className="panel-head-title">{currentLabel}</span>
+          <Button variant={pinned ? 'subtle' : 'ghost'} size="sm" icon={pinned ? 'pinOff' : 'pin'} onClick={() => togglePin('right')} title={pinned ? 'Unpin: fold back to the rail' : 'Pin open'} aria-label={pinned ? 'Unpin side panel' : 'Pin side panel'} aria-pressed={pinned} />
         </div>
+      )}
+      <div className="panel-section panel-top">
+        {!minimal && (
+          <div className="panel-tabs">
+            {TABS.map((t) => (
+              <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => selectTop(t.id)}>
+                <Icon name={t.icon} size={13} /> {topLabel(t.id, t.label)}
+                {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
+              </button>
+            ))}
+            <span className="spacer" />
+            <Button variant="ghost" size="sm" icon="x" onClick={() => togglePanel(false)} aria-label="Close panel" />
+          </div>
+        )}
         <div className="panel-body">
           {session.mission && (tab === 'changes' || tab === 'files') && (mission ? <MissionWorkspacePicker record={mission} value={workspaceId} onChange={(id) => setWorkspace({ sessionId: session.id, id })} /> : <div className="pad muted">Loading Mission workspace state…</div>)}
           {tab === 'changes' && (session.mission ? mission && <MissionChanges record={mission} workspaceId={workspaceId} /> : <ChangesTab session={session} />)}
@@ -102,19 +178,17 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
       </div>
       {!bottomIdle && <SplitResizer />}
       <div className="panel-section panel-bottom">
-        <div className="panel-tabs">
-          {BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents').map((t) => (
-            <button key={t.id} type="button" className={`panel-tab ${!bottomIdle && bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`} title={minimal ? t.label : undefined}>
-              <Icon name={t.icon} size={13} /> {t.label}
-              {t.id === 'processes' && orphanedProcesses > 0 && (
-                <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} running on ${orphanedProcesses === 1 ? 'its' : 'their'} own: nothing in Vocs Code will stop ${orphanedProcesses === 1 ? 'it' : 'them'}`}>
-                  {orphanedProcesses}
-                </span>
-              )}
-            </button>
-          ))}
-          <span className="spacer" />
-        </div>
+        {!minimal && (
+          <div className="panel-tabs">
+            {bottomTabs.map((t) => (
+              <button key={t.id} type="button" className={`panel-tab ${!bottomIdle && bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
+                <Icon name={t.icon} size={13} /> {t.label}
+                {t.id === 'processes' && processCount}
+              </button>
+            ))}
+            <span className="spacer" />
+          </div>
+        )}
         <div className="panel-body">
           {bottomTab === 'mcp' && opened.includes('mcp') && <McpTab session={session} />}
           {bottomTab === 'desktop' && opened.includes('desktop') && <DesktopTab session={session} />}

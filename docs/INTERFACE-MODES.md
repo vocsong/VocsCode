@@ -20,8 +20,18 @@ File / Edit / View / Help menu bar.
   appears only when pointed at; a failed or interrupted one stays visible.
 - The composer is a floating pill. Its model, permission, attach and voice controls appear when you
   point at it or tab into them; Send never hides.
-- The side panel is a drawer floating beside the column, with icon tabs. The column moves out of its
-  way rather than hiding under it.
+- The side panel mirrors the session rail on the right edge: one series of icons, the workspace views
+  (Changes, Files, Git, Goal, Usage, Terminal), a short rule, then the live services (MCP, Desktop,
+  Subagents, Knowledge, Processes). The rail says what it can without opening: a dot on Changes while
+  the tree has uncommitted work, a live dot on an active goal, a count on processes left running.
+  Hovering it, or tabbing or typing into it, slides out a drawer wider than the Standard panel
+  (at least 560px) over the conversation. The drawer shows one view at a time, named in its head, and
+  folds back once the pointer and focus have left. Something that asks for the panel without the
+  pointer (a file link, the branch crumb, the usage meter) makes it peek out until a press lands
+  elsewhere. The rail stands in for the header's panel toggle and changes chip.
+- Either side can be pinned open (the pin at the top of the open sidebar, and in the drawer's head).
+  A pinned side owns its room and the column moves out of its way; unpin to fold it back to its rail.
+  Pins are kept per window in localStorage, so they survive a restart.
 - The title bar keeps only the menu, where you are and Vesta. File / Edit / View / Help fold into one
   menu button whose panel switches menus by icon. Back and forward appear when the bar is pointed
   at. Labels the layout drops become tooltips, so no destination disappears.
@@ -37,7 +47,12 @@ File / Edit / View / Help menu bar.
   one attribute: nothing remounts, so the open session, an unsent draft, a running turn, terminals
   and the side panel all survive a switch.
 - React reads the mode (`src/renderer/src/ui-mode.ts`) only where the layout needs different markup:
-  the one-button menu, tooltips for labels the layout hides and the composer placeholder. The CSS
+  the one-button menu, tooltips for labels the layout hides, the composer placeholder, the pin
+  buttons, and the side panel's rail and drawer head, which replace its two tab strips. The panel's
+  bodies stay where they are in the tree, so a switch still remounts nothing. The store keeps which
+  half was picked last (`panelFocus`), the peek (`panelPeek`) and the pins (`pins`, saved by
+  `src/renderer/src/pins.ts`); the panel exposes them to the CSS as `data-focus`, `data-peek` and
+  `data-pinned`, and `.app` carries `pin-left` / `pin-right`. The CSS
   also reads a few data hooks:
   - `data-status`, `data-harness` and `data-pinned` on session rows;
   - `data-short` on the work chip (its facts without words);

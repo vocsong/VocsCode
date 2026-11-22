@@ -8,6 +8,7 @@
 import React, { useState } from 'react';
 import { invoke } from '../api';
 import { useStore } from '../store';
+import { useMinimalUi } from '../ui-mode';
 
 type Target = 'sidebar' | 'panel';
 
@@ -20,6 +21,14 @@ const LIMITS: Record<Target, { min: number; max: number; def: number }> = {
 /** The main column never gets squeezed below this, whatever the window size. */
 const MAIN_MIN = 420;
 
+/**
+ * Zen: the side panel is a drawer that slides out over the column, so it starts wider than the
+ * Standard panel. ui-zen.css draws it at `max(--panel, 560px)`; the drag uses the same floor so the
+ * edge stays under the pointer. Both sides also keep a 52px rail when they are not pinned open.
+ */
+const ZEN_PANEL_MIN = 560;
+const ZEN_RAIL = 52;
+
 const VAR: Record<Target, string> = { sidebar: '--sidebar', panel: '--panel' };
 
 export function Resizer({ target }: { target: Target }) {
@@ -27,11 +36,19 @@ export function Resizer({ target }: { target: Target }) {
   const settings = useStore((s) => s.settings);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const panelOpen = useStore((s) => s.panelOpen);
+  const pins = useStore((s) => s.pins);
+  const minimal = useMinimalUi();
   if (!settings) return null;
 
-  const width = target === 'sidebar' ? settings.sidebarWidth : settings.panelWidth;
-  const other = target === 'sidebar' ? (panelOpen ? settings.panelWidth : 0) : sidebarOpen ? settings.sidebarWidth : 0;
-  const { min, max, def } = LIMITS[target];
+  const zenPanel = Math.max(ZEN_PANEL_MIN, settings.panelWidth);
+  const width = target === 'sidebar' ? settings.sidebarWidth : minimal ? zenPanel : settings.panelWidth;
+  const other = !minimal
+    ? target === 'sidebar' ? (panelOpen ? settings.panelWidth : 0) : sidebarOpen ? settings.sidebarWidth : 0
+    : target === 'sidebar'
+      ? panelOpen ? ZEN_RAIL + (pins.right ? zenPanel : 0) : 0
+      : sidebarOpen ? (pins.left ? settings.sidebarWidth : ZEN_RAIL) : 0;
+  const { max, def } = LIMITS[target];
+  const min = minimal && target === 'panel' ? ZEN_PANEL_MIN : LIMITS[target].min;
   const clamp = (w: number) => Math.round(Math.min(Math.min(max, window.innerWidth - other - MAIN_MIN), Math.max(min, w)));
 
   const paint = (w: number) => document.querySelector<HTMLElement>('.app')?.style.setProperty(VAR[target], `${w}px`);

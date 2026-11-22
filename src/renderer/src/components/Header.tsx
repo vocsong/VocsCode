@@ -83,7 +83,7 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
         {paneId && split && (
           <Button variant="ghost" size="sm" icon="x" onClick={() => useStore.getState().closePane(paneId)} title="Close pane — the session keeps running" aria-label="Close pane" />
         )}
-        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
+        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" className="header-panel-toggle" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
       </div>
 
       {session.mission && (
