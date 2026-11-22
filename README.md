@@ -71,7 +71,7 @@ That installs everything (including dev dependencies, even if your environment s
 
 **MCP where you want it.** Add a server once — globally, or in a repo's `.mcp.json` — and Claude, both Codex adapters, ACP agents and Pi pick it up. Test a server before you rely on it; secrets stay in your keychain, never in the repo. GitNexus ships built in, scoped to each repo's code graph: one shared server serves every session, and each one sees only its own repo's graph. A same-named entry in Codex’s own config is switched off for the session, so the shared server is the only one that runs.
 
-**Housekeep sessions.** Run `/housekeep` to review older sessions, confirm one batch, and archive finished work with clean worktrees. Recent activity is protected for 7 days by default; change the window in [Settings → Housekeep](docs/SETTINGS.md#find-the-right-page).
+**Housekeep sessions.** Run `/housekeep` to review older sessions, confirm one batch, and archive finished work with clean worktrees. Recent activity is protected for 7 days by default. Use `/housekeep 3` to protect the last 3 days for one review, or change the default in [Settings → Housekeep](docs/SETTINGS.md#find-the-right-page).
 
 **Private by default.** Keys in your keychain, encrypted at rest. Sessions resume after restart, whatever agent you used.
 

@@ -27,14 +27,14 @@ import { isTopLevelSession, pauseMissionSession } from './missions';
 import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
 import { activeComposer } from './panes';
 import { GitPanelCache } from './git-panel-cache';
-import { canHousekeepHere, HOUSEKEEP_OPEN } from './housekeep';
+import { canHousekeepHere, HOUSEKEEP_OPEN, type HousekeepOpenOptions } from './housekeep';
 
 export function App() {
   const [gitPanelCache] = useState(() => new GitPanelCache());
-  const [housekeepOpen, setHousekeepOpen] = useState(false);
+  const [housekeepOpen, setHousekeepOpen] = useState<HousekeepOpenOptions | null>(null);
   useEffect(() => {
     if (!canHousekeepHere()) return;
-    const open = () => setHousekeepOpen(true);
+    const open = (event: WindowEventMap[typeof HOUSEKEEP_OPEN]) => setHousekeepOpen(event.detail);
     window.addEventListener(HOUSEKEEP_OPEN, open);
     return () => window.removeEventListener(HOUSEKEEP_OPEN, open);
   }, []);
@@ -225,7 +225,7 @@ export function App() {
       {quickSessionOpen && <QuickSessionPicker />}
       {paletteOpen && <CommandPalette />}
       {searchOpen && <SearchModal />}
-      {housekeepOpen && <HousekeepDialog onClose={() => setHousekeepOpen(false)} />}
+      {housekeepOpen && <HousekeepDialog key={housekeepOpen.recentDaysOverride ?? 'configured'} {...housekeepOpen} onClose={() => setHousekeepOpen(null)} />}
       <ConfirmHost />
       <ContextMenuHost />
       {settings.onboardingDone && <Vesta />}
