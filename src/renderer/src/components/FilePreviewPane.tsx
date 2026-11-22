@@ -1,18 +1,13 @@
-/**
- * A file previewed in the split view, beside the session that named it. Every way of opening a file
- * — a transcript mention, a Files tab row, a link inside a previewed markdown file — lands here.
- *
- * A shortened mention (`tools.ts`) is resolved in the session folder first: one match opens, several
- * ask which one, none says so. Text, rendered markdown, images and binary files each get their own
- * view. The pane never becomes the active pane, so the conversation keeps the composer and panels.
- * A request that fails leaves the previous file on screen; with nothing to show, the pane closes.
- */
+/** The right-panel file drawer. Opening a file never takes space from the conversation layout. */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { diffLines } from 'diff';
 import { imageMimeType, type WorkspaceImage } from '../../../shared/image-files';
-import { canInvoke, invoke, invokeErrorMessage } from '../api';
+import { FILE_PREVIEW_MAX_BYTES } from '../../../shared/ipc';
+import type { SessionMeta } from '../../../shared/types';
+import { canInvoke, invoke, invokeErrorMessage, modKey } from '../api';
 import { fileManagerName, fileScope } from '../file-open';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
-import type { SessionPane } from '../panes';
+import type { FilePreviewTarget } from '../panes';
 import { useStore } from '../store';
 import { SessionTitle } from './SessionTitle';
 import { Button, Icon, Spinner } from './ui';
@@ -21,76 +16,126 @@ interface Preview {
   path: string;
   content: string;
   truncated: boolean;
-  /** Not text (a zip, an executable): there is nothing to show but its name. */
+  readOnly?: boolean;
   binary?: boolean;
-  /** Set for image files, which render as a picture; null when the image could not be read. */
   image?: WorkspaceImage | null;
-  /** The line the request asked for, kept for "Open in editor". */
   line?: number;
 }
 
+interface Draft {
+  original: string;
+  text: string;
+  saving?: boolean;
+}
+
+type Drafts = Map<string, Draft>;
 const isMarkdown = (p: string) => /\.(?:md|markdown)$/i.test(p);
 const dirname = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+const editorText = (content: string) => content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
 
-export function FilePreviewPane({ pane, size, split }: { pane: SessionPane; size: number; split: boolean }) {
-  const target = pane.file!;
-  const session = useStore((s) => s.sessions.find((x) => x.id === target.sessionId));
+/** A textarea normalizes newlines. Keep the BOM and preserve the endings of unchanged lines. */
+function restoreFileText(text: string, original: string): string {
+  const bom = original.startsWith('\uFEFF') ? '\uFEFF' : '';
+  const endings = original.match(/\r\n|\r|\n/g) ?? [];
+  const eol = endings[0] ?? '\n';
+  if (endings.every((ending) => ending === eol)) return bom + text.replace(/\n/g, eol);
+  const changes = diffLines(editorText(original), text, { maxEditLength: 2000 });
+  if (!changes) return bom + text.replace(/\n/g, eol);
+  let at = 0;
+  return bom + changes.map(({ value, added, removed }) => {
+    const restored = value.replace(/\n/g, () => added ? eol : endings[at++] ?? eol);
+    return removed ? '' : restored;
+  }).join('');
+}
+
+export function FilePreviewPane({ visible = true }: { visible?: boolean }) {
+  const target = useStore((s) => s.layout.filePreview);
+  const session = useStore((s) => s.sessions.find((x) => x.id === target?.sessionId));
   const mission = useStore((s) => (session?.mission ? s.missions[session.mission.missionId] : undefined));
+  // Drafts are in-memory only and follow the exact workspace and file, even when the drawer closes.
+  const [drafts, setDrafts] = useState<Drafts>(() => new Map());
+  const pendingWrites = useRef(new Map<string, Promise<void>>()).current;
+  const updateDraft = (key: string, draft?: Draft) => setDrafts((current) => {
+    const next = new Map(current);
+    if (draft) next.set(key, draft);
+    else next.delete(key);
+    return next;
+  });
+  if (!visible || !target || !session) return null;
+  const root = fileScope(session, mission, target.missionWorkspaceId ?? '').root;
+  const scopeKey = JSON.stringify([session.id, session.mission?.missionId, target.missionWorkspaceId, root]);
+  return <ScopedPreview key={scopeKey} {...{ target, session, root, scopeKey, drafts, updateDraft, pendingWrites }} />;
+}
+
+function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, pendingWrites }: {
+  target: FilePreviewTarget;
+  session: SessionMeta;
+  root: string;
+  scopeKey: string;
+  drafts: Drafts;
+  updateDraft: (key: string, draft?: Draft) => void;
+  pendingWrites: Map<string, Promise<void>>;
+}) {
   const toast = useStore((s) => s.toast);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [mdView, setMdView] = useState(false);
   const [scrollLine, setScrollLine] = useState<number | null>(null);
   const [matches, setMatches] = useState<{ reference: string; paths: string[]; line?: number } | null>(null);
   const [resolving, setResolving] = useState(false);
-  const mdBody = useRef<HTMLDivElement | null>(null);
-  const preBody = useRef<HTMLPreElement | null>(null);
+  const [reading, setReading] = useState(false);
+  const mdBody = useRef<HTMLDivElement>(null);
+  const editor = useRef<HTMLTextAreaElement>(null);
   const shown = useRef<Preview | null>(null);
   shown.current = preview;
-  /** Monotonic request id: a slow earlier read must not replace a file opened after it. */
   const readSeq = useRef(0);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
+    return () => { mounted.current = false; };
   }, []);
 
   const sessionId = target.sessionId;
-  const root = session ? fileScope(session, mission, target.missionWorkspaceId ?? '').root : '';
-  const scope = session?.mission ? { missionWorkspaceId: target.missionWorkspaceId } : {};
-  const current = (seq: number) => mounted.current && readSeq.current === seq;
-  const close = () => useStore.getState().closePane(pane.id);
-  /** A request that cannot be shown: say why, and keep whatever was on screen before it. */
+  const scope = session.mission ? { missionWorkspaceId: target.missionWorkspaceId } : {};
+  const current = (seq: number) => mounted.current && readSeq.current === seq && useStore.getState().layout.filePreview === target;
+  const close = () => useStore.getState().closeFilePreview();
   const fail = (message: string) => {
     toast(message, 'error');
     if (!shown.current) close();
   };
 
-  const openFile = async (rel: string, line: number | undefined, seq: number) => {
+  const keyFor = (path: string) => JSON.stringify([scopeKey, path]);
+  const openFile = async (rel: string, line: number | undefined, seq: number, discard = false) => {
+    const path = rel.replace(/\\/g, '/');
+    const key = keyFor(path);
+    setReading(true);
     try {
-      // Image bytes decoded as text are noise, so images take their own read and render as a picture.
+      // Reopening a drawer mid-save must read the bytes after the write, not the stale baseline.
+      const pending = pendingWrites.get(key);
+      if (pending) await pending;
+      if (!current(seq)) return;
       const r = imageMimeType(rel)
         ? { content: '', truncated: false, image: await invoke('fs:readImage', { sessionId, path: rel, ...scope }) }
-        : await invoke('fs:read', { sessionId, path: rel, maxBytes: 200_000, ...scope });
+        : await invoke('fs:read', { sessionId, path: rel, maxBytes: FILE_PREVIEW_MAX_BYTES, ...scope });
       if (!current(seq)) return;
-      const p = rel.replace(/\\/g, '/');
-      setPreview({ path: p, ...r, ...(line ? { line } : {}) });
-      setMdView(isMarkdown(p));
+      if (discard) updateDraft(key);
+      setPreview({ path, ...r, line });
+      setMdView(false);
       setScrollLine(line && line > 0 ? line : null);
     } catch (err) {
       if (current(seq)) fail(invokeErrorMessage(err));
+    } finally {
+      if (current(seq)) setReading(false);
     }
   };
 
   /** StrictMode replays mount effects; one request must not start two lookups. */
-  const handled = useRef<typeof target | null>(null);
+  const handled = useRef<FilePreviewTarget | null>(null);
   useEffect(() => {
     if (handled.current === target) return;
     handled.current = target;
     const seq = ++readSeq.current;
     setMatches(null);
-    // Exact paths, and transports without the lookup, read the path as given.
+    setReading(false);
     if (target.exact || !canInvoke('fs:resolve')) {
       setResolving(false);
       void openFile(target.path, target.line, seq);
@@ -113,7 +158,6 @@ export function FilePreviewPane({ pane, size, split }: { pane: SessionPane; size
       });
   }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Stops a lookup or a choice; the previous file stays, and without one the pane closes. */
   const cancel = () => {
     readSeq.current++;
     setResolving(false);
@@ -121,19 +165,49 @@ export function FilePreviewPane({ pane, size, split }: { pane: SessionPane; size
     if (!shown.current) close();
   };
 
-  // Once the text is on screen, bring the requested line to the middle of the view.
+  const isText = !!preview && !preview.binary && preview.image === undefined;
+  const editable = isText && !preview.truncated && !preview.readOnly && canInvoke('fs:writeText');
+  const blocked = reading || resolving || !!matches;
+  const pathKey = keyFor(preview?.path ?? '');
+  const draft = drafts.get(pathKey);
+  const text = draft?.text ?? (preview ? editorText(preview.content) : '');
+  const dirty = !!draft;
+
+  const save = () => {
+    if (!preview || !editable || !draft || blocked || pendingWrites.has(pathKey)) return;
+    updateDraft(pathKey, { ...draft, saving: true });
+    const write = async () => {
+      try {
+        const content = restoreFileText(draft.text, draft.original);
+        await invoke('fs:writeText', { sessionId, path: preview.path, expectedContent: draft.original, content, ...scope });
+        if (mounted.current) setPreview((current) => current?.path === preview.path ? { ...current, content } : current);
+        updateDraft(pathKey);
+        useStore.setState((s) => ({ changesVersion: s.changesVersion + 1 }));
+        toast(`Saved ${preview.path}`, 'success');
+      } catch (error) {
+        updateDraft(pathKey, draft);
+        toast(invokeErrorMessage(error), 'error');
+      }
+    };
+    pendingWrites.set(pathKey, write().finally(() => pendingWrites.delete(pathKey)).then(() => undefined));
+  };
+
+  // Position the caret and scroll the requested line into view in the unwrapped source editor.
   useEffect(() => {
-    if (scrollLine === null) return;
-    const pre = preBody.current;
-    if (!pre) return;
-    const lineHeight = Number.parseFloat(getComputedStyle(pre).lineHeight) || 18;
-    pre.scrollTop = Math.max(0, (scrollLine - 1) * lineHeight - pre.clientHeight / 2);
+    const field = editor.current;
+    if (scrollLine === null || !field) return;
+    const lines = field.value.split('\n');
+    const line = Math.min(scrollLine, lines.length);
+    const offset = lines.slice(0, line - 1).reduce((sum, row) => sum + row.length + 1, 0);
+    field.setSelectionRange(offset, offset);
+    const lineHeight = Number.parseFloat(getComputedStyle(field).lineHeight) || 20;
+    field.scrollTop = Math.max(0, (line - 1) * lineHeight - field.clientHeight / 2);
     setScrollLine(null);
   }, [scrollLine, preview, mdView]);
 
-  const isMd = !!preview && isMarkdown(preview.path);
-  // Links inside a markdown file are relative to that file, not to the workspace root.
-  const mdHtml = useMemo(() => (isMd && preview ? renderMarkdown(preview.content, { fileLinks: true, fileBase: dirname(preview.path) }) : ''), [isMd, preview]);
+  const isMd = isText && isMarkdown(preview.path);
+  const mdPath = preview?.path ?? '';
+  const mdHtml = useMemo(() => isMd && mdView ? renderMarkdown(text, { fileLinks: true, fileBase: dirname(mdPath) }) : '', [isMd, mdView, text, mdPath]);
   useEffect(() => {
     if (!mdView || !mdBody.current) return;
     return installMarkdownHandlers(
@@ -141,29 +215,37 @@ export function FilePreviewPane({ pane, size, split }: { pane: SessionPane; size
       (url) => void invoke('app:openExternal', { url }),
       (p, line) => useStore.getState().revealFile(sessionId, p, line, { workspace: target.missionWorkspaceId ?? '' })
     );
-  }, [mdView, mdHtml, sessionId, target.missionWorkspaceId]);
+  }, [mdView, mdHtml, resolving, matches, sessionId, target.missionWorkspaceId]);
   const image = preview?.image;
   const imageSrc = useMemo(() => (image && !image.tooLarge ? `data:${image.mimeType};base64,${image.data}` : ''), [image]);
-
-  if (!session) return null;
   const title = preview?.path ?? target.path;
   return (
     <section
-      className="pane file-pane"
-      data-pane-id={pane.id}
+      className="file-pane"
       data-testid="file-pane"
       aria-label={`Preview: ${title}`}
-      style={split ? { flexGrow: Math.round(size * 1000) } : undefined}
+      onKeyDown={(event) => {
+        if (event.defaultPrevented || event.nativeEvent.isComposing) return;
+        if (event.key === 'Escape') {
+          event.stopPropagation();
+          close();
+        } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          event.stopPropagation();
+          void save();
+        }
+      }}
     >
       <div className="file-preview-head">
         <Icon name="file" size={13} />
         <span className="mono file-preview-path" title={title}>{title}</span>
         <SessionTitle session={session} className="muted small file-preview-session" />
         <span className="spacer" />
-        {preview && isMd && (
-          <Button size="sm" variant="ghost" icon={mdView ? 'file' : 'eye'} onClick={() => setMdView((v) => !v)} title={mdView ? 'Show source' : 'Show markdown preview'} />
+        {editable && <Button size="sm" variant={dirty ? 'primary' : 'ghost'} disabled={!dirty || draft.saving || blocked} onClick={save} title={`Save file (${modKey}+S)`}>{draft?.saving ? 'Saving…' : 'Save'}</Button>}
+        {isMd && (
+          <Button size="sm" variant="ghost" icon={mdView ? 'file' : 'eye'} onClick={() => setMdView((v) => !v)} title={mdView ? 'Show source' : 'Show markdown preview'} aria-label={mdView ? 'Show source' : 'Show markdown preview'} />
         )}
-        {preview && !session.mission && (
+        {preview && !session.mission && canInvoke('app:openInEditor') && (
           <Button
             size="sm"
             variant="ghost"
@@ -187,33 +269,22 @@ export function FilePreviewPane({ pane, size, split }: { pane: SessionPane; size
             <Button size="sm" variant="ghost" onClick={cancel}>Cancel</Button>
           </div>
           {matches.paths.map((candidate) => (
-            <button
-              className="file-row"
-              type="button"
-              key={candidate}
-              title={candidate}
-              onClick={() => {
-                setMatches(null);
-                void openFile(candidate, matches.line, ++readSeq.current);
-              }}
-            >
+            <button className="file-row" type="button" key={candidate} title={candidate} onClick={() => {
+              setMatches(null);
+              void openFile(candidate, matches.line, ++readSeq.current);
+            }}>
               <Icon name="file" size={13} />
               <span className="file-path">{candidate}</span>
             </button>
           ))}
         </section>
       ) : !preview ? (
-        <div className="pad row gap8" role="status">
-          <Spinner /> Opening {target.path}…
-        </div>
+        <div className="pad row gap8" role="status"><Spinner /> Opening {target.path}…</div>
       ) : (
-        // `.file-preview` is on screen only while a file actually is.
         <div className="file-preview">
           {preview.image !== undefined ? (
             <div className="file-image">
-              {imageSrc ? (
-                <img src={imageSrc} alt={preview.path} />
-              ) : (
+              {imageSrc ? <img src={imageSrc} alt={preview.path} /> : (
                 <span className="muted small">
                   {image?.tooLarge ? `Image is ${(image.size / 1_000_000).toFixed(1)} MB, too large to preview.` : 'This image could not be previewed.'}
                 </span>
@@ -223,11 +294,7 @@ export function FilePreviewPane({ pane, size, split }: { pane: SessionPane; size
             <div className="file-binary">
               <span className="muted small">Binary file, no text preview.</span>
               {!session.mission && canInvoke('app:showInFolder') && (
-                <Button
-                  size="sm"
-                  icon="folder"
-                  onClick={() => void invoke('app:showInFolder', { sessionId, path: `${root}/${preview.path}` }).then((r) => !r.ok && toast(r.error ?? 'Could not show the file', 'error'))}
-                >
+                <Button size="sm" icon="folder" onClick={() => void invoke('app:showInFolder', { sessionId, path: `${root}/${preview.path}` }).then((r) => !r.ok && toast(r.error ?? 'Could not show the file', 'error'))}>
                   Show in {fileManagerName()}
                 </Button>
               )}
@@ -235,8 +302,28 @@ export function FilePreviewPane({ pane, size, split }: { pane: SessionPane; size
           ) : isMd && mdView ? (
             <div ref={mdBody} className="md file-md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
           ) : (
-            <pre className="mono" ref={preBody}>{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>
+            <textarea
+              key={preview.path}
+              ref={editor}
+              className="mono file-editor"
+              value={text}
+              aria-label="File contents"
+              autoCapitalize="off"
+              spellCheck={false}
+              wrap="off"
+              readOnly={!editable || draft?.saving || blocked}
+              onChange={(event) => {
+                if (!editable || draft?.saving || blocked) return;
+                const value = event.target.value;
+                const original = draft?.original ?? preview.content;
+                updateDraft(pathKey, value === editorText(original) ? undefined : { original, text: value });
+              }}
+            />
           )}
+          {isText && <div className="file-preview-status muted small">
+            <span role="status">{reading ? 'Loading…' : preview.truncated ? 'Truncated preview · read-only' : !editable ? 'Read-only' : draft?.saving ? 'Saving…' : dirty ? 'Unsaved changes' : ''}</span>
+            {editable && dirty && !draft.saving && <Button size="sm" variant="ghost" disabled={blocked} onClick={() => void openFile(preview.path, preview.line, ++readSeq.current, true)}>Discard and reload</Button>}
+          </div>}
         </div>
       )}
     </section>

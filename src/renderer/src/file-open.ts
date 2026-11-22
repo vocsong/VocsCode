@@ -1,7 +1,7 @@
 /**
  * Where a file named in a session is read from, and what happens to one outside it. Shared by the
- * store's `revealFile` (which decides between the file pane, the Files tab and the system file
- * manager) and the file pane itself (which reads and shows the file).
+ * store's `revealFile` (which selects the editor drawer, the Files tab or the system file manager)
+ * and the drawer itself (which reads and shows the file).
  */
 import type { MissionRecord } from '../../shared/mission';
 import type { SessionMeta } from '../../shared/types';

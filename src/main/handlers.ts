@@ -13,7 +13,7 @@ import type { CreateMissionRequest, MissionCodeRevision, MissionControlRequest, 
 import { MISSION_NOT_LINKED_MESSAGE, parseMissionCommand } from '../shared/mission-command';
 import { missionRevisionConflictMessage } from '../shared/mission-errors';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
-import { PUSH_CHANNELS, TEXT_EXPORT_MAX_BYTES } from '../shared/ipc';
+import { FILE_PREVIEW_MAX_BYTES, PUSH_CHANNELS, TEXT_EXPORT_MAX_BYTES } from '../shared/ipc';
 import { missionPlanMarkdown } from './mission/context';
 import { missionDeliveryBranch } from './mission/delivery';
 import type { TargetObservation } from './mission/workspaces';
@@ -51,7 +51,7 @@ import type { DesktopFocusTracker } from './desktop-focus';
 import type { ProcessTracker } from './process-tracker';
 import { relayUrl, signInAvailable } from './remote/relay-url';
 import { transcriptPage } from '../shared/transcript-page';
-import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile, validateWorkspaceFileTarget } from './workspace-files';
+import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile, validateWorkspaceFileTarget, writeWorkspaceText } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
 import { DictationService } from './dictation/service';
@@ -114,6 +114,8 @@ export interface HandlerDeps {
   secrets: SecretStore;
   sessions: SessionManager;
   missions?: MissionHandlerService;
+  /** Reserves desktop preview saves against Mission workspace capture/reconciliation. */
+  withWorkspaceWrite?: (cwd: string, write: () => Promise<void>) => Promise<void>;
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
@@ -321,6 +323,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (channel.startsWith('housekeep:') && actor !== 'desktop') throw new Error('Housekeep requires the local desktop owner.');
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
     if (channel === 'harness:antigravityQuota' && actor !== 'desktop') throw new Error('Antigravity quota requires the local desktop owner.');
+    if (channel === 'fs:writeText' && actor !== 'desktop') throw new Error('Saving workspace text requires the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
     if (!fn) {
       deps.log('warn', `ipc: unknown channel ${channel}`);
@@ -1569,13 +1572,32 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       missionIdSchema.parse(workspaceId);
       if (!mission || !isLead(session, mission)) throw new Error('Only the owning Mission lead can select a Mission workspace.');
     }
-    if (!mission || !isLead(session, mission)) return { cwd: session.cwd };
+    if (!mission || !isLead(session, mission)) return { cwd: session.cwd, session };
     const workspace = workspaceId === undefined ? mission.workspaces.find((w) => w.role === 'integration' && w.cleanedAt === undefined) : mission.workspaces.find((w) => w.id === workspaceId && w.cleanedAt === undefined);
     if (!workspace) throw new Error('Mission workspace is unavailable or cleaned. No integration result is ready yet.');
     const cwd = await fs.realpath(workspace.path);
     // Provisioning records canonical roots. A replaced root/junction cannot redirect inspection.
     if (pathKey(cwd) !== pathKey(workspace.path) || !(await fs.stat(cwd)).isDirectory()) throw new Error('Mission workspace path changed; reconcile before inspecting it.');
-    return { cwd, mission, workspace };
+    return { cwd, mission, workspace, session };
+  }
+  function assertPreviewWriteScope(scope: Awaited<ReturnType<typeof missionReadScope>>): void {
+    const mission = scope.mission ?? missionFor(scope.session);
+    if (!mission) return;
+    requireLead(scope.session, mission);
+    if (scope.workspace?.role !== 'lead' || scope.workspace.ownerSessionId !== scope.session.id ||
+        !mission.executionAuthorization || scope.session.mission?.sourceAccess === 'read_only' ||
+        scope.session.archived || mission.archived || mission.status !== 'running' || mission.phase !== 'executing') {
+      throw new Error('Only the active Mission lead’s own executing workspace is editable.');
+    }
+  }
+  async function assertPreviewWriteTarget(scope: Awaited<ReturnType<typeof missionReadScope>>, target: string): Promise<void> {
+    if (!scope.workspace) {
+      // An ordinary session can overlap a managed worktree; containing a path is not enough.
+      if (missionOwnershipPossible()) await assertOrdinaryWorkspace(target);
+      return;
+    }
+    const owners = await workspaceOwners(target);
+    if (!owners.length || owners.some(owner => owner.mission.id !== scope.mission.id || owner.workspace.id !== scope.workspace.id)) denyMissionControl();
   }
   async function missionDiff(sessionId: string, workspaceId?: string, file?: string, staged?: boolean): Promise<{ diff: string; error?: string }> {
     const scope = await missionReadScope(sessionId, workspaceId);
@@ -1767,8 +1789,42 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await walk(root, '', 0);
     return out;
   });
-  handle('fs:read', async ({ sessionId, path: p, maxBytes, missionWorkspaceId }) => readWorkspaceFile((await missionReadScope(sessionId, missionWorkspaceId)).cwd, p, maxBytes));
+  handle('fs:read', async ({ sessionId, path: p, maxBytes, missionWorkspaceId }) => {
+    const scope = await missionReadScope(sessionId, missionWorkspaceId);
+    return readWorkspaceFile(scope.cwd, p, maxBytes, async target => {
+      try {
+        validateWorkspaceFileTarget(p);
+        assertPreviewWriteScope(scope);
+        await assertPreviewWriteTarget(scope, target);
+        return true;
+      } catch {
+        return false; // Inspection remains available even if this scope cannot write.
+      }
+    });
+  });
   handle('fs:readImage', async ({ sessionId, path: p, missionWorkspaceId }) => readWorkspaceImage((await missionReadScope(sessionId, missionWorkspaceId)).cwd, p));
+  handle('fs:writeText', async (input) => {
+    const text = z.string().max(FILE_PREVIEW_MAX_BYTES, 'Text exceeds the preview size limit.');
+    const { sessionId, path: target, content, expectedContent, missionWorkspaceId } = z.strictObject({
+      sessionId: missionIdSchema, path: z.string(), content: text, expectedContent: text, missionWorkspaceId: missionIdSchema.optional()
+    }).parse(input);
+    const relative = validateWorkspaceFileTarget(target);
+    const scope = await missionReadScope(sessionId, missionWorkspaceId);
+    assertPreviewWriteScope(scope);
+    const write = async () => {
+      const current = await missionReadScope(sessionId, missionWorkspaceId);
+      if (current.cwd !== scope.cwd || current.workspace?.id !== scope.workspace?.id || current.mission?.id !== scope.mission?.id) {
+        throw new Error('Workspace changed. Reload the preview before saving.');
+      }
+      assertPreviewWriteScope(current);
+      sessions.assertNotHousekeeping?.(sessionId);
+      await writeWorkspaceText(current.cwd, relative, content, expectedContent, {
+        canonicalRoot: current.workspace ? current.cwd : undefined,
+        authorizeTarget: target => assertPreviewWriteTarget(current, target)
+      });
+    };
+    return deps.withWorkspaceWrite ? deps.withWorkspaceWrite(scope.cwd, write) : write();
+  });
 
   // Layer 2 project knowledge. Every channel resolves its scope from the session, never from a
   // renderer-supplied path, so a client cannot read or write another project's wiki.

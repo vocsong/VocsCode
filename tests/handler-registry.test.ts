@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry, type HandlerDeps } from '../src/main/handlers';
-import { PUSH_CHANNELS } from '../src/shared/ipc';
+import { FILE_PREVIEW_MAX_BYTES, PUSH_CHANNELS } from '../src/shared/ipc';
 import { agentChannels } from '../src/shared/agent-manifest';
 import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-channels';
 import type { AnalyticsStore } from '../src/main/analytics';
@@ -656,13 +656,59 @@ describe('handler registry', () => {
     expect(list.map((e) => e.path)).toEqual(['sub', 'a.txt']);
     const read = (await registry.invoke('fs:read', { sessionId: 's_test', path: 'a.txt' })) as { content: string; truncated: boolean };
     expect(read).toEqual({ content: 'hello', truncated: false });
-    const escaped = (await registry.invoke('fs:read', { sessionId: 's_test', path: '../escape.txt' })) as { content: string };
-    expect(escaped.content).toBe('');
+    await expect(registry.invoke('fs:read', { sessionId: 's_test', path: '../escape.txt' })).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+    await expect(registry.invoke('fs:read', { sessionId: 's_test', path: 'sub' })).resolves.toEqual({ content: '', truncated: false, readOnly: true });
     const outside = (await registry.invoke('fs:list', { sessionId: 's_test', relPath: '../' })) as unknown[];
     expect(outside).toEqual([]);
     const search = (await registry.invoke('fs:search', { sessionId: 's_test', query: 'txt' })) as string[];
     expect(search).toHaveLength(2);
     expect(search).toEqual(expect.arrayContaining(['a.txt', 'sub/b.txt']));
+  });
+
+  it('saves only desktop text using an exact byte precondition in the session worktree', async () => {
+    const r = await fileResolveRig();
+    const file = path.join(r.cwd, 'edit.txt');
+    const checkoutFile = path.join(r.projectRoot, 'edit.txt');
+    const before = '\uFEFFfirst\r\nsecond\r\n';
+    const content = '\uFEFF雪\r\n';
+    await fs.writeFile(file, before);
+    await fs.writeFile(checkoutFile, before);
+    const target = { sessionId: 's_test', path: 'edit.txt' };
+    const preview = await r.registry.invoke('fs:read', { ...target, maxBytes: FILE_PREVIEW_MAX_BYTES });
+    expect(preview).toEqual({ content: before, truncated: false });
+    const req = { ...target, content, expectedContent: before };
+    expect(isRemoteChannel('fs:writeText')).toBe(false);
+    for (const actor of ['user', 'agent'] as const) {
+      await expect(r.registry.invoke('fs:writeText', req, actor)).rejects.toThrow(/local desktop owner/);
+    }
+    await expect(fs.readFile(file)).resolves.toEqual(Buffer.from(before));
+    await expect(r.registry.invoke('fs:writeText', req, 'desktop')).resolves.toBeUndefined();
+    await expect(fs.readFile(file)).resolves.toEqual(Buffer.from(content));
+    await expect(fs.readFile(checkoutFile)).resolves.toEqual(Buffer.from(before));
+    await fs.writeFile(file, 'external');
+    await expect(r.registry.invoke('fs:writeText', { ...req, expectedContent: content }, 'desktop')).rejects.toThrow(/changed on disk/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('external');
+  });
+
+  it('rejects malformed and out-of-workspace save requests before opening files', async () => {
+    const r = await fileResolveRig();
+    const file = path.join(r.cwd, 'edit.txt');
+    const outside = path.join(r.sibling, 'edit.txt');
+    await fs.writeFile(file, 'before');
+    await fs.writeFile(outside, 'before');
+    await fs.symlink(r.sibling, path.join(r.cwd, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const req = { sessionId: 's_test', path: 'edit.txt', content: 'after', expectedContent: 'before' };
+    const open = vi.spyOn(fs, 'open');
+    for (const invalid of [undefined, null, {}, { ...req, expectedContent: undefined }, { ...req, content: 1 },
+      { ...req, root: r.sibling }, { ...req, sessionId: '../s_test' }, { ...req, sessionId: 'missing' },
+      { ...req, missionWorkspaceId: 1 }, { ...req, path: 'escape/edit.txt' }, { ...req, path: '../edit.txt' },
+      { ...req, path: outside }, { ...req, path: 'edit.txt:stream' }, { ...req, path: 'missing.txt' }]) {
+      await expect(r.registry.invoke('fs:writeText', invalid, 'desktop')).rejects.toThrow();
+    }
+    expect(open).not.toHaveBeenCalled();
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('before');
+    await expect(fs.readFile(outside, 'utf8')).resolves.toBe('before');
+    await expect(fs.stat(path.join(r.cwd, 'missing.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('resolves an exact file from the session cwd before suffix matches or the configured project root', async () => {

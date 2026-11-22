@@ -5,7 +5,7 @@
  */
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, createEvent, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppSettings, SessionMeta, TranscriptItem } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -98,6 +98,7 @@ beforeEach(() => {
     view: 'chat',
     sidebarOpen: true,
     panelOpen: false,
+    panelTab: 'changes',
     composerInsert: null,
     history: [],
     historyIndex: -1
@@ -151,56 +152,75 @@ describe('split view, empty pane holding focus', () => {
   });
 });
 
-describe('file previews in the split view', () => {
-  const filePanes = () => [...document.querySelectorAll<HTMLElement>('[data-testid="file-pane"]')];
+describe('file reveals with session panes', () => {
   const reply = (id: string, text: string): TranscriptItem => ({ id, kind: 'assistant', ts: 2, text });
 
   beforeEach(() => {
-    useStore.setState({ transcripts: { s_a: [user('u_a', 'alpha question'), reply('r_a', 'The layout lives in `src/arch.ts:3`.')], s_b: [user('u_b', 'beta question')] } } as never);
+    useStore.setState({
+      transcripts: { s_a: [user('u_a', 'alpha question'), reply('r_a', 'The layout lives in `src/arch.ts:3`.')], s_b: [user('u_b', 'beta question')] },
+      panelFocus: 'bottom',
+      panelPeek: false
+    });
     invoke.mockImplementation(async (channel: string, request: { path?: string }) => {
       if (channel === 'harness:models') return { models: [] };
       if (channel === 'git:summary') return null;
+      if (channel === 'fs:list') return [];
       if (channel === 'fs:resolve') return { status: 'resolved', path: request.path };
       if (channel === 'fs:read') return { content: 'export const arch = 1;\nexport const layout = 2;\nexport const third = 3;\n', truncated: false };
       return {};
     });
   });
 
-  it('a clicked file mention opens beside its session, which keeps focus, the composer and the panels', async () => {
+  it('reveals a clicked file in Files without reflowing the session panes', async () => {
     render(<App />);
-    fireEvent.click(await waitFor(() => panes()[0]!.querySelector<HTMLElement>('.file-ref')!));
+    const before = useStore.getState().layout;
+    const [pane] = panes();
+    const composer = pane!.querySelector('.composer textarea');
+    fireEvent.click(await waitFor(() => pane!.querySelector<HTMLElement>('.file-ref')!));
 
-    await waitFor(() => expect(filePanes()).toHaveLength(1));
-    const preview = filePanes()[0]!;
-    await waitFor(() => expect(preview.querySelector('pre')?.textContent).toContain('export const third = 3;'));
-    expect(preview.querySelector('.file-preview-path')?.textContent).toBe('src/arch.ts');
-    // Order on screen: the conversation, then its preview.
-    const row = [...document.querySelector('[data-testid="session-panes"]')!.children].filter((el) => el.matches('.pane')).map((el) => el.getAttribute('data-testid'));
-    expect(row).toEqual(['session-pane', 'file-pane']);
-    expect(panes()[0]!.classList.contains('active')).toBe(true);
-    expect(useStore.getState().activeId).toBe('s_a');
+    const state = useStore.getState();
+    expect(state.layout.panes).toBe(before.panes);
+    expect(state.layout.sizes).toBe(before.sizes);
+    expect(state.layout.orientation).toBe(before.orientation);
+    expect(state.layout.activePaneId).toBe(before.activePaneId);
+    expect(state.layout.filePreview).toMatchObject({ sessionId: 's_a', path: 'src/arch.ts', line: 3 });
+    expect(state).toMatchObject({ activeId: 's_a', panelOpen: false, panelTab: 'files', panelFocus: 'top', panelPeek: true, view: 'chat' });
+    expect(document.querySelector('.app.no-panel.panel-preview-only')).not.toBeNull();
+    expect(panes()).toEqual([pane]);
+    expect(pane!.querySelector('.composer textarea')).toBe(composer);
+    expect(pane!.classList.contains('active')).toBe(true);
+    expect(document.querySelector('.pane-divider')).toBeNull();
+    expect(pane!.querySelector('[aria-label="Close pane"]')).toBeNull();
+    expect(pane!.querySelector('[aria-label="Split right"]')).not.toBeNull();
+
+    act(() => useStore.getState().closeFilePreview());
+    expect(useStore.getState().layout).toEqual(before);
+    expect(panes()).toEqual([pane]);
+  });
+
+  it('dismisses the file preview when the panel is toggled or explicitly closed', async () => {
+    render(<App />);
+    const link = await waitFor(() => panes()[0]!.querySelector<HTMLElement>('.file-ref')!);
+    fireEvent.click(link);
+    expect(screen.getByTestId('file-pane')).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'j', ctrlKey: true });
+    expect(screen.queryByTestId('file-pane')).toBeNull();
     expect(useStore.getState().panelOpen).toBe(false);
 
-    // Clicking into the preview does not take the active pane away from the conversation.
-    fireEvent.pointerDown(preview);
-    expect(useStore.getState().activeId).toBe('s_a');
-    expect(panes()[0]!.classList.contains('active')).toBe(true);
-    // A preview beside a lone session neither makes the session closable nor blocks a split.
-    expect(panes()[0]!.querySelector('[aria-label="Close pane"]')).toBeNull();
-    expect(panes()[0]!.querySelector('[aria-label="Split right"]')).not.toBeNull();
-
-    fireEvent.click(preview.querySelector('[aria-label="Close preview"]')!);
-    await waitFor(() => expect(filePanes()).toHaveLength(0));
-    expect(panes()).toHaveLength(1);
+    fireEvent.click(link);
+    expect(screen.getByTestId('file-pane')).toBeTruthy();
+    act(() => useStore.getState().togglePanel(false));
+    expect(screen.queryByTestId('file-pane')).toBeNull();
+    expect(useStore.getState().panelOpen).toBe(false);
   });
 
   it('closes the preview when its session leaves the pane', async () => {
     render(<App />);
     fireEvent.click(await waitFor(() => panes()[0]!.querySelector<HTMLElement>('.file-ref')!));
-    await waitFor(() => expect(filePanes()).toHaveLength(1));
+    expect(useStore.getState().layout.filePreview?.sessionId).toBe('s_a');
     fireEvent.click(sidebarRow('s_b'));
     await waitFor(() => expect(paneText(0)).toContain('beta question'));
-    expect(filePanes()).toHaveLength(0);
+    expect(useStore.getState().layout.filePreview).toBeUndefined();
     expect(panes()).toHaveLength(1);
   });
 });

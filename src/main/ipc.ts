@@ -23,6 +23,7 @@ export interface IpcDeps {
   secrets: SecretStore;
   sessions: SessionManager;
   missions?: MissionHandlerService;
+  withWorkspaceWrite?: HandlerDeps['withWorkspaceWrite'];
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
@@ -125,6 +126,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     secrets: deps.secrets,
     sessions: deps.sessions,
     missions: deps.missions,
+    withWorkspaceWrite: deps.withWorkspaceWrite,
     terminals: deps.terminals,
     runtime: deps.runtime,
     analytics: deps.analytics,
@@ -146,13 +148,14 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     desktop: desktopBridge(deps)
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
-    if (channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'harness:antigravityQuota') {
+    if (channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'harness:antigravityQuota' || channel === 'fs:writeText') {
       const contents = deps.getWindow()?.webContents;
       if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {
         if (channel.startsWith('vocsAccount:')) throw new Error('Vocs account sign-in requires the local desktop owner.');
         if (channel.startsWith('housekeep:')) throw new Error('Housekeep requires the local desktop owner.');
         if (channel === 'harness:login') throw new Error('Harness sign-in requires the local desktop owner.');
         if (channel === 'harness:antigravityQuota') throw new Error('Antigravity quota requires the local desktop owner.');
+        if (channel === 'fs:writeText') throw new Error('Saving workspace text requires the local desktop owner.');
         throw new Error('External control grants require the local desktop owner.');
       }
     }
