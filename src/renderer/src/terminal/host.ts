@@ -13,11 +13,10 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { DEFAULT_TERMINAL_SETTINGS, type ShellKind, type TerminalInfo, type TerminalSettings } from '../../../shared/terminal';
-import { isDarkTheme } from '../../../shared/themes';
 import { ansiFromTokens, parseHex, withAlpha, type AnsiPalette } from '../../../shared/ansi';
 import { invoke, isMac, on, platform } from '../api';
 import { useStore } from '../store';
-import { activeTheme, systemPrefersDark } from '../theme';
+import { activeScheme } from '../theme';
 
 interface Instance {
   id: string;
@@ -58,8 +57,8 @@ function init(): void {
     if (s.terminals !== prev.terminals) reconcile(s.terminals);
     if (s.settings?.terminal !== prev.settings?.terminal) applySettings();
   });
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
-  new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  // theme.ts re-resolves data-scheme when the OS flips, so the attributes are the one signal to watch.
+  new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-scheme', 'data-palette'] });
 }
 
 function settings(): TerminalSettings {
@@ -387,7 +386,7 @@ function cssVar(name: string): string {
 }
 
 function isDark(): boolean {
-  return isDarkTheme(activeTheme(), systemPrefersDark());
+  return activeScheme() === 'dark';
 }
 
 /** Reads a theme token, falling back when the property is missing or not a plain hex color. */

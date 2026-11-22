@@ -9,12 +9,12 @@ import { harnessStatus } from '../../../shared/harness-setup';
 import { DEFAULT_HOUSEKEEP_RECENT_DAYS, MAX_HOUSEKEEP_RECENT_DAYS, normalizeHousekeepRecentDays } from '../../../shared/housekeep';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
 import { DEFAULT_REMOTE_ORIGIN, pairingLink as pairingLinkFor, remoteOrigin } from '../../../shared/pairing';
-import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
+import { DEFAULT_PALETTE, GROUP_LABELS, GROUP_ORDER, PALETTES, THEME_MODES, findPalette, resolveScheme, swatchFor, type PaletteId, type ThemeMode } from '../../../shared/themes';
 import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
 import { invoke, isMac, on, platform } from '../api';
 import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
-import { systemPrefersDark } from '../theme';
+import { darkQuery, systemPrefersDark } from '../theme';
 import { UI_MODES, type UiModeId } from '../../../shared/ui-modes';
 import { useMinimalUi } from '../ui-mode';
 import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
@@ -217,29 +217,66 @@ function Housekeep({ recentDays, onSave }: { recentDays?: number; onSave: (days:
   );
 }
 
-/** Swatch grid for the theme catalogue, grouped by family. */
-function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: ThemeId) => void }) {
-  const systemDark = systemPrefersDark();
+const MODE_ICONS: Record<ThemeMode, string> = { system: 'monitor', light: 'sun', dark: 'moon' };
+
+/** Whether the OS currently asks for dark, kept live so System previews follow an OS switch. */
+function useSystemDark(): boolean {
+  const [dark, setDark] = useState(systemPrefersDark);
+  useEffect(() => {
+    const query = darkQuery();
+    if (!query) return;
+    const sync = (): void => setDark(query.matches);
+    query.addEventListener('change', sync);
+    return () => query.removeEventListener('change', sync);
+  }, []);
+  return dark;
+}
+
+/**
+ * The color theme: a System / Light / Dark switch, then one swatch per palette, grouped by family.
+ * The two are independent — every palette has a light and a dark variant — so the swatches are
+ * drawn in the scheme the window paints right now.
+ */
+function ThemePicker({ mode, palette, onMode, onPalette }: { mode: ThemeMode; palette: PaletteId; onMode: (mode: ThemeMode) => void; onPalette: (id: PaletteId) => void }) {
+  const scheme = resolveScheme(mode, useSystemDark());
   return (
     <div className="theme-picker">
+      <div className="theme-mode-row">
+        <div className="theme-mode" role="group" aria-label="Light or dark mode">
+          {THEME_MODES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              className={`theme-mode-option${mode === m.id ? ' active' : ''}`}
+              title={m.description}
+              aria-pressed={mode === m.id}
+              onClick={() => onMode(m.id)}
+            >
+              <Icon name={MODE_ICONS[m.id]} size={14} />
+              {m.name}
+            </button>
+          ))}
+        </div>
+        <span className="theme-mode-hint">{mode === 'system' ? `Following your computer · ${scheme === 'dark' ? 'Dark' : 'Light'} now` : 'Applies to every palette'}</span>
+      </div>
       {GROUP_ORDER.map((group) => {
-        const themes = THEMES.filter((t) => t.group === group);
-        if (!themes.length) return null;
+        const palettes = PALETTES.filter((p) => p.group === group);
+        if (!palettes.length) return null;
         return (
           <div key={group}>
             <div className="theme-family">{GROUP_LABELS[group]}</div>
             <div className="theme-grid">
-              {themes.map((t) => {
-                const [base, raised, accent] = swatchFor(t.id, systemDark);
+              {palettes.map((t) => {
+                const [base, raised, accent] = swatchFor(t.id, scheme);
                 return (
                   <button
                     key={t.id}
                     type="button"
-                    className={`theme-card${value === t.id ? ' active' : ''}`}
+                    className={`theme-card${palette === t.id ? ' active' : ''}`}
                     title={t.description}
                     aria-label={t.name}
-                    aria-pressed={value === t.id}
-                    onClick={() => onChange(t.id)}
+                    aria-pressed={palette === t.id}
+                    onClick={() => onPalette(t.id)}
                   >
                     <span className="theme-swatch" style={{ background: base, borderColor: raised }}>
                       <span className="theme-swatch-bar" style={{ background: raised }} />
@@ -261,9 +298,10 @@ function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: Theme
 }
 
 function General({ settings, update, navigate }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void; navigate: (section: Section) => void }) {
-  const theme = THEMES.find((t) => t.id === settings.theme);
+  const palette = findPalette(settings.palette ?? DEFAULT_PALETTE);
+  const mode = THEME_MODES.find((m) => m.id === settings.theme);
   const links: { section: Section; detail: string }[] = [
-    { section: 'appearance', detail: `${UI_MODES.find((m) => m.id === (settings.uiMode ?? 'standard'))?.name ?? 'Standard'} · ${theme?.name ?? 'System'}` },
+    { section: 'appearance', detail: `${UI_MODES.find((m) => m.id === (settings.uiMode ?? 'standard'))?.name ?? 'Standard'} · ${palette?.name ?? 'Default'} · ${mode?.name ?? 'System'}` },
     { section: 'sessions', detail: HARNESSES.find((h) => h.id === settings.defaultHarness)?.name ?? 'Choose your defaults' },
     { section: 'providers', detail: `${settings.providers.filter((p) => p.enabled).length} enabled providers` },
     { section: 'shortcuts', detail: 'Make it second nature' },
@@ -293,18 +331,19 @@ function General({ settings, update, navigate }: { settings: AppSettings; update
 }
 
 function Appearance({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
-  const theme = THEMES.find((t) => t.id === settings.theme)!;
+  const palette = findPalette(settings.palette ?? DEFAULT_PALETTE) ?? PALETTES[0];
+  const mode = THEME_MODES.find((m) => m.id === settings.theme) ?? THEME_MODES[0];
   return <div className="settings-section">
     <div className="settings-theme-preview" aria-hidden="true">
       <div className="settings-preview-sidebar"><Icon name="logo" size={24} /><span /><span /><span /></div>
       <div className="settings-preview-workspace"><div className="settings-eyebrow">YOUR NEXT GREAT IDEA</div><strong>A calmer place to build.</strong><p>One workspace. Every coding agent.</p><div className="settings-preview-message"><Icon name="sparkles" size={16} /> Ready when you are.</div></div>
-      <div className="settings-preview-caption"><Icon name={theme?.id === 'system' ? 'sun' : 'palette'} size={15} />{theme?.name ?? 'System'}<span>Live preview</span></div>
+      <div className="settings-preview-caption"><Icon name={MODE_ICONS[mode.id]} size={15} />{palette.name} · {mode.name}<span>Live preview</span></div>
     </div>
     <SettingsGroup id="appearance-interface" title="Interface" description="How the window is laid out. Separate from the color theme: every theme works with every layout, and switching keeps your sessions, drafts and panels as they are." icon="layout">
       <UiModePicker value={settings.uiMode ?? 'standard'} onChange={(next) => update({ uiMode: next })} />
     </SettingsGroup>
-    <SettingsGroup id="appearance-theme" title="Color theme" description="Choose a palette below. System follows your computer’s light or dark preference." icon="palette">
-      <ThemePicker value={settings.theme} onChange={(next) => update({ theme: next })} />
+    <SettingsGroup id="appearance-theme" title="Color theme" description="Pick light or dark once, then any palette. Every palette has both variants, and System follows your computer." icon="palette">
+      <ThemePicker mode={settings.theme} palette={settings.palette ?? DEFAULT_PALETTE} onMode={(next) => update({ theme: next })} onPalette={(next) => update({ palette: next })} />
     </SettingsGroup>
   </div>;
 }
