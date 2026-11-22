@@ -5462,8 +5462,9 @@ body.resizing {
   max-width: 46%;
   font-weight: 400;
 }
+/* Only the trigger is held to the header's share; the menu below it sizes itself. */
 .ns-header-root > .dropdown,
-.ns-header-root > .dropdown > div {
+.ns-header-root > .dropdown > div:not(.dropdown-menu) {
   min-width: 0;
   max-width: 100%;
 }
@@ -5490,9 +5491,115 @@ body.resizing {
 .ns-root-btn > svg {
   flex-shrink: 0;
 }
+/* The folder menu: filter box on top, the list scrolling between it and the pinned "Choose another
+   folder…". The menu box itself does not scroll, so neither end ever scrolls out of reach. */
 .ns-header-root .dropdown-menu {
-  max-height: 60vh;
+  width: min(440px, calc(100vw - 32px));
+  max-height: none;
+  overflow: hidden;
+  padding: 0;
+}
+.folder-picker {
+  display: flex;
+  flex-direction: column;
+  max-height: min(520px, 64vh);
+}
+.folder-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-faint);
+  flex: none;
+}
+.folder-picker-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+  color: var(--fg);
+  font-size: 13px;
+  outline: none;
+  box-shadow: none;
+}
+.folder-picker-list {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  padding: 4px;
+}
+.folder-picker-footer {
+  flex: none;
+  padding: 4px;
+  border-top: 1px solid var(--border);
+}
+.folder-picker-footer .menu-item {
+  color: var(--fg-muted);
+}
+.folder-picker-footer .menu-item:hover,
+.folder-picker-footer .menu-item:focus-visible {
+  color: var(--fg);
+}
+.folder-choice {
+  gap: 10px;
+  padding: 6px 8px;
+  color: var(--fg);
+}
+.folder-choice > .icon {
+  flex: none;
+  color: var(--fg-faint);
+}
+.folder-choice.active > .icon,
+.folder-choice-check {
+  color: var(--accent);
+}
+.folder-choice.enter-target,
+.folder-choice:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+.folder-choice-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.3;
+}
+.folder-choice-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-choice.active .folder-choice-name {
+  color: var(--accent);
+}
+/* The full path, trimmed from the start like the header's (the leaf end is the part that differs). */
+.folder-choice-path {
+  font-size: 11px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.folder-choice-path > bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.folder-choice-meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+.folder-choice-check {
+  flex: none;
+  display: flex;
+  width: 14px;
 }
 .ns-attachments {
   max-width: none;
