@@ -1,7 +1,7 @@
 import type { VocsAccountSignInRequest, VocsAccountState } from './vocs-account';
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
-import type { HousekeepOutcome, HousekeepPreview } from './housekeep';
+import type { HousekeepInventory, HousekeepOutcome, HousekeepPreview } from './housekeep';
 import type { AntigravityQuota, HarnessSetupStatus, LoginHarnessId } from './harness-setup';
 import type {
   AnalyticsSummary,
@@ -331,6 +331,8 @@ export interface IpcContract {
   'housekeep:preview': [{ protectedIds: string[]; recentDaysOverride?: number }, HousekeepPreview];
   'housekeep:assess': [{ previewId: string }, HousekeepPreview];
   'housekeep:apply': [{ previewId: string; ids: string[]; protectedIds: string[] }, HousekeepOutcome[]];
+  /** Local desktop only, read-only, with no renderer-supplied scan paths. */
+  'housekeep:inventory': [void, HousekeepInventory];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];
