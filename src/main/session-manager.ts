@@ -174,7 +174,7 @@ export interface SessionActivity {
 interface ActiveSession {
   adapter: HarnessAdapter;
   /** Input acceptance is not a terminal turn observation (including ordinary source writers). */
-  turnPending: boolean;
+  turnPending?: symbol;
   startupDispatched: boolean;
   tearingDown: boolean;
   uncertain: boolean;
@@ -428,8 +428,7 @@ export class SessionManager {
   /** Reflects the session branch's PR/merge state in the sidebar status label. */
   private async checkGitState(id: string, recheck: boolean): Promise<void> {
     const meta = this.get(id);
-    if (!meta || !meta.worktreeBranch) return;
-    if (!this.gitStateCheckable(meta.status)) return;
+    if (!meta?.worktreeBranch || !this.gitStateCheckable(meta)) return;
     let state: BranchGitState;
     try {
       const others = this.deps.store.list().filter((s) => s.id !== id && s.worktreeBranch).map((s) => s.worktreeBranch!);
@@ -445,8 +444,8 @@ export class SessionManager {
       this.deps.log('warn', `pr/merge status check failed: ${errorMessage(e)}`);
       return;
     }
-    // The check can take seconds over the network; the session may have moved on.
-    if (!this.gitStateCheckable(meta.status)) return;
+    // The check can take seconds over the network; re-read the live turn state before publishing.
+    if (this.get(id) !== meta || !this.gitStateCheckable(meta)) return;
     const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
     // A stopped harness stays stopped unless the branch is actually pr/merged: git evidence
     // may upgrade the status, never downgrade it back to idle.
@@ -461,9 +460,11 @@ export class SessionManager {
     if (next === 'pr' && recheck) this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS);
   }
 
-  /** Only idle/pr/stopped sessions take a label update; live or already-final statuses are left alone. */
-  private gitStateCheckable(status: SessionStatus): boolean {
-    return status === 'idle' || status === 'pr' || status === 'stopped';
+  /** Git labels must not replace the status that drives Interrupt, even when that status lags. */
+  private gitStateCheckable(meta: SessionMeta): boolean {
+    if (meta.status !== 'idle' && meta.status !== 'pr' && meta.status !== 'stopped') return false;
+    const active = this.active.get(meta.id);
+    return !active || !(active.adapter.busy || active.turnPending || active.approvals.size);
   }
 
   /**
@@ -1256,7 +1257,6 @@ export class SessionManager {
     const adapter = ownedAdapter(createAdapter(meta.config.harness, ctx), { sessionId: id });
     active = {
       adapter,
-      turnPending: false,
       startupDispatched: false,
       tearingDown: false,
       uncertain: false,
@@ -1453,7 +1453,7 @@ export class SessionManager {
         if (active.adapter.busy || active.turnPending || active.approvals.size || meta.queued ||
             [...active.nativeChildren.values()].some((child) => child.running) || active.adapter.workspaceWriterState?.() === 'unknown') throw new Error('Controlled runtime became busy before dispatch');
         lease.dispatched = true;
-        active.turnPending = true;
+        active.turnPending = Symbol();
         try {
           accepted = Promise.resolve(active.adapter.send(prepared)).catch(() => {
             if (this.controlled.get(id) !== lease) return;
@@ -1764,7 +1764,7 @@ export class SessionManager {
         assertCurrent();
       }
       assertCurrent();
-      active.turnPending = true;
+      const pending = active.turnPending = Symbol();
       try {
         // Normal Pi steering aborts the old run; release its approval waits before handing off.
         // Queue and Mission input retain their existing approval lifecycle.
@@ -1773,7 +1773,13 @@ export class SessionManager {
         }
         await active.adapter.send(prepared);
       } catch (e) {
-        if (hooks) active.uncertain = true; // A rejected transport request need not mean no work ran.
+        if (hooks) {
+          // A rejected managed transport request need not mean no work ran.
+          active.uncertain = true;
+        } else if (active.turnPending === pending && !active.adapter.busy) {
+          // A refused ordinary send may go idle without a turn item. Retire only its own marker.
+          active.turnPending = undefined;
+        }
         throw e;
       }
     };
@@ -2538,7 +2544,7 @@ export class SessionManager {
           if (streaming) this.checkpointStream(sessionId, active, item);
           else active.checkpoints?.delete(item.id);
         }
-        if (item.kind === 'turn' && active) active.turnPending = false;
+        if (item.kind === 'turn' && active) active.turnPending = undefined;
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
         if (item.kind === 'user' && meta && !meta.mission) this.deps.analytics.recordUserMessage(meta, item);
         if (item.kind === 'tool') {

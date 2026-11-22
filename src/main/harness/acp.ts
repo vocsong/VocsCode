@@ -27,32 +27,44 @@ const ACP_ENV_KEYS: Record<string, string> = {
   mistral: 'MISTRAL_API_KEY'
 };
 
+// The ACP prompt result is the only proof of completion. Recover a quiet Antigravity
+// stream as failed, not completed, and allow an explicit interrupt even without prose.
+export const ANTIGRAVITY_PROMPT_QUIET_MS = 180_000;
+export const ANTIGRAVITY_CANCEL_GRACE_MS = 5_000;
+
+type ActivePrompt = {
+  startedAt: number;
+  quietTimer?: NodeJS.Timeout;
+  cancelTimer?: NodeJS.Timeout;
+  recovering?: boolean;
+};
+
 export class AcpAdapter implements HarnessAdapter {
   private child: ChildProcess | null = null;
+  private childShutdown: Promise<void> | null = null;
   private conn: acp.ClientSideConnection | null = null;
   private sessionId: string | null = null;
-  private _busy = false;
+  private prompt: ActivePrompt | null = null;
+  private pendingPermissions = 0;
   private queue: UserInput[] = [];
   private currentAssistant: Extract<TranscriptItem, { kind: 'assistant' }> | null = null;
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private configOptions: ConfigOptionLike[] = [];
   private caps: Record<string, unknown> = {};
   private readonly usage: TurnUsageTracker;
-  private turnStartedAt = 0;
   private sessionAllowedKinds = new Set<string>();
   private preset: AcpAgentPreset | null = null;
   private sessionModes?: acp.SessionModeState | null;
   private applyingMode = false;
   /** Clean ModelRef -> the agent's raw option value (tuple-advertising agents key choices by it). */
   private modelValues = new Map<string, string>();
-  private inflightPrompt: Promise<unknown> | null = null;
 
   constructor(private readonly ctx: HarnessContext, readonly id: 'acp' | 'antigravity' = 'acp') {
     this.usage = new TurnUsageTracker(ctx.session().usage);
   }
 
   get busy(): boolean {
-    return this._busy;
+    return this.prompt !== null;
   }
 
   private resolvePreset(): AcpAgentPreset {
@@ -64,10 +76,18 @@ export class AcpAdapter implements HarnessAdapter {
   }
 
   private async killChild(): Promise<void> {
+    if (this.childShutdown) return this.childShutdown;
     const child = this.child;
     this.conn = null;
     this.child = null;
-    if (child) await shutdownChild(child, 2000);
+    this.pendingPermissions = 0;
+    if (!child) return;
+    this.childShutdown = shutdownChild(child, 2000);
+    try {
+      await this.childShutdown;
+    } finally {
+      this.childShutdown = null;
+    }
   }
 
   private async resolveLaunch() {
@@ -119,14 +139,20 @@ export class AcpAdapter implements HarnessAdapter {
     else child.stderr?.on('data', (d: Buffer) => this.ctx.log('debug', `[acp:${preset.id}] ${d.toString().trimEnd()}`));
     child.on('close', (code) => {
       if (this.child !== child) return;
-      this._busy = false;
+      this.child = null;
       this.conn = null;
-      this.ctx.emit({ type: 'status', status: 'stopped', detail: `${preset.name} exited (${code})` });
+      this.pendingPermissions = 0;
+      const detail = `${preset.name} exited (${code})`;
+      if (this.prompt) this.finishPrompt(this.prompt, 'failed', detail, false);
+      this.discardQueue();
+      this.ctx.emit({ type: 'status', status: 'stopped', detail });
     });
-    child.on('error', (e) => this.ctx.emit({ type: 'error', message: `${preset.name} failed to start: ${errorMessage(e)}`, fatal: true }));
+    child.on('error', (e) => {
+      if (this.child === child) this.ctx.emit({ type: 'error', message: `${preset.name} failed to start: ${errorMessage(e)}`, fatal: true });
+    });
 
     try {
-      this.conn = connectAcp(child, () => this.clientHandlers());
+      this.conn = connectAcp(child, () => this.clientHandlers(child));
 
       const init = await withTimeout(
         this.conn.initialize({
@@ -227,11 +253,27 @@ export class AcpAdapter implements HarnessAdapter {
     if (eff && isEffortLevel(eff.currentValue)) this.ctx.updateMeta({ activeEffort: eff.currentValue });
   }
 
-  private clientHandlers(): acp.Client {
+  private clientHandlers(child: ChildProcess): acp.Client {
     const cwd = () => this.ctx.session().cwd;
     return {
-      requestPermission: async (params: acp.RequestPermissionRequest) => this.onRequestPermission(params),
-      sessionUpdate: async (params: acp.SessionNotification) => this.onSessionUpdate(params),
+      requestPermission: async (params: acp.RequestPermissionRequest) => {
+        if (this.child !== child || this.prompt?.recovering) return { outcome: { outcome: 'cancelled' } };
+        this.pendingPermissions++;
+        this.armQuietTimer();
+        try {
+          return await this.onRequestPermission(params);
+        } finally {
+          if (this.child === child) {
+            this.pendingPermissions--;
+            this.armQuietTimer();
+          }
+        }
+      },
+      sessionUpdate: async (params: acp.SessionNotification) => {
+        if (this.child !== child || this.prompt?.recovering) return;
+        this.onSessionUpdate(params);
+        this.armQuietTimer();
+      },
       // ACP reads intentionally retain the adapter-wide read policy: an absolute path is allowed
       // even when it is outside the session workspace. Writes and commands still go through the
       // permission gate; callers should only use ACP with an agent they trust.
@@ -472,10 +514,11 @@ export class AcpAdapter implements HarnessAdapter {
   }
 
   async send(input: UserInput): Promise<void> {
+    if (this.prompt?.recovering || this.childShutdown) throw new Error('The ACP agent is stopping. Retry once it stops.');
     if (!this.conn) await this.start();
     if (!this.conn || !this.sessionId) throw new Error('ACP session is not ready');
     if (this.applyingMode) throw new Error('Wait for the Antigravity permission update to finish.');
-    if (this._busy) {
+    if (this.prompt) {
       this.queue.push(input);
       this.ctx.updateMeta({ queued: this.queue.length });
       return;
@@ -487,44 +530,95 @@ export class AcpAdapter implements HarnessAdapter {
       if (promptCaps.image) blocks.push({ type: 'image', data: img.data, mimeType: img.mimeType });
       else this.info('This ACP agent does not accept images; the attachment was dropped.', 'warn');
     }
-    this._busy = true;
+    this.toolItems.clear();
+    const turn: ActivePrompt = { startedAt: Date.now() };
+    this.prompt = turn;
     this.usage.beginTurn();
-    this.turnStartedAt = Date.now();
     this.ctx.emit({ type: 'status', status: 'running' });
-    const p = this.conn.prompt({ sessionId: this.sessionId, prompt: blocks } as acp.PromptRequest);
-    this.inflightPrompt = p;
-    void p
-      .then((res) => {
-        this.closeAssistant();
+    void this.conn.prompt({ sessionId: this.sessionId, prompt: blocks } as acp.PromptRequest).then(
+      (res) => {
+        if (this.prompt !== turn || turn.recovering) return;
         const stop = res.stopReason;
-        const completed = this.usage.finishTurn();
-        this.ctx.emit({ type: 'usage', totals: completed.totals });
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: stop === 'cancelled' ? 'interrupted' : stop === 'refusal' ? 'failed' : 'completed', durationMs: Date.now() - this.turnStartedAt, error: stop === 'refusal' ? 'The agent refused the request.' : stop === 'max_tokens' || stop === 'max_turn_requests' ? `Stopped: ${stop}` : undefined } });
-      })
-      .catch((e) => {
-        this.usage.finishTurn(false);
-        this.closeAssistant();
+        this.finishPrompt(turn, stop === 'cancelled' ? 'interrupted' : stop === 'refusal' ? 'failed' : 'completed',
+          stop === 'refusal' ? 'The agent refused the request.' : stop === 'max_tokens' || stop === 'max_turn_requests' ? `Stopped: ${stop}` : undefined);
+        this.drainQueue();
+      },
+      (e) => {
+        if (this.prompt !== turn || turn.recovering) return;
         const error = this.id === 'antigravity' && isAntigravityAuthRequired(e) ? ANTIGRAVITY_SIGN_IN_MESSAGE : errorMessage(e);
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', durationMs: Date.now() - this.turnStartedAt, error } });
-      })
-      .finally(() => {
-        this._busy = false;
-        this.inflightPrompt = null;
-        if (!this.conn) return;
-        this.ctx.emit({ type: 'status', status: 'idle' });
-        const next = this.queue.shift();
-        this.ctx.updateMeta({ queued: this.queue.length });
-        if (next) void this.send(next);
-      });
+        this.finishPrompt(turn, 'failed', error, false);
+        this.drainQueue();
+      }
+    );
+  }
+
+  private finishPrompt(turn: ActivePrompt, status: Extract<TranscriptItem, { kind: 'turn' }>['status'], error?: string, count = true): void {
+    clearTimeout(turn.quietTimer);
+    clearTimeout(turn.cancelTimer);
+    this.closeAssistant();
+    if (!count) {
+      for (const item of this.toolItems.values()) {
+        if (item.status === 'running') this.ctx.emit({ type: 'item.upsert', item: { ...item, status: 'error' } });
+      }
+    }
+    const completed = this.usage.finishTurn(count);
+    if (count) this.ctx.emit({ type: 'usage', totals: completed.totals });
+    this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - turn.startedAt, error } });
+    this.prompt = null;
+  }
+
+  private drainQueue(): void {
+    if (!this.conn) return;
+    this.ctx.emit({ type: 'status', status: 'idle' });
+    const next = this.queue.shift();
+    this.ctx.updateMeta({ queued: this.queue.length });
+    if (next) void this.send(next);
+  }
+
+  private discardQueue(): void {
+    if (!this.queue.length) return;
+    this.queue = [];
+    this.ctx.updateMeta({ queued: 0 });
+    this.info('Queued messages were not sent. Resend them after checking the workspace.', 'warn');
+  }
+
+  private armQuietTimer(): void {
+    const turn = this.prompt;
+    if (this.id !== 'antigravity' || !turn || turn.recovering || turn.cancelTimer) return;
+    clearTimeout(turn.quietTimer);
+    if (!this.currentAssistant?.text.trim() || this.pendingPermissions || [...this.toolItems.values()].some((item) => item.status === 'running')) return;
+    turn.quietTimer = setTimeout(() => {
+      void this.recoverPrompt(turn, 'failed', 'Antigravity stopped sending updates without confirming the turn ended. The reply was kept; check the workspace before retrying.');
+    }, ANTIGRAVITY_PROMPT_QUIET_MS).unref();
+  }
+
+  private async recoverPrompt(turn: ActivePrompt, status: 'failed' | 'interrupted', detail: string): Promise<void> {
+    if (this.prompt !== turn || turn.recovering) return;
+    turn.recovering = true;
+    clearTimeout(turn.quietTimer);
+    clearTimeout(turn.cancelTimer);
+    // A prompt cannot be retried safely on a connection that may still be doing work.
+    await this.killChild();
+    if (this.prompt !== turn) return;
+    this.finishPrompt(turn, status, detail, false);
+    this.discardQueue();
+    this.ctx.emit({ type: 'status', status: 'stopped', detail });
   }
 
   async interrupt(): Promise<void> {
     if (!this.conn || !this.sessionId) return;
-    try {
-      await this.conn.cancel({ sessionId: this.sessionId });
-    } catch (e) {
-      this.ctx.log('warn', `cancel failed: ${errorMessage(e)}`);
+    const turn = this.prompt;
+    if (this.id === 'antigravity' && turn && !turn.cancelTimer) {
+      clearTimeout(turn.quietTimer);
+      turn.cancelTimer = setTimeout(() => {
+        void this.recoverPrompt(turn, 'interrupted', 'Antigravity did not acknowledge the interrupt. Its CLI was stopped; check the workspace before retrying.');
+      }, ANTIGRAVITY_CANCEL_GRACE_MS).unref();
     }
+    const cancel = this.conn.cancel({ sessionId: this.sessionId }).catch((e) => {
+      this.ctx.log('warn', `cancel failed: ${errorMessage(e)}`);
+    });
+    // A stuck write must not hold the caller open; recovery is tied to the prompt result.
+    if (this.id !== 'antigravity') await cancel;
   }
 
   async setModel(model: ModelRef): Promise<void> {
@@ -555,7 +649,7 @@ export class AcpAdapter implements HarnessAdapter {
     if (this.id !== 'antigravity') return; // Other ACP agents use client-side policy.
     if (!HARNESS_BY_ID[this.id].capabilities.permissionModes.includes(mode)) throw new Error(`Antigravity does not support the ${mode} permission mode.`);
     if (!this.conn || !this.sessionId) return;
-    if (this._busy || this.applyingMode) throw new Error('Wait for the current Antigravity activity before changing permissions.');
+    if (this.busy || this.applyingMode) throw new Error('Wait for the current Antigravity activity before changing permissions.');
     // Every mode but Plan runs the CLI in `default` under its strict tool policy, so each tool call
     // reaches onRequestPermission and Accept edits / Auto / Full access are enforced client-side.
     const modeId = mode === 'plan' ? 'plan' : 'default';
@@ -591,13 +685,20 @@ export class AcpAdapter implements HarnessAdapter {
 
   async dispose(): Promise<void> {
     const conn = this.conn;
+    const turn = this.prompt;
+    if (turn) {
+      turn.recovering = true;
+      clearTimeout(turn.quietTimer);
+      clearTimeout(turn.cancelTimer);
+    }
     this.conn = null;
     this.queue = [];
-    if (conn && this.sessionId) {
+    if (conn && !turn && this.sessionId) {
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { close?: unknown };
       if (sessionCaps.close) await withTimeout(conn.closeSession({ sessionId: this.sessionId } as acp.CloseSessionRequest), 5000, 'session/close').catch(() => undefined);
     }
     await this.killChild();
+    if (this.prompt) this.finishPrompt(this.prompt, 'interrupted', undefined, false);
   }
 }
 
