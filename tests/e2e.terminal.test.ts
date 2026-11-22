@@ -312,7 +312,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       // rather than keeping the archived session's transcript on screen.
       await win.waitForSelector('.main-empty', { timeout: 20_000 });
       expect(await win.locator('.main-empty').innerText()).toContain('Welcome to Vocs Code');
-      await win.click('.sidebar-link:has-text("Archived")');
+      await win.click('[data-testid="sidebar-archived"]');
       const archivedRow = win.locator('[data-testid="session-row"]').first();
       await archivedRow.waitFor({ timeout: 20_000 });
       await archivedRow.hover();
@@ -328,7 +328,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       // archived one had — the marker typed above — is nowhere in it.
       await archivedRow.hover();
       await archivedRow.locator('[aria-label="Restore session"]').click();
-      await win.click('.sidebar-link:has-text("Show active")');
+      await win.click('[data-testid="sidebar-archived"]'); // pressed again: back to active sessions
       const restoredRow = win.locator('[data-testid="session-row"]').first();
       await restoredRow.waitFor({ timeout: 20_000 });
       await restoredRow.click();
