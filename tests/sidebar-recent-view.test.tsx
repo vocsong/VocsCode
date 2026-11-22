@@ -110,15 +110,42 @@ describe('sidebar Recent view', () => {
     expect(rowIds(container)).toEqual(['a-gone', 'b-gone']);
   });
 
-  it('puts the Projects | Recent switch at the top, apart from the nav links and the Archived toggle', () => {
+  it('puts the Projects | Recent switch and the Archived filter together at the top, apart from the nav links', () => {
     const { container, getByTestId } = mount(sessions);
     const sw = container.querySelector('.sidebar-viewswitch') as HTMLElement;
     expect(sw.contains(getByTestId('sidebar-folders'))).toBe(true);
     expect(sw.contains(getByTestId('sidebar-recent'))).toBe(true);
+    // Archived sits beside the layout choice but outside it: it filters, it is not a third layout.
+    expect(sw.contains(getByTestId('sidebar-archived'))).toBe(true);
+    expect(getByTestId('sidebar-archived').closest('.segmented')).toBeNull();
+    expect(container.querySelector('.sidebar-section button')).toBeNull();
     expect(sw.closest('.sidebar-views, .sidebar-section, .sidebar-bottom')).toBeNull();
     // Before the list it lays out, right after the New session entry.
     const order = [...(container.querySelector('.sidebar') as HTMLElement).children].map((el) => el.className.split(' ')[0]);
     expect(order.indexOf('sidebar-viewswitch')).toBe(order.indexOf('sidebar-nav') + 1);
     expect(order.indexOf('sidebar-viewswitch')).toBeLessThan(order.indexOf('sidebar-list'));
+  });
+
+  it('toggles Archived in place, keeps the layout choice, and shows it in the rail icon', async () => {
+    const { container, getByTestId } = mount(sessions, 'recent');
+    const railIcon = () => container.querySelector('.sidebar-viewswitch-icon')?.getAttribute('data-icon');
+    const archived = getByTestId('sidebar-archived');
+    expect(archived.getAttribute('aria-pressed')).toBe('false');
+    expect(railIcon()).toBe('list');
+
+    await act(async () => { fireEvent.click(archived); });
+    expect(archived.getAttribute('aria-pressed')).toBe('true');
+    expect(archived.textContent?.trim()).toBe('Archived');
+    expect(container.querySelector('.sidebar-section-label')?.textContent).toBe('Archived sessions');
+    expect(rowIds(container)).toEqual(['a-gone']);
+    expect(railIcon()).toBe('archive');
+    // Layout and filter are independent: the archived list still uses the Recent layout.
+    expect(getByTestId('sidebar-recent').getAttribute('aria-pressed')).toBe('true');
+    expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
+
+    await act(async () => { fireEvent.click(archived); });
+    expect(archived.getAttribute('aria-pressed')).toBe('false');
+    expect(rowIds(container)).toEqual(['b-new', 'a-new', 'b-mid', 'a-old']);
+    expect(railIcon()).toBe('list');
   });
 });

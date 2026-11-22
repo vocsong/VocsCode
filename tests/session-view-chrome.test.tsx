@@ -106,15 +106,20 @@ describe('sidebar navigation', () => {
     expect(useStore.getState()).toMatchObject({ newSessionOpen: true, newSessionRoot: 'G:/proj/b', quickSessionOpen: false });
   });
 
-  it('keeps the views at the top, the Archived toggle on the Sessions heading and Settings at the foot', () => {
+  it('keeps the views at the top, the Archived toggle beside the list layout switch and Settings at the foot', () => {
     const { container } = render(<Sidebar />);
     const labels = (selector: string) => [...container.querySelectorAll(selector)].map((el) => el.textContent?.trim());
     expect(labels('.sidebar-views .sidebar-link')).toEqual(['Analytics', 'Skills', 'MCP']);
     expect(labels('.sidebar-bottom .sidebar-link')).toEqual(['Settings']);
     expect(container.querySelector('.sidebar-section-label')?.textContent).toBe('Sessions');
-    fireEvent.click(screen.getByRole('button', { name: 'Archived' }));
+    const archived = screen.getByRole('button', { name: 'Archived' });
+    expect(archived.closest('.sidebar-viewswitch')).not.toBeNull();
+    fireEvent.click(archived);
     expect(container.querySelector('.sidebar-section-label')?.textContent).toBe('Archived sessions');
-    expect(screen.getByRole('button', { name: 'Show active' })).toBeTruthy();
+    // A pressed toggle, not a relabelled link: pressing it again returns to active sessions.
+    expect(screen.getByRole('button', { name: 'Archived', pressed: true })).toBe(archived);
+    fireEvent.click(archived);
+    expect(container.querySelector('.sidebar-section-label')?.textContent).toBe('Sessions');
     fireEvent.click(screen.getByRole('button', { name: 'Analytics' }));
     expect(useStore.getState().view).toBe('analytics');
   });
