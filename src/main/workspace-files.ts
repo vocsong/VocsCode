@@ -1,9 +1,11 @@
-/** Node-only workspace file listing and bounded reading helpers. */
-import { promises as fs } from 'node:fs';
+/** Node-only workspace file listing and bounded text I/O. */
+import { isUtf8 } from 'node:buffer';
+import { constants, promises as fs, type BigIntStats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { imageMimeType, type WorkspaceImage } from '../shared/image-files';
 import type { FsEntry } from '../shared/types';
-import type { WorkspaceFileResolution } from '../shared/ipc';
+import { FILE_PREVIEW_MAX_BYTES, type IpcResponse, type WorkspaceFileResolution } from '../shared/ipc';
 
 const DEFAULT_MAX_BYTES = 400_000;
 const MAX_BYTES = 2_000_000;
@@ -29,7 +31,7 @@ async function realpathOrNotFound(p: string, missing: () => string): Promise<str
   }
 }
 
-async function resolveInWorkspace(root: string, target = ''): Promise<{ lexicalRoot: string; lexicalTarget: string; realTarget: string } | undefined> {
+async function resolveInWorkspace(root: string, target = ''): Promise<{ lexicalRoot: string; lexicalTarget: string; realRoot: string; realTarget: string } | undefined> {
   const lexicalRoot = path.resolve(root);
   const lexicalTarget = path.resolve(lexicalRoot, target);
   if (!isWithin(lexicalRoot, lexicalTarget)) return undefined;
@@ -38,7 +40,7 @@ async function resolveInWorkspace(root: string, target = ''): Promise<{ lexicalR
   const realRoot = await realpathOrNotFound(lexicalRoot, () => `${lexicalRoot} no longer exists`);
   const realTarget = await realpathOrNotFound(lexicalTarget, () => `${path.relative(lexicalRoot, lexicalTarget).split(path.sep).join('/')} was not found in ${lexicalRoot}`);
   if (!isWithin(realRoot, realTarget)) return undefined;
-  return { lexicalRoot, lexicalTarget, realTarget };
+  return { lexicalRoot, lexicalTarget, realRoot, realTarget };
 }
 
 /** Shared with the IPC boundary so malformed input cannot trigger even Mission scope reads. */
@@ -162,32 +164,119 @@ export async function listWorkspaceFiles(root: string, relPath?: string): Promis
   return out.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name));
 }
 
-/** `binary` is set, with empty content, when the bytes are not text: a zip decoded as UTF-8 is noise. */
-export async function readWorkspaceFile(root: string, target: string, maxBytes?: number): Promise<{ content: string; truncated: boolean; binary?: boolean }> {
+async function readPrefix(handle: FileHandle, limit: number): Promise<Buffer> {
+  const buffer = Buffer.alloc(limit);
+  let total = 0;
+  while (total < limit) {
+    const { bytesRead } = await handle.read(buffer, total, limit - total, total);
+    if (!bytesRead) break;
+    total += bytesRead;
+  }
+  return buffer.subarray(0, total);
+}
+
+function isText(bytes: Buffer): boolean {
+  return !bytes.includes(0) && isUtf8(bytes);
+}
+
+/** `binary` is set, with empty content, when a complete file is not UTF-8 text. */
+export async function readWorkspaceFile(
+  root: string, target: string, maxBytes?: number,
+  canWriteTarget?: (target: string) => Promise<boolean>
+): Promise<IpcResponse<'fs:read'>> {
+  const placeholder = { content: '', truncated: false, readOnly: true };
   const resolved = await resolveInWorkspace(root, target);
-  if (!resolved) return { content: '', truncated: false };
+  if (!resolved || !(await fs.lstat(resolved.realTarget)).isFile()) return placeholder;
 
   const requestedMax = maxBytes ?? DEFAULT_MAX_BYTES;
   const limit = Math.min(Math.max(0, Math.trunc(requestedMax)), MAX_BYTES);
-  const handle = await fs.open(resolved.realTarget, 'r');
+  const handle = await fs.open(resolved.realTarget, constants.O_RDONLY | SAFE_OPEN_FLAGS);
   try {
-    const initialSize = (await handle.stat()).size;
-    const buffer = Buffer.alloc(Math.min(initialSize, limit));
-    let totalRead = 0;
-    while (totalRead < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, totalRead, buffer.length - totalRead, totalRead);
-      if (bytesRead === 0) break;
-      totalRead += bytesRead;
+    const initial = await handle.stat();
+    if (!initial.isFile()) return placeholder;
+    const bytes = await readPrefix(handle, Math.min(initial.size, limit));
+    const final = await handle.stat();
+    const truncated = final.size > bytes.length;
+    // A preview cut in the middle of a UTF-8 character remains truncated text, not binary.
+    if (truncated ? bytes.subarray(0, BINARY_SNIFF_BYTES).includes(0) : !isText(bytes)) {
+      return { content: '', truncated: false, binary: true };
     }
-
-    if (buffer.subarray(0, Math.min(totalRead, BINARY_SNIFF_BYTES)).includes(0)) return { content: '', truncated: false, binary: true };
-    const finalSize = (await handle.stat()).size;
-    return {
-      content: buffer.subarray(0, totalRead).toString('utf8'),
-      truncated: finalSize > totalRead,
-    };
+    const readOnly = !truncated && (final.nlink !== 1 || final.size > FILE_PREVIEW_MAX_BYTES ||
+      (canWriteTarget !== undefined && !(await canWriteTarget(resolved.realTarget))));
+    return { content: bytes.toString('utf8'), truncated, ...(readOnly ? { readOnly: true } : {}) };
   } finally {
     await handle.close();
+  }
+}
+
+function assertWritableTextFile(stat: BigIntStats): void {
+  if (!stat.isFile() || stat.nlink !== 1n) throw new Error('Only existing regular files without hard links can be saved.');
+  if (stat.size > FILE_PREVIEW_MAX_BYTES) throw new Error('File is too large to edit in the preview.');
+}
+
+function sameFile(a: BigIntStats, b: BigIntStats): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function encodePreviewText(text: string): Buffer {
+  if (Buffer.byteLength(text, 'utf8') > FILE_PREVIEW_MAX_BYTES) throw new Error('Text exceeds the preview size limit.');
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.includes(0) || bytes.toString('utf8') !== text) throw new Error('Save requires valid UTF-8 text without NUL bytes.');
+  return bytes;
+}
+
+// On POSIX, refuse a replaced leaf and keep a raced FIFO from blocking open.
+const SAFE_OPEN_FLAGS = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW | constants.O_NONBLOCK;
+const savingFiles = new Set<string>();
+
+/** Compare and update a pinned file descriptor: never create a file or reopen the path to write. */
+export async function writeWorkspaceText(
+  root: string, target: string, content: string, expectedContent: string,
+  options: { canonicalRoot?: string; authorizeTarget?: (target: string) => Promise<void> } = {}
+): Promise<void> {
+  const relative = validateWorkspaceFileTarget(target);
+  const next = encodePreviewText(content);
+  const expected = encodePreviewText(expectedContent);
+  const resolved = await resolveInWorkspace(root, relative);
+  if (!resolved || (options.canonicalRoot && resolved.realRoot !== options.canonicalRoot)) throw new Error('Path outside workspace or workspace location changed.');
+  await options.authorizeTarget?.(resolved.realTarget);
+  const original = await fs.lstat(resolved.realTarget, { bigint: true });
+  assertWritableTextFile(original);
+  const key = `${original.dev}:${original.ino}`;
+  if (savingFiles.has(key)) throw new Error('Another save is in progress for this file.');
+  savingFiles.add(key);
+  const conflict = () => new Error('File changed on disk. Reload the preview before saving.');
+  try {
+    // No O_CREAT or O_TRUNC. Recheck identity on all platforms.
+    const handle = await fs.open(resolved.realTarget, constants.O_RDWR | SAFE_OPEN_FLAGS);
+    try {
+      const initial = await handle.stat({ bigint: true });
+      assertWritableTextFile(initial);
+      if (!sameFile(original, initial)) throw conflict();
+      const bytes = await readPrefix(handle, FILE_PREVIEW_MAX_BYTES + 1);
+      if (bytes.length > FILE_PREVIEW_MAX_BYTES) throw new Error('File is too large to edit in the preview.');
+      if (!isText(bytes)) throw new Error('Only valid UTF-8 text files without binary content can be saved.');
+      if (!bytes.equals(expected)) throw conflict();
+      const currentPath = await resolveInWorkspace(root, relative);
+      if (!currentPath || currentPath.realRoot !== resolved.realRoot || currentPath.realTarget !== resolved.realTarget) throw conflict();
+      const current = await fs.lstat(currentPath.realTarget, { bigint: true });
+      assertWritableTextFile(current);
+      if (!sameFile(initial, current) || current.size !== BigInt(bytes.length) || current.mtimeNs !== initial.mtimeNs || current.ctimeNs !== initial.ctimeNs) throw conflict();
+      if (bytes.equals(next)) return;
+      // This is optimistic, not a filesystem CAS against arbitrary external processes.
+      // Write before shrinking so a failure before the first byte never truncates the file.
+      let offset = 0;
+      while (offset < next.length) {
+        const { bytesWritten } = await handle.write(next, offset, next.length - offset, offset);
+        if (!bytesWritten) throw new Error('Could not finish writing the file.');
+        offset += bytesWritten;
+      }
+      if (next.length < bytes.length) await handle.truncate(next.length);
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    savingFiles.delete(key);
   }
 }
 

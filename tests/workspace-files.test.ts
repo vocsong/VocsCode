@@ -4,7 +4,8 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listWorkspaceFiles, MAX_IMAGE_BYTES, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile } from '../src/main/workspace-files';
+import { listWorkspaceFiles, MAX_IMAGE_BYTES, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile, writeWorkspaceText } from '../src/main/workspace-files';
+import { FILE_PREVIEW_MAX_BYTES } from '../src/shared/ipc';
 import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import type { SessionMeta } from '../src/shared/types';
 import { missionFixture } from './support/mission-fixture';
@@ -66,7 +67,7 @@ describe('listWorkspaceFiles', () => {
     await fs.symlink(sibling, path.join(root, 'outside-link'), process.platform === 'win32' ? 'junction' : 'dir');
 
     await expect(listWorkspaceFiles(root, 'outside-link')).resolves.toEqual([]);
-    await expect(readWorkspaceFile(root, path.join('outside-link', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false });
+    await expect(readWorkspaceFile(root, path.join('outside-link', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false, readOnly: true });
   });
 });
 
@@ -78,8 +79,16 @@ describe('readWorkspaceFile', () => {
     const outside = path.join(sibling, 'outside.txt');
     await fs.writeFile(outside, 'outside');
 
-    await expect(readWorkspaceFile(root, outside)).resolves.toEqual({ content: '', truncated: false });
-    await expect(readWorkspaceFile(root, path.join('..', 'proj2', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false });
+    await expect(readWorkspaceFile(root, outside)).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+    await expect(readWorkspaceFile(root, path.join('..', 'proj2', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+  });
+
+  it('distinguishes a directory placeholder from an existing empty regular file', async () => {
+    const { root } = workspace();
+    await fs.mkdir(path.join(root, 'dir'), { recursive: true });
+    await fs.writeFile(path.join(root, 'empty.txt'), '');
+    await expect(readWorkspaceFile(root, 'dir')).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+    await expect(readWorkspaceFile(root, 'empty.txt')).resolves.toEqual({ content: '', truncated: false });
   });
 
   it('returns only the bounded UTF-8 prefix and reports truncation', async () => {
@@ -141,6 +150,76 @@ describe('readWorkspaceFile', () => {
     const clampedRead = await readWorkspaceFile(root, 'clamped.txt', 3_000_000);
     expect(clampedRead.content).toHaveLength(2_000_000);
     expect(clampedRead.truncated).toBe(true);
+  });
+});
+
+describe('writeWorkspaceText', () => {
+  it('rejects binary and invalid UTF-8 but permits a literal replacement character', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root);
+    for (const bytes of [Buffer.from([0xff]), Buffer.from('x'.repeat(8001) + '\0')]) {
+      const file = path.join(root, 'invalid.txt');
+      await fs.writeFile(file, bytes);
+      await expect(readWorkspaceFile(root, 'invalid.txt', FILE_PREVIEW_MAX_BYTES)).resolves.toEqual({ content: '', truncated: false, binary: true });
+      await expect(writeWorkspaceText(root, 'invalid.txt', 'edit', '')).rejects.toThrow(/valid UTF-8 text files/);
+      await expect(fs.readFile(file)).resolves.toEqual(bytes);
+    }
+    await fs.writeFile(path.join(root, 'valid.txt'), '\uFFFD');
+    for (const invalid of ['\uD800', '\0']) {
+      await expect(writeWorkspaceText(root, 'valid.txt', invalid, '\uFFFD')).rejects.toThrow(/valid UTF-8 text/);
+      await expect(writeWorkspaceText(root, 'valid.txt', '', invalid)).rejects.toThrow(/valid UTF-8 text/);
+    }
+    await expect(writeWorkspaceText(root, 'valid.txt', '', '\uFFFD')).resolves.toBeUndefined();
+    await expect(writeWorkspaceText(root, 'valid.txt', 'new', '')).resolves.toBeUndefined();
+    await expect(fs.readFile(path.join(root, 'valid.txt'), 'utf8')).resolves.toBe('new');
+  });
+
+  it('caps old and new content by UTF-8 bytes, including a truncated multibyte preview', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root);
+    const file = path.join(root, 'edit.txt');
+    const max = 'é'.repeat(FILE_PREVIEW_MAX_BYTES / 2);
+    const tooLong = `a${max}`;
+    await fs.writeFile(file, 'before');
+    await expect(writeWorkspaceText(root, 'edit.txt', tooLong, 'before')).rejects.toThrow(/size limit/);
+    await expect(writeWorkspaceText(root, 'edit.txt', 'after', tooLong)).rejects.toThrow(/size limit/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('before');
+    await expect(writeWorkspaceText(root, 'edit.txt', max, 'before')).resolves.toBeUndefined();
+    await expect(fs.readFile(file)).resolves.toHaveLength(FILE_PREVIEW_MAX_BYTES);
+    await fs.writeFile(file, tooLong);
+    const preview = await readWorkspaceFile(root, 'edit.txt', FILE_PREVIEW_MAX_BYTES);
+    expect(preview.truncated).toBe(true);
+    expect(preview.binary).toBeUndefined();
+    await expect(writeWorkspaceText(root, 'edit.txt', 'after', max)).rejects.toThrow(/too large/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe(tooLong);
+  });
+
+  it('refuses directories and hard-linked files, leaving the outside alias untouched', async () => {
+    const { container, root } = workspace();
+    await fs.mkdir(path.join(root, 'dir'), { recursive: true });
+    const outside = path.join(container, 'outside.txt');
+    await fs.writeFile(outside, 'before');
+    await fs.link(outside, path.join(root, 'linked.txt'));
+    await expect(writeWorkspaceText(root, 'dir', 'edit', '')).rejects.toThrow(/existing regular files/);
+    await expect(writeWorkspaceText(root, 'linked.txt', 'edit', 'before')).rejects.toThrow(/hard links/);
+    await expect(fs.readFile(outside, 'utf8')).resolves.toBe('before');
+  });
+
+  it('leaves the original intact on an injected write failure and releases the next save', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root);
+    const file = path.join(root, 'edit.txt');
+    await fs.writeFile(file, 'before');
+    const open = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementationOnce(async (...args) => {
+      const handle = await open(...args);
+      vi.spyOn(handle, 'write').mockRejectedValueOnce(new Error('injected write failure'));
+      return handle;
+    });
+    await expect(writeWorkspaceText(root, 'edit.txt', 'x', 'before')).rejects.toThrow(/injected write failure/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('before');
+    await expect(writeWorkspaceText(root, 'edit.txt', 'x', 'before')).resolves.toBeUndefined();
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('x');
   });
 });
 

@@ -549,6 +549,7 @@ async function main(): Promise<void> {
     secrets,
     sessions,
     missions: missions.service,
+    withWorkspaceWrite: missions.admission.dispatch.bind(missions.admission),
     terminals,
     runtime,
     analytics,

@@ -6,17 +6,16 @@ import {
   applyDrop,
   canClosePane,
   canSplit,
+  closeFilePreview,
   closePane,
   dropZoneAt,
-  filePane,
   focusPane,
   MAX_PANES,
-  openFilePane,
+  openFilePreview,
   openSession,
   restoreLayout,
   resizePanes,
   saveLayout,
-  sessionPanes,
   singlePaneLayout,
   splitPane,
   visiblePaneSessions,
@@ -101,102 +100,74 @@ describe('session pane model', () => {
   });
 });
 
-describe('file preview panes', () => {
-  const file = (sessionId = 's_a', path = 'src/a.ts', nonce = 1): FilePreviewTarget => ({ sessionId, path, nonce });
-  const kinds = (layout: PaneLayout) => layout.panes.map((p) => (p.file ? `file:${p.file.sessionId}:${p.file.path}` : p.sessionId));
+describe('transient file preview', () => {
+  const file: FilePreviewTarget = { sessionId: 's_a', path: 'src/a.ts', nonce: 1 };
 
-  it('opens beside a lone session, side by side, and leaves the session pane active', () => {
-    const start = { ...singlePaneLayout('s_a'), orientation: 'vertical' as const };
-    const layout = openFilePane(start, file());
-    expect(kinds(layout)).toEqual(['s_a', 'file:s_a:src/a.ts']);
-    expect(layout.orientation).toBe('horizontal');
-    expect(layout.sizes).toEqual([0.5, 0.5]);
-    expect(layout.activePaneId).toBe('pane-1');
-    expect(activePane(layout).sessionId).toBe('s_a');
+  it('opens and closes without changing orientation, shares, panes or the active session', () => {
+    const start = resizePanes(two('s_a', 's_b', 'vertical'), [0.6, 0.4]);
+    const layout = openFilePreview(start, file);
+    expect(layout).toEqual({ ...start, filePreview: file });
+    expect(activePane(layout).sessionId).toBe('s_b');
+    const closed = closeFilePreview(layout);
+    expect(closed).toEqual(start);
+    expect(closeFilePreview(closed)).toBe(closed);
   });
 
-  it('switches the open preview to the next file instead of adding a pane', () => {
-    const once = openFilePane(singlePaneLayout('s_a'), file('s_a', 'src/a.ts', 1));
-    const twice = openFilePane(once, file('s_a', 'src/b.ts', 2));
-    expect(kinds(twice)).toEqual(['s_a', 'file:s_a:src/b.ts']);
-    expect(filePane(twice)!.id).toBe(filePane(once)!.id);
+  it('retargets the single preview, and ignores requests from sessions without a pane', () => {
+    const start = two();
+    const first = openFilePreview(start, file);
+    const target = { sessionId: 's_b', path: 'src/b.ts', nonce: 2 };
+    const second = openFilePreview(first, target);
+    expect(second).toEqual({ ...start, filePreview: target });
+    expect(openFilePreview(second, { ...file, sessionId: 's_z' })).toBe(second);
   });
 
-  it('opens nothing for a session that is not on screen', () => {
-    const start = singlePaneLayout('s_a');
-    expect(openFilePane(start, file('s_z'))).toBe(start);
-  });
-
-  it('never becomes the active pane', () => {
-    const layout = openFilePane(singlePaneLayout('s_a'), file());
-    expect(focusPane(layout, filePane(layout)!.id)).toBe(layout);
-    expect(dropZoneAt(layout, { left: 0, top: 0, width: 1000, height: 800 }, 990, 400)).toBe('right');
-  });
-
-  it('does not count toward MAX_PANES, and a new session pane lands before it', () => {
-    const layout = openFilePane(singlePaneLayout('s_a'), file());
-    expect(canSplit(layout)).toBe(true);
-    const split = splitPane(layout, 'pane-1', 'horizontal', 's_b');
-    expect(kinds(split)).toEqual(['s_a', 's_b', 'file:s_a:src/a.ts']);
-    expect(activePane(split).sessionId).toBe('s_b');
-    expect(canSplit(split)).toBe(false);
-    expect(sessionPanes(split)).toHaveLength(2);
-    // A file pane is not something to split.
-    expect(splitPane(layout, filePane(layout)!.id, 'horizontal', 's_b')).toBe(layout);
-  });
-
-  it('gives a third pane a third of the room and keeps the sessions\' proportions', () => {
-    const layout = openFilePane(resizePanes(two(), [0.6, 0.4]), file('s_b'));
-    expect(layout.sizes.map((s) => Math.round(s * 1000) / 1000)).toEqual([0.4, 0.267, 0.333]);
-  });
-
-  it('closes on its own, but never takes the last session pane with it', () => {
-    const layout = openFilePane(singlePaneLayout('s_a'), file());
+  it('does not count toward pane limits or change which conversations are visible', () => {
+    const layout = openFilePreview(singlePaneLayout('s_a'), file);
     expect(canClosePane(layout, 'pane-1')).toBe(false);
     expect(closePane(layout, 'pane-1')).toBe(layout);
-    const closed = closePane(layout, filePane(layout)!.id);
-    expect(kinds(closed)).toEqual(['s_a']);
-    expect(closed.sizes).toEqual([1]);
+    expect(canSplit(layout)).toBe(true);
+    const split = splitPane(layout, 'pane-1', 'vertical', 's_b');
+    expect(shown(split)).toEqual(['s_a', 's_b']);
+    expect(split.filePreview).toBe(file);
+    expect(canSplit(split)).toBe(false);
+    expect(visiblePaneSessions(split, false)).toEqual(['s_a', 's_b']);
+    expect(visiblePaneSessions(split, true)).toEqual(['s_b']);
   });
 
-  it('closes when its session leaves the screen, however it leaves', () => {
-    const withFile = openFilePane(two(), file('s_a'));
-    // The session's pane closes.
-    expect(kinds(closePane(withFile, 'pane-1'))).toEqual(['s_b']);
-    // The active pane switches to another session (a sidebar click).
-    const lone = openFilePane(singlePaneLayout('s_a'), file('s_a'));
-    expect(kinds(openSession(lone, 's_c'))).toEqual(['s_c']);
-    // The session is deleted or archived.
-    expect(kinds(withoutSessions(withFile, (id) => id === 's_a', null))).toEqual(['s_b']);
-    expect(kinds(withoutSessions(lone, (id) => id === 's_a', 's_z'))).toEqual(['s_z']);
-    // Another session's pane changing leaves it alone.
-    expect(kinds(withoutSessions(withFile, (id) => id === 's_b', null))).toEqual(['s_a', 'file:s_a:src/a.ts']);
+  it('prunes the preview when the owner is replaced, closed, dropped over, deleted or archived', () => {
+    const start = two();
+    const layout = openFilePreview(start, file);
+    const lone = openFilePreview(singlePaneLayout('s_a'), file);
+    expect(closePane(layout, 'pane-1')).toEqual(closePane(start, 'pane-1'));
+    expect(openSession(lone, 's_c')).toEqual(singlePaneLayout('s_c'));
+    expect(applyDrop(lone, 'pane-1', 'center', 's_c')).toEqual(singlePaneLayout('s_c'));
+    expect(withoutSessions(layout, (id) => id === 's_a', null)).toEqual(closePane(start, 'pane-1'));
+    expect(withoutSessions(lone, (id) => id === 's_a', 's_z')).toEqual(singlePaneLayout('s_z'));
   });
 
-  it('a session dropped on the preview takes its place while there is room', () => {
-    const layout = openFilePane(singlePaneLayout('s_a'), file());
-    const dropped = applyDrop(layout, filePane(layout)!.id, 'center', 's_b');
-    expect(kinds(dropped)).toEqual(['s_a', 's_b']);
-    expect(activePane(dropped).sessionId).toBe('s_b');
-    const full = openFilePane(two(), file('s_a'));
-    expect(applyDrop(full, filePane(full)!.id, 'center', 's_c')).toBe(full);
+  it('keeps the preview across focus changes, swaps and removal of another session', () => {
+    const start = two();
+    const layout = openFilePreview(start, file);
+    expect(focusPane(layout, 'pane-1').filePreview).toBe(file);
+    const swapped = applyDrop(layout, 'pane-1', 'center', 's_b');
+    expect(shown(swapped)).toEqual(['s_b', 's_a']);
+    expect(swapped.filePreview).toBe(file);
+    expect(withoutSessions(layout, (id) => id === 's_b', null)).toEqual({ ...closePane(start, start.activePaneId), filePreview: file });
   });
 
-  it('a narrow workspace shows the preview the user just opened', () => {
-    const layout = openFilePane(singlePaneLayout('s_a'), file());
-    expect(visiblePaneSessions(layout, false)).toEqual(['s_a']);
-    expect(visiblePaneSessions(layout, true)).toEqual([]);
-  });
-
-  it('is never remembered across a restart', () => {
+  it('never writes or restores a preview', () => {
     const data = new Map<string, string>();
     const store = { setItem: (k: string, v: string) => void data.set(k, v), removeItem: (k: string) => void data.delete(k) };
-    saveLayout(openFilePane(singlePaneLayout('s_a'), file()), store);
+    saveLayout(openFilePreview(singlePaneLayout('s_a'), file), store);
     expect(data.size).toBe(0);
-    saveLayout(openFilePane(resizePanes(two(), [0.6, 0.4]), file('s_a')), store);
-    const restored = restoreLayout(data.get('vocs-code.sessionLayout') ?? null, () => true);
-    expect(restored && kinds(restored)).toEqual(['s_a', 's_b']);
-    expect(restored?.sizes.map((s) => Math.round(s * 1000) / 1000)).toEqual([0.6, 0.4]);
+    const start = resizePanes(two('s_a', 's_b', 'vertical'), [0.6, 0.4]);
+    const layout = openFilePreview(start, file);
+    saveLayout(layout, store);
+    const raw = data.get('vocs-code.sessionLayout')!;
+    expect(JSON.parse(raw)).toEqual(start);
+    expect(restoreLayout(raw, () => true)).toEqual(start);
+    expect(restoreLayout(JSON.stringify(layout), () => true)).toEqual(start);
   });
 });
 

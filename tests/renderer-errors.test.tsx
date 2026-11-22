@@ -14,7 +14,7 @@ import { ErrorBoundary } from '../src/renderer/src/ErrorBoundary';
 import { HarnessSetup } from '../src/renderer/src/components/HarnessSetup';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { FilePreviewPane } from '../src/renderer/src/components/FilePreviewPane';
-import { filePane, singlePaneLayout } from '../src/renderer/src/panes';
+import { singlePaneLayout } from '../src/renderer/src/panes';
 import { Sidebar } from '../src/renderer/src/components/Sidebar';
 import { Transcript } from '../src/renderer/src/components/Transcript';
 import { TitleBar } from '../src/renderer/src/components/TitleBar';
@@ -227,18 +227,13 @@ describe('file preview failures', () => {
       return Promise.resolve({});
     });
     useStore.setState({ panelTab: 'files', sessions: [session], activeId: session.id, layout: singlePaneLayout(session.id) });
-    // The file previews in the split view's file pane, which SessionPanes would mount.
-    const Pane = () => {
-      const pane = useStore((s) => filePane(s.layout));
-      return pane ? <FilePreviewPane pane={pane} size={0.5} split /> : null;
-    };
-
-    render(<><RightPanel session={session} /><Pane /></>);
+    render(<><RightPanel session={session} /><FilePreviewPane /></>);
     fireEvent.click(await screen.findByText('notes.txt'));
 
     await waitFor(() => expect(toastTexts().some((t) => t.includes('read failed'))).toBe(true));
     expect(invokeMock).toHaveBeenCalledWith('fs:read', { sessionId: 's_p', path: 'notes.txt', maxBytes: 200_000 });
     // Nothing could be shown, so the empty preview pane does not linger.
-    await waitFor(() => expect(filePane(useStore.getState().layout)).toBeUndefined());
+    expect(useStore.getState().layout.filePreview).toBeUndefined();
+    expect(screen.queryByTestId('file-pane')).toBeNull();
   });
 });
