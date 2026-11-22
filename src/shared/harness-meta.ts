@@ -302,6 +302,7 @@ export function isMissionHarnessSupported(id: HarnessId): boolean {
  */
 export const SLASH_COMMANDS: { name: string; description: string; args?: string }[] = [
   { name: 'help', description: 'Show available commands and shortcuts' },
+  { name: 'housekeep', description: 'Review old sessions for safe batch archiving', args: '[sessions|settings]' },
   { name: 'doctor', description: 'Check harness runtimes, sign-in state and provider keys' },
   { name: 'model', description: 'Switch model for this session', args: '<provider/model>' },
   { name: 'mode', description: 'Change permission mode', args: 'ask|accept-edits|plan|auto|full-auto' },

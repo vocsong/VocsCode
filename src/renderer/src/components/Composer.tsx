@@ -7,6 +7,8 @@ import { modelName, parseTypedModel } from '../../../shared/model-names';
 import { canInvoke, invoke } from '../api';
 import { FileAttachmentChips, readAttachments } from '../attachments';
 import { fmtCost, fmtTokens } from '../format';
+import { canHousekeepHere, openHousekeep } from '../housekeep';
+import { openSettings } from './SettingsView';
 import { useSessionModels } from '../models';
 import { setSessionEffort } from '../sessionActions';
 import { NO_COMPOSER_HISTORY, useStore } from '../store';
@@ -199,6 +201,17 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
       setHistIdx(-1);
     };
     const typedCommand = t.startsWith('/') ? t.slice(1).split(/\s+/)[0] : '';
+    if (typedCommand === 'housekeep') {
+      if (images.length || files.length) { toast('Housekeep cannot include attachments.', 'error'); return; }
+      const arg = t.slice('/housekeep'.length).trim().toLowerCase();
+      if (arg && arg !== 'sessions' && arg !== 'settings') { toast('Usage: /housekeep [sessions|settings]', 'info'); return; }
+      if (!canHousekeepHere()) { toast('Housekeep is available in the desktop app.', 'info'); return; }
+      clearDraft();
+      setDraft(session.id, '');
+      if (arg === 'settings') openSettings('housekeep');
+      else openHousekeep();
+      return;
+    }
     // Mission owns its exact token before native /goal or harness command forwarding.
     const missionCommand = parseMissionCommand(text);
     if (missionCommand) {

@@ -137,6 +137,23 @@ async function fileResolveRig() {
 }
 
 describe('handler registry', () => {
+  it('restricts Housekeep and its excerpts to the desktop and refuses forged batches before session dispatch', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list');
+    for (const channel of ['housekeep:preview', 'housekeep:assess', 'housekeep:apply']) {
+      expect(registry.channels()).toContain(channel);
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels()).not.toContain(channel);
+      await expect(registry.invoke(channel, {}, 'agent')).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke(channel, {}, 'user')).rejects.toThrow(/desktop owner/);
+    }
+    const previewId = '56756756-e138-4775-8652-44316fa0203b';
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['s_test'], protectedIds: [], force: true }, 'desktop')).rejects.toThrow();
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['../s_test'], protectedIds: [] }, 'desktop')).rejects.toThrow();
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['s_test'], protectedIds: [] }, 'desktop')).rejects.toThrow(/preview expired/);
+    expect(list).not.toHaveBeenCalled();
+  });
+
   it('keeps all account channels local-only and accepts no endpoint/credential configuration', async () => {
     const snapshot = { realm: 'staging', status: 'signed_out', refreshing: false, revision: 0, connections: [] } as const;
     const account = { get: vi.fn(() => snapshot), signIn: vi.fn(async () => snapshot), cancel: vi.fn(() => snapshot), signOut: vi.fn(async () => snapshot), refresh: vi.fn(async () => snapshot), dispose: vi.fn() };

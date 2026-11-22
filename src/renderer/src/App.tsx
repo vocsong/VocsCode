@@ -5,6 +5,7 @@ import { useActiveSession, useStore, toastError } from './store';
 import { Vesta } from './components/Vesta';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
+import { HousekeepDialog } from './components/HousekeepDialog';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { QuickSessionPicker } from './components/QuickSessionPicker';
@@ -26,9 +27,17 @@ import { isTopLevelSession, pauseMissionSession } from './missions';
 import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
 import { activeComposer } from './panes';
 import { GitPanelCache } from './git-panel-cache';
+import { canHousekeepHere, HOUSEKEEP_OPEN } from './housekeep';
 
 export function App() {
   const [gitPanelCache] = useState(() => new GitPanelCache());
+  const [housekeepOpen, setHousekeepOpen] = useState(false);
+  useEffect(() => {
+    if (!canHousekeepHere()) return;
+    const open = () => setHousekeepOpen(true);
+    window.addEventListener(HOUSEKEEP_OPEN, open);
+    return () => window.removeEventListener(HOUSEKEEP_OPEN, open);
+  }, []);
   const booted = useStore((s) => s.booted);
   const bootError = useStore((s) => s.bootError);
   const boot = useStore((s) => s.boot);
@@ -216,6 +225,7 @@ export function App() {
       {quickSessionOpen && <QuickSessionPicker />}
       {paletteOpen && <CommandPalette />}
       {searchOpen && <SearchModal />}
+      {housekeepOpen && <HousekeepDialog onClose={() => setHousekeepOpen(false)} />}
       <ConfirmHost />
       <ContextMenuHost />
       {settings.onboardingDone && <Vesta />}

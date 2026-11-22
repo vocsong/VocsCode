@@ -6,6 +6,7 @@ import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, HarnessUpdat
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { harnessStatus } from '../../../shared/harness-setup';
+import { DEFAULT_HOUSEKEEP_RECENT_DAYS, MAX_HOUSEKEEP_RECENT_DAYS, normalizeHousekeepRecentDays } from '../../../shared/housekeep';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
 import { DEFAULT_REMOTE_ORIGIN, pairingLink as pairingLinkFor, remoteOrigin } from '../../../shared/pairing';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
@@ -86,7 +87,7 @@ export function SettingsView() {
     } else heading.current?.focus();
     setDestination(null);
   }, [destination, searching, section]);
-  const update = (patch: Partial<AppSettings>) => void invoke('settings:update', patch).catch((error: unknown) => {
+  const update = (patch: Partial<AppSettings>) => invoke('settings:update', patch).catch((error: unknown) => {
     toast(`Could not save settings: ${error instanceof Error ? error.message : String(error)}`, 'error');
   });
   // Zen shows the section nav as icons, so each one carries its name as a tooltip.
@@ -164,6 +165,7 @@ export function SettingsView() {
               {section === 'voice' && <VoiceSection settings={settings} />}
               {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
               {section === 'import' && <ChatImport />}
+              {section === 'housekeep' && <Housekeep recentDays={settings.housekeepRecentDays} onSave={(days) => update({ housekeepRecentDays: days })} />}
               {section === 'instructions' && <InstructionsSection />}
               {section === 'pi' && <PiSection />}
               {section === 'acp' && <AcpAgents settings={settings} update={update} />}
@@ -174,6 +176,44 @@ export function SettingsView() {
         </div>
       </div>
     </div>
+  );
+}
+
+function Housekeep({ recentDays, onSave }: { recentDays?: number; onSave: (days: number) => Promise<unknown> }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState<{ days: number } | null>(null);
+  const [invalid, setInvalid] = useState(false);
+  const current = submitted?.days ?? normalizeHousekeepRecentDays(recentDays);
+  const commit = (input: HTMLInputElement) => {
+    if (draft === null) return;
+    setDraft(null);
+    // A blank or incomplete number is not an intentional zero. Only submit a valid, finished edit.
+    setInvalid(!input.validity.valid);
+    if (!input.validity.valid || input.valueAsNumber === current) return;
+    const mine = { days: input.valueAsNumber };
+    setSubmitted(mine);
+    void onSave(mine.days).finally(() => setSubmitted((latest) => latest === mine ? null : latest));
+  };
+
+  return (
+    <SettingsGroup id="housekeep-recent" title="Recent session protection" icon="clock">
+      <Field label="Protect sessions used in the last (days)">
+        <input
+          type="number" min={0} max={MAX_HOUSEKEEP_RECENT_DAYS} step={1} required
+          value={draft ?? current}
+          aria-describedby="housekeep-recent-hint"
+          onChange={(e) => { setDraft(e.currentTarget.value); setInvalid(false); }}
+          onBlur={(e) => commit(e.currentTarget)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            commit(e.currentTarget);
+          }}
+        />
+      </Field>
+      <p id="housekeep-recent-hint" className="field-hint">Enter a whole number from 0 to {MAX_HOUSEKEEP_RECENT_DAYS} (default: {DEFAULT_HOUSEKEEP_RECENT_DAYS}). 0 disables only the age guard; other protections still apply.</p>
+      {invalid && <p role="alert">That value wasn’t saved. Enter a whole number from 0 to {MAX_HOUSEKEEP_RECENT_DAYS}.</p>}
+    </SettingsGroup>
   );
 }
 

@@ -8,6 +8,7 @@ import { assertEndpointUrl } from '../shared/endpoint-policy';
 import { isAutoCompactionThreshold } from '../shared/compaction';
 import { DEFAULT_DICTATION, DICTATION_IDLE_MINUTES, localModel, type DictationSettings } from '../shared/dictation';
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
+import { DEFAULT_HOUSEKEEP_RECENT_DAYS, normalizeHousekeepRecentDays } from '../shared/housekeep';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigError, validateMissionConfig, validateMissionProjectOverride, type MissionCapabilityResolver, type MissionProjectOverride } from '../shared/mission-config';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
@@ -215,6 +216,7 @@ export function defaultSettings(): AppSettings {
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
     autoCompactionThreshold: undefined,
+    housekeepRecentDays: DEFAULT_HOUSEKEEP_RECENT_DAYS,
     defaultModelByHarness: {},
     folderSessionDefaults: {},
     favoriteModels: [],
@@ -511,6 +513,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     // Same for an interface mode this build does not know: the full layout is always safe.
     uiMode: isUiModeId(stored.uiMode) ? stored.uiMode : d.uiMode,
     autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,
+    housekeepRecentDays: normalizeHousekeepRecentDays(stored.housekeepRecentDays),
     // An effort level removed from the app (or a harness-specific value written by an older build) falls back to the harness default.
     defaultEffort: isEffortLevel(stored.defaultEffort) ? stored.defaultEffort : undefined,
     binaries: { ...d.binaries, ...(stored.binaries ?? {}) },
