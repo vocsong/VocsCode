@@ -170,7 +170,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       costReporting: false,
       systemPrompt: false,
       mcp: 'inject',
-      permissionModes: ['ask', 'plan'],
+      permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'acp-config'
     }
   },

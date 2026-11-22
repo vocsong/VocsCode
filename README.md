@@ -59,7 +59,7 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Use your Antigravity quota.** Install the Antigravity CLI and open **Settings → Providers & keys → Harness logins → Google Antigravity** to sign in with Google or check your remaining quota. Select **Google Antigravity** in New Session, pick one of your account’s Gemini models, and send a prompt. [Setup instructions](docs/ONBOARDING.md#subscription-and-api-routes)
 
-**Choose permissions per session.** Each harness offers the modes it supports. Antigravity offers Ask and Plan for interactive Gemini sessions.
+**Choose permissions per session.** Each harness offers the modes it supports. Antigravity offers every mode for Gemini sessions you drive yourself; goal loops and Missions cannot prompt it.
 
 **Nothing gets lost.** Threads grouped by project, isolated git worktrees per session, diff review with per-file revert and commit, steer a running turn or queue your next message, `/goal` with an iteration guard. Each project remembers how you start it — harness, model, permission mode and whether sessions isolate in a worktree.
 
