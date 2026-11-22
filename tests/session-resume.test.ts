@@ -372,7 +372,7 @@ describe('session resume persistence', () => {
 
     await expect(manager.runControlled(meta.id, { text: 'Say hello' }, control)).rejects.toThrow('direct user prompts');
     await expect(manager.goal(meta.id, 'set', { objective: 'Say hello' })).rejects.toThrow('direct user prompts');
-    await expect(manager.setPermissionMode(meta.id, 'yolo' as PermissionMode)).rejects.toThrow('does not support the yolo permission mode');
+    await expect(manager.setPermissionMode(meta.id, 'yolo' as PermissionMode)).rejects.toThrow('does not offer that permission mode');
     expect(control.beforeStart).not.toHaveBeenCalled();
     expect(mocks.adapterCalls).toHaveLength(0);
     expect(await manager.transcript(meta.id)).toEqual([]);

@@ -68,11 +68,12 @@ describe('gate decision table', () => {
     expect(ASK(await decide('accept-edits', 'write', { path: '../outside.txt' }))).toBe(true);
   });
 
-  it('auto allows safe shell and in-project edits but asks for dangerous commands and MCP', async () => {
+  it('auto runs safe shell, in-project edits and MCP tools but asks for dangerous commands', async () => {
     expect(ALLOW(await decide('auto', 'bash', { command: 'npm test' }))).toBe(true);
     expect(ALLOW(await decide('auto', 'edit', { path: 'src/a.ts' }))).toBe(true);
     expect(ASK(await decide('auto', 'bash', { command: 'git push --force' }))).toBe(true);
-    expect(ASK(await decide('auto', 'mcp__server__write', {}))).toBe(true);
+    expect(ALLOW(await decide('auto', 'mcp__server__write', {}))).toBe(true);
+    expect(ASK(await decide('ask', 'mcp__server__write', {}))).toBe(true);
   });
 
   it('a session grant never unlocks a dangerous command or an outside write', async () => {
@@ -177,14 +178,15 @@ describe('read-only MCP tools', () => {
     }
   });
 
-  it('still asks for a write-capable tool from the same server', async () => {
+  it('gates a write-capable tool from the same server by the tier', async () => {
     const propose = 'mcp__vocs_memory__knowledge_propose';
-    expect(ASK(await decide('auto', propose, { title: 't' }, { readOnlyMcp: new Set([search]) }))).toBe(true);
+    expect(ASK(await decide('ask', propose, { title: 't' }, { readOnlyMcp: new Set([search]) }))).toBe(true);
+    expect(ALLOW(await decide('auto', propose, { title: 't' }, { readOnlyMcp: new Set([search]) }))).toBe(true);
   });
 
   it('cannot be extended to a server the app does not own', async () => {
     // The trusted set only ever names the app's memory server, so an unknown tool keeps asking.
-    expect(ASK(await decide('auto', 'mcp__other__wipe', {}, { readOnlyMcp: new Set([search]) }))).toBe(true);
+    expect(ASK(await decide('ask', 'mcp__other__wipe', {}, { readOnlyMcp: new Set([search]) }))).toBe(true);
   });
 });
 

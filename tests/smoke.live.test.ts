@@ -204,6 +204,20 @@ describe('live harness smoke', () => {
     assertSuccessfulTurn(items, events, 'PONG');
   });
 
+  it.runIf(want('codex'))('codex app-server Auto runs an ordinary project command without asking', async () => {
+    const { ctx, events, waitTurn, meta } = await makeCtx('codex');
+    expect(meta.config.permissionMode).toBe('auto');
+    const adapter = createAdapter('codex', ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    await adapter.send({ text: 'Run exactly this shell command in the current directory and nothing else: node -e "require(\'fs\').writeFileSync(\'auto-marker.txt\', \'ok\')". Then reply DONE.' });
+    await waitTurn(170_000);
+    // Codex asks for every command not on its known-safe list (`untrusted`); the app's Auto gate
+    // must answer that without showing the user an approval.
+    expect(await fs.readFile(path.join(meta.cwd, 'auto-marker.txt'), 'utf8')).toBe('ok');
+    expect(events.filter((e) => e.type === 'log' && e.message.startsWith('auto-approving'))).toEqual([]);
+  });
+
   it.runIf(want('codex-exec'))('codex exec SDK answers a prompt', async () => {
     const { ctx, items, events, waitTurn } = await makeCtx('codex-exec');
     const adapter = createAdapter('codex-exec', ctx);
@@ -279,6 +293,28 @@ describe('live harness smoke', () => {
     await waitTurn(170_000);
     assertSuccessfulTurn(items, events, 'PONG');
     expect(meta.harnessRef.claudeSessionId).toBeTruthy();
+  });
+
+  it.runIf(want('claude'))('claude Auto runs an ordinary command without asking and Plan blocks a write', async () => {
+    const auto = await makeCtx('claude');
+    const runner = createAdapter('claude', auto.ctx);
+    cleanups.push(() => runner.dispose());
+    await runner.start();
+    await runner.send({ text: 'Use the Bash tool to run exactly: node -e "require(\'fs\').writeFileSync(\'auto-marker.txt\', \'ok\')". Then reply DONE.' });
+    await auto.waitTurn(170_000);
+    // The PreToolUse tier check answers Auto itself; no approval reaches the user.
+    expect(await fs.readFile(path.join(auto.meta.cwd, 'auto-marker.txt'), 'utf8')).toBe('ok');
+    expect(auto.events.filter((e) => e.type === 'log' && e.message.startsWith('auto-approving'))).toEqual([]);
+    await runner.dispose();
+
+    const plan = await makeCtx('claude', { permissionMode: 'plan' });
+    const planner = createAdapter('claude', plan.ctx);
+    cleanups.push(() => planner.dispose());
+    await planner.start();
+    await planner.send({ text: 'Use the Write tool to create plan-marker.txt containing ok. If you cannot, reply BLOCKED.' });
+    await plan.waitTurn(170_000);
+    await expect(fs.stat(path.join(plan.meta.cwd, 'plan-marker.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(plan.events.filter((e) => e.type === 'log' && e.message.startsWith('auto-approving'))).toEqual([]);
   });
 
   // Proves the injection path end to end rather than only at the dialect converter: the harness

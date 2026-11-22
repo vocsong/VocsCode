@@ -5,14 +5,15 @@
  * pi's bridge registers and the subagent gate classifies, so a tool is recognizable across
  * harnesses.
  *
- * A third-party server's tool can do anything, so it always asks below Full access (the same rule
- * pi's gate applies) and is hidden in plan mode. The app's own memory server is the one exception:
- * the app wrote its tools, and only the tools it marks read-only may run unprompted — which also
- * keeps knowledge_search usable while planning.
+ * A third-party server's tool can do anything, so it follows the tier like a shell command and is
+ * hidden in plan mode. The app's own servers are the exception: a tool on the built-in read-only
+ * allowlist (`isBuiltinReadOnlyTool`) runs unprompted on every tier, Plan included, but only when
+ * the definition carries the provenance the app set when it built it — never by the server's name
+ * or the server's own readOnly annotation.
  */
 import type { ResolvedServer } from '../../mcp/effective';
 import { connectServer, type ConnectedMcpServer } from '../../mcp/client';
-import { VOCS_MEMORY_SERVER_ID } from '../../mcp/memory';
+import { isBuiltinReadOnlyTool } from '../../../shared/builtin-tools';
 import { errorMessage } from '../../util/async';
 import type { NativeToolDef } from './tools';
 
@@ -81,9 +82,9 @@ export class NativeMcpSession {
       }
       connections.push(result.connection);
       for (const tool of result.connection.tools) {
-        // Only the app's own memory server is trusted to declare a tool read-only, and only by the
+        // Read-only trust comes from the app's allowlist for its own servers, and only by the
         // provenance the app set on the definition it built, never by the server's name.
-        const readOnly = def.builtin === VOCS_MEMORY_SERVER_ID && def.id === VOCS_MEMORY_SERVER_ID && tool.readOnly === true;
+        const readOnly = def.builtin === def.id && isBuiltinReadOnlyTool(def.id, tool.name);
         const description = tool.description ? `${tool.description} (MCP server: ${def.id})` : `${def.id}: ${tool.name}`;
         const name = mcpToolName(def.id, tool.name);
         // Two tool names that fold together would give one name two tools; keep the first.

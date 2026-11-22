@@ -29,7 +29,7 @@ import { branchNameFromText, branchSlug, normalizeBranchPrefix } from '../shared
 import { autoCompactionThresholdLabel, autoCompactionTokenThreshold, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { nativeGoalCommand } from '../shared/goal-driver';
 import { fastModeSupport } from '../shared/fast-mode';
-import { HARNESS_BY_ID } from '../shared/harness-meta';
+import { HARNESS_BY_ID, assertPermissionModeOffered, closestPermissionMode } from '../shared/harness-meta';
 import { modelName } from '../shared/model-names';
 import { validateQuestionResponse } from '../shared/question-response';
 import { skillInstalled } from './skills';
@@ -671,8 +671,9 @@ export class SessionManager {
     if (req.config.fastMode !== undefined && typeof req.config.fastMode !== 'boolean') throw new Error('Fast mode must be a boolean');
     const settings = this.settings();
     let cfg = { ...req.config, fastMode: req.config.fastMode === true };
+    if (!HARNESS_BY_ID[cfg.harness]) throw new Error('Unknown harness');
+    assertPermissionModeOffered(cfg.harness, cfg.permissionMode);
     if (cfg.harness === 'antigravity') {
-      if (!HARNESS_BY_ID.antigravity.capabilities.permissionModes.includes(cfg.permissionMode)) throw new Error(`Antigravity does not support the ${cfg.permissionMode} permission mode.`);
       if (controlCreation || req.goal?.trim()) throw new Error('Antigravity sessions are driven by direct user prompts.');
     }
     if (cfg.fastMode) {
@@ -1207,7 +1208,9 @@ export class SessionManager {
       settings: () => this.settings(),
       runtime: this.deps.runtime,
       sessionDir,
-      permissionMode: () => session().config.permissionMode,
+      // A session saved before its harness's tiers were enforced may carry one it does not offer;
+      // the adapter runs the closest stricter tier, never a looser one.
+      permissionMode: () => closestPermissionMode(session().config.harness, session().config.permissionMode),
       ...(this.deps.appInstructions ? { appInstructions: () => this.deps.appInstructions!(session().config.harness) } : {}),
       ordinaryProcessOwnership: () => !managed && this.ordinaryOwnership(),
       effort: () => {
@@ -2303,10 +2306,10 @@ export class SessionManager {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    assertPermissionModeOffered(meta.config.harness, mode);
     const antigravity = meta.config.harness === 'antigravity';
     const active = this.active.get(id);
     if (antigravity) {
-      if (!HARNESS_BY_ID.antigravity.capabilities.permissionModes.includes(mode)) throw new Error(`Antigravity does not support the ${mode} permission mode.`);
       if ((this.configDispatches.get(id) ?? 0) > 1 || active?.starting || active?.turnPending || active?.adapter.busy || meta.queued) {
         throw new Error('Wait for the current Antigravity activity before changing permissions.');
       }
@@ -3191,7 +3194,7 @@ export class SessionManager {
         acpAgent: undefined,
         codexModelProvider: undefined,
         fastMode: false,
-        permissionMode: src.config.permissionMode,
+        permissionMode: closestPermissionMode(target, src.config.permissionMode),
         useWorktree: !!own
       };
       meta.activeModel = meta.config.model;

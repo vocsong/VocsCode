@@ -172,6 +172,8 @@ describe('codex streamed items reach the transcript once', () => {
     notify('turn/started', { turn: { id: 'turn-1' } });
     notify('item/started', { threadId, item: { id, type: 'fileChange', status: 'inProgress', changes: [{ path: 'example.txt', kind: { type: 'update' }, diff }] } });
     const approval = serverRequest('item/fileChange/requestApproval', { threadId, itemId: id });
+    // The real-path project check runs before the card is raised, so the card arrives asynchronously.
+    await vi.waitFor(() => expect(appended.some((item) => item.kind === 'approval')).toBe(true));
     const card = appended.find((item) => item.kind === 'approval');
     expect(card?.request).toMatchObject({ changes: [{ path: 'example.txt', kind: 'update', diff }], toolItemId: id });
     expect(appended.some((item) => item.id === id)).toBe(false);

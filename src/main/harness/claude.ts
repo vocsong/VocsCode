@@ -41,7 +41,8 @@ import { exists } from '../util/fs';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { SUBAGENT_TOOLS, ClaudeSubagentRuns, type NestedAssistantLike, type TaskNotificationLike, type TaskProgressLike, type TaskStartedLike, type TaskUpdatedLike } from './claude-subagents';
-import { gateAction, isOutsideWorkspace, isTrustedMissionCoordination, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
+import { gateAction, isTrustedMissionCoordination, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL, requiresPathApproval, type GateVerdict } from './permissions';
+import { isBuiltinReadOnlyMcpName } from '../../shared/builtin-tools';
 import { projectInstructionBlock } from './project-instructions';
 import { questionAnswerWithNote } from './question-answers';
 import { sessionAppendPrompt } from './system-prompt';
@@ -105,6 +106,13 @@ const READ_ONLY_TOOLS = new Set([
   'ReadMcpResourceTool',
   'Skill'
 ]);
+/**
+ * Tools that steer the Claude session itself (questions, subagents, plan mode, background-task
+ * control) rather than the project, the shell or the network. The PreToolUse gate leaves them to
+ * Claude Code's own pipeline, which reaches canUseTool when it would ask: AskUserQuestion needs
+ * canUseTool to collect its answers, and what a subagent does is gated call by call in its own run.
+ */
+const SESSION_CONTROL_TOOLS = new Set(['AskUserQuestion', 'Agent', 'Task', 'TaskOutput', 'TaskStop', 'KillShell', 'BashOutput', 'EnterPlanMode']);
 
 /** `get_settings` → `applied`: what the next request will send, after env overrides, org caps and
  * model-support downgrades. The installed SDK implements `getSettings()` but does not declare it. */
@@ -151,10 +159,11 @@ function toSdkMode(mode: PermissionMode): SdkPermissionMode {
     case 'plan':
       return 'plan';
     case 'auto':
-      // Our own gate auto-allows non-dangerous actions; keep the CLI prompting so we see everything.
-      return 'default';
     case 'full-auto':
-      return 'bypassPermissions';
+      // The app gate decides every call (PreToolUse, then canUseTool), so the CLI stays in its
+      // prompting mode and is never handed `bypassPermissions`: Full access is the gate allowing
+      // everything, which applies live and needs no `allowDangerouslySkipPermissions`.
+      return 'default';
   }
 }
 
@@ -219,6 +228,9 @@ export class ClaudeAdapter implements HarnessAdapter {
    *  Anthropic model list must not replace it. */
   private gateway = false;
   private sessionAllowed = new Set<string>();
+  /** Built-in MCP servers this process was handed through `options.mcpServers`; only their
+   * read-only tools run on every tier. */
+  private builtinServers = new Map<string, 'dynamic' | 'sdk'>();
   private currentAssistant: { id: string; text: string; thinking: string } | null = null;
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private fileSnapshots = new Map<string, string | null>();
@@ -303,7 +315,6 @@ export class ClaudeAdapter implements HarnessAdapter {
       cwd: meta.cwd,
       model: cfg.model?.model || meta.activeModel?.model,
       permissionMode: toSdkMode(mode),
-      allowDangerouslySkipPermissions: mode === 'full-auto',
       canUseTool: this.canUseTool,
       includePartialMessages: true,
       // Without this the SDK forwards only a subagent's tool_use/tool_result blocks, so a delegated
@@ -369,6 +380,9 @@ export class ClaudeAdapter implements HarnessAdapter {
     const gatewayMemory = mcp.filter((def) => def.id === VOCS_MEMORY_SERVER_ID
       && (def.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || def.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined));
     const processServers = mcp.filter((def) => def.id !== MISSION_SERVER_ID && !gatewayMemory.includes(def));
+    // Built-in servers this process hands Claude, keyed to the source Claude reports for them:
+    // `dynamic` for --mcp-config; the in-process memory gateway bridge below registers as `sdk`.
+    this.builtinServers = new Map(processServers.filter((def) => def.builtin === def.id).map((def) => [def.id, 'dynamic' as const]));
     if (mission) {
       if (missionServers.length !== 1 || missionServers[0].transport !== 'http' || !missionServers[0].headers?.Authorization) throw new Error('Managed Mission requires its authenticated MCP bridge.');
       // Never pass the Mission capability there either:
@@ -414,7 +428,10 @@ export class ClaudeAdapter implements HarnessAdapter {
     if (!mission && gatewayMemory.length) {
       const bridge = gatewayMemory.length === 1 ? await this.memoryMcpBridge(gatewayMemory[0], meta.cwd) : undefined;
       this.abort.signal.throwIfAborted();
-      if (bridge) options.mcpServers = { ...options.mcpServers, [VOCS_MEMORY_SERVER_ID]: bridge };
+      if (bridge) {
+        options.mcpServers = { ...options.mcpServers, [VOCS_MEMORY_SERVER_ID]: bridge };
+        if (gatewayMemory[0]!.builtin === VOCS_MEMORY_SERVER_ID) this.builtinServers.set(VOCS_MEMORY_SERVER_ID, 'sdk');
+      }
       else this.ctx.log('warn', '[claude] memory gateway MCP unavailable; skipping it for this launch');
     }
     try {
@@ -582,21 +599,38 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   private canUseTool: CanUseTool = (toolName, input, { mcpServer }) => this.authorizeTool(toolName, input, mcpServer);
 
+  /** A read-only tool of a built-in server this process was handed, reported by Claude with the
+   * source it was handed under (`dynamic` or `sdk`). A user or project server reusing a built-in
+   * name gets nothing. */
+  private builtinReadOnly(toolName: string, mcpServer?: { name: string; source: string }): boolean {
+    if (!isBuiltinReadOnlyMcpName(toolName)) return false;
+    const server = toolName.slice('mcp__'.length, toolName.indexOf('__', 'mcp__'.length));
+    const source = this.builtinServers.get(server);
+    return !!source && (!mcpServer || mcpServer.name === server && mcpServer.source === source);
+  }
+
+  /** The tier's verdict for one call, without asking anyone. */
+  private async gateTool(toolName: string, input: Record<string, unknown>, mcpServer?: { name: string; source: string }): Promise<{ verdict: GateVerdict; isEdit: boolean; command?: string; outsideWorkspace: boolean }> {
+    const mode = this.ctx.session().mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
+    const isEdit = EDIT_TOOLS.has(toolName);
+    const mutating = !READ_ONLY_TOOLS.has(toolName) && !this.builtinReadOnly(toolName, mcpServer);
+    const command = typeof input.command === 'string' ? input.command : undefined;
+    const editTarget = isEdit ? String(input.file_path ?? input.notebook_path ?? '') : '';
+    // Real-path check: a symlink or junction inside the project that leads out of it counts as outside.
+    const outsideWorkspace = !!editTarget && await requiresPathApproval(this.ctx.session().cwd, editTarget);
+    const verdict = gateAction(mode, { mutating, isEdit, command, sessionAllowed: this.sessionAllowed.has(toolName), outsideWorkspace,
+      trustedCoordination: !!this.ctx.session().mission && this.missionCoordination.has(toolName) && isTrustedMissionCoordination(toolName, mcpServer) });
+    return { verdict, isEdit, command, outsideWorkspace };
+  }
+
   private async authorizeTool(toolName: string, input: Record<string, unknown>, mcpServer?: { name: string; source: string }): Promise<PermissionResult> {
     const denied = this.missionDenial(toolName, input, mcpServer);
     if (denied) return { behavior: 'deny', message: denied };
-    const mode = this.ctx.session().mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
-    const isEdit = EDIT_TOOLS.has(toolName);
-    const mutating = !READ_ONLY_TOOLS.has(toolName);
-    const command = typeof (input as Record<string, unknown>).command === 'string' ? ((input as Record<string, unknown>).command as string) : undefined;
 
     if (toolName === 'AskUserQuestion') return this.askUserQuestion(input);
 
     const cwd = this.ctx.session().cwd;
-    const editTarget = isEdit ? String((input as Record<string, unknown>).file_path ?? (input as Record<string, unknown>).notebook_path ?? '') : '';
-    const outsideWorkspace = isEdit && isOutsideWorkspace(cwd, editTarget || undefined, path);
-    const verdict = gateAction(mode, { mutating, isEdit, command, sessionAllowed: this.sessionAllowed.has(toolName), outsideWorkspace,
-      trustedCoordination: !!this.ctx.session().mission && this.missionCoordination.has(toolName) && isTrustedMissionCoordination(toolName, mcpServer) });
+    const { verdict, isEdit, command, outsideWorkspace } = await this.gateTool(toolName, input, mcpServer);
     if (verdict === 'allow') return { behavior: 'allow', updatedInput: input };
     if (verdict === 'deny') return { behavior: 'deny', message: PLAN_MODE_DENIAL };
 
@@ -685,6 +719,16 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   private preToolUse: HookCallback = async (input) => {
     let managedInput: Record<string, unknown> | undefined;
+    let tierDecision: 'allow' | 'ask' | undefined;
+    if (input.hook_event_name === 'PreToolUse' && !this.ctx.session().mission && !SESSION_CONTROL_TOOLS.has(input.tool_name)) {
+      // The tier overrides Claude settings: an allow rule there would skip canUseTool, so every call
+      // is re-gated here first. The hook never prompts — 'ask' makes Claude Code route the call to
+      // canUseTool even past an allow rule, which shows the one approval card; 'allow' also lifts
+      // the CLI's plan-mode block for the built-in read-only tools. A settings deny rule still wins.
+      const { verdict } = await this.gateTool(input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>, input.mcp_server);
+      if (verdict === 'deny') return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: PLAN_MODE_DENIAL } };
+      tierDecision = verdict;
+    }
     if (input.hook_event_name === 'PreToolUse' && this.ctx.session().mission) {
       const reason = this.missionDenial(input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>, input.mcp_server);
       if (reason) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
@@ -709,7 +753,9 @@ export class ClaudeAdapter implements HarnessAdapter {
         }
       }
     }
-    return managedInput ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: managedInput } } : { continue: true };
+    if (managedInput) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: managedInput } };
+    if (tierDecision) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: tierDecision, ...(tierDecision === 'ask' ? { permissionDecisionReason: 'Vocs Code permission tier requires approval.' } : {}) } };
+    return { continue: true };
   };
 
   private postToolUse: HookCallback = async (input) => {
@@ -1208,13 +1254,11 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
     if (this.ctx.session().mission?.sourceAccess === 'read_only') mode = 'plan';
-    if (mode === 'full-auto') {
-      this.info('Full access requires restarting the Claude process; it will apply on the next session start.', 'warn');
-      return;
-    }
-    await this.q?.setPermissionMode(toSdkMode(mode));
-    // Per-tool session grants do not survive a mode change.
+    // Per-tool session grants do not survive a mode change. The app gate reads the new tier on the
+    // next call; the CLI mode only carries Plan's prompt and read-only workflow, so every tier,
+    // Full access included, applies live.
     this.sessionAllowed.clear();
+    await this.q?.setPermissionMode(toSdkMode(mode));
   }
 
   /**
