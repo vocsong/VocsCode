@@ -66,6 +66,7 @@ import type { AgentClientContext, AgentState } from './agent';
 import type { ChatImportPreview, ChatImportSource } from './chat-import';
 import type { ExecutionRecord } from './analytics/records';
 import type { KnowledgeGraph, KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
+import type { CollectionMember, ContextPacket, IntelligenceSearchResponse, IntelligenceView, MemoryExportBundle, MemoryState, MemoryType } from './intelligence';
 import type { AgentTypeInfo, SubagentRun, SubagentRunSummary } from './subagents';
 import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
@@ -487,6 +488,38 @@ export interface IpcContract {
   'knowledge:graph': [{ sessionId: string }, KnowledgeGraph];
   /** Deletes one page without tombstoning it; rejecting is what stops a claim returning. */
   'knowledge:delete': [{ sessionId: string; id: string }, KnowledgeView];
+
+  /** Memory records, collections, the graph provider and the gateway for one session's project. */
+  'intelligence:view': [{ sessionId: string }, IntelligenceView];
+  /** Federated, permission-scoped evidence search: the planner the agents' tools use, for the panel. */
+  'intelligence:search': [{ sessionId: string; query: string; scope?: 'project' | 'collection'; limit?: number; includeHistorical?: boolean }, IntelligenceSearchResponse];
+  /** A bounded, cited context packet for one question. */
+  'intelligence:compile': [{ sessionId: string; query: string; budgetTokens?: number; scope?: 'project' | 'collection' }, ContextPacket];
+  /** Adds a record by hand: a lesson for the project, or a preference the user declares. */
+  'intelligence:memory:add': [{ sessionId: string; type: MemoryType; title: string; text: string; scope: 'project' | 'personal' }, IntelligenceView];
+  /** A person's decision about one record: verify, activate, mark uncertain, reject, expire or revoke. */
+  'intelligence:memory:decide': [{ sessionId: string; id: string; to: MemoryState; note?: string }, IntelligenceView];
+  /** Deletes a record, its index entry and anything promoted from it; the text is tombstoned. */
+  'intelligence:memory:forget': [{ sessionId: string; id: string }, IntelligenceView];
+  /** Writes a record into the project wiki as a human-reviewed page. */
+  'intelligence:memory:apply': [{ sessionId: string; id: string }, { pageId: string; view: IntelligenceView }];
+  /** This project's own records as a portable bundle; collection and personal memory stay behind. */
+  'intelligence:memory:export': [{ sessionId: string }, MemoryExportBundle];
+  'intelligence:memory:import': [{ sessionId: string; bundle: unknown }, { imported: number; skipped: number; view: IntelligenceView }];
+  /** Session-end reflection, on request: one captured episode plus candidate lessons. */
+  'intelligence:reflect': [{ sessionId: string }, { ok: boolean; captured: number; candidates: number; detail?: string; error?: string }];
+  /** Promotes a wiki page or a record into a collection or personal memory; the caller is the reviewer. */
+  'intelligence:promote': [{ sessionId: string; pageId?: string; recordId?: string; to: 'collection' | 'personal'; collectionId?: string }, IntelligenceView];
+  /** Approves or rejects a promotion an agent asked for. */
+  'intelligence:promotion:decide': [{ sessionId: string; id: string; decision: 'approve' | 'reject' }, IntelligenceView];
+  /** Creates a collection, or replaces an existing one's name, description and membership. */
+  'intelligence:collection:save': [{ sessionId: string; id?: string; name: string; description?: string; members: CollectionMember[] }, IntelligenceView];
+  /** Deletes a collection and revokes everything promoted into it. */
+  'intelligence:collection:delete': [{ sessionId: string; id: string }, IntelligenceView];
+  /** Builds the optional graph index for a project that opted in; never runs on its own. */
+  'intelligence:graph:index': [{ sessionId: string }, IntelligenceView];
+  /** Clears the derived graph cache; authoritative records are untouched. */
+  'intelligence:graph:clear': [{ sessionId: string }, IntelligenceView];
 
   'terminal:list': [void, TerminalInfo[]];
   /** Read-only plain-text screen of one terminal (remote P3.5): never attaches, pauses or resizes it. */

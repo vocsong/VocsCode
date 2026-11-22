@@ -26,6 +26,8 @@ import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssueComments, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequest, gitPullRequestComments, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
+import type { IntelligenceContext, IntelligenceService } from './intelligence/service';
+import { isIntelligenceOwnerRequest, isMemoryState, isMemoryType } from '../shared/intelligence';
 import type { UpdateState } from '../shared/types';
 import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
@@ -123,6 +125,9 @@ export interface HandlerDeps {
   search: SearchIndex;
   /** Layer 2 project knowledge (wiki store + jobs); present when wired up in index.ts. */
   knowledge?: KnowledgeService;
+  /** Memory lifecycle, collections and scoped retrieval; present when wired up in index.ts. */
+  intelligence?: IntelligenceService;
+  revokeMemoryGrants?: () => void;
   /** Best-effort GitNexus freshness queue; absent in tests/hosts that do not run the built-in. */
   gitnexusIndexer?: Pick<GitnexusIndexer, 'schedule' | 'index'>;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
@@ -161,6 +166,7 @@ export interface HandlerRegistry {
 
 /** A handler holding the host process this long has already frozen the UI; say so. */
 const SLOW_HANDLER_MS = 1000;
+
 /** The CLI whose catalog `harness:models` reads, so a switched runtime misses the model cache. */
 const HARNESS_BINARY: Partial<Record<HarnessId, ToolName>> = { claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi', antigravity: 'agy' };
 
@@ -321,6 +327,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (channel.startsWith('vocsAccount:') && actor !== 'desktop') throw new Error('Vocs account sign-in requires the local desktop owner.');
     if (channel.startsWith('control:') && actor !== 'desktop') throw new Error('External control grants require the local desktop owner.');
     if (channel.startsWith('housekeep:') && actor !== 'desktop') throw new Error('Housekeep requires the local desktop owner.');
+    if (isIntelligenceOwnerRequest(channel, req) && actor !== 'desktop') throw new Error('Intelligence settings and memory management require the local desktop owner.');
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
     if (channel === 'harness:antigravityQuota' && actor !== 'desktop') throw new Error('Antigravity quota requires the local desktop owner.');
     if (channel === 'fs:writeText' && actor !== 'desktop') throw new Error('Saving workspace text requires the local desktop owner.');
@@ -832,6 +839,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const changesHousekeep = !!patch && typeof patch === 'object' && Object.hasOwn(patch, 'housekeepRecentDays');
     if (changesHousekeep) housekeepSettingsWrites++;
     const next = await settings.update(patch).finally(() => { if (changesHousekeep) housekeepSettingsWrites--; });
+    if (patch?.intelligence && next.intelligence?.gateway === false) deps.revokeMemoryGrants?.();
     // Keys only: provider entries carry custom headers, and window bounds change every drag.
     const keys = patch && typeof patch === 'object' ? Object.keys(patch).filter((k) => k !== 'windowBounds') : [];
     if (keys.length) deps.log('debug', `settings updated: ${keys.join(', ')}`);
@@ -1091,7 +1099,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const mcpScope = (sessionId: string) => {
     const m = sessions.get(sessionId);
     if (!m) throw new Error('Session not found');
-    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness };
+    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, managed: !!m.mission, readOnly: m.config.permissionMode === 'plan' };
   };
   handle('mcp:stores', () => globalStoreInfo());
   handle('mcp:project', ({ sessionId }) => projectInfo(mcpScope(sessionId)));
@@ -1854,12 +1862,15 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!k || typeof q !== 'string' || !q.trim()) return [];
     return k.search(knowledgeScopeOf(sessionId), q, { limit: typeof limit === 'number' ? limit : undefined, includeHistorical: includeHistorical === true });
   });
-  handle('knowledge:review', ({ sessionId, id, action, note }) => {
+  handle('knowledge:review', async ({ sessionId, id, action, note }) => {
     const k = knowledgeOf();
     if (!k) throw new Error('Project knowledge is unavailable in this run');
     if (action !== 'accept' && action !== 'reject') throw new Error('Unknown review action');
     const scope = knowledgeScopeOf(sessionId);
-    return k.review(scope, id, action, { by: 'human', ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {}) }).then(() => k.view(scope));
+    const withdraw = deps.intelligence && action === 'reject' && (await k.store.read(scope, id))?.meta.scope === 'repo';
+    await k.review(scope, id, action, { by: 'human', ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {}) });
+    if (withdraw && !(await k.store.read(scope, id))) await deps.intelligence?.retireWikiPromotions({ sessionId, ...scope }, id);
+    return k.view(scope);
   });
   handle('knowledge:reviewAll', async ({ sessionId }) => {
     const k = knowledgeOf();
@@ -1890,10 +1901,133 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!k) throw new Error('Project knowledge is unavailable in this run');
     if (typeof id !== 'string' || !id) throw new Error('A page id is required');
     const scope = knowledgeScopeOf(sessionId);
+    const withdraw = deps.intelligence && (await k.store.read(scope, id))?.meta.scope === 'repo';
     // A delete that found nothing must not report success: the panel would claim a page is gone
     // while it is still served to every agent.
     if (!(await k.remove(scope, id))) throw new Error(`Nothing to delete: ${id} is not in this project's wiki.`);
+    if (withdraw) await deps.intelligence?.retireWikiPromotions({ sessionId, ...scope }, id);
     return k.view(scope);
+  });
+
+  // The intelligence core. As with knowledge, the project, checkout and branch always come from
+  // the session the app holds: a renderer can name a session, never a path or a project id.
+  const intelligenceOf = (): IntelligenceService => {
+    if (!deps.intelligence) throw new Error('Memory and collections are unavailable in this run');
+    return deps.intelligence;
+  };
+  const intelligenceContextOf = (sessionId: string): IntelligenceContext => {
+    const id = missionIdSchema.parse(sessionId);
+    return { sessionId: id, ...knowledgeScopeOf(id) };
+  };
+  const recordId = (id: unknown): string => {
+    if (typeof id !== 'string' || !/^mem_[0-9a-z]{6,40}$/.test(id)) throw new Error('A memory record id is required');
+    return id;
+  };
+  handle('intelligence:view', ({ sessionId }) => intelligenceOf().view(intelligenceContextOf(sessionId)));
+  handle('intelligence:search', ({ sessionId, query, scope, limit, includeHistorical }) => {
+    if (typeof query !== 'string' || !query.trim()) throw new Error('A question is required');
+    return intelligenceOf().search(intelligenceContextOf(sessionId), {
+      query: query.slice(0, 500),
+      scope: scope === 'collection' ? 'collection' : 'project',
+      ...(typeof limit === 'number' ? { limit } : {}),
+      includeHistorical: includeHistorical === true
+    });
+  });
+  handle('intelligence:compile', ({ sessionId, query, budgetTokens, scope }) => {
+    if (typeof query !== 'string' || !query.trim()) throw new Error('A question is required');
+    return intelligenceOf().compile(intelligenceContextOf(sessionId), { query: query.slice(0, 500), ...(typeof budgetTokens === 'number' ? { budgetTokens } : {}), scope: scope === 'collection' ? 'collection' : 'project' });
+  });
+  handle('intelligence:memory:add', async ({ sessionId, type, title, text, scope }) => {
+    if (!isMemoryType(type) || type === 'working') throw new Error('Unknown memory type');
+    if (typeof title !== 'string' || !title.trim() || typeof text !== 'string' || !text.trim()) throw new Error('A record needs a title and text');
+    if (scope !== 'project' && scope !== 'personal') throw new Error('A record is added to this project or to personal memory');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.addRecord(ctx, { type, title, text, scope });
+    return i.view(ctx);
+  });
+  handle('intelligence:memory:decide', async ({ sessionId, id, to, note }) => {
+    if (!isMemoryState(to)) throw new Error('Unknown memory state');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.decide(ctx, recordId(id), to, typeof note === 'string' && note.trim() ? { note: note.trim() } : {});
+    return i.view(ctx);
+  });
+  handle('intelligence:memory:forget', async ({ sessionId, id }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    // A forget that removed nothing must not report success: the panel would show a record as gone
+    // while it is still recalled.
+    if (!(await i.forget(ctx, recordId(id), 'human')).forgotten) throw new Error('Nothing was forgotten: that record is no longer there.');
+    return i.view(ctx);
+  });
+  handle('intelligence:memory:apply', async ({ sessionId, id }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    const { pageId } = await i.applyToWiki(ctx, recordId(id));
+    return { pageId, view: await i.view(ctx) };
+  });
+  handle('intelligence:memory:export', ({ sessionId }) => intelligenceOf().exportMemory(intelligenceContextOf(sessionId)));
+  handle('intelligence:memory:import', async ({ sessionId, bundle }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    const result = await i.importMemory(ctx, bundle);
+    return { ...result, view: await i.view(ctx) };
+  });
+  handle('intelligence:reflect', ({ sessionId }) => {
+    const ctx = intelligenceContextOf(sessionId);
+    const m = sessions.get(ctx.sessionId);
+    if (!m || m.mission) throw new Error('Reflection is only available for ordinary sessions.');
+    return intelligenceOf().reflect(ctx, { title: m.title }, 'manual');
+  });
+  handle('intelligence:promote', async ({ sessionId, pageId, recordId: record, to, collectionId }) => {
+    if (to !== 'collection' && to !== 'personal') throw new Error('Promote to a collection or to personal memory');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.promote(ctx, {
+      ...(typeof pageId === 'string' && pageId ? { pageId } : {}),
+      ...(typeof record === 'string' && record ? { recordId: recordId(record) } : {}),
+      to,
+      ...(typeof collectionId === 'string' && collectionId ? { collectionId } : {})
+    });
+    return i.view(ctx);
+  });
+  handle('intelligence:promotion:decide', async ({ sessionId, id, decision }) => {
+    if (decision !== 'approve' && decision !== 'reject') throw new Error('Unknown decision');
+    if (typeof id !== 'string' || !id) throw new Error('A promotion request id is required');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.decidePromotion(ctx, id, decision);
+    return i.view(ctx);
+  });
+  handle('intelligence:collection:save', async ({ sessionId, id, name, description, members }) => {
+    if (typeof name !== 'string' || !name.trim()) throw new Error('A collection needs a name');
+    const list = (Array.isArray(members) ? members : [])
+      .filter((m): m is { projectId: string; share: 'promoted' | 'wiki' } => !!m && typeof m.projectId === 'string')
+      .map((m) => ({ projectId: m.projectId, share: m.share === 'wiki' ? ('wiki' as const) : ('promoted' as const) }));
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.saveCollection({ ...(typeof id === 'string' && id ? { id } : {}), name, ...(typeof description === 'string' ? { description } : {}), members: list });
+    return i.view(ctx);
+  });
+  handle('intelligence:collection:delete', async ({ sessionId, id }) => {
+    if (typeof id !== 'string' || !id) throw new Error('A collection id is required');
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    if (!(await i.deleteCollection(id))) throw new Error('That collection no longer exists.');
+    return i.view(ctx);
+  });
+  handle('intelligence:graph:index', async ({ sessionId }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.graphIndex(ctx);
+    return i.view(ctx);
+  });
+  handle('intelligence:graph:clear', async ({ sessionId }) => {
+    const i = intelligenceOf();
+    const ctx = intelligenceContextOf(sessionId);
+    await i.graphClear(ctx);
+    return i.view(ctx);
   });
 
   handle('terminal:list', () => terminals.list());

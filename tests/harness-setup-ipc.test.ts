@@ -2,11 +2,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { listeners, invoke, mainFrame, contents, ownerChannels } = vi.hoisted(() => {
   const mainFrame = {};
-  const ownerChannels = ['harness:login', 'harness:antigravityQuota', 'control:grant', 'vocsAccount:get', 'vocsAccount:signIn', 'vocsAccount:cancel', 'vocsAccount:refresh', 'vocsAccount:signOut', 'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText'];
+  const ownerChannels = ['harness:login', 'harness:antigravityQuota', 'control:grant', 'vocsAccount:get', 'vocsAccount:signIn', 'vocsAccount:cancel', 'vocsAccount:refresh', 'vocsAccount:signOut', 'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText', 'intelligence:view', 'intelligence:promote'];
   return { listeners: new Map<string, (event: { sender: unknown; senderFrame: unknown }, req: unknown) => unknown>(), invoke: vi.fn(), mainFrame, contents: { mainFrame }, ownerChannels };
 });
 vi.mock('electron', () => ({ app: {}, BrowserWindow: {}, dialog: {}, shell: {}, ipcMain: { handle: (channel: string, fn: never) => listeners.set(channel, fn) } }));
-vi.mock('../src/main/handlers', () => ({ createHandlerRegistry: () => ({ channels: () => [...ownerChannels, 'harness:setup'], invoke }) }));
+vi.mock('../src/main/handlers', () => ({ createHandlerRegistry: () => ({ channels: () => [...ownerChannels, 'harness:setup', 'settings:update'], invoke }) }));
 import { registerIpc, type IpcDeps } from '../src/main/ipc';
 let windowPresent: boolean;
 beforeEach(() => {
@@ -21,6 +21,16 @@ describe('local desktop setup authority', () => {
     windowPresent = false;
     expect(() => handler({ sender: contents, senderFrame: mainFrame }, { harness: 'antigravity' })).toThrow(/local desktop owner/);
     expect(invoke).not.toHaveBeenCalled();
+  });
+  it('keeps intelligence settings owner-only without changing ordinary settings dispatch', async () => {
+    const handler = listeners.get('settings:update')!;
+    const intelligence = { intelligence: { personalMemory: true } };
+    expect(() => handler({ sender: contents, senderFrame: {} }, intelligence)).toThrow(/local desktop owner/);
+    expect(invoke).not.toHaveBeenCalled();
+    await expect(handler({ sender: contents, senderFrame: mainFrame }, intelligence)).resolves.toEqual({ ok: true });
+    const ordinary = { theme: 'dark' };
+    await expect(handler({ sender: contents, senderFrame: mainFrame }, ordinary)).resolves.toEqual({ ok: true });
+    expect(invoke.mock.calls).toEqual([['settings:update', intelligence, 'desktop'], ['settings:update', ordinary, 'desktop']]);
   });
   it('dispatches the real owner main frame with desktop authority, without deriving authority from the payload', async () => {
     const payload = { harness: 'codex', device: true };

@@ -78,6 +78,12 @@ export interface SessionManagerDeps {
   memoryServerPath?: string;
   /** userData path, so the memory server can recall session history (search.db). */
   memoryUserData?: string;
+  /** Mints a session's intelligence-gateway endpoint and token; null when the gateway is off. */
+  memoryGateway?: (sessionId: string) => { url: string; token: string } | null;
+  /** A stopping runtime loses its memory capability before disposal settles. */
+  revokeMemoryGateway?: (sessionId: string) => void;
+  /** A runtime entering Plan must stop any in-flight writes through its memory gateway. */
+  restrictMemoryGateway?: (sessionId: string) => void;
   /** Layer 2 digest for priming a new session's system prompt; absent disables priming. */
   knowledgeDigest?: (scope: { projectRoot: string; cwd: string; branch?: string }) => Promise<string | null>;
   /**
@@ -1215,23 +1221,25 @@ export class SessionManager {
       },
       getApiKey: (providerId) => this.deps.getSecret(providerId),
       mcpServers: async () => {
-        if (!current()) throw new Error('Session runtime is no longer current');
+        const available = () => current() && runtime?.()?.tearingDown !== true;
+        if (!available()) throw new Error('Session runtime is no longer current');
         const m = session();
         const hooks = m.mission ? this.requireMissionHooks() : undefined;
         const servers = await resolveForSession(
-          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, branch: m.worktreeBranch },
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, branch: m.worktreeBranch, sessionId: id, managed, readOnly: m.config.permissionMode === 'plan' },
           {
             getSecret: this.deps.getSecret,
             sharedGitnexus: this.deps.sharedGitnexus,
             gitnexusProxyPath: this.deps.gitnexusProxyPath,
             memoryServerPath: this.deps.memoryServerPath,
             memoryUserData: this.deps.memoryUserData,
+            memoryGateway: (sessionId) => available() ? this.deps.memoryGateway?.(sessionId) ?? null : null,
             log: (level, message) => this.deps.log(level, `[${id}] ${message}`)
           }
         );
-        if (!current() || (hooks && this.missionHooks !== hooks)) throw new Error('Session runtime is no longer current');
+        if (!available() || (hooks && this.missionHooks !== hooks)) throw new Error('Session runtime is no longer current');
         const resolved = hooks ? await hooks.mcpServers(m, servers) : servers;
-        if (!current() || (hooks && this.missionHooks !== hooks)) throw new Error('Session runtime is no longer current');
+        if (!available() || (hooks && this.missionHooks !== hooks)) throw new Error('Session runtime is no longer current');
         return resolved;
       },
       ownedMcpIds: () => builtinServerIds(),
@@ -1981,6 +1989,8 @@ export class SessionManager {
   }
 
   private disposeRuntime(id: string, active: ActiveSession, status: 'idle' | 'stopped' | 'error' = 'stopped'): Promise<void> {
+    // A late dispose from a retired runtime must never revoke its replacement's capability.
+    if (this.active.get(id) === active) this.deps.revokeMemoryGateway?.(id);
     return this.get(id)?.mission ? this.disposeManaged(id, active, status) : this.retireOrdinary(id, active, status === 'idle');
   }
 
@@ -2317,6 +2327,7 @@ export class SessionManager {
       }
       this.deps.log('info', `[${id}] permission mode ${meta.config.permissionMode} → ${mode}`);
       meta.config.permissionMode = mode;
+      if (mode === 'plan') this.deps.restrictMemoryGateway?.(id);
       if (!antigravity) await active?.adapter.setPermissionMode(mode);
       await this.deps.store.upsert(meta);
     };
