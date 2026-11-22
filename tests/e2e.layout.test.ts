@@ -130,7 +130,7 @@ describe.runIf(enabled)('shell layout', () => {
     const groups = ['Workspace', 'Agent behavior', 'Connections', 'System'];
     const sections = [
       'General', 'Appearance', 'Shortcuts', 'Terminal', 'Voice', 'Session defaults', 'Instructions', 'Mission',
-      'Vesta & utility', 'Vocs account', 'Providers & keys', 'Harnesses', 'Pi', 'ACP agents', 'Import chats', 'Remote access', 'About & doctor'
+      'Vesta & utility', 'Vocs account', 'Providers & keys', 'Harnesses', 'Pi', 'ACP agents', 'Import chats', 'Housekeep', 'Remote access', 'About & doctor'
     ];
     expect(await win.locator('.settings-nav-label').allTextContents()).toEqual(groups);
     expect(await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button').allTextContents()).toEqual(sections);
@@ -294,7 +294,7 @@ describe.runIf(enabled)('shell layout', () => {
         anchoredTopics++;
       }
     }
-    expect(anchoredTopics).toBe(29);
+    expect(anchoredTopics).toBe(30);
 
     // A Mission budget result skips the tier cards and focuses the actual limits heading.
     await search.fill('mission budget');
