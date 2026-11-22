@@ -73,6 +73,13 @@ describe('sidebar Recent view', () => {
     expect(rowIds(container)).toEqual(['a-new', 'a-old']);
     expect(container.querySelector('[data-testid="session-folder"]')).toBeNull();
 
+    // Each row omits the redundant "project |" prefix because folder headers (Projects) or the
+    // coloured folder chip (Recent) already name the project.
+    const rowLabel = (id: string) => [...container.querySelectorAll(`[data-session-id="${id}"] .session-label > span`)].map((el) => el.textContent);
+    expect(rowLabel('a-new')).toEqual(['Native', 'Session a-new']);
+    expect(container.querySelector('.sidebar-list .session-label-project')).toBeNull();
+    expect(container.querySelector('.sidebar-list .session-label-separator')).toBeNull();
+
     expect(getByTestId('sidebar-folders').getAttribute('aria-pressed')).toBe('true');
     const toggle = getByTestId('sidebar-recent');
     expect(toggle.getAttribute('aria-pressed')).toBe('false');
@@ -82,6 +89,9 @@ describe('sidebar Recent view', () => {
     // Recent view: no folder headers, every live row (collapsed folders too) by the user's last message.
     expect(container.querySelectorAll('.project-header')).toHaveLength(0);
     expect(rowIds(container)).toEqual(['b-new', 'a-new', 'b-mid', 'a-old']);
+    expect(rowLabel('b-new')).toEqual(['Native', 'Session b-new']);
+    expect(container.querySelector('.sidebar-list .session-label-project')).toBeNull();
+    expect(container.querySelector('.sidebar-list .session-label-separator')).toBeNull();
     expect(getByTestId('sidebar-recent').getAttribute('aria-pressed')).toBe('true');
     expect(getByTestId('sidebar-recent').classList.contains('active')).toBe(true);
     expect(getByTestId('sidebar-folders').getAttribute('aria-pressed')).toBe('false');
