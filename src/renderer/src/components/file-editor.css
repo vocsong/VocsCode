@@ -19,7 +19,7 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
-  font-size: 13px;
+  font-size: var(--code-size);
 }
 
 .file-source-editor .cm-editor.cm-focused {
@@ -30,7 +30,7 @@
 .file-source-editor .cm-editor .cm-scroller {
   overflow: auto;
   font-family: var(--mono);
-  line-height: 20px;
+  line-height: 1.55;
 }
 
 .file-source-editor .cm-editor .cm-content {
