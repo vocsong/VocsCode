@@ -2532,6 +2532,81 @@ h4 {
   color: var(--fg);
   border-color: var(--border-strong);
 }
+/* Your message for the stretch being read, pinned over the top of the transcript. */
+.pinned-prompt {
+  position: absolute;
+  z-index: 3;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - 48px);
+  max-width: var(--reading);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 12px 8px 15px;
+  font: inherit;
+  text-align: left;
+  color: var(--fg);
+  cursor: pointer;
+  background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--bg-elev);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 10px;
+  box-shadow: inset 3px 0 0 var(--accent), var(--shadow-card);
+  animation: pinned-prompt-in 0.16s ease-out;
+}
+.pinned-prompt:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.pinned-prompt:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.pinned-prompt-text {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pinned-prompt-meta {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-top: 2px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.pinned-prompt:hover .pinned-prompt-meta {
+  color: var(--accent);
+}
+@keyframes pinned-prompt-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+}
+/* The message a pinned prompt jumped to flashes once, so the eye lands on it. */
+.prompt-jump-hl {
+  animation: prompt-jump-flash 1.4s ease-out;
+}
+@keyframes prompt-jump-flash {
+  from {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+  to {
+    outline: 2px solid transparent;
+    outline-offset: 3px;
+  }
+}
 /* Transcript find bar (Ctrl+F) */
 .find-bar {
   position: absolute;
@@ -2592,13 +2667,17 @@ h4 {
 ::highlight(transcript-find-current) {
   background: rgba(255, 122, 0, 0.6);
 }
+/* Your messages are the landmarks you scroll back to: set apart from the answer above and
+   outlined in the accent, so they read at a glance in a long transcript. */
 .msg-user {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  padding-top: 12px;
 }
 .msg-user .msg-bubble {
   background: var(--user-bubble);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
   border-radius: 18px 18px 6px 18px;
   padding: 10px 15px;
   max-width: 80%;
