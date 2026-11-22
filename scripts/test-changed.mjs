@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { fullRunReason } from './test-changed-scope.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const base = process.env.VOCS_CODE_TEST_BASE || 'origin/develop';
+const baseRef = process.env.VOCS_CODE_TEST_BASE || 'origin/develop';
 const vitest = path.join(root, 'node_modules', 'vitest', 'vitest.mjs');
 
 function git(...args) {
@@ -16,16 +16,28 @@ function git(...args) {
     console.error(run.stderr.trim() || `git ${args.join(' ')} failed`);
     process.exit(run.status ?? 1);
   }
-  return run.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  return run.stdout;
 }
 
-// The same set vitest --changed sees: the working tree against the base, plus untracked files.
-const changed = [...git('diff', '--name-only', base), ...git('ls-files', '--others', '--exclude-standard')];
+const base = git('rev-parse', '--verify', '--end-of-options', `${baseRef}^{commit}`).trim();
+// Match Vitest's branch diff, staged changes and working-tree edits. Comparing directly to the
+// base tip would also count upstream-only changes. Include both sides of renames for fallback.
+const changed = [...new Set([
+  git('diff', '--no-renames', '--name-only', '-z', `${base}...HEAD`, '--'),
+  git('diff', '--cached', '--no-renames', '--name-only', '-z', '--'),
+  git('ls-files', '--others', '--modified', '--exclude-standard', '-z'),
+].join('').split('\0').filter(Boolean))];
 const reason = fullRunReason(changed);
 const scope = reason ? [] : ['--changed', base, '--passWithNoTests'];
-console.log(reason
-  ? `${reason} changed since ${base}: running the full offline suite.`
-  : `${changed.length} file(s) changed since ${base}: running the offline tests that import them.`);
-const run = spawnSync(process.execPath, [vitest, 'run', ...scope, '--exclude', 'tests/smoke.remote-live.test.ts', ...process.argv.slice(2)], { cwd: root, stdio: 'inherit' });
+const args = process.argv.slice(2);
+const listOnly = args[0] === '--list';
+const command = listOnly ? ['list', '--filesOnly'] : ['run'];
+if (listOnly) args.shift();
+const action = listOnly ? 'listing' : 'running';
+const log = listOnly ? console.error : console.log;
+log(reason
+  ? `${reason} changed on this branch or worktree: ${action} the full offline suite.`
+  : `${changed.length} file(s) changed against ${baseRef}: ${action} affected offline test files.`);
+const run = spawnSync(process.execPath, [vitest, ...command, ...scope, '--exclude', 'tests/smoke.remote-live.test.ts', ...args], { cwd: root, stdio: 'inherit' });
 if (run.error) throw run.error;
 process.exit(run.status ?? 1);
