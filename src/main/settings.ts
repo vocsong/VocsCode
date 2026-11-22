@@ -14,7 +14,7 @@ import { pruneModelOverrides } from '../shared/model-overrides';
 import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigError, validateMissionConfig, validateMissionProjectOverride, type MissionCapabilityResolver, type MissionProjectOverride } from '../shared/mission-config';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
-import { isThemeId } from '../shared/themes';
+import { DEFAULT_PALETTE, migrateTheme } from '../shared/themes';
 import { DEFAULT_UI_MODE, isUiModeId } from '../shared/ui-modes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
@@ -212,6 +212,7 @@ export function defaultSettings(): AppSettings {
     mission: createDefaultMissionConfig(),
     missionProjects: {},
     theme: 'system',
+    palette: DEFAULT_PALETTE,
     uiMode: DEFAULT_UI_MODE,
     defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
@@ -510,8 +511,9 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
   const merged: AppSettings = {
     ...d,
     ...stored,
-    // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
-    theme: isThemeId(stored.theme) ? stored.theme : d.theme,
+    // Mode and palette are stored apart; a legacy single-variant theme id is split into both, and
+    // anything this build does not know falls back to System + Default.
+    ...migrateTheme(stored.theme, stored.palette),
     // Same for an interface mode this build does not know: the full layout is always safe.
     uiMode: isUiModeId(stored.uiMode) ? stored.uiMode : d.uiMode,
     autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,
@@ -603,7 +605,7 @@ export class SettingsStore {
       this.settings = normalizeSettings({ ...stored, mission: undefined, missionProjects: undefined });
     }
     if (stored === undefined) this.log('info', 'no settings.json yet; using defaults');
-    else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme}`);
+    else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme} palette=${this.settings.palette}`);
     return this.settings;
   }
 

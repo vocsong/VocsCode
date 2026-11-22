@@ -27,15 +27,15 @@ describe('interface mode in settings', () => {
     try {
       const store = new SettingsStore(dir);
       await store.load();
-      await store.update({ theme: 'blueprint' });
+      await store.update({ theme: 'light', palette: 'midnight' });
       expect((await store.update({ uiMode: 'zen' })).uiMode).toBe('zen');
       const onDisk = JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf8')) as AppSettings;
-      expect(onDisk).toMatchObject({ uiMode: 'zen', theme: 'blueprint' });
+      expect(onDisk).toMatchObject({ uiMode: 'zen', theme: 'light', palette: 'midnight' });
       const reloaded = new SettingsStore(dir);
       expect((await reloaded.load()).uiMode).toBe('zen');
       expect((await reloaded.update({ uiMode: 'bogus' as never })).uiMode).toBe('standard');
       const final = JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf8')) as AppSettings;
-      expect(final).toMatchObject({ uiMode: 'standard', theme: 'blueprint' });
+      expect(final).toMatchObject({ uiMode: 'standard', theme: 'light', palette: 'midnight' });
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }

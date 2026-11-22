@@ -130,7 +130,7 @@ describe.runIf(enabled)('shell layout', () => {
     const groups = ['Workspace', 'Agent behavior', 'Connections', 'System'];
     const sections = [
       'General', 'Appearance', 'Shortcuts', 'Terminal', 'Voice', 'Session defaults', 'Instructions', 'Mission',
-      'Vesta & utility', 'Vocs account', 'Providers & keys', 'Harnesses', 'Pi', 'ACP agents', 'Import chats', 'Remote access', 'About & doctor'
+      'Vesta & utility', 'Vocs account', 'Providers & keys', 'Harnesses', 'Pi', 'ACP agents', 'Import chats', 'Housekeep', 'Remote access', 'About & doctor'
     ];
     expect(await win.locator('.settings-nav-label').allTextContents()).toEqual(groups);
     expect(await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button').allTextContents()).toEqual(sections);
@@ -143,7 +143,7 @@ describe.runIf(enabled)('shell layout', () => {
 
     await navigate('Appearance');
     await win.locator('.theme-picker').waitFor();
-    expect(await win.locator('.theme-card.active').innerText()).toContain('Dark');
+    expect(await win.locator('.theme-mode-option.active').innerText()).toContain('Dark');
     await capture('appearance');
 
     // Search is keyboard reachable, announces its results and leads to the setting group, not just a page.
@@ -294,7 +294,7 @@ describe.runIf(enabled)('shell layout', () => {
         anchoredTopics++;
       }
     }
-    expect(anchoredTopics).toBe(29);
+    expect(anchoredTopics).toBe(30);
 
     // A Mission budget result skips the tier cards and focuses the actual limits heading.
     await search.fill('mission budget');
@@ -328,7 +328,7 @@ describe.runIf(enabled)('shell layout', () => {
     expect(await compact.locator('optgroup').evaluateAll((items) => items.map((item) => item.getAttribute('label')))).toEqual(groups);
     await compact.selectOption('appearance');
     await win.getByRole('heading', { name: 'Appearance', level: 1 }).waitFor();
-    expect(await win.locator('.theme-card.active').innerText()).toContain('Dark');
+    expect(await win.locator('.theme-mode-option.active').innerText()).toContain('Dark');
     await compact.selectOption('sessions');
     await win.getByRole('heading', { name: 'Session defaults', level: 1 }).waitFor();
     expect(await win.getByLabel(/^Default harness/).inputValue()).toBe('native');

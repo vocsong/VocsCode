@@ -57,8 +57,8 @@ File / Edit / View / Help menu bar.
   - `data-status`, `data-harness` and `data-pinned` on session rows;
   - `data-short` on the work chip (its facts without words);
   - the `turn-*` span classes on turn footers.
-- Tokens are overridden on `:root[data-ui='zen'][data-theme]` so they outrank the injected theme
-  blocks.
+- Tokens are overridden on `:root[data-ui='zen'][data-palette][data-scheme]` so they outrank the
+  injected palette blocks.
 
 In both modes, the transcript and composer grow with the pane up to a shared maximum. Prose has
 its own narrower line length. Markdown tables size to their content and scroll horizontally within
