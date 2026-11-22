@@ -27,6 +27,13 @@
   --zen-rail: 52px;
   --zen-glyph: 26px;
 }
+/* Transcript width: Zen's one column, narrower or wider (TRANSCRIPT_WIDTHS in shared/typography.ts). */
+:root[data-ui='zen'][data-width='narrow'][data-palette][data-scheme] {
+  --reading: 600px;
+}
+:root[data-ui='zen'][data-width='wide'][data-palette][data-scheme] {
+  --reading: 860px;
+}
 
 /* ---------- Title bar: only the menu, the place you are and Vesta ---------- */
 :root[data-ui='zen'] .titlebar {
@@ -516,8 +523,9 @@
   padding-block: 24px 32px;
 }
 :root[data-ui='zen'] .md {
-  font-size: 15px;
-  line-height: 1.75;
+  /* A step above Standard, kept relative so Text & fonts still moves it. */
+  font-size: calc(var(--content-size) + 1px);
+  line-height: calc(var(--content-leading) + 0.1);
 }
 /* Your words open each stretch of the transcript: a full-width tinted band with an accent rule,
    so they stand out from the answers when you scroll back looking for them. */
@@ -531,9 +539,9 @@
   border-radius: 4px 14px 14px 4px;
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   box-shadow: inset 3px 0 0 var(--accent);
-  font-size: 16px;
+  font-size: calc(var(--content-size) + 2px);
   font-weight: 500;
-  line-height: 1.6;
+  line-height: calc(var(--content-leading) - 0.05);
   color: var(--fg);
 }
 :root[data-ui='zen'] .msg-user-meta {
@@ -653,7 +661,7 @@
 }
 :root[data-ui='zen'] .pane .composer-box textarea {
   padding: 15px 22px 4px;
-  font-size: 15px;
+  font-size: calc(var(--content-size) + 1px);
   min-height: 48px;
 }
 :root[data-ui='zen'] .pane .composer-actions {

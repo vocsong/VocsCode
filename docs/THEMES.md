@@ -66,3 +66,26 @@ Settings store the mode under `theme` (kept for compatibility with older setting
 - every other old palette keeps its name, in the mode it used to paint.
 
 Adding a palette means adding one entry with both variants; the tests then hold it to the same bar as the others.
+
+## Text & fonts
+
+The same Appearance page has a **Text & fonts** group (`src/shared/typography.ts`, `components/TypographySettings.tsx`):
+
+| Setting | Choices | Applies to |
+| --- | --- | --- |
+| Interface size | 90%, 100%, 110%, 125% | The whole window, as the zoom factor the main process sets |
+| Interface font | System default, or an installed preset (Inter, Segoe UI, Roboto, Noto Sans, IBM Plex Sans, Open Sans, Helvetica / Arial, Verdana, Atkinson Hyperlegible), or a custom family | `--font` |
+| Transcript font | Same as interface (default), System default, Reading serif (Charter or Georgia), any interface preset, or custom | `--content-font`: messages from you and your agents |
+| Code font | Default monospace, or Cascadia Code / Mono, JetBrains Mono, Fira Code, Source Code Pro, IBM Plex Mono, Consolas, SF Mono / Menlo, Courier New, or custom | `--mono`: code blocks, diffs, paths and the terminal |
+| Transcript text size | 12–20 px (default 14) | `--content-size`: transcript prose, your messages and the composer |
+| Code text size | 11–16 px (default 12.5) | `--code-size`: code blocks and diffs. The terminal keeps its own size under *Terminal* |
+| Line spacing | Compact 1.5, Normal 1.65, Relaxed 1.8 | `--content-leading` |
+| Transcript width | Narrow, Normal, Wide | `data-width`: the conversation column and the prose line length together |
+
+Interface size is a zoom because the chrome's type is authored in fixed pixels. A zoom scales it without breaking the layout. Everything else is a custom property on `<html>`, and `styles.css` declares the same defaults, so nothing shifts before settings load. Zen keeps its slightly larger reading type as offsets from these variables, so the settings move it too.
+
+Fonts are referenced, never bundled:
+
+- Each preset is a named family followed by the role's default stack, so a missing font degrades gracefully.
+- The picker measures text on a canvas to mark presets that are not installed on this computer.
+- A custom family name is reduced to letters, digits, spaces and `-_.`, then quoted, so it can only ever name a font.

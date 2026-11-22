@@ -129,7 +129,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 npm run dist:dir -- --publish never && HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.update.test.ts
 ```
 
-`npm run test:e2e:ci` runs twenty-seven no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes` and the
+`npm run test:e2e:ci` runs twenty-eight no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
 seeded `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
@@ -162,6 +162,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
 | Settings navigation/search, `settings-catalog.ts`, `SettingsPrimitives.tsx`, `components/settings.css` | `tests/settings-navigation.test.tsx`, `tests/branch-prefix-settings-ui.test.tsx`, `tests/context-ui.test.tsx` + `e2e.layout`; update and run the affected section’s E2E below. The layout suite captures isolated light/dark review screenshots in `tests/artifacts/settings-redesign-*.png`; see [Settings UX](SETTINGS.md). |
 | Themes, `styles.css`, terminal colours | `e2e.themes`, `e2e.ui-modes` (Zen restyles the standard tree, so a `styles.css` change can move it) |
+| Text & fonts — `shared/typography.ts`, `TypographySettings.tsx`, `applyTypography` (`theme.ts`), the interface-size zoom in `src/main/index.ts`, the `--content-*` / `--code-size` / `data-width` rules | `tests/typography.test.ts` + `e2e.typography` |
 | Interface modes — `shared/ui-modes.ts`, `ui-zen.css`, `ui-mode.ts`, `applyUiMode` (`theme.ts`), Appearance → Interface, Zen's one-button title-bar menu, the CSS hooks on session rows and work chips (`data-status`, `data-tone`, `data-pinned`, `data-short`) | `tests/ui-modes.test.tsx`, `tests/ui-modes-settings.test.ts`, `tests/zen-panel-rail.test.tsx` (Zen's side-panel rail, peek and pins) + `e2e.ui-modes` (review screenshots `tests/artifacts/ui-modes-*.png`). A change to a component either mode restyles (sidebar, header, transcript, composer, side panel, settings) needs a look in Zen too |
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
 | Which permission tiers a harness may run (`closestPermissionMode`, create/switch/fork/remote create) | `tests/permission-tiers.test.ts`, `tests/control-service.test.ts`, `tests/cursor-harness.test.ts` |
