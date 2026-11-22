@@ -2700,7 +2700,7 @@ h4 {
   white-space: pre-wrap;
   word-break: break-word;
 }
-/* Time, copy and edit are there when you reach for them, not on every message. */
+/* The time stays; copy and edit are there when you reach for them, not on every message. */
 .msg-user-meta {
   display: flex;
   align-items: center;
@@ -2709,12 +2709,50 @@ h4 {
   padding: 3px 4px 0;
   color: var(--fg-faint);
   font-size: 11px;
+}
+.msg-user-meta .msg-action {
   opacity: 0;
   transition: opacity 0.15s ease;
 }
-.msg-user:hover .msg-user-meta,
-.msg-user:focus-within .msg-user-meta {
+.msg-user:hover .msg-action,
+.msg-user:focus-within .msg-action {
   opacity: 1;
+}
+/* When each message, thought and step happened: one quiet column of times, never louder than the
+   row it belongs to. Zen hides them until the row is pointed at (ui-zen.css). */
+.stamp {
+  flex-shrink: 0;
+  color: var(--fg-faint);
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: opacity 0.15s ease;
+}
+/* Tool rows end in 8px padding, a 12px chevron and an 8px gap; 28px puts every time in one column. */
+.msg-stamp {
+  float: right;
+  margin: 0 28px 0 12px;
+  line-height: 22px;
+}
+.info-time {
+  margin-left: auto;
+  padding-left: 10px;
+  /* In the same column as a step's time: clear of the step row's chevron and end padding. */
+  margin-right: 28px;
+}
+.plan-time {
+  margin-left: auto;
+}
+.approval-time {
+  line-height: 19px;
+}
+.work-time::before {
+  content: '·';
+  margin-right: 7px;
+}
+.tool-chevron-none {
+  visibility: hidden;
 }
 .msg-action {
   display: inline-flex;
@@ -2841,6 +2879,8 @@ h4 {
   right: 14px;
 }
 .msg-assistant {
+  /* Holds its floated time inside the row. */
+  display: flow-root;
   padding: 2px 0;
 }
 .msg-plan {

@@ -26,7 +26,7 @@ export function search(root: HTMLElement, query: string): Match[] {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(n) {
       const p = n.parentElement;
-      if (!p || p.closest('script, style, textarea, .find-bar')) return NodeFilter.FILTER_REJECT;
+      if (!p || p.closest('script, style, textarea, .find-bar, .stamp')) return NodeFilter.FILTER_REJECT;
       return n.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
     },
   });
