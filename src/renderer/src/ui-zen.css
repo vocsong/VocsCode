@@ -386,9 +386,6 @@
   color: var(--fg-muted);
   overflow: hidden;
 }
-:root[data-ui='zen'] .session-title .session-label-project {
-  flex-shrink: 1;
-}
 :root[data-ui='zen'] .session-row.active .session-title,
 :root[data-ui='zen'] .session-row.unseen .session-title {
   font-weight: 550;
