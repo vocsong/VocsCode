@@ -255,8 +255,8 @@ export class SessionManager {
   private fencedRuntimes = new WeakSet<ActiveSession>();
   /** Serialize imports so concurrent requests cannot publish the same source conversation twice. */
   private importQueue: Promise<void> = Promise.resolve();
-  /** No turn or second settings change may race a premium-speed transition. */
-  private fastModeUpdates = new Set<string>();
+  /** No turn or second settings change may race a model or premium-speed transition. */
+  private pendingConfigUpdates = new Map<string, 'fast-mode' | 'model'>();
   /** Hold turn admission while Antigravity acknowledges and persists a permission change. */
   private antigravityModeUpdates = new Set<string>();
   /** Reserve send-first dispatches before startup/preamble awaits expose an idle gap. */
@@ -395,6 +395,18 @@ export class SessionManager {
         if (this.deps.store.get(meta.id)) this.trackControlledWrite(meta.id, Promise.resolve(this.deps.store.upsert(meta))).catch((e) => this.deps.log('warn', `meta persist failed: ${errorMessage(e)}`));
       }, 300)
     );
+  }
+
+  private assertNoConfigUpdate(id: string): void {
+    const kind = this.pendingConfigUpdates.get(id);
+    if (kind === 'fast-mode') throw new Error('Wait for the Fast mode update to finish.');
+    if (kind === 'model') throw new Error('Wait for the model update to finish.');
+  }
+
+  private cancelGitStateCheck(id: string): void {
+    const t = this.gitStateTimers.get(id);
+    if (t) clearTimeout(t);
+    this.gitStateTimers.delete(id);
   }
 
   private cancelPersist(id: string): void {
@@ -908,6 +920,8 @@ export class SessionManager {
     await this.stop(id);
     await this.preserveUserInputs(meta, await this.deps.store.readTranscript(id));
     this.cancelPersist(id);
+    this.cancelGitStateCheck(id);
+    this.prRefsCache.delete(id);
     this.titleAttempts.delete(id);
     this.titleInFlight.delete(id);
     const tStop = Date.now();
@@ -1216,7 +1230,7 @@ export class SessionManager {
   }
 
   private async ensureActive(id: string): Promise<ActiveSession> {
-    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    this.assertNoConfigUpdate(id);
     const existing = this.active.get(id);
     if (existing) {
       if (existing.tearingDown || existing.uncertain) throw new Error('Session runtime is stopping or uncertain');
@@ -1392,7 +1406,7 @@ export class SessionManager {
     const previous = this.active.get(id);
     const activity = this.activity(id);
     if (meta.archived || meta.goal?.status === 'active' || meta.nativeGoal || previous?.goalContinuationTimer || previous?.pendingGoalKickoff ||
-        this.configDispatches.has(id) || this.fastModeUpdates.has(id) || previous?.starting || activity.turn || activity.tools || activity.nativeChildren ||
+        this.configDispatches.has(id) || this.pendingConfigUpdates.has(id) || previous?.starting || activity.turn || activity.tools || activity.nativeChildren ||
         activity.approvals || activity.queued || activity.tearingDown || activity.uncertain || previous?.adapter.workspaceWriterState?.() === 'active' ||
         meta.status === 'starting' || meta.status === 'awaiting' || meta.status === 'running' && !activity.compacting) {
       throw new Error('Session is busy or its activity is unproven');
@@ -1640,7 +1654,7 @@ export class SessionManager {
     const meta = source === 'mission' ? this.managedMeta(id, generation!) : this.get(id);
     if (!meta) throw new Error('Session not found');
     if (meta.config.harness === 'antigravity' && source !== 'user') throw new Error('Antigravity sessions are driven by direct user prompts.');
-    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    this.assertNoConfigUpdate(id);
     if (source !== 'mission') this.assertUnmanaged(id);
     // A Mission owns its own immutable user-input receipts; ordinary file uploads cannot bypass them.
     if (source === 'mission' && input.files?.length) throw new Error('Mission file attachments are not supported.');
@@ -1727,7 +1741,7 @@ export class SessionManager {
   }
 
   private async dispatchInput(id: string, input: UserInput, generation?: number): Promise<void> {
-    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    this.assertNoConfigUpdate(id);
     this.configDispatches.set(id, (this.configDispatches.get(id) ?? 0) + 1);
     try {
       await this.dispatchReservedInput(id, input, generation);
@@ -2103,6 +2117,8 @@ export class SessionManager {
 
   /** App quit. Never rejects, so the caller still flushes persistence and analytics afterwards. */
   async stopAll(): Promise<void> {
+    for (const timer of this.gitStateTimers.values()) clearTimeout(timer);
+    this.gitStateTimers.clear();
     const ids = [...new Set([...this.active.keys(), ...this.managedDispatches.keys(), ...this.controlled.keys()])];
     if (ids.length) this.deps.log('info', `stopping ${ids.length} running session(s)`);
     const results = await Promise.allSettled(ids.map((id) => {
@@ -2128,13 +2144,13 @@ export class SessionManager {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
-    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    this.assertNoConfigUpdate(id);
     if (meta.config.fastMode && !fastModeSupport(meta.config.harness, model, this.settings().providers).supported) {
       throw new Error('Turn off Fast mode before switching to this model.');
     }
     if (this.configDispatches.has(id)) throw new Error('Wait for the current message to be accepted before switching models.');
     const active = this.active.get(id);
-    this.fastModeUpdates.add(id);
+    this.pendingConfigUpdates.set(id, 'model');
     try {
       // Do not publish or persist the requested model until the harness accepts the switch.
       if (active) await active.adapter.setModel(model);
@@ -2147,7 +2163,7 @@ export class SessionManager {
       this.pushSessions();
       return meta;
     } finally {
-      this.fastModeUpdates.delete(id);
+      this.pendingConfigUpdates.delete(id);
     }
   }
 
@@ -2175,7 +2191,7 @@ export class SessionManager {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (typeof enabled !== 'boolean') throw new Error('Fast mode must be a boolean');
-    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    this.assertNoConfigUpdate(id);
     const active = this.active.get(id);
     const activity = this.activity(id);
     if (this.configDispatches.has(id) || active?.starting || activity.turn || activity.tools || activity.nativeChildren || activity.approvals || activity.compacting || activity.queued || activity.tearingDown || activity.uncertain) {
@@ -2188,7 +2204,7 @@ export class SessionManager {
     }
     const previous = meta.config.fastMode;
     const status = meta.fastModeStatus;
-    this.fastModeUpdates.add(id);
+    this.pendingConfigUpdates.set(id, 'fast-mode');
     let applied = false;
     try {
       if (active?.adapter.setFastMode) {
@@ -2218,7 +2234,7 @@ export class SessionManager {
       this.pushSessions();
       throw error;
     } finally {
-      this.fastModeUpdates.delete(id);
+      this.pendingConfigUpdates.delete(id);
     }
   }
 
@@ -3029,6 +3045,7 @@ export class SessionManager {
     delete ref.codexThreadId;
     delete ref.piSessionFile;
     delete ref.acpSessionId;
+    delete ref.cursorAgentId;
     delete ref.forkOnResume;
     meta.harnessRef = ref;
     await this.deps.store.upsert(meta);
@@ -3138,12 +3155,25 @@ export class SessionManager {
     if (meta.knowledgeDigest && !HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
     if (!HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingAppInstructions = true;
     const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision)).map(carriedItem);
-    // A same-harness fork that lost the source directory also lost the provider session it would
-    // have resumed; both it and a fork into another harness start from the conversation as text.
-    const lostResume = !cross && !!own && src.config.harness === 'claude' && !!src.harnessRef.claudeSessionId;
-    // Codex forks start a fresh provider thread; unlike Claude, they cannot inherit a fork-on-resume ref.
-    const lostCodexResume = !cross && (src.config.harness === 'codex' || src.config.harness === 'codex-exec') && !!src.harnessRef.codexThreadId;
-    if (cross || lostResume || lostCodexResume || src.pendingForkContext) {
+    // Any same-harness fork that had a provider resume reference and did not inherit it (a Claude
+    // fork that moved to a new worktree, or Codex/Pi/Cursor/ACP forks that start fresh provider
+    // sessions) hands the prior conversation over as plain text, just like a cross-harness fork.
+    const hadProviderResume = Boolean(
+      src.harnessRef.claudeSessionId ||
+      src.harnessRef.codexThreadId ||
+      src.harnessRef.piSessionFile ||
+      src.harnessRef.acpSessionId ||
+      src.harnessRef.cursorAgentId
+    );
+    const keptProviderResume = Boolean(
+      meta.harnessRef.claudeSessionId ||
+      meta.harnessRef.codexThreadId ||
+      meta.harnessRef.piSessionFile ||
+      meta.harnessRef.acpSessionId ||
+      meta.harnessRef.cursorAgentId
+    );
+    const lostResume = !cross && hadProviderResume && !keptProviderResume;
+    if (cross || lostResume || src.pendingForkContext) {
       // Hand the prior conversation over as plain text: the first message in the fork carries it
       // and then the flag is cleared.
       await this.deps.store.writeBlob(nid, FORK_CONTEXT_FILE, renderForkContext(keep, src.config.harness, target));

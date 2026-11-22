@@ -206,7 +206,7 @@
 .settings .vocs-account-connections li { border-bottom: 1px solid var(--border); padding: 10px 0; min-width: 0; }
 .settings .vocs-account-connections li:last-child { border-bottom: 0; }
 .settings .vocs-account-connections p { margin: 8px 0; line-height: 1.65; }
-.settings .vocs-account-resource { font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
+.settings .vocs-account-resource { font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
 .settings .vocs-account-error { border-left: 2px solid var(--accent); padding-left: 12px; margin: 12px 0; }
 .settings .vocs-account-keep { margin: 12px 0; }
 .settings .vocs-account-keep label { display: flex; align-items: center; gap: 8px; }

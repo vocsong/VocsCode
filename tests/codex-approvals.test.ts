@@ -35,9 +35,17 @@ function makeAdapter(mode: PermissionMode, decision: ApprovalDecision = { option
   (adapter as unknown as { wireServerRequests: (client: unknown) => void }).wireServerRequests(rpc);
   const applyPatch = handlers.get('applyPatchApproval');
   if (!applyPatch) throw new Error('applyPatchApproval handler was not registered');
+  const fileChange = handlers.get('item/fileChange/requestApproval');
+  if (!fileChange) throw new Error('item/fileChange/requestApproval handler was not registered');
   const requestUserInput = handlers.get('item/tool/requestUserInput');
   if (!requestUserInput) throw new Error('item/tool/requestUserInput handler was not registered');
-  return { applyPatch, requestUserInput, requestApproval, events };
+  const rememberFileChanges = (itemId: string, paths: string[]) => {
+    (adapter as unknown as { fileChangeItems: Map<string, { path: string; kind: 'update' }[]> }).fileChangeItems.set(
+      itemId,
+      paths.map((p) => ({ path: p, kind: 'update' }))
+    );
+  };
+  return { applyPatch, fileChange, rememberFileChanges, requestUserInput, requestApproval, events };
 }
 
 function questionInput() {
@@ -190,5 +198,29 @@ describe('applyPatchApproval workspace scope', () => {
     const full = makeAdapter('full-auto');
     await expect(full.applyPatch({ fileChanges: { [outside]: {} } })).resolves.toEqual({ decision: 'approved' });
     expect(full.requestApproval).not.toHaveBeenCalled();
+  });
+});
+
+describe('item/fileChange/requestApproval workspace scope', () => {
+  it('auto-approves in-workspace file changes in auto mode without prompting', async () => {
+    const { fileChange, rememberFileChanges, requestApproval } = makeAdapter('auto');
+    rememberFileChanges('fc-1', [inside]);
+    await expect(fileChange({ itemId: 'fc-1', grantRoot: null })).resolves.toEqual({ decision: 'accept' });
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('prompts for an outside-workspace fileChange even when grantRoot is absent and respects denial', async () => {
+    const { fileChange, rememberFileChanges, requestApproval } = makeAdapter('auto', { optionId: 'deny' });
+    rememberFileChanges('fc-out', [outside]);
+    await expect(fileChange({ itemId: 'fc-out', grantRoot: null })).resolves.toEqual({ decision: 'decline' });
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+    expect(requestApproval.mock.calls[0]![0].changes?.map((c) => c.path)).toEqual([outside]);
+  });
+
+  it('prompts in accept-edits mode when a fileChange targets outside the workspace', async () => {
+    const { fileChange, rememberFileChanges, requestApproval } = makeAdapter('accept-edits', { optionId: 'allow' });
+    rememberFileChanges('fc-out-2', [inside, outside]);
+    await expect(fileChange({ itemId: 'fc-out-2', grantRoot: null })).resolves.toEqual({ decision: 'accept' });
+    expect(requestApproval).toHaveBeenCalledTimes(1);
   });
 });

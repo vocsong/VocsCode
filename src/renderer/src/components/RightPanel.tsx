@@ -5,6 +5,7 @@ import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke, invokeErrorMessage } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
 import { GitPanelCache } from '../git-panel-cache';
+import { activeLeadWorkspace } from '../file-open';
 import { workspaceRelativePath } from '../file-refs';
 import { clamp, relTime } from '../format';
 import { useStore, type FileReveal, type PanelBottomTab, type PanelTab } from '../store';
@@ -50,11 +51,11 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
   const { record: mission } = useMission(session);
   const [workspace, setWorkspace] = useState({ sessionId: session.id, id: '' });
   const reveal = useStore((s) => s.fileReveal);
-  const leadWorkspace = mission?.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission?.workspaces.find((w) => w.role === 'lead');
+  const leadWorkspace = activeLeadWorkspace(mission, session.id);
   const workspaceId = reveal?.sessionId === session.id && leadWorkspace ? leadWorkspace.id : workspace.sessionId === session.id ? workspace.id : '';
   useEffect(() => {
     if (mission && reveal?.sessionId === session.id) {
-      const lead = mission.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission.workspaces.find((w) => w.role === 'lead');
+      const lead = activeLeadWorkspace(mission, session.id);
       if (lead) setWorkspace({ sessionId: session.id, id: lead.id });
     }
   }, [reveal, mission?.id, session.id]);

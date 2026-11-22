@@ -3,6 +3,7 @@
  *  references, and a size budget. Built into a temp directory so the test never disturbs the
  *  served assets. */
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -19,9 +20,11 @@ let lazy = new Map<string, string>();
 
 beforeAll(() => {
   out = mkdtempSync(path.join(os.tmpdir(), 'vocs-web-bundle-'));
+  const viteManifest = createRequire(import.meta.url).resolve('vite/package.json');
+  const viteBin = path.join(path.dirname(viteManifest), JSON.parse(readFileSync(viteManifest, 'utf8')).bin.vite);
   const result = spawnSync(
     process.execPath,
-    [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--config', 'vite.config.web.ts', '--outDir', out],
+    [viteBin, 'build', '--config', 'vite.config.web.ts', '--outDir', out],
     { cwd: root, encoding: 'utf8', env: { ...process.env, NODE_ENV: 'production' } }
   );
   if (result.status !== 0) throw new Error(`vite build failed (${result.status}):\n${result.stderr || result.stdout}`);

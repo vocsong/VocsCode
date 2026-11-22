@@ -106,9 +106,10 @@ export default function vocsCodeApprovals(pi: PiLike): void {
   pi.on('tool_call', async (event, ctx) => {
     await refreshMode();
     const tool = event.toolName;
+    const nonce = process.env.VOCS_CODE_PI_NONCE;
     const decline = (reason: string) => {
       if (event.toolCallId && ctx.ui?.notify) {
-        ctx.ui.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: event.toolCallId, toolName: tool }), 'info');
+        ctx.ui.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: event.toolCallId, toolName: tool, ...(nonce ? { nonce } : {}) }), 'info');
       }
       return { block: true, reason };
     };
@@ -119,7 +120,7 @@ export default function vocsCodeApprovals(pi: PiLike): void {
     if (!ctx.ui || typeof ctx.ui.select !== 'function') {
       return { block: true, reason: 'Vocs Code approval UI is unavailable; refusing to run this action.' };
     }
-    const payload = JSON.stringify({ tool, toolCallId: event.toolCallId, input: trimInput(event.input), summary: decision.summary });
+    const payload = JSON.stringify({ tool, toolCallId: event.toolCallId, input: trimInput(event.input), summary: decision.summary, ...(nonce ? { nonce } : {}) });
     const choice = (await ctx.ui.select(APPROVAL_MARKER + payload, APPROVAL_OPTIONS)) as ApprovalChoice | undefined;
     if (choice === 'Allow once') return undefined;
     if (choice === 'Allow for session') {

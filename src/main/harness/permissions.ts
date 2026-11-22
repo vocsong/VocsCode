@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { ApprovalOption, FileChange, PermissionMode } from '../../shared/types';
 import type { ApprovalDraft } from './types';
 import { isDangerousCommand } from './types';
@@ -48,12 +50,70 @@ export function gateAction(
   return 'ask';
 }
 
-/** True when `target` (absolute or relative to cwd) resolves outside cwd. */
-export function isOutsideWorkspace(cwd: string, target: string | undefined, pathMod: { resolve: (...p: string[]) => string; relative: (a: string, b: string) => string; isAbsolute: (p: string) => boolean }): boolean {
+/**
+ * Resolve `target` through symlinks/junctions (including dangling symlinks and non-existent leaf
+ * segments) by walking up to the deepest existing ancestor. Fails closed by throwing on loops.
+ */
+function resolveRealWithAncestors(target: string, hops = 0): string {
+  if (hops > 16) throw new Error('Too many symbolic link levels');
+  const resolved = path.resolve(target);
+  try {
+    return fs.realpathSync(resolved);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+  }
+  const tail: string[] = [];
+  let cur = resolved;
+  while (true) {
+    try {
+      const st = fs.lstatSync(cur);
+      if (st.isSymbolicLink()) {
+        // Dangling symlink (realpath failed with ENOENT): follow its target so an escape outside
+        // cwd is still detected even before the external destination exists.
+        const link = fs.readlinkSync(cur);
+        const next = path.resolve(path.dirname(cur), link, ...tail.reverse());
+        return resolveRealWithAncestors(next, hops + 1);
+      }
+      return path.join(fs.realpathSync(cur), ...tail.reverse());
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) return resolved;
+    tail.push(path.basename(cur));
+    cur = parent;
+  }
+}
+
+/** True when `target` (absolute or relative to cwd) resolves outside cwd, including via symlinks/junctions. */
+export function isOutsideWorkspace(
+  cwd: string,
+  target: string | undefined,
+  pathMod: { resolve: (...p: string[]) => string; relative: (a: string, b: string) => string; isAbsolute: (p: string) => boolean; sep?: string }
+): boolean {
   if (!target) return false;
-  const abs = pathMod.resolve(cwd, target);
-  const rel = pathMod.relative(pathMod.resolve(cwd), abs);
-  return rel.startsWith('..') || pathMod.isAbsolute(rel);
+  const sep = pathMod.sep ?? (pathMod === path.posix ? '/' : pathMod === path.win32 ? '\\' : path.sep);
+  const fold = (p: string) => (pathMod !== path.posix && process.platform === 'win32' ? p.toLowerCase() : p);
+  const outside = (base: string, dest: string) => {
+    const rel = pathMod.relative(fold(base), fold(dest));
+    return rel === '..' || rel.startsWith(`..${sep}`) || pathMod.isAbsolute(rel);
+  };
+  const resolvedCwd = pathMod.resolve(cwd);
+  const abs = pathMod.resolve(resolvedCwd, target);
+  if (outside(resolvedCwd, abs)) return true;
+  if (pathMod === path && fs.existsSync(resolvedCwd)) {
+    try {
+      const realCwd = resolveRealWithAncestors(resolvedCwd);
+      const realTarget = resolveRealWithAncestors(abs);
+      return outside(realCwd, realTarget);
+    } catch {
+      // Unresolvable symlink loop or unreadable boundary: fail closed so permissions prompt.
+      return true;
+    }
+  }
+  return false;
 }
 
 export function commandApproval(command: string, cwd?: string, extra?: Partial<ApprovalDraft>): ApprovalDraft {

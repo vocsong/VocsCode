@@ -257,4 +257,17 @@ describe('per-session Fast mode lifecycle', () => {
     await manager.setModel(meta.id, incompatible);
     expect(meta.config.model).toEqual(incompatible);
   });
+
+  it('reports a model-update wait error rather than Fast mode while a model switch is in flight', async () => {
+    const { manager, create } = await fixture();
+    const meta = await create();
+    await manager.send(meta.id, { text: 'Initialize' });
+    let release!: () => void;
+    runtime.switches.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+    const switching = manager.setModel(meta.id, { provider: 'openai', model: 'gpt-5.3-codex-spark' });
+    await expect(manager.setModel(meta.id, openai)).rejects.toThrow('Wait for the model update to finish.');
+    await expect(manager.setFastMode(meta.id, true)).rejects.toThrow('Wait for the model update to finish.');
+    release();
+    await switching;
+  });
 });

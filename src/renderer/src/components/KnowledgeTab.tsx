@@ -26,6 +26,16 @@ function authorityLabel(page: KnowledgePageSummary): string {
   return page.status;
 }
 
+/** \u0001/\u0002 markers from main's snippetFor() render as React <mark> nodes (never raw HTML). */
+function HighlightedSnippet({ text }: { text: string }) {
+  const parts = useMemo(() => text.split(/[\u0001\u0002]/), [text]);
+  return (
+    <>
+      {parts.map((part, index) => (index % 2 ? <mark key={index}>{part}</mark> : <React.Fragment key={index}>{part}</React.Fragment>))}
+    </>
+  );
+}
+
 /** Normalized tags, rendered the same way in a list row and a detail header. */
 function LabelChips({ labels, testId }: { labels: string[]; testId?: string }) {
   if (!labels.length) return null;
@@ -381,7 +391,7 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
                     <li key={`${edge.from}:${edge.to}:${edge.type}`} className="knowledge-edge">
                       <span className="muted small" title={outgoing ? 'This page points to it' : 'It points to this page'}>{outgoing ? '→' : '←'}</span>
                       <Badge tone="neutral">{edge.type}</Badge>
-                      <button type="button" className="link" onClick={() => void open(other)}>{titleOf(other)}</button>
+                      <button type="button" className="link-btn" onClick={() => void open(other)}>{titleOf(other)}</button>
                     </li>
                   );
                 })}
@@ -393,7 +403,7 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
               <h4>Related</h4>
               <ul>
                 {detail.related.map((r) => (
-                  <li key={r.id}><button type="button" className="link" onClick={() => void open(r.id)}>{r.title}</button></li>
+                  <li key={r.id}><button type="button" className="link-btn" onClick={() => void open(r.id)}>{r.title}</button></li>
                 ))}
               </ul>
             </div>
@@ -421,7 +431,7 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
               <span className="knowledge-row-main">
                 <span className="knowledge-title">{page.title}</span>
                 {page.claim && <span className="muted small knowledge-claim">{page.claim}</span>}
-                {page.snippet && <span className="muted small knowledge-snippet" dangerouslySetInnerHTML={{ __html: page.snippet.replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>') }} />}
+                {page.snippet && <span className="muted small knowledge-snippet"><HighlightedSnippet text={page.snippet} /></span>}
                 <LabelChips labels={page.labels ?? []} testId={`knowledge-labels-${page.id}`} />
               </span>
               {page.updatedBy && <span className="muted small knowledge-by" title={`Last written by ${page.updatedBy}`}>{page.updatedBy}</span>}

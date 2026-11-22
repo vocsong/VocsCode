@@ -157,7 +157,11 @@ const SLOW_HANDLER_MS = 1000;
 const missionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/, 'Invalid Mission/session identifier');
 const missionKeySchema = z.string().min(1).max(200);
 const missionTextSchema = z.string().min(1).max(100_000).refine((text) => !!text.trim(), 'Text must not be empty');
-const missionImageSchema = z.strictObject({ mimeType: z.string().regex(/^image\/[a-z0-9.+-]+$/i), data: z.string().min(1).max(32_000_000), name: z.string().max(1000).optional() });
+const missionImageSchema = z.strictObject({
+  mimeType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']),
+  data: z.string().min(1).max(24 * 1024 * 1024).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+  name: z.string().min(1).max(1000).refine((value) => !!value.trim() && !value.includes('\0')).optional()
+});
 const missionImagesSchema = z.array(missionImageSchema).max(100).optional();
 const missionFileSchema = z.strictObject({
   name: z.string().min(1).max(255), mimeType: z.string().min(1).max(200),
@@ -1350,6 +1354,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       filters: [{ name: 'Markdown', extensions: ['md'] }]
     });
     if (res.canceled || !res.filePath) return { path: null };
+    if (!path.isAbsolute(res.filePath)) throw new Error('Export did not return an absolute destination.');
+    await assertOrdinaryWorkspace(res.filePath);
     await fs.writeFile(res.filePath, md, 'utf8');
     deps.log('info', `[${id}] transcript exported to ${res.filePath}`);
     return { path: res.filePath };
@@ -1460,7 +1466,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
         deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
         if (mirror === true) deps.remoteMirror?.sync();
         else await deps.remoteMirror?.disable();
-      })();
+      })().catch((e: unknown) => deps.log('warn', `remote:setMirror failed: ${errorMessage(e)}`));
       return remote.state();
     });
     handle('remote:clearAudit', () => {
@@ -1798,7 +1804,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       else await assertOrdinaryWorkspace(target);
     },
     shutdown: async () => {
-      await Promise.all([vocsAccount.dispose(), vesta.dispose(), dictationService?.dispose()]);
+      await Promise.all([vocsAccount.dispose(), vesta.dispose(), dictationService?.dispose(), cuaPreview.close()]);
     }
   };
 }

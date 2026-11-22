@@ -4,7 +4,7 @@
  *  halfway with the transcript showing "Turn complete". */
 import type { SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { HarnessContext } from '../src/main/harness/types';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PiAdapter } from '../src/main/harness/pi';
 import { toolCallFromItem } from '../src/main/analytics';
 
@@ -115,6 +115,28 @@ describe('Pi adapter tool outcomes', () => {
     feed(a, { type: 'tool_execution_end', toolCallId: 'call', toolName: 'bash', isError: true, result: {} });
     expect(linked).toBe('call');
     expect(toolResult(events, 'call').status).toBe('declined');
+  });
+
+  it('fails closed on malformed approval payloads and nonce mismatches without prompting', async () => {
+    const { ctx, events } = stubCtx();
+    const requestApproval = vi.fn(async () => ({ optionId: 'allow' }));
+    ctx.requestApproval = requestApproval;
+    const a = new PiAdapter(ctx);
+    const written: string[] = [];
+    (a as unknown as { extensionNonce: string; write: (obj: unknown) => void }).extensionNonce = 'expected-nonce';
+    (a as unknown as { write: (obj: unknown) => void }).write = (obj: unknown) => written.push(JSON.stringify(obj));
+
+    feed(a, { type: 'tool_execution_start', toolCallId: 'call', toolName: 'bash', args: { command: 'echo hi' } });
+    feed(a, { type: 'extension_ui_request', id: 'bad-json', method: 'select', title: 'VCODE_APPROVAL::{not-json' });
+    feed(a, { type: 'extension_ui_request', id: 'bad-nonce', method: 'select', title: 'VCODE_APPROVAL::' + JSON.stringify({ tool: 'bash', toolCallId: 'call', input: { command: 'echo hi' }, nonce: 'wrong-nonce' }) });
+    feed(a, { type: 'extension_ui_request', id: 'bad-block', method: 'notify', message: 'VCODE_TOOL_BLOCKED::' + JSON.stringify({ toolCallId: 'call', toolName: 'bash', nonce: 'wrong-nonce' }) });
+    await settle();
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(written).toContain(JSON.stringify({ type: 'extension_ui_response', id: 'bad-json', value: 'Deny' }));
+    expect(written).toContain(JSON.stringify({ type: 'extension_ui_response', id: 'bad-nonce', value: 'Deny' }));
+    // Unverified block notice must not relabel a real tool failure as host-declined.
+    feed(a, { type: 'tool_execution_end', toolCallId: 'call', toolName: 'bash', isError: true, result: {} });
+    expect(toolResult(events, 'call').status).toBe('error');
   });
 });
 

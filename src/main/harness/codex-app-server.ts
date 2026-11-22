@@ -458,9 +458,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const n = p as { itemId: string; reason?: string | null; grantRoot?: string | null };
       const mode = this.ctx.permissionMode();
       if (mode === 'plan') return { decision: 'decline' };
-      // A grantRoot request means the patch writes outside the sandboxed workspace: always ask below full access.
-      if (mode === 'full-auto' || ((mode === 'accept-edits' || mode === 'auto') && !n.grantRoot)) return { decision: 'accept' };
       const changes = this.fileChangeItems.get(n.itemId);
+      const cwd = this.ctx.session().cwd;
+      // A grantRoot request or any patch target resolving outside the workspace (including symlinks/junctions)
+      // must always prompt below full access.
+      const outsideWorkspace = !!n.grantRoot || (changes ?? []).some((c) => isOutsideWorkspace(cwd, c.path, path));
+      if (gateAction(mode, { mutating: true, isEdit: true, outsideWorkspace }) === 'allow') return { decision: 'accept' };
       const decision = await this.ctx.requestApproval({
         kind: 'file_change',
         title: changes?.length ? `Apply changes to ${changes.length} file${changes.length === 1 ? '' : 's'}?` : 'Apply file changes?',
