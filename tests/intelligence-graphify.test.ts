@@ -706,7 +706,8 @@ describe('defaultGraphifyRun', () => {
     expect(status.error).toBeUndefined();
   });
 
-  it.skipIf(process.platform !== 'win32')('launches a .cmd shim with the same argument fidelity, and fails closed on what cmd.exe cannot carry', async () => {
+  // A .cmd shim cannot execute on POSIX; collect this case only on a Windows host.
+  if (process.platform === 'win32') it('launches a .cmd shim with the same argument fidelity, and fails closed on what cmd.exe cannot carry', async () => {
     const echo = script('echo-args.mjs', 'process.stdout.write(JSON.stringify(process.argv.slice(2)));');
     const shimDir = path.join(scripts, 'shim dir');
     fs.mkdirSync(shimDir, { recursive: true });
