@@ -1239,3 +1239,48 @@ export async function worktreeInfo(cwd: string): Promise<{ branch?: string; main
   const branch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
   return { branch, mainRoot: path.dirname(path.resolve(cwd, common)) };
 }
+
+/**
+ * Provenance for the exact checkout. Origin and root commit are hints, not permission to link
+ * projects. A Git common directory is identity evidence only for a registered worktree, not for an
+ * arbitrary folder containing a `.git` pointer or a directory below the checkout root.
+ */
+export async function gitIdentityFacts(cwd: string): Promise<{ origin?: string; rootCommit?: string; head?: string; commonDir?: string }> {
+  const real = await fs.realpath(cwd).catch(() => null);
+  const root = real ? await gitRoot(real) : null;
+  if (!real || !root || pathKey(real) !== pathKey(root)) return {};
+  const out: { origin?: string; rootCommit?: string; head?: string; commonDir?: string } = {};
+  const [remote, head, common, registered] = await Promise.all([
+    git(real, ['config', '--get', 'remote.origin.url']),
+    gitHeadCommit(real),
+    git(real, ['rev-parse', '--path-format=absolute', '--git-common-dir']),
+    git(real, ['worktree', 'list', '--porcelain', '-z'])
+  ]);
+  if (remote.code === 0 && !remote.truncated && remote.stdout.trim()) out.origin = remote.stdout.trim();
+  if (head && /^[0-9a-f]{40,64}$/i.test(head)) out.head = head;
+  const dir = common.stdout.trim();
+  if (common.code === 0 && !common.truncated && path.isAbsolute(dir) && registered.code === 0 && !registered.truncated && registered.stdout.split('\0').some(
+    (field) => field.startsWith('worktree ') && pathKey(field.slice(9)) === pathKey(real)
+  )) {
+    const canonical = await fs.realpath(dir).catch(() => null);
+    if (canonical) out.commonDir = canonical;
+  }
+  if (out.head) {
+    // A shallow clone's oldest commit is only its graft boundary, which differs per clone.
+    const shallow = await git(cwd, ['rev-parse', '--is-shallow-repository']);
+    if (shallow.code === 0 && shallow.stdout.trim() === 'false') {
+      const roots = await git(cwd, ['rev-list', '--max-parents=0', 'HEAD']);
+      const first = roots.code === 0 && !roots.truncated ? roots.stdout.trim().split('\n').filter(Boolean).sort()[0] : undefined;
+      if (first && /^[0-9a-f]{40,64}$/i.test(first)) out.rootCommit = first;
+    }
+  }
+  return out;
+}
+
+/** The full SHA a revision names in this repository, or null when it does not name a commit. */
+export async function gitResolveCommit(cwd: string, revision: string): Promise<string | null> {
+  if (!/^[0-9a-f]{7,64}$/i.test(revision)) return null;
+  const r = await git(cwd, ['rev-parse', '--verify', '--quiet', `${revision}^{commit}`]);
+  const sha = r.stdout.trim();
+  return r.code === 0 && /^[0-9a-f]{40,64}$/i.test(sha) ? sha : null;
+}

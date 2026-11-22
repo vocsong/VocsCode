@@ -186,6 +186,32 @@ describe('handler registry', () => {
     expect(deps.settings.get().housekeepRecentDays).toBe(7);
   });
 
+  it('keeps intelligence grants on the desktop and derives the project from the held session', async () => {
+    const view = vi.fn(async () => ({ available: true }));
+    const forget = vi.fn(async () => ({ forgotten: true }));
+    const { registry, deps } = stubDeps({ intelligence: { view, forget } as unknown as HandlerDeps['intelligence'] });
+    const settingsUpdate = vi.spyOn(deps.settings, 'update');
+    for (const actor of ['user', 'agent'] as const) {
+      await expect(registry.invoke('intelligence:view', { sessionId: 's_test' }, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: 'mem_abcdef' }, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('settings:update', { intelligence: { gateway: false, personalMemory: true } }, actor)).rejects.toThrow(/desktop owner/);
+    }
+    expect(settingsUpdate).not.toHaveBeenCalled();
+    await expect(registry.invoke('intelligence:view', { sessionId: '../s_test' }, 'desktop')).rejects.toThrow(/Invalid Mission\/session identifier/);
+    await expect(registry.invoke('intelligence:view', { sessionId: 's_unknown' }, 'desktop')).rejects.toThrow('Session not found');
+    await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: '../../another' }, 'desktop')).rejects.toThrow('A memory record id is required');
+    expect(view).not.toHaveBeenCalled();
+    expect(forget).not.toHaveBeenCalled();
+    const channels = registry.channels().filter((channel) => channel.startsWith('intelligence:'));
+    expect(channels).toContain('intelligence:view');
+    expect(channels.every((channel) => !isRemoteChannel(channel) && !agentChannels().includes(channel))).toBe(true);
+    const session = deps.sessions.get('s_test')!;
+    session.cwd = path.join(ws, 'worktree');
+    session.worktreeBranch = 'vocs/test';
+    await expect(registry.invoke('intelligence:view', { sessionId: 's_test', projectRoot: 'attacker', cwd: 'attacker', branch: 'other' }, 'desktop')).resolves.toEqual({ available: true });
+    expect(view).toHaveBeenCalledExactlyOnceWith({ sessionId: 's_test', projectRoot: ws, cwd: session.cwd, branch: session.worktreeBranch });
+  });
+
   it('keeps all account channels local-only and accepts no endpoint/credential configuration', async () => {
     const snapshot = { realm: 'staging', status: 'signed_out', refreshing: false, revision: 0, connections: [] } as const;
     const account = { get: vi.fn(() => snapshot), signIn: vi.fn(async () => snapshot), cancel: vi.fn(() => snapshot), signOut: vi.fn(async () => snapshot), refresh: vi.fn(async () => snapshot), dispose: vi.fn() };

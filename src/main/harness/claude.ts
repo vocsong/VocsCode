@@ -8,6 +8,7 @@ import {
   type AccountInfo,
   type CanUseTool,
   type HookCallback,
+  type McpSdkServerConfigWithInstance,
   type ModelUsage,
   type Options,
   type PermissionMode as SdkPermissionMode,
@@ -18,7 +19,7 @@ import {
   type SettingSource,
   type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
-import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { AppSettings, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
 import { fastModeSupport } from '../../shared/fast-mode';
 import { assertEndpointUrl } from '../../shared/endpoint-policy';
@@ -27,6 +28,7 @@ import { PiMcpConnection } from '../../../resources/pi/mcp-client';
 import { isMissionCoordinationTool, MISSION_SERVER_ID, missionToolDenial, missionCommandDenial, missionToolSubset } from '../../../resources/pi/vocs-code-mission';
 import { hasClaudeAgentPins } from '../claude-agents';
 import { toClaude } from '../mcp/effective';
+import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, VOCS_MEMORY_SERVER_ID } from '../mcp/memory';
 import { claudeSdkCatalog } from '../models/claude-catalog';
 import { resolveProviderApiKey } from '../models/providers';
 import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
@@ -234,6 +236,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   private autoCompactionWindow: number | null | undefined;
   /** Records the delegated runs Claude Code spawns, so the Subagents panel can show them. */
   private readonly subagents: ClaudeSubagentRuns;
+  private closeMemoryMcp: (() => Promise<void>) | undefined;
   private missionConnection: PiMcpConnection | null = null;
   private missionAllowed = new Set<string>();
   private missionCoordination = new Set<string>();
@@ -285,13 +288,16 @@ export class ClaudeAdapter implements HarnessAdapter {
     if (process.platform === 'win32' && !bin) throw new Error('Claude Agent SDK needs a native Claude Code executable. Reinstall Vocs Code (or run npm install --include=dev in a dev checkout), or select a native .exe; npm .cmd/.bat shims cannot be spawned.');
     const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
     // Never let this app's own Claude Code host variables leak into a nested session.
-    for (const k of Object.keys(env)) if (k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_CODE_USE_BEDROCK' && k !== 'CLAUDE_CODE_USE_VERTEX' && k !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[k];
+    for (const k of Object.keys(env)) {
+      if (k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_CODE_USE_BEDROCK' && k !== 'CLAUDE_CODE_USE_VERTEX' && k !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[k];
+      const name = process.platform === 'win32' ? k.toUpperCase() : k;
+      if (name === MEMORY_GATEWAY_URL_ENV || name === MEMORY_GATEWAY_TOKEN_ENV
+        || name === 'VOCS_CODE_MCP_EPHEMERAL' || name === 'VOCS_CODE_MISSION_POLICY') delete env[k];
+    }
     delete env.CLAUDECODE;
     // After the scrub, which would otherwise drop it with every other CLAUDE_CODE_* variable. The
     // SDK reads the cap from the child's environment and, left alone, applies its own default.
     if (!meta.mission) env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = String(MAX_CONCURRENT_SUBAGENTS);
-    delete env.VOCS_CODE_MCP_EPHEMERAL;
-    delete env.VOCS_CODE_MISSION_POLICY;
 
     const options: Options = {
       cwd: meta.cwd,
@@ -353,18 +359,22 @@ export class ClaudeAdapter implements HarnessAdapter {
     // twice under one name; injecting it is still the reliable route, because Claude's
     // project-scope trust prompt has no interactive path in SDK mode (docs/MCP.md §11).
     const mission = this.ctx.session().mission;
-    const mcp = await this.ctx.mcpServers().catch((e) => {
+    const mcp = (await this.ctx.mcpServers().catch((e) => {
       if (mission) throw new Error('Managed Mission MCP configuration is unavailable.');
       this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
       return [];
-    });
-    const missionServers = mcp.filter((entry) => entry.def.id === MISSION_SERVER_ID);
+    })).map(({ def }) => def);
+    const missionServers = mcp.filter((def) => def.id === MISSION_SERVER_ID);
+    // The SDK serializes process MCP configs (including stdio env) into --mcp-config argv.
+    const gatewayMemory = mcp.filter((def) => def.id === VOCS_MEMORY_SERVER_ID
+      && (def.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || def.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined));
+    const processServers = mcp.filter((def) => def.id !== MISSION_SERVER_ID && !gatewayMemory.includes(def));
     if (mission) {
-      if (missionServers.length !== 1 || missionServers[0].def.transport !== 'http' || !missionServers[0].def.headers?.Authorization) throw new Error('Managed Mission requires its authenticated MCP bridge.');
-      // Claude serializes HTTP mcpServers into --mcp-config argv. Never pass the capability there:
+      if (missionServers.length !== 1 || missionServers[0].transport !== 'http' || !missionServers[0].headers?.Authorization) throw new Error('Managed Mission requires its authenticated MCP bridge.');
+      // Never pass the Mission capability there either:
       // hold it in the SDK host and expose an in-process SDK server with no serializable secrets.
       try {
-        this.missionConnection = await PiMcpConnection.connect(missionServers[0].def);
+        this.missionConnection = await PiMcpConnection.connect(missionServers[0]);
         const listed = await this.missionConnection.listTools();
         if (!listed.some((entry) => entry.name === 'mission_read') || !listed.some((entry) => entry.name === (mission.questionId ? 'mission_context_read' : 'mission_report')) || listed.some((entry) => !isMissionCoordinationTool(MISSION_SERVER_ID, entry.name)
           || mission.questionId && entry.name !== 'mission_read' && entry.name !== 'mission_context_read')) throw new Error();
@@ -378,7 +388,7 @@ export class ClaudeAdapter implements HarnessAdapter {
             return { content: result.content.map((part) => ({ type: 'text' as const, text: part.text ?? '' })), isError: result.isError };
           } catch { return { content: [{ type: 'text' as const, text: 'Mission coordination request failed; the connection may have been revoked.' }], isError: true }; }
         })) });
-        options.mcpServers = { ...toClaude(mcp.filter((entry) => entry.def.id !== MISSION_SERVER_ID).map((entry) => entry.def)), [MISSION_SERVER_ID]: bridge };
+        options.mcpServers = { ...toClaude(processServers), [MISSION_SERVER_ID]: bridge };
       } catch {
         this.missionConnection?.close();
         this.missionConnection = null;
@@ -387,7 +397,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       }
     } else {
       if (missionServers.length) throw new Error('Mission MCP bridge requires a managed session.');
-      if (mcp.length) options.mcpServers = toClaude(mcp.map((r) => r.def));
+      if (processServers.length) options.mcpServers = toClaude(processServers);
     }
     const s = this.ctx.settings();
     const provider = claudeProviderFor(s, this.ctx.session().config.model ?? this.ctx.session().activeModel);
@@ -401,7 +411,18 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
     if (!mission) options.env = { ...(options.env ?? {}), ...(await this.subagentModelEnv(options.model)) };
     this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
-    this.q = query({ prompt: this.input, options });
+    if (!mission && gatewayMemory.length) {
+      const bridge = gatewayMemory.length === 1 ? await this.memoryMcpBridge(gatewayMemory[0], meta.cwd) : undefined;
+      this.abort.signal.throwIfAborted();
+      if (bridge) options.mcpServers = { ...options.mcpServers, [VOCS_MEMORY_SERVER_ID]: bridge };
+      else this.ctx.log('warn', '[claude] memory gateway MCP unavailable; skipping it for this launch');
+    }
+    try {
+      this.q = query({ prompt: this.input, options });
+    } catch (error) {
+      if (this.closeMemoryMcp) await this.closeMemoryMcp();
+      throw error;
+    }
     // This CLI counts the tokens and dollars of the process that is starting, not of the session:
     // a resumed process opens at zero, so without this the first turn after every resume would be
     // measured against the totals already recorded and thrown away.
@@ -418,6 +439,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'error', message: `Claude harness stopped: ${errorMessage(e)}`, fatal: true });
       this.ctx.emit({ type: 'status', status: 'error', detail: errorMessage(e) });
     });
+    if (this.closeMemoryMcp) this.pump = this.pump.finally(this.closeMemoryMcp);
     if (mission) {
       try {
         if (typeof this.q.initializationResult !== 'function') throw new Error('Mission SDK hook initialization is unverified.');
@@ -443,6 +465,51 @@ export class ClaudeAdapter implements HarnessAdapter {
       }
     }
     this.ctx.emit({ type: 'status', status: 'idle' });
+  }
+
+  /** Run the app-owned stdio child from the SDK host, not from Claude Code. */
+  private async memoryMcpBridge(def: McpServerDef, cwd: string): Promise<McpSdkServerConfigWithInstance | undefined> {
+    if (def.builtin !== VOCS_MEMORY_SERVER_ID || def.transport !== 'stdio' || !def.command
+      || !def.env?.[MEMORY_GATEWAY_URL_ENV] || !def.env?.[MEMORY_GATEWAY_TOKEN_ENV]) return;
+    try {
+      const [{ Client }, { StdioClientTransport }, { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode }] = await Promise.all([
+        import('@modelcontextprotocol/sdk/client/index.js'),
+        import('@modelcontextprotocol/sdk/client/stdio.js'),
+        import('@modelcontextprotocol/sdk/types.js')
+      ]);
+      this.abort.signal.throwIfAborted();
+      const client = new Client({ name: 'vocs-code', version: '0.1.0' });
+      // Ignore child stderr: a failed handshake can otherwise surface snippets of launch secrets.
+      const transport = new StdioClientTransport({ command: def.command, args: def.args, env: def.env, cwd, stderr: 'ignore' });
+      let closing: Promise<void> | undefined;
+      this.closeMemoryMcp = () => closing ??= client.close().catch(() => undefined);
+      await client.connect(transport, { signal: this.abort.signal, timeout: 10_000 });
+      const timeout = def.timeoutMs && def.timeoutMs >= 1000 ? def.timeoutMs : undefined;
+      const bridge = createSdkMcpServer({
+        name: VOCS_MEMORY_SERVER_ID,
+        version: client.getServerVersion()?.version,
+        instructions: client.getInstructions(),
+        timeout
+      });
+      // Relay the tool protocol directly: reconstructing via sdkTool() would change the stdio
+      // server's JSON Schemas, annotations and returned content.
+      bridge.instance.server.registerCapabilities({ tools: {} });
+      bridge.instance.server.setRequestHandler(ListToolsRequestSchema, async ({ params }, { signal }) => {
+        try { return await client.listTools(params, { signal, timeout: 10_000 }); }
+        catch { throw new McpError(ErrorCode.InternalError, 'Memory gateway MCP tool discovery failed.'); }
+      });
+      bridge.instance.server.setRequestHandler(CallToolRequestSchema, async ({ params }, { signal }) => {
+        // The gateway can take up to 90 seconds before local fallback starts.
+        try { return await client.callTool(params, undefined, { signal, timeout: timeout ?? 120_000 }); }
+        catch { throw new McpError(ErrorCode.InternalError, 'Memory gateway MCP request failed.'); }
+      });
+      return bridge;
+    } catch {
+      if (this.closeMemoryMcp) await this.closeMemoryMcp();
+      this.closeMemoryMcp = undefined;
+      // No inline fallback and no error detail from the credential-bearing child.
+      return undefined;
+    }
   }
 
   async missionReadiness(): Promise<MissionReadiness> {
@@ -1253,6 +1320,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       /* ignore */
     }
     this.q = null;
+    if (this.closeMemoryMcp) await this.closeMemoryMcp();
+    this.closeMemoryMcp = undefined;
     if (this.ctx.session().mission && this.pump) await withTimeout(this.pump, 5_000, 'Managed Claude shutdown');
     // A run still open when the process goes away has no end record and no owner left to write one,
     // so close it as interrupted rather than leaving it spinning as `running` in an open app.

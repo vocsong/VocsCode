@@ -1,10 +1,10 @@
 # Vocs Code — Unified Knowledge, Memory and Cross-Project Intelligence
 
-**Status:** Proposal for architecture review — not implemented  
-**Version:** 1.0  
-**Date:** 22 November 2026  
-**Target:** Vocs Code (develop branch)  
-**Audience:** Vocs Code maintainers, coding-agent developers, architecture reviewers, security reviewers and future implementers
+- **Status:** Historical proposal — see [Local Knowledge and Memory](INTELLIGENCE.md) for the local implementation and its limits
+- **Version:** 1.0
+- **Date:** 22 November 2026
+- **Target:** Vocs Code (develop branch)
+- **Audience:** Vocs Code maintainers, coding-agent developers, architecture reviewers, security reviewers and future implementers
 
 > **Document convention:** **Current** describes behavior verified in the Vocs Code repository at the time of writing. **Proposed** describes a target design, not an existing capability. **Decision pending** identifies an area that must be agreed before implementation. This proposal does not authorize cloud sync, broader memory sharing, external data transfer or changes to security-sensitive access rules.
 

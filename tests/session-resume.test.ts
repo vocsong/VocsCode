@@ -302,6 +302,35 @@ function makeManagerDeps(store: SessionStore): SessionManagerDeps {
 }
 
 describe('session resume persistence', () => {
+  it('revokes memory access at Stop and does not let a retired runtime mint another grant', async () => {
+    const home = path.join(tmpRoot, 'memory-runtime');
+    const store = new SessionStore(home);
+    await store.load();
+    const meta = persistedMeta('native', {});
+    meta.cwd = meta.config.projectRoot = home;
+    await store.upsert(meta);
+    const settings = defaultSettings();
+    settings.mcpDisabledBuiltins = ['gitnexus', 'cua-driver'];
+    let serial = 0;
+    const attach = vi.fn((_id: string) => ({ url: 'http://127.0.0.1:14141/call', token: `test-grant-${++serial}` }));
+    const revoke = vi.fn();
+    const manager = new SessionManager({ ...makeManagerDeps(store), settings: { get: () => settings } as never, memoryServerPath: '/vocs-memory.mjs', memoryGateway: attach, revokeMemoryGateway: revoke });
+    try {
+      await manager.send(meta.id, { text: 'Start one runtime' });
+      const first = mocks.adapterCalls.at(-1)!.ctx;
+      await expect(first.mcpServers()).resolves.toMatchObject([{ def: { id: 'vocs-memory', env: { VOCS_MEMORY_GATEWAY_TOKEN: 'test-grant-1' } } }]);
+      await manager.stop(meta.id);
+      expect(revoke).toHaveBeenCalledExactlyOnceWith(meta.id);
+      await expect(first.mcpServers()).rejects.toThrow(/no longer current/);
+      expect(attach).toHaveBeenCalledTimes(1);
+      await manager.send(meta.id, { text: 'Start another runtime' });
+      await expect(mocks.adapterCalls.at(-1)!.ctx.mcpServers()).resolves.toMatchObject([{ def: { env: { VOCS_MEMORY_GATEWAY_TOKEN: 'test-grant-2' } } }]);
+      expect(attach).toHaveBeenCalledTimes(2);
+    } finally {
+      await manager.stopAll();
+    }
+  });
+
   it('round-trips every harness ref through the store and a fresh manager', async () => {
     const dir = path.join(tmpRoot, 'store-roundtrip');
     const store = new SessionStore(dir);

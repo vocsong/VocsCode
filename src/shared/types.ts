@@ -7,6 +7,7 @@ import type { ThemeId } from './themes';
 import type { UiModeId } from './ui-modes';
 import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
+import type { IntelligenceSettings } from './intelligence';
 import type { DictationSettings } from './dictation';
 import type { ReliabilityReport } from './analytics/reliability';
 import type { CodeOutputReport } from './analytics/code-output';
@@ -1383,6 +1384,8 @@ export interface AppSettings {
   gitSetupSkipped?: string[];
   /** Layer 2 project knowledge: always-on digest priming and automatic distillation after git events. */
   knowledge?: KnowledgeSettings;
+  /** Memory lifecycle, the tool gateway, project collections and the optional graph provider. */
+  intelligence?: IntelligenceSettings;
   /** Voice to text in the composer: cloud transcription or whisper.cpp on this machine. */
   dictation?: DictationSettings;
 }

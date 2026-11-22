@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, CuaSettings, FolderSessionDefaults, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, PermissionMode, ProviderConfig } from '../shared/types';
 import { MCP_BUILTIN_IDS, isCuaPermissionMode } from '../shared/types';
 import type { KnowledgeSettings } from '../shared/knowledge';
+import { DEFAULT_INTELLIGENCE_SETTINGS, resolveIntelligenceSettings } from '../shared/intelligence';
 import { normalizeBranchPrefix, normalizeCustomBranchPrefixes } from '../shared/branch-prefix';
 import { assertEndpointUrl } from '../shared/endpoint-policy';
 import { isAutoCompactionThreshold } from '../shared/compaction';
@@ -232,6 +233,7 @@ export function defaultSettings(): AppSettings {
     cua: { enabled: true, mode: 'standard' },
     mcpProjectState: {},
     knowledge: { prime: true, autoDistill: true },
+    intelligence: structuredClone(DEFAULT_INTELLIGENCE_SETTINGS),
     dictation: structuredClone(DEFAULT_DICTATION),
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
@@ -547,6 +549,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
       : [],
     mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),
     knowledge: normalizeKnowledgeSettings(stored.knowledge),
+    // Field by field, so a hand-edited file can switch nothing on that the type does not allow.
+    intelligence: resolveIntelligenceSettings(stored.intelligence),
     dictation: normalizeDictationSettings(stored.dictation),
     providers: [],
     acpAgents: []

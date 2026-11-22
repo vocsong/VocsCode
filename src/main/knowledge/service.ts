@@ -36,7 +36,7 @@ import {
   type KnowledgeView
 } from '../../shared/knowledge';
 import { errorMessage } from '../util/async';
-import { KnowledgeStore, writeFileAtomic, type StoredPage } from './store';
+import { KnowledgeProtectedError, KnowledgeStore, writeFileAtomic, type StoredPage } from './store';
 import { bootstrapKnowledge, distillKnowledge, type KnowledgeJobResult, type KnowledgeSynthDeps } from './synth';
 import type { AnchorResolver } from './anchors';
 
@@ -54,13 +54,28 @@ export interface KnowledgeServiceDeps {
   anchors?: AnchorResolver;
 }
 
+/** A change to a human-reviewed page that was not applied, handed on so it is not simply lost. */
+export interface KnowledgeProtectedChange {
+  scope: KnowledgeScope;
+  pageId: string;
+  input: KnowledgeProposalInput;
+  origin: string;
+  sessionId?: string;
+  signal?: AbortSignal;
+}
+
 export interface KnowledgeProposeResult {
   id: string;
   evidenceCount: number;
   /** True when the model may not edit anything: the claim was rejected before. */
   rejected: boolean;
-  /** True when repeated evidence promoted it straight to a proposed page. */
+  /** True when the page was written. */
   promoted: boolean;
+  /**
+   * Set when the target is human-reviewed: `kept` — the same claim, so only the evidence was added
+   * and the human's text stands; `refused` — a different claim, so the page was not touched.
+   */
+  protected?: 'kept' | 'refused';
 }
 
 const DEFAULT_SETTINGS: KnowledgeSettings = { prime: true, autoDistill: true };
@@ -73,10 +88,22 @@ export class KnowledgeService {
   private readonly seedAttempts = new Set<string>();
   /** Last job outcome per project; the panel shows it so a failure cannot vanish into a toast. */
   private readonly lastJobs = new Map<string, KnowledgeJobState>();
+  private protectedSink: ((change: KnowledgeProtectedChange) => Promise<void>) | null = null;
+  private projectIdOf: ((scope: KnowledgeScope) => Promise<string | undefined>) | null = null;
 
   constructor(deps: KnowledgeServiceDeps) {
     this.deps = deps;
     this.store = deps.store ?? new KnowledgeStore();
+  }
+
+  /** Where a refused change to a human-reviewed page goes: the intelligence core files a candidate. */
+  onProtectedChange(sink: (change: KnowledgeProtectedChange) => Promise<void>): void {
+    this.protectedSink = sink;
+  }
+
+  /** Stamps new writes with the project's stable id once the registry is wired in. */
+  useProjectIds(resolve: (scope: KnowledgeScope) => Promise<string | undefined>): void {
+    this.projectIdOf = resolve;
   }
 
   settings(): KnowledgeSettings {
@@ -183,17 +210,18 @@ export class KnowledgeService {
    * Ranked scan. Every query term must appear somewhere (title, keywords, claim or body), which is
    * the right default for a curated corpus: a page that matches half the words is not evidence.
    */
-  async search(scope: KnowledgeScope, query: string, opts: { limit?: number; includeHistorical?: boolean } = {}): Promise<KnowledgeSearchResult[]> {
+  async search(scope: KnowledgeScope, query: string, opts: { limit?: number; includeHistorical?: boolean; match?: 'all' | 'any' } = {}): Promise<KnowledgeSearchResult[]> {
     const terms = tokenize(query);
     if (!terms.length) return [];
     const pages = await this.store.load(scope);
     const out: KnowledgeSearchResult[] = [];
+    const exact = query.trim().toLowerCase();
     for (const page of pages) {
       const meta = page.meta;
       if (!opts.includeHistorical && !isServable(meta)) continue;
       const hay = { id: meta.id, title: meta.title, keywords: meta.keywords.join(' '), claim: meta.claim ?? '', body: page.body };
       let score = 0;
-      let matchedAll = true;
+      let matched = 0;
       for (const term of terms) {
         const inId = occur(hay.id, term) * 6;
         const inTitle = occur(hay.title, term) * 6;
@@ -201,10 +229,15 @@ export class KnowledgeService {
         const inClaim = occur(hay.claim, term) * 3;
         const inBody = Math.min(occur(hay.body, term), 5) * 1;
         const total = inId + inTitle + inKeywords + inClaim + inBody;
-        if (total === 0) matchedAll = false;
+        if (total > 0) matched++;
         score += total;
       }
-      if (!matchedAll || score <= 0) continue;
+      // `any` is for a natural-language question no page holds every word of: a partial match is
+      // admitted, and scored down by how much of the question it actually covers.
+      if (score <= 0 || (opts.match === 'any' ? matched === 0 : matched < terms.length)) continue;
+      if (matched < terms.length) score *= (matched / terms.length) ** 2;
+      // An exact id or title is the strongest lexical signal there is.
+      if (exact && (meta.id === exact || meta.title.toLowerCase() === exact)) score += 20;
       score += Math.max(0, 4 - authorityOf(meta));
       if (meta.status === 'uncertain') score -= 1;
       out.push({ ...this.summarize(page, snippetFor(page.body, terms)), score });
@@ -241,12 +274,40 @@ export class KnowledgeService {
    * immediately, ranked below anything human-reviewed by the authority ladder. An implicit id
    * collision refuses the write; intentionally changing a claim requires an explicit pageId.
    */
-  async propose(scope: KnowledgeScope, input: KnowledgeProposalInput, origin: string, sessionId?: string): Promise<KnowledgeProposeResult> {
+  async propose(scope: KnowledgeScope, input: KnowledgeProposalInput, origin: string, sessionId?: string, signal?: AbortSignal): Promise<KnowledgeProposeResult> {
+    signal?.throwIfAborted();
     const claim = input.claim.trim();
     const title = input.title.trim();
     if (!title || !claim) throw new Error('A proposal needs a title and a one-line claim');
-    const { page, evidenceCount } = await this.store.ingest(scope, { ...input, title, claim }, origin, sessionId);
+    let projectId: string | undefined;
+    try {
+      projectId = await this.projectIdOf?.(scope);
+    } catch {
+      projectId = undefined; // identity is provenance, never a reason to lose the write
+    }
+    let ingested: Awaited<ReturnType<KnowledgeStore['ingest']>>;
+    try {
+      ingested = await this.store.ingest(scope, { ...input, title, claim, ...(projectId ? { projectId } : {}) }, origin, sessionId, signal);
+    } catch (error) {
+      if (!(error instanceof KnowledgeProtectedError)) throw error;
+      // The human-reviewed page stands. The change is handed on rather than dropped, so a person
+      // can still decide to apply it.
+      this.deps.log('info', `knowledge: ${error.pageId} is human-reviewed; change from ${origin} was not applied`);
+      signal?.throwIfAborted();
+      if (this.protectedSink) {
+        await this.protectedSink({ scope, pageId: error.pageId, input: { ...input, title, claim }, origin, sessionId, signal }).catch((e) => {
+          signal?.throwIfAborted();
+          this.deps.log('warn', `knowledge: could not file the refused change to ${error.pageId}: ${errorMessage(e)}`);
+        });
+      }
+      return { id: error.pageId, evidenceCount: 0, rejected: false, promoted: false, protected: 'refused' };
+    }
+    const { page, evidenceCount } = ingested;
     if (!page) return { id: '', evidenceCount: 0, rejected: true, promoted: false };
+    if (ingested.kept) {
+      this.deps.log('info', `knowledge: evidence added to human-reviewed ${page.meta.id} (origin ${origin})`);
+      return { id: page.meta.id, evidenceCount, rejected: false, promoted: true, protected: 'kept' };
+    }
     for (const superseded of page.meta.supersedes) {
       await this.store.patch(scope, superseded, { status: 'superseded', supersededBy: page.meta.id });
     }
@@ -254,8 +315,13 @@ export class KnowledgeService {
     return { id: page.meta.id, evidenceCount, rejected: false, promoted: true };
   }
 
-  /** Accept (human review) or reject one proposal. Accepting marks the page current and reviewed. */
-  /** Accept (human review) or reject one candidate: a proposal, or an unreviewed page. */
+  /** Records that a page's claim was checked against a source; null when the page is gone. */
+  async verify(scope: KnowledgeScope, id: string, verification: NonNullable<KnowledgePageMeta['verification']>): Promise<KnowledgePageSummary | null> {
+    const page = await this.store.patch(scope, id, { verification });
+    return page ? this.summarize(page) : null;
+  }
+
+  /** Accept (human review) or reject a proposal or an unreviewed page. */
   async review(scope: KnowledgeScope, id: string, action: 'accept' | 'reject', opts: { by?: string; body?: string; title?: string; note?: string } = {}): Promise<KnowledgePageSummary | null> {
     const proposals = await this.store.proposals(scope);
     const proposal = proposals.find((p) => p.meta.id === id);
@@ -554,6 +620,8 @@ export class KnowledgeService {
       ...(meta.updatedBy ? { updatedBy: meta.updatedBy } : {}),
       ...(meta.confidence ? { confidence: meta.confidence } : {}),
       authority: authorityOf(meta),
+      ...(meta.verification ? { verifiedBy: meta.verification.method } : {}),
+      ...(meta.memoryType ? { memoryType: meta.memoryType } : {}),
       ...(meta.evidenceCount !== undefined ? { evidenceCount: meta.evidenceCount } : {}),
       ...(snippet ? { snippet } : {})
     };
