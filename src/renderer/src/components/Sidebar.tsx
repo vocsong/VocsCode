@@ -18,7 +18,7 @@ import { FolderBranch } from './FolderBranch';
 import { ActivityMenu } from './ActivityTray';
 import { ForkIntoDropdown } from './ForkInto';
 import { SessionTitle } from './SessionTitle';
-import { askConfirm, Badge, Button, Dropdown, Icon, Kbd, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
+import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
 
 /** Sessions in a folder whose last turn finished while nobody was looking. */
 const unseenIn = (list: SessionMeta[]): number => list.filter((s) => s.unseenAt !== undefined).length;
@@ -329,19 +329,6 @@ export function Sidebar() {
         </div>
       </div>
       <div className="sidebar-nav">
-        {/* Same as Ctrl+Shift+N: the full new-session dialog, seeded with the open session's folder
-            (the folder picker first when no session is open). */}
-        <button
-          type="button"
-          className="sidebar-new"
-          onClick={() => {
-            const st = useStore.getState();
-            void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot);
-          }}
-          title={`New session in this folder (${modKey}+Shift+N)`}
-        >
-          <Icon name="sessionPlus" size={15} /> <span>New session</span> <Kbd>{modKey}+Shift+N</Kbd>
-        </button>
         <div className="sidebar-views">
           <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} title={tip('Analytics')} onClick={() => setView('analytics')}>
             <Icon name="chart" size={14} /> Analytics
@@ -356,7 +343,7 @@ export function Sidebar() {
       </div>
       {/* What the list shows, picked at the top of the sidebar: its layout (folder groups or one
           recency order) and, beside it, which sessions (live or archived). The two are independent:
-          archived sessions list by project or by recent too. */}
+          archived sessions list by project or by recent too. New session closes the row. */}
       <div className="sidebar-viewswitch" role="group" aria-label="Session list view">
         <Icon name={showArchived ? 'archive' : sidebarView === 'recent' ? 'list' : 'folder'} size={15} className="sidebar-viewswitch-icon" />
         <div className="segmented" role="group" aria-label="Session list layout">
@@ -385,8 +372,26 @@ export function Sidebar() {
           title={showArchived ? 'Back to active sessions' : 'Show archived sessions'}
           onClick={() => setShowArchived((v) => !v)}
         >
-          {/* Zen's narrow rail keeps only the icon; the name stays in aria-label and the tooltip. */}
-          <Icon name="archive" size={12} /> <span className="segmented-toggle-label">Archived</span>
+          {/* Icon only, like New session beside it, so Projects | Recent keeps room for its labels;
+              the name lives in aria-label and the tooltip. */}
+          <Icon name="archive" size={14} />
+        </button>
+        {/* Same as Ctrl+Shift+N: the full new-session dialog, seeded with the open session's folder
+            (the folder picker first when no session is open). An icon at the row's end keeps the
+            top of the sidebar to one line; the name and shortcut live in the tooltip. */}
+        <button
+          type="button"
+          className="segmented-toggle sidebar-new"
+          data-testid="sidebar-new"
+          aria-label="New session"
+          aria-keyshortcuts={`${modKey === 'Ctrl' ? 'Control' : 'Meta'}+Shift+N`}
+          title={`New session in this folder (${modKey}+Shift+N)`}
+          onClick={() => {
+            const st = useStore.getState();
+            void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot);
+          }}
+        >
+          <Icon name="sessionPlus" size={14} />
         </button>
       </div>
       <div className="sidebar-section">

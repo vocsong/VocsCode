@@ -1433,37 +1433,6 @@ h4 {
   gap: 6px;
   padding: 0 10px 10px;
 }
-.sidebar-new {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 8px 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  font-weight: 500;
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition: border-color 0.12s, box-shadow 0.12s;
-}
-.sidebar-new > .icon {
-  color: var(--accent);
-}
-.sidebar-new > span {
-  flex: 1;
-  text-align: left;
-}
-.sidebar-new .kbd {
-  color: var(--fg-faint);
-  border-bottom-width: 1px;
-  font-size: 10px;
-}
-.sidebar-new:hover {
-  border-color: var(--border-strong);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
 .sidebar-views {
   display: flex;
   gap: 2px;
@@ -1546,6 +1515,19 @@ h4 {
 .segmented-toggle:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+/* Archived and New session are icon buttons, so the layout switch keeps room for its labels. */
+.sidebar-viewswitch .segmented-toggle {
+  padding: 4px 8px;
+}
+/* New session closes the row, the accent marking it as the row's one action. */
+.sidebar-viewswitch .sidebar-new {
+  color: var(--accent);
+}
+.sidebar-viewswitch .sidebar-new:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  color: var(--accent);
 }
 .sidebar-list {
   flex: 1;

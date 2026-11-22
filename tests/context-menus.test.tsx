@@ -114,7 +114,7 @@ describe('sidebar context menus', () => {
 
   it('offers restore instead of archive on an archived row', () => {
     const { container } = setup([session('s_a', { title: 'A', archived: true, pinned: true })]);
-    fireEvent.click(screen.getByText('Archived'));
+    fireEvent.click(screen.getByRole('button', { name: 'Archived' }));
     rightClick(container.querySelector('.session-row') as HTMLElement);
     expect(menuLabels()).toEqual(['Open session', 'Rename', 'Unpin', 'Restore session', 'Delete session']);
   });

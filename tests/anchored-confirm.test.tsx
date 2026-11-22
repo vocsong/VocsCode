@@ -163,7 +163,7 @@ describe('anchored confirmations from the sidebar', () => {
 
   it('asks to delete an archived session at its delete button', async () => {
     const { container } = setup([session('s_a', { title: 'A', archived: true })]);
-    fireEvent.click(screen.getByText('Archived'));
+    fireEvent.click(screen.getByRole('button', { name: 'Archived' }));
     const del = rowButton(container.querySelector('.session-row')!, 'Delete session');
     rects.set(del, box(600, 100, 26, 26));
     fireEvent.click(del);
