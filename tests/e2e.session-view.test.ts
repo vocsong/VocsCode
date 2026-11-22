@@ -5,8 +5,8 @@
  * session entry, a header that sheds detail in a narrow split pane instead of overflowing it, and the
  * sidebar's activity tray reaching a session that finished unviewed in a collapsed folder, and the
  * sidebar's Recent view listing every folder's sessions in one recency order across a restart, picked
- * from a Projects | Recent switch at the top of the sidebar, with the Archived filter beside it
- * (Standard and Zen).
+ * from a Projects | Recent switch at the top of the sidebar, with the Archived filter and the New
+ * session icon beside it (Standard and Zen).
  * Layout cases use seeded sessions and transcripts. The title refresh case runs native chat against
  * a scripted loopback provider. No provider keys; screenshots land in tests/artifacts/session-view-*.png.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
@@ -732,10 +732,11 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.locator('.sidebar').hover();
     const box = async (sel: string) => (await win.locator(sel).first().boundingBox())!;
     await expect.poll(async () => {
-      const [fresh, sw, list, analytics, archived] = await Promise.all(['.sidebar-new', '.sidebar-viewswitch', '.sidebar-list', '.sidebar-views', '[data-testid="sidebar-archived"]'].map(box));
-      // Archived shares the switch's row, under New session and above the list and the nav links.
-      const inRow = archived.y >= sw.y && archived.y + archived.height <= sw.y + sw.height;
-      return fresh.y < sw.y && sw.y < list.y && list.y < analytics.y && inRow;
+      const [brand, sw, list, analytics, archived, fresh] = await Promise.all(['.brand', '.sidebar-viewswitch', '.sidebar-list', '.sidebar-views', '[data-testid="sidebar-archived"]', '[data-testid="sidebar-new"]'].map(box));
+      // Archived and the New session icon share the switch's row, right under the brand and above the
+      // list and the nav links; New session ends the row.
+      const inRow = (b: { y: number; height: number }) => b.y >= sw.y && b.y + b.height <= sw.y + sw.height;
+      return brand.y < sw.y && sw.y < list.y && list.y < analytics.y && inRow(archived) && inRow(fresh) && fresh.x > archived.x;
     }).toBe(true);
     // The rail opens on hover after a short delay; shoot it open so the review image shows the switch.
     await expect.poll(async () => (await win.locator('.sidebar').boundingBox())!.width, { timeout: 5_000 }).toBeGreaterThan(200);

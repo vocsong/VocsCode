@@ -162,7 +162,6 @@
   width: var(--zen-rail);
   height: 20px;
 }
-:root[data-ui='zen'] .sidebar-new,
 :root[data-ui='zen'] .sidebar-views .sidebar-link,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link {
   justify-content: flex-start;
@@ -177,30 +176,18 @@
   font-size: 13px;
   font-weight: 450;
 }
-:root[data-ui='zen'] .sidebar-new > .icon,
 :root[data-ui='zen'] .sidebar-views .sidebar-link > .icon,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link > .icon {
   width: var(--zen-rail);
   height: 16px;
   color: inherit;
 }
-:root[data-ui='zen'] .sidebar-new:hover,
 :root[data-ui='zen'] .sidebar-views .sidebar-link:hover,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link:hover,
 :root[data-ui='zen'] .sidebar-link.active {
   background: var(--bg-hover);
   color: var(--fg);
   box-shadow: none;
-}
-:root[data-ui='zen'] .sidebar-new {
-  order: 1;
-  color: var(--accent);
-}
-:root[data-ui='zen'] .sidebar-new > span {
-  color: var(--fg);
-}
-:root[data-ui='zen'] .sidebar-new .kbd {
-  display: none;
 }
 :root[data-ui='zen'] .sidebar-list {
   order: 2;
@@ -219,8 +206,9 @@
   flex-direction: column;
   gap: 0;
 }
-/* Projects | Recent and Archived sit right under New session, above the list they shape. Closed,
-   the rail shows what the list holds (archive, list or folder icon); open, the choices sit beside it. */
+/* Projects | Recent, Archived and New session sit right under the brand, above the list they shape.
+   Closed, the rail shows what the list holds (archive, list or folder icon); open, the choices sit
+   beside it. */
 :root[data-ui='zen'] .sidebar-viewswitch {
   order: 1;
   width: var(--sidebar);
@@ -238,11 +226,16 @@
 :root[data-ui='zen'] .sidebar-viewswitch .segmented-toggle:not(.active) {
   background: none;
 }
-/* The open rail is too narrow for three labels: Archived keeps its icon, its name moves to the tooltip. */
-:root[data-ui='zen'] .sidebar-viewswitch .segmented-toggle {
+:root[data-ui='zen'] .sidebar-viewswitch .sidebar-new:hover {
+  background: var(--bg-hover);
+  box-shadow: none;
+}
+/* The open rail is narrow: the layout segments drop their icons (the rail icon beside them already
+   shows the layout), so both labels fit beside the Archived and New session icons. */
+:root[data-ui='zen'] .sidebar-viewswitch .segment {
   padding: 4px 8px;
 }
-:root[data-ui='zen'] .sidebar-viewswitch .segmented-toggle-label {
+:root[data-ui='zen'] .sidebar-viewswitch .segment > .icon {
   display: none;
 }
 :root[data-ui='zen'] .sidebar-bottom {

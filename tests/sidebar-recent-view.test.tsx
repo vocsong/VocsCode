@@ -104,9 +104,9 @@ describe('sidebar Recent view', () => {
 
   it('keeps pinned rows on top and lists archived rows by recency in the Archived view', async () => {
     const list = [...sessions, session('G:/proj/a', 'a-pin', 1, { pinned: true, pinnedAt: 5 }), session('G:/proj/b', 'b-gone', 800, { archived: true })];
-    const { container, getByText } = mount(list, 'recent');
+    const { container, getByTestId } = mount(list, 'recent');
     expect(rowIds(container)).toEqual(['a-pin', 'b-new', 'a-new', 'b-mid', 'a-old']);
-    await act(async () => { fireEvent.click(getByText('Archived')); });
+    await act(async () => { fireEvent.click(getByTestId('sidebar-archived')); });
     expect(rowIds(container)).toEqual(['a-gone', 'b-gone']);
   });
 
@@ -135,7 +135,7 @@ describe('sidebar Recent view', () => {
 
     await act(async () => { fireEvent.click(archived); });
     expect(archived.getAttribute('aria-pressed')).toBe('true');
-    expect(archived.textContent?.trim()).toBe('Archived');
+    expect(archived.getAttribute('aria-label')).toBe('Archived');
     expect(container.querySelector('.sidebar-section-label')?.textContent).toBe('Archived sessions');
     expect(rowIds(container)).toEqual(['a-gone']);
     expect(railIcon()).toBe('archive');
