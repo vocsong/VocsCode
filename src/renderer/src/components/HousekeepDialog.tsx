@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import type { HousekeepOutcome, HousekeepPreview, HousekeepRow } from '../../../shared/housekeep';
 import { invoke, invokeErrorMessage } from '../api';
 import { useStore } from '../store';
+import { HousekeepInventory } from './HousekeepInventory';
 import { openSettings } from './SettingsView';
 import { Badge, Button, Modal } from './ui';
 import './housekeep-dialog.css';
@@ -235,11 +236,14 @@ export function HousekeepDialog({ onClose, recentDaysOverride }: { onClose: () =
             <div className="muted small">{row.projectRoot} · {worktreeAction(row)}</div>
           </li>)}
         </ul>
-      </> : preview && <>
-        <h2 ref={stepHeading} tabIndex={-1}>Review sessions</h2>
-        <AgeRule days={preview.recentDays} oneTime={recentDaysOverride !== undefined} />
-        <p><button className="link-btn" type="button" disabled={busy !== null} onClick={() => { onClose(); openSettings('housekeep'); }}>Housekeep settings</button></p>
-        {preview.rows.length === 0 ? <p role="status">No sessions to review.</p> : <>
+      </> : <>
+        {preview && <>
+          <h2 ref={stepHeading} tabIndex={-1}>Review sessions</h2>
+          <AgeRule days={preview.recentDays} oneTime={recentDaysOverride !== undefined} />
+          <p><button className="link-btn" type="button" disabled={busy !== null} onClick={() => { onClose(); openSettings('housekeep'); }}>Housekeep settings</button></p>
+        </>}
+        <HousekeepInventory disabled={busy !== null} />
+        {preview && (preview.rows.length === 0 ? <p role="status">No sessions to review.</p> : <>
           <p>Open the conversation excerpts for each session marked Review before selecting it. Protected and Keep sessions can’t be selected.</p>
           {preview.reviewModel ? <div className="housekeep-analysis">
             <p id={analysisDisclosureId}>
@@ -265,7 +269,7 @@ export function HousekeepDialog({ onClose, recentDaysOverride }: { onClose: () =
                 return next;
               })} />)}
           </ul>
-        </>}
+        </>)}
       </>}
     </div>
   </Modal>;

@@ -140,7 +140,7 @@ describe('handler registry', () => {
   it('restricts Housekeep and its excerpts to the desktop and refuses forged batches before session dispatch', async () => {
     const { registry, deps } = stubDeps();
     const list = vi.spyOn(deps.sessions, 'list');
-    for (const channel of ['housekeep:preview', 'housekeep:assess', 'housekeep:apply']) {
+    for (const channel of ['housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory']) {
       expect(registry.channels()).toContain(channel);
       expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels()).not.toContain(channel);
@@ -152,6 +152,20 @@ describe('handler registry', () => {
     await expect(registry.invoke('housekeep:apply', { previewId, ids: ['../s_test'], protectedIds: [] }, 'desktop')).rejects.toThrow();
     await expect(registry.invoke('housekeep:apply', { previewId, ids: ['s_test'], protectedIds: [] }, 'desktop')).rejects.toThrow(/preview expired/);
     expect(list).not.toHaveBeenCalled();
+  });
+
+  it('scopes inventory to the desktop profile without accepting paths or starting normal session Git polling', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list').mockReturnValue([]);
+    await expect(registry.invoke('housekeep:inventory', { folders: [ws] }, 'desktop')).rejects.toThrow();
+    expect(list).not.toHaveBeenCalled();
+    const [first, second] = await Promise.all([
+      registry.invoke('housekeep:inventory', undefined, 'desktop'),
+      registry.invoke('housekeep:inventory', undefined, 'desktop')
+    ]);
+    expect(first).toEqual({ repositories: 0, rows: [], warnings: [], limited: false });
+    expect(second).toEqual(first);
+    expect(list).toHaveBeenCalledExactlyOnceWith({ refreshGit: false });
   });
 
   it('validates the Housekeep override before scanning and accepts it only with a new preview', async () => {

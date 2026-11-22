@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { HousekeepOutcome, HousekeepPreview, HousekeepRow } from '../src/shared/housekeep';
+import type { HousekeepInventory, HousekeepOutcome, HousekeepPreview, HousekeepRow } from '../src/shared/housekeep';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn<(channel: string, request?: unknown) => Promise<unknown>>() }));
@@ -29,13 +29,15 @@ const preview = (rows: HousekeepRow[], patch: Partial<HousekeepPreview> = {}): H
   id: 'preview-1', recentDays: 14, reviewModel: 'fixture-provider/utility-small', rows, ...patch
 });
 
-function reply({ preview: scan, assess, apply }: {
+function reply({ preview: scan, inventory, assess, apply }: {
   preview: () => HousekeepPreview | Promise<HousekeepPreview>;
+  inventory?: () => HousekeepInventory | Promise<HousekeepInventory>;
   assess?: () => HousekeepPreview | Promise<HousekeepPreview>;
   apply?: () => HousekeepOutcome[] | Promise<HousekeepOutcome[]>;
 }) {
   invoke.mockImplementation(async (channel) => {
     if (channel === 'housekeep:preview') return scan();
+    if (channel === 'housekeep:inventory' && inventory) return inventory();
     if (channel === 'housekeep:assess' && assess) return assess();
     if (channel === 'housekeep:apply' && apply) return apply();
     if (channel === 'harness:models') return { models: [] };
@@ -135,6 +137,99 @@ describe('/housekeep', () => {
     expect(invoke.mock.calls.some(([channel]) => channel === 'sessions:send')).toBe(false);
   });
 
+  it('scans only on demand with no sessions to review and displays read-only findings', async () => {
+    const scan = deferred<HousekeepInventory>();
+    reply({ preview: () => preview([]), inventory: () => scan.promise });
+    render(<HousekeepDialog onClose={vi.fn()} />);
+    await dialog().findByText('No sessions to review.');
+    const name = 'Stranded worktrees and branches';
+    const panel = within(dialog().getByRole('region', { name }));
+    expect(panel.getByRole('heading', { name })).toBeTruthy();
+    expect(panel.queryByRole('list')).toBeNull();
+    expect(invoke.mock.calls).toEqual([['housekeep:preview', { protectedIds: [] }]]);
+    const scanButton = panel.getByRole<HTMLButtonElement>('button', {
+      name: 'Scan worktrees and branches',
+      description: /Read-only:.*known worktree folders.*checkout contents.*or on remotes.*not necessarily abandoned/
+    });
+    fireEvent.click(scanButton);
+    fireEvent.click(scanButton);
+    expect(scanButton.disabled).toBe(true);
+    expect(panel.getByRole('status').textContent).toBe('Scanning worktrees and branches…');
+    const projectRoot = '/fixture/project';
+    const location = `${projectRoot}/.vocs-code/worktrees/left-behind`;
+    await act(async () => scan.resolve({ repositories: 1, warnings: [], limited: false, rows: [
+      { projectRoot, kind: 'unregistered-folder', location, sessions: [] },
+      { projectRoot, kind: 'retained-branch', location: 'vocs/archived', sessions: [{ title: 'Closed ticket', archived: true }] },
+      { projectRoot, kind: 'stale-registration', location: `${location}-stale`, branch: 'vocs/stale', locked: true, sessions: [] }
+    ] }));
+
+    expect(panel.getByRole('status').textContent).toBe('1 repository scanned. 3 findings returned.');
+    const findings = within(panel.getByRole('list', { name: 'Inventory findings' }));
+    for (const text of ['Unregistered folder', location, 'Retained branch', 'vocs/archived', 'Stale registration', 'Locked', 'vocs/stale']) {
+      expect(findings.getByText(text)).toBeTruthy();
+    }
+    expect(findings.getByText('Linked session: Closed ticket (archived)')).toBeTruthy();
+    expect(panel.queryByRole('checkbox')).toBeNull();
+    expect(panel.getAllByRole('button')).toEqual([scanButton]);
+    expect(button('Review selected').disabled).toBe(true);
+    expect(invoke.mock.calls).toEqual([['housekeep:preview', { protectedIds: [] }], ['housekeep:inventory', undefined]]);
+  });
+
+  it('separates scan failures, warnings, and limits from a clean empty result', async () => {
+    const empty = { repositories: 1, rows: [], warnings: [], limited: false } satisfies HousekeepInventory;
+    const scan = vi.fn<() => Promise<HousekeepInventory>>()
+      .mockRejectedValueOnce(new Error("Error invoking remote method 'housekeep:inventory': Error: Git unavailable."))
+      .mockResolvedValueOnce({ ...empty, warnings: ['Could not check a project.'] })
+      .mockResolvedValueOnce({ ...empty, limited: true })
+      .mockResolvedValueOnce(empty);
+    reply({ preview: () => preview([]), inventory: scan });
+    render(<HousekeepDialog onClose={vi.fn()} />);
+    const scanButton = await dialog().findByRole('button', { name: 'Scan worktrees and branches' });
+    const panel = within(dialog().getByRole('region', { name: 'Stranded worktrees and branches' }));
+
+    fireEvent.click(scanButton);
+    expect((await panel.findByRole('alert')).textContent).toBe('Could not scan worktrees and branches. Git unavailable.');
+    expect(scan).toHaveBeenCalledTimes(1);
+    fireEvent.click(scanButton);
+    expect(await panel.findByText('Could not check a project.')).toBeTruthy();
+    expect(panel.getByRole('alert').textContent).toMatch(/with warnings.*may be incomplete/);
+    expect(panel.queryByText(/No findings in the checked locations/)).toBeNull();
+    fireEvent.click(scanButton);
+    expect(await panel.findByText('Scan limit reached. Results are incomplete.')).toBeTruthy();
+    expect(panel.queryByText(/No findings in the checked locations/)).toBeNull();
+    fireEvent.click(scanButton);
+    expect(await panel.findByText('1 repository scanned. No findings in the checked locations.')).toBeTruthy();
+    expect(panel.queryByRole('alert')).toBeNull();
+    expect(scan).toHaveBeenCalledTimes(4);
+  });
+
+  it('offers the read-only inventory even when the session review fails', async () => {
+    reply({ preview: () => { throw new Error('Session preview unavailable.'); }, inventory: () => ({ repositories: 0, rows: [], warnings: [], limited: false }) });
+    render(<HousekeepDialog onClose={vi.fn()} />);
+    expect(await dialog().findByText(/Session preview unavailable/)).toBeTruthy();
+    fireEvent.click(button('Scan worktrees and branches'));
+    expect(await dialog().findByText('No known Git repositories to scan.')).toBeTruthy();
+    expect(invoke.mock.calls).toEqual([['housekeep:preview', { protectedIds: [] }], ['housekeep:inventory', undefined]]);
+  });
+
+  it('keeps a pending inventory scan outside the session archive flow', async () => {
+    const scan = deferred<HousekeepInventory>();
+    reply({ preview: () => preview([row('one', 'Archive candidate')]), inventory: () => scan.promise, apply: () => [] });
+    render(<HousekeepDialog onClose={vi.fn()} />);
+    fireEvent.click(await dialog().findByRole('button', { name: 'Scan worktrees and branches' }));
+    await readAndSelect('Archive candidate');
+    fireEvent.click(button('Review selected'));
+    expect(pickedTitles().map((item) => item.querySelector('strong')?.textContent)).toEqual(['Archive candidate']);
+    expect(dialog().queryByRole('heading', { name: 'Stranded worktrees and branches' })).toBeNull();
+    await act(async () => scan.resolve({ repositories: 0, rows: [], warnings: [], limited: false }));
+    fireEvent.click(button('Confirm archive (1)'));
+    expect(await dialog().findByRole('heading', { name: 'Archive results' })).toBeTruthy();
+    expect(invoke.mock.calls).toEqual([
+      ['housekeep:preview', { protectedIds: [] }], ['housekeep:inventory', undefined],
+      ['housekeep:apply', { previewId: 'preview-1', ids: ['one'], protectedIds: [] }]
+    ]);
+  });
+
   it('discloses what is sent and requires explicit selection of completed, unprotected recommendations', async () => {
     const rows = [row('done', 'Completed change', { worktree: 'remove' }), row('manual', 'Unclear result'),
       row('keep', 'Waiting for release'), row('pinned', 'Pinned session', { verdict: 'protected', reason: 'Pinned by the user.', worktree: null, evidence: undefined }),
@@ -166,6 +261,7 @@ describe('/housekeep', () => {
     fireEvent.click(button('Analyze'));
     expect(dialog().getByText('Analyzing excerpts…')).toBeTruthy();
     expect(button('Analyze').disabled).toBe(true);
+    expect(button('Scan worktrees and branches').disabled).toBe(true);
     act(() => useStore.getState().setDraft('in-progress', 'New work'));
     await act(async () => assessment.resolve(preview([
       { ...rows[0], verdict: 'complete', reason: 'The requested change shipped.' },

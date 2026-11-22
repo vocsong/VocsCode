@@ -59,6 +59,7 @@ import { localModel } from '../shared/dictation';
 import { discoverChatImports } from './chat-import';
 import { MAX_HOUSEKEEP_RECENT_DAYS } from '../shared/housekeep';
 import { configuredHousekeepReviewer, HousekeepService } from './housekeep';
+import { scanHousekeepInventory } from './housekeep-inventory';
 import { representsChatImport } from './chat-import-identity';
 import { isReservedSecretId, providerSecrets } from './secret-ids';
 
@@ -1354,6 +1355,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   const housekeepIds = z.array(missionIdSchema).max(4096);
   const housekeepPreviewId = z.string().uuid();
+  let scanningHousekeepInventory: ReturnType<typeof scanHousekeepInventory> | undefined;
+  handle('housekeep:inventory', input => {
+    z.undefined().parse(input); // Only the current profile supplies the scope, never the renderer.
+    return scanningHousekeepInventory ??= scanHousekeepInventory(settings.get().folders, sessions.list({ refreshGit: false }))
+      .finally(() => { scanningHousekeepInventory = undefined; });
+  });
   handle('housekeep:preview', input => {
     const { protectedIds, recentDaysOverride } = z.strictObject({
       protectedIds: housekeepIds,

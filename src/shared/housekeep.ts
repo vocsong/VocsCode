@@ -44,6 +44,24 @@ export interface HousekeepPreview {
   rows: HousekeepRow[];
 }
 
+/** A read-only observation, never an archive candidate or a permission to remove anything. */
+export interface HousekeepInventoryRow {
+  projectRoot: string;
+  kind: 'unregistered-folder' | 'stale-registration' | 'archived-worktree' | 'unlinked-worktree' | 'unverified-path' | 'retained-branch' | 'unlinked-branch';
+  /** The checkout path or local branch name. */
+  location: string;
+  branch?: string;
+  locked?: boolean;
+  sessions: { title: string; archived: boolean }[];
+}
+
+export interface HousekeepInventory {
+  repositories: number;
+  rows: HousekeepInventoryRow[];
+  warnings: string[];
+  limited: boolean;
+}
+
 export interface HousekeepOutcome {
   sessionId: string;
   title: string;
