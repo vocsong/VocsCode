@@ -32,8 +32,7 @@ export interface NavEntry {
   sessionId: string | null;
 }
 
-/** A folder a transcript link wants the Files tab to show; the Files tab clears it once opened. Files
- *  open in the split view instead (`panes.openFilePane`). */
+/** A folder a transcript link wants the Files tab to show; the Files tab clears it once opened. */
 export interface FileReveal {
   sessionId: string;
   path: string;
@@ -214,11 +213,12 @@ interface State {
   togglePin(side: PinSide): void;
   /**
    * Opens a path a session names (workspace-relative, shortened, or absolute inside its folder). A
-   * file previews in the split view beside its session; a folder opens in the Files tab; a path
-   * outside the folder is only shown in the system file manager. `exact` skips the shortened-name
-   * lookup; `workspace` picks a Mission workspace ('' is the integration result, absent is the lead's).
+   * file opens a preview and a folder opens for browsing, both in the Files tab. A path outside the
+   * folder is only shown in the system file manager. `exact` skips the shortened-name lookup;
+   * `workspace` picks a Mission workspace ('' is the integration result, absent is the lead's).
    */
   revealFile(sessionId: string, path: string, line?: number, opts?: { exact?: boolean; workspace?: string; missionLoaded?: boolean }): void;
+  closeFilePreview(): void;
   consumeFileReveal(): void;
   /** Opens the Subagents tab on one run, used by a transcript tool card. */
   revealSubagentRun(sessionId: string, runId: string): void;
@@ -1031,8 +1031,8 @@ export const useStore = create<State>((set, get) => ({
   },
   togglePanel(open) {
     set((s) => {
-      const panelOpen = open ?? !s.panelOpen;
-      return { panelOpen, panelPeek: panelOpen };
+      const panelOpen = open ?? !(s.panelOpen || s.layout.filePreview);
+      return { panelOpen, panelPeek: panelOpen, layout: panelOpen ? s.layout : panes.closeFilePreview(s.layout) };
     });
   },
   setPanelTab(tab) {
@@ -1089,10 +1089,11 @@ export const useStore = create<State>((set, get) => ({
       void showOutsideFile(sessionId, scope.root, target, (text, kind) => get().toast(text, kind));
       return;
     }
+    const filesPanel = { panelTab: 'files', panelFocus: 'top', panelPeek: true, view: 'chat' } as const;
     const clean = rel.replace(/\/+$/, '');
     if (/[\\/]$/.test(target) || clean === '') {
       // A folder is something to browse: the Files tab opens on it.
-      set({ fileReveal: { sessionId, path: target }, panelTab: 'files', panelOpen: true, panelFocus: 'top', panelPeek: true });
+      set({ ...filesPanel, panelOpen: true, fileReveal: { sessionId, path: target } });
       return;
     }
     const file: FilePreviewTarget = {
@@ -1103,8 +1104,13 @@ export const useStore = create<State>((set, get) => ({
       ...(opts.exact ? { exact: true } : {}),
       ...(session.mission ? { missionWorkspaceId: scope.missionWorkspaceId } : {})
     };
-    const layout = panes.openFilePane(st.layout, file);
-    if (layout !== st.layout) set({ layout, view: 'chat' });
+    const layout = panes.openFilePreview(st.layout, file);
+    if (layout !== st.layout) set({ ...filesPanel, layout });
+  },
+  closeFilePreview() {
+    const current = get().layout;
+    const layout = panes.closeFilePreview(current);
+    if (layout !== current) set({ layout });
   },
   consumeFileReveal() {
     set((s) => (s.fileReveal ? { fileReveal: null } : {}));

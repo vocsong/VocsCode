@@ -86,6 +86,9 @@ export type WorkspaceFileResolution =
   | { status: 'missing' }
   | { status: 'incomplete' };
 
+/** Text previews and their desktop Save action share this UTF-8 byte limit. */
+export const FILE_PREVIEW_MAX_BYTES = 200_000;
+
 /** Readable text exports fail explicitly rather than silently truncating a saved artifact. */
 export const TEXT_EXPORT_MAX_BYTES = 1024 * 1024;
 
@@ -457,8 +460,11 @@ export interface IpcContract {
   'fs:search': [{ sessionId: string; query: string; limit?: number; missionWorkspaceId?: string }, string[]];
   /** Exact file first, then a bounded component-suffix search within the selected workspace. */
   'fs:resolve': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceFileResolution];
-  /** `binary` comes with empty content: the file is not text the panel can show. */
-  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean; binary?: boolean }];
+  /** `binary` comes with empty content. `readOnly` excludes placeholders and protected files from editing. */
+  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean; binary?: boolean; readOnly?: boolean }];
+  /** Desktop Save: replace only existing workspace text that still matches the original read bytes.
+   * Both strings are literal UTF-8 text, including any BOM and line endings. */
+  'fs:writeText': [{ sessionId: string; path: string; content: string; expectedContent: string; missionWorkspaceId?: string }, void];
   /** An image file as base64 for the Files panel preview; null outside the workspace or for a non-image path. */
   'fs:readImage': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceImage | null];
 

@@ -1,7 +1,7 @@
 /**
- * File mentions in transcript replies become links that preview the file in the split view, beside
- * the session that named it: recognition, sanitisation, click/keyboard activation, and the round
- * trip through the store into the file pane. Links nothing can open must not look clickable.
+ * File mentions in transcript replies become links that open the right-panel file preview:
+ * recognition, sanitisation, click/keyboard activation, and the round trip through the store into
+ * the file editor. Links nothing can open must not look clickable.
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,7 +19,7 @@ import { FilePreviewPane } from '../src/renderer/src/components/FilePreviewPane'
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { Transcript } from '../src/renderer/src/components/Transcript';
 import { installMarkdownHandlers, renderMarkdown, type MarkdownOptions } from '../src/renderer/src/markdown';
-import { filePane, singlePaneLayout } from '../src/renderer/src/panes';
+import { singlePaneLayout } from '../src/renderer/src/panes';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
@@ -35,13 +35,13 @@ const session = {
   usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
 } as SessionMeta;
 
-/** The file pane as SessionPanes mounts it: whatever the layout's file pane currently is. */
-function Pane() {
-  const pane = useStore((s) => filePane(s.layout));
-  return pane ? <FilePreviewPane pane={pane} size={0.5} split /> : null;
-}
-const target = () => filePane(useStore.getState().layout)?.file;
+const target = () => useStore.getState().layout.filePreview;
 const reads = () => invokeMock.mock.calls.filter(([channel]) => channel === 'fs:read');
+const writes = () => invokeMock.mock.calls.filter(([channel]) => channel === 'fs:writeText');
+const findEditor = () => screen.findByRole<HTMLTextAreaElement>('textbox', { name: 'File contents' });
+const saveButton = () => screen.getByRole<HTMLButtonElement>('button', { name: 'Save' });
+const pressSave = (element: HTMLElement) => fireEvent.keyDown(element, { key: 's', ctrlKey: true });
+const openExact = (path: string) => act(() => useStore.getState().revealFile(session.id, path, undefined, { exact: true }));
 const lines = (prefix: string) => Array.from({ length: 60 }, (_, i) => `${prefix} ${i + 1}`).join('\n');
 
 beforeEach(() => {
@@ -193,23 +193,20 @@ describe('installMarkdownHandlers file activation', () => {
   });
 });
 
-describe('file mentions preview in the split view', () => {
-  it('a clicked mention opens a file pane beside its session, which stays the active pane', async () => {
+describe('file mentions open the right-panel preview', () => {
+  it('opens Files for a clicked mention without changing the conversation layout', async () => {
     const items: TranscriptItem[] = [{ id: 'a1', kind: 'assistant', ts: 2, text: 'It lives in `src/hello.ts:30`.' }];
     useStore.setState({ transcripts: { [session.id]: items }, loaded: { [session.id]: true } });
+    const before = useStore.getState().layout;
 
     render(<Transcript session={session} />);
     fireEvent.click(await screen.findByText('src/hello.ts:30'));
 
-    const layout = useStore.getState().layout;
-    expect(layout.panes.map((p) => (p.file ? `file:${p.file.path}:${p.file.line}` : p.sessionId))).toEqual([session.id, 'file:src/hello.ts:30']);
-    expect(layout.orientation).toBe('horizontal');
-    expect(layout.activePaneId).toBe(layout.panes[0]!.id);
-    expect(useStore.getState().activeId).toBe(session.id);
-    // The preview is not in the right panel any more: nothing there switched or opened.
-    expect(useStore.getState().panelTab).toBe('changes');
-    expect(useStore.getState().panelOpen).toBe(false);
-    expect(useStore.getState().fileReveal).toBeNull();
+    expect(useStore.getState().layout).toEqual({
+      ...before,
+      filePreview: expect.objectContaining({ sessionId: session.id, path: 'src/hello.ts', line: 30 })
+    });
+    expect(useStore.getState()).toMatchObject({ activeId: session.id, panelTab: 'files', panelOpen: false, fileReveal: null });
   });
 
   it("opens a Codex /G:/ link inside the session folder as a workspace path", async () => {
@@ -220,7 +217,7 @@ describe('file mentions preview in the split view', () => {
     expect(target()).toMatchObject({ sessionId: session.id, path: 'src/main/models/static-models.ts', line: 17 });
   });
 
-  it('previews the file, scrolls to its line, and keeps the session pane in charge', async () => {
+  it('opens the source editor, positions the caret, and scrolls to the requested line', async () => {
     const items: TranscriptItem[] = [{ id: 'a1', kind: 'assistant', ts: 2, text: 'It lives in `src/hello.ts:30`.' }];
     useStore.setState({ transcripts: { [session.id]: items }, loaded: { [session.id]: true } });
     invokeMock.mockImplementation(async (channel: string, request: { path: string }) => {
@@ -229,17 +226,19 @@ describe('file mentions preview in the split view', () => {
       return {};
     });
 
-    render(<><Transcript session={session} /><Pane /></>);
+    render(<><Transcript session={session} /><FilePreviewPane /></>);
     fireEvent.click(await screen.findByText('src/hello.ts:30'));
 
-    const pane = await screen.findByTestId('file-pane');
-    await waitFor(() => expect(pane.querySelector('.file-preview-head .mono')?.textContent).toBe('src/hello.ts'));
+    const editor = await findEditor();
+    expect(screen.getByRole('region', { name: 'Preview: src/hello.ts' })).toBeTruthy();
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/hello.ts', maxBytes: 200_000 }]]);
-    expect(await screen.findByText(/line 30/)).toBeTruthy();
-    await waitFor(() => expect((pane.querySelector('.file-preview pre') as HTMLPreElement).scrollTop).toBeGreaterThan(0));
+    expect(editor.value).toBe(lines('line'));
+    const offset = editor.value.indexOf('line 30\n');
+    expect([editor.selectionStart, editor.selectionEnd]).toEqual([offset, offset]);
+    expect(editor.scrollTop).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
-    expect(useStore.getState().layout.panes.map((p) => p.sessionId)).toEqual([session.id]);
+    expect(target()).toBeUndefined();
     expect(screen.queryByTestId('file-pane')).toBeNull();
   });
 
@@ -252,13 +251,13 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:read') return { content: lines('line'), truncated: false };
       return {};
     });
-    render(<><Transcript session={worktree} /><Pane /></>);
+    render(<><Transcript session={worktree} /><FilePreviewPane /></>);
     fireEvent.click(await screen.findByText('tools.ts:30'));
-    const pane = await screen.findByTestId('file-pane');
-    await waitFor(() => expect(pane.querySelector('.file-preview-head .mono')?.textContent).toBe('src/app/api/mcp/tools.ts'));
+    const editor = await findEditor();
+    expect(screen.getByRole('region', { name: 'Preview: src/app/api/mcp/tools.ts' })).toBeTruthy();
     expect(invokeMock).toHaveBeenCalledWith('fs:resolve', { sessionId: session.id, path: 'tools.ts' });
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/app/api/mcp/tools.ts', maxBytes: 200_000 }]]);
-    await waitFor(() => expect((pane.querySelector('.file-preview pre') as HTMLPreElement).scrollTop).toBeGreaterThan(0));
+    expect(editor.selectionStart).toBe(editor.value.indexOf('line 30\n'));
   });
 
   it('asks which full path to open when a basename is ambiguous, without reading either first', async () => {
@@ -267,38 +266,38 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:read') return { content: lines('chosen'), truncated: false };
       return {};
     });
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'tools.ts', 30));
     const chooser = await screen.findByRole('region', { name: 'Choose a file' });
     expect(chooser.querySelectorAll('.file-row')).toHaveLength(2);
     expect(reads()).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: 'src/lib/tools.ts' }));
-    const pane = screen.getByTestId('file-pane');
-    await waitFor(() => expect(pane.querySelector('.file-preview-head .mono')?.textContent).toBe('src/lib/tools.ts'));
+    const editor = await findEditor();
+    expect(screen.getByRole('region', { name: 'Preview: src/lib/tools.ts' })).toBeTruthy();
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/lib/tools.ts', maxBytes: 200_000 }]]);
     expect(screen.queryByRole('region', { name: 'Choose a file' })).toBeNull();
-    await waitFor(() => expect((pane.querySelector('.file-preview pre') as HTMLPreElement).scrollTop).toBeGreaterThan(0));
+    expect(editor.selectionStart).toBe(editor.value.indexOf('chosen 30\n'));
   });
 
   it('cancelling an ambiguous reference closes the pane without opening any candidate', async () => {
     invokeMock.mockImplementation(async (channel: string) => channel === 'fs:resolve' ? { status: 'ambiguous', paths: ['src/api/tools.ts', 'src/lib/tools.ts'] } : {});
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'tools.ts'));
     await screen.findByRole('region', { name: 'Choose a file' });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('region', { name: 'Choose a file' })).toBeNull();
-    expect(useStore.getState().layout.panes).toHaveLength(1);
+    expect(target()).toBeUndefined();
     expect(reads()).toHaveLength(0);
   });
 
   it.each(['missing', 'incomplete'])('does not read a guessed path after a %s lookup, and closes the empty pane', async (status) => {
     invokeMock.mockImplementation(async (channel: string) => channel === 'fs:resolve' ? { status } : {});
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'api/tools.ts'));
     await waitFor(() => expect(useStore.getState().toasts).toHaveLength(1));
     expect(useStore.getState().toasts[0].text).toMatch(status === 'missing' ? /^api\/tools.ts was not found in G:\/proj\/a$/ : /full.*path/i);
     expect(reads()).toHaveLength(0);
-    await waitFor(() => expect(useStore.getState().layout.panes).toHaveLength(1));
+    expect(target()).toBeUndefined();
     expect(screen.queryByTestId('file-pane')).toBeNull();
   });
 
@@ -308,13 +307,13 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:read') return { content: 'first file', truncated: false };
       return {};
     });
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'src/first.ts'));
-    await screen.findByText('first file');
+    expect((await findEditor()).value).toBe('first file');
     act(() => useStore.getState().revealFile(session.id, 'gone.ts'));
     await waitFor(() => expect(useStore.getState().toasts.map((t) => t.text)).toEqual(['gone.ts was not found in G:/proj/a']));
-    expect(screen.getByText('first file')).toBeTruthy();
-    expect(useStore.getState().layout.panes).toHaveLength(2);
+    expect(screen.getByRole('region', { name: 'Preview: src/first.ts' })).toBeTruthy();
+    expect((await findEditor()).value).toBe('first file');
   });
 
   it('ignores an older resolution when a newer reference has already opened', async () => {
@@ -325,13 +324,13 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:read') return { content: 'new content', truncated: false };
       return {};
     });
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'old.ts'));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('fs:resolve', expect.objectContaining({ path: 'old.ts' })));
     act(() => useStore.getState().revealFile(session.id, 'new.ts'));
-    const pane = screen.getByTestId('file-pane');
-    await waitFor(() => expect(pane.querySelector('.file-preview-head .mono')?.textContent).toBe('src/new.ts'));
+    expect((await findEditor()).value).toBe('new content');
     await act(async () => { resolveOld({ status: 'resolved', path: 'src/old.ts' }); await old; });
+    expect(screen.getByRole('region', { name: 'Preview: src/new.ts' })).toBeTruthy();
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/new.ts', maxBytes: 200_000 }]]);
   });
 
@@ -341,9 +340,9 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:read') return { content: 'strict preview', truncated: false };
       return {};
     });
-    render(<StrictMode><Pane /></StrictMode>);
+    render(<StrictMode><FilePreviewPane /></StrictMode>);
     act(() => useStore.getState().revealFile(session.id, 'tools.ts'));
-    await screen.findByText('strict preview');
+    expect((await findEditor()).value).toBe('strict preview');
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:resolve')).toHaveLength(1);
     expect(reads()).toHaveLength(1);
   });
@@ -352,27 +351,29 @@ describe('file mentions preview in the split view', () => {
     let resolve!: (result: unknown) => void;
     const pending = new Promise((done) => { resolve = done; });
     invokeMock.mockImplementation(async (channel: string) => channel === 'fs:resolve' ? pending : {});
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'tools.ts'));
     await screen.findByRole('status');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await act(async () => { resolve({ status: 'resolved', path: 'src/tools.ts' }); await pending; });
     expect(reads()).toHaveLength(0);
-    expect(useStore.getState().layout.panes).toHaveLength(1);
+    expect(target()).toBeUndefined();
   });
 
-  it('discards a pending lookup once the session leaves the pane, which closes the preview', async () => {
+  it('closes the preview and discards a pending lookup when its session leaves the layout', async () => {
     let resolve!: (result: unknown) => void;
     const pending = new Promise((done) => { resolve = done; });
     const other = { ...session, id: 'other', cwd: 'G:/other' };
     useStore.setState({ sessions: [session, other] });
     invokeMock.mockImplementation(async (channel: string) => channel === 'fs:resolve' ? pending : []);
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'tools.ts'));
     await screen.findByRole('status');
     await act(async () => { await useStore.getState().setActive(other.id); });
     expect(useStore.getState().layout.panes.map((p) => p.sessionId)).toEqual([other.id]);
     await act(async () => { resolve({ status: 'resolved', path: 'src/tools.ts' }); await pending; });
+    expect(target()).toBeUndefined();
+    expect(screen.queryByTestId('file-pane')).toBeNull();
     expect(reads()).toHaveLength(0);
     expect(useStore.getState().toasts).toHaveLength(0);
   });
@@ -382,9 +383,9 @@ describe('file mentions preview in the split view', () => {
     harness.can = (channel) => channel !== 'fs:resolve';
     try {
       invokeMock.mockImplementation(async (channel: string) => channel === 'fs:read' ? { content: 'legacy preview', truncated: false } : {});
-      render(<Pane />);
+      render(<FilePreviewPane />);
       act(() => useStore.getState().revealFile(session.id, 'src/tools.ts'));
-      await screen.findByText('legacy preview');
+      expect((await findEditor()).value).toBe('legacy preview');
       expect(invokeMock).not.toHaveBeenCalledWith('fs:resolve', expect.anything());
     } finally {
       delete harness.can;
@@ -397,15 +398,11 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:readImage') return { mimeType: 'image/png', data: 'iVBORw0KGgo=', size: 8, tooLarge: false };
       return { content: '\u0089PNG garbage', truncated: false };
     });
-    const { container } = render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'runs/hour_bias/window_bias.png'));
-    const img = await waitFor(() => {
-      const el = container.querySelector('.file-preview .file-image img');
-      expect(el).toBeTruthy();
-      return el as HTMLImageElement;
-    });
+    const img = await screen.findByRole('img', { name: 'runs/hour_bias/window_bias.png' });
     expect(img.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=');
-    expect(container.querySelector('.file-preview pre')).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'File contents' })).toBeNull();
     expect(invokeMock).toHaveBeenCalledWith('fs:readImage', { sessionId: session.id, path: 'runs/hour_bias/window_bias.png' });
     expect(reads()).toHaveLength(0);
   });
@@ -416,10 +413,10 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:readImage') return { mimeType: 'image/jpeg', data: '', size: 25_000_000, tooLarge: true };
       return {};
     });
-    const { container } = render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'big.jpg'));
     expect(await screen.findByText('Image is 25.0 MB, too large to preview.')).toBeTruthy();
-    expect(container.querySelector('.file-preview img')).toBeNull();
+    expect(screen.queryByRole('img', { name: 'big.jpg' })).toBeNull();
   });
 
   it('resolves an absolute mention inside the session folder', async () => {
@@ -428,12 +425,13 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:read') return { content: 'hello', truncated: false };
       return {};
     });
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'G:/proj/a/src/hello.ts'));
-    await waitFor(() => expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/hello.ts', maxBytes: 200_000 }]]));
+    expect((await findEditor()).value).toBe('hello');
+    expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/hello.ts', maxBytes: 200_000 }]]);
   });
 
-  it('shows a file outside the session folder in File Explorer without reading it or opening a pane', async () => {
+  it('shows a file outside the session folder in File Explorer without reading or previewing it', async () => {
     invokeMock.mockImplementation(async (channel: string) => (channel === 'app:showInFolder' ? { ok: true } : {}));
     act(() => useStore.getState().revealFile(session.id, 'G:/elsewhere/SideGuard-Q-2026-10.zip'));
     // The file manager's name follows the platform, which the hoisted imports read before the stub above.
@@ -442,7 +440,7 @@ describe('file mentions preview in the split view', () => {
     ]));
     expect(invokeMock).toHaveBeenCalledWith('app:showInFolder', { sessionId: session.id, path: 'G:/elsewhere/SideGuard-Q-2026-10.zip' });
     expect(reads()).toHaveLength(0);
-    expect(useStore.getState().layout.panes).toHaveLength(1);
+    expect(target()).toBeUndefined();
   });
 
   it('refuses a mention outside the session folder where the host cannot show it', async () => {
@@ -453,7 +451,7 @@ describe('file mentions preview in the split view', () => {
       await waitFor(() => expect(useStore.getState().toasts.map((t) => [t.kind, t.text])).toEqual([['error', 'Cannot open files outside G:/proj/a']]));
       expect(reads()).toHaveLength(0);
       expect(invokeMock).not.toHaveBeenCalledWith('app:showInFolder', expect.anything());
-      expect(useStore.getState().layout.panes).toHaveLength(1);
+      expect(target()).toBeUndefined();
     } finally {
       delete harness.can;
     }
@@ -465,23 +463,26 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:resolve') throw new Error("Error invoking remote method 'fs:resolve': Error: SideGuard-Q-2026-10.zip was not found in G:\\proj\\a");
       return {};
     });
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'SideGuard-Q-2026-10.zip'));
     await waitFor(() => expect(useStore.getState().toasts.map((t) => [t.kind, t.text])).toEqual([['error', 'SideGuard-Q-2026-10.zip was not found in G:\\proj\\a']]));
     await waitFor(() => expect(screen.queryByTestId('file-pane')).toBeNull());
   });
 
-  it('says a binary file has no text preview and offers its folder instead', async () => {
+  it('does not edit or save a binary file and offers its folder instead', async () => {
     invokeMock.mockImplementation(async (channel: string, request: { path: string }) => {
       if (channel === 'fs:resolve') return { status: 'resolved', path: request.path };
       if (channel === 'fs:read') return { content: '', truncated: false, binary: true };
       if (channel === 'app:showInFolder') return { ok: true };
       return {};
     });
-    const { container } = render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'dist/bundle.zip'));
     expect(await screen.findByText('Binary file, no text preview.')).toBeTruthy();
-    expect(container.querySelector('.file-preview pre')).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'File contents' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    pressSave(screen.getByRole('region', { name: 'Preview: dist/bundle.zip' }));
+    expect(writes()).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: /^Show in / }));
     expect(invokeMock).toHaveBeenCalledWith('app:showInFolder', { sessionId: session.id, path: 'G:/proj/a/dist/bundle.zip' });
   });
@@ -492,16 +493,131 @@ describe('file mentions preview in the split view', () => {
       if (channel === 'fs:read') return request.path === 'docs/guide.md' ? { content: 'Read [the code](../src/a.ts#L2).', truncated: false } : { content: 'code body', truncated: false };
       return {};
     });
-    render(<Pane />);
+    render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'docs/guide.md'));
+    expect((await findEditor()).value).toBe('Read [the code](../src/a.ts#L2).');
+    expect(screen.queryByRole('link', { name: 'the code' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show markdown preview' }));
     fireEvent.click(await screen.findByRole('link', { name: 'the code' }));
     expect(target()).toMatchObject({ path: 'src/a.ts', line: 2 });
-    await screen.findByText('code body');
-    expect(useStore.getState().layout.panes).toHaveLength(2);
+    expect((await findEditor()).value).toBe('code body');
   });
 });
 
-describe('the Files tab browses and previews beside the conversation', () => {
+describe('file editor saves', () => {
+  it('writes only on Ctrl+S and preserves the BOM and CRLF in both IPC strings', async () => {
+    const path = 'docs/guide.md';
+    const original = '\uFEFF# Guide\r\nFirst line\r\n';
+    const edited = '# Guide\nRevised line\n';
+    let finishSave!: () => void;
+    const pending = new Promise<void>((resolve) => { finishSave = resolve; });
+    invokeMock.mockImplementation(async (channel: string) => {
+      if (channel === 'fs:read') return { content: original, truncated: false };
+      if (channel === 'fs:writeText') return pending;
+      return {};
+    });
+    render(<FilePreviewPane />);
+    openExact(path);
+    const editor = await findEditor();
+    expect(editor.value).toBe('# Guide\nFirst line\n');
+    expect(saveButton().disabled).toBe(true);
+    pressSave(editor);
+
+    fireEvent.change(editor, { target: { value: edited } });
+    expect(screen.getByText('Unsaved changes')).toBeTruthy();
+    expect(writes()).toHaveLength(0);
+    pressSave(editor);
+    expect(writes()).toEqual([['fs:writeText', {
+      sessionId: session.id, path, content: '\uFEFF# Guide\r\nRevised line\r\n', expectedContent: original
+    }]]);
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Saving…' }).disabled).toBe(true);
+    await act(async () => { finishSave(); await pending; });
+    expect(saveButton().disabled).toBe(true);
+    expect(screen.queryByText('Unsaved changes')).toBeNull();
+    expect(editor.value).toBe(edited);
+  });
+
+  it('retains a rejected draft for retry without leaking it into another opened file', async () => {
+    const path = 'docs/notes.txt';
+    const otherPath = 'src/notes.txt';
+    const original = 'original notes';
+    const draft = 'revised notes';
+    let rejectSave = true;
+    invokeMock.mockImplementation(async (channel: string, request: { path: string }) => {
+      if (channel === 'fs:read') return { content: request.path === path ? original : 'other notes', truncated: false };
+      if (channel === 'fs:writeText') {
+        if (rejectSave) throw new Error('File changed on disk');
+        return undefined;
+      }
+      return {};
+    });
+    render(<FilePreviewPane />);
+    openExact(path);
+    fireEvent.change(await findEditor(), { target: { value: draft } });
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(useStore.getState().toasts.at(-1)).toMatchObject({ kind: 'error', text: 'File changed on disk' }));
+    expect((await findEditor()).value).toBe(draft);
+    expect(screen.getByText('Unsaved changes')).toBeTruthy();
+    expect(saveButton().disabled).toBe(false);
+
+    openExact(otherPath);
+    await screen.findByDisplayValue('other notes');
+    expect(saveButton().disabled).toBe(true);
+    openExact(path);
+    await screen.findByDisplayValue(draft);
+    const write = ['fs:writeText', { sessionId: session.id, path, content: draft, expectedContent: original }];
+    expect(writes()).toEqual([write]);
+
+    rejectSave = false;
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(saveButton().disabled).toBe(true));
+    expect(writes()).toEqual([write, write]);
+    expect((await findEditor()).value).toBe(draft);
+    expect(screen.queryByText('Unsaved changes')).toBeNull();
+  });
+
+  it('reopens a file against the new baseline if its save was still pending', async () => {
+    const path = 'notes.txt';
+    let disk = 'before';
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    invokeMock.mockImplementation(async (channel: string, request: { content: string }) => {
+      if (channel === 'fs:read') return { content: disk, truncated: false };
+      if (channel === 'fs:writeText') { await pending; disk = request.content; }
+      return undefined;
+    });
+    render(<FilePreviewPane />);
+    openExact(path);
+    const editor = await findEditor();
+    fireEvent.change(editor, { target: { value: 'after' } });
+    pressSave(editor);
+    fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
+    openExact(path);
+    expect(reads()).toHaveLength(1);
+    await act(async () => { finish(); await pending; });
+    expect((await findEditor()).value).toBe('after');
+    expect(saveButton().disabled).toBe(true);
+    fireEvent.change(await findEditor(), { target: { value: 'next' } });
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(disk).toBe('next'));
+    expect(writes().at(-1)?.[1]).toMatchObject({ path, expectedContent: 'after' });
+  });
+
+  it('shows a truncated text preview as read-only and will not save it', async () => {
+    invokeMock.mockImplementation(async (channel: string) => channel === 'fs:read' ? { content: 'partial text', truncated: true } : undefined);
+    render(<FilePreviewPane />);
+    openExact('large.txt');
+    const editor = await findEditor();
+    expect(editor.value).toBe('partial text');
+    expect(editor.readOnly).toBe(true);
+    expect(screen.getByRole('status').textContent).toMatch(/truncated.*read-only/i);
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    pressSave(editor);
+    expect(writes()).toHaveLength(0);
+  });
+});
+
+describe('the right-panel Files tab', () => {
   it('a file row opens its exact path in the file pane and marks the row', async () => {
     useStore.setState({ panelTab: 'files', panelOpen: true });
     invokeMock.mockImplementation(async (channel: string) => {
@@ -509,23 +625,21 @@ describe('the Files tab browses and previews beside the conversation', () => {
       if (channel === 'fs:read') return { content: 'row preview', truncated: false };
       return {};
     });
-    render(<><RightPanel session={session} /><Pane /></>);
+    render(<><RightPanel session={session} /><FilePreviewPane /></>);
     const row = await screen.findByRole('button', { name: /hello\.ts/ });
     fireEvent.click(row);
-    await screen.findByText('row preview');
+    expect((await findEditor()).value).toBe('row preview');
     expect(target()).toMatchObject({ path: 'src/hello.ts', exact: true });
     expect(invokeMock).not.toHaveBeenCalledWith('fs:resolve', expect.anything());
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/hello.ts', maxBytes: 200_000 }]]);
     await waitFor(() => expect(row.className).toContain('active'));
-    // The panel stays a browser: no preview inside it.
-    expect(document.querySelector('.panel .file-preview')).toBeNull();
   });
 
-  it('a folder mention opens the Files tab on that folder instead of a pane', async () => {
+  it('a folder mention opens the Files tab on that folder without a file preview', async () => {
     invokeMock.mockImplementation(async (channel: string) => (channel === 'fs:list' ? [] : {}));
     act(() => useStore.getState().revealFile(session.id, 'src/main/harness/'));
     expect(useStore.getState()).toMatchObject({ panelTab: 'files', panelOpen: true, fileReveal: { sessionId: session.id, path: 'src/main/harness/' } });
-    expect(useStore.getState().layout.panes).toHaveLength(1);
+    expect(target()).toBeUndefined();
     render(<RightPanel session={session} />);
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('fs:list', { sessionId: session.id, relPath: 'src/main/harness' }));
     expect(useStore.getState().fileReveal).toBeNull();

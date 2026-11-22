@@ -262,6 +262,8 @@ h4 {
   height: 100%;
 }
 .app {
+  --file-drawer-left: var(--sidebar);
+  position: relative;
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 1fr) var(--panel);
   grid-template-rows: minmax(0, 1fr);
@@ -269,6 +271,7 @@ h4 {
   min-height: 0;
 }
 .app.no-sidebar {
+  --file-drawer-left: 0px;
   grid-template-columns: minmax(0, 1fr) var(--panel);
 }
 .app.no-panel {
@@ -341,48 +344,6 @@ h4 {
 .panes.narrow > .pane:not(.active),
 .panes.narrow > .pane-divider {
   display: none;
-}
-/* …unless a file was just opened: then the preview is what the user asked to see. */
-.panes.narrow.has-file > .pane.active {
-  display: none;
-}
-.panes.narrow.has-file > .pane.file-pane {
-  display: flex;
-}
-/* A file previewed beside its session: a lighter surface than a conversation, and narrower allowed. */
-.panes-horizontal.split > .pane.file-pane {
-  min-width: 280px;
-}
-.panes-vertical.split > .pane.file-pane {
-  min-height: 160px;
-}
-.pane.file-pane {
-  background: var(--bg-sunken);
-}
-.pane.file-pane > .file-preview {
-  flex: 1;
-  min-height: 0;
-}
-.file-pane .file-preview-head {
-  min-height: 40px;
-  min-width: 0;
-}
-.file-pane .file-preview-path {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.file-pane .file-preview-session {
-  flex: 0 1 auto;
-}
-.file-pane .file-preview pre {
-  background: var(--bg);
-}
-.file-pane .file-match-list {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
 }
 .panes.narrow > .pane {
   min-width: 0;
@@ -4158,6 +4119,13 @@ h4 {
   min-height: 0;
 }
 
+.panel-preview-only > .panel {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: var(--panel);
+  z-index: 34;
+}
+
 /* The panel's two halves: workspace views on top, live session services below. The split fraction
    lives on --panel-split so a drag updates one custom property instead of re-rendering. */
 .panel-section {
@@ -5104,6 +5072,23 @@ body.resizing {
   color: var(--accent);
   padding: 0 2px;
 }
+/* Out of the grid flow: the editor opens over the conversation, attached to the Files panel.
+   On small windows it can overlap the panel to keep a usable editor width. */
+.file-pane {
+  --file-panel-edge: var(--panel);
+  --file-drawer-right: min(var(--file-panel-edge), max(0px, calc(100% - var(--file-drawer-left) - 280px)));
+  position: absolute;
+  inset: 0 var(--file-drawer-right) 0 auto;
+  width: min(720px, calc(100% - var(--file-drawer-right) - var(--file-drawer-left)));
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius) 0 0 var(--radius);
+  box-shadow: -16px 0 40px -20px rgb(0 0 0 / 0.6);
+  overflow: hidden;
+}
 .file-preview {
   display: flex;
   flex-direction: column;
@@ -5114,16 +5099,53 @@ body.resizing {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 40px;
+  min-width: 0;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
 }
-.file-preview pre {
-  margin: 0;
-  padding: 10px;
-  overflow: auto;
+.file-preview-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-preview-session {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.file-match-list {
   flex: 1;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  min-height: 0;
+  overflow: auto;
+}
+.file-preview .file-editor {
+  margin: 0;
+  padding: 14px 16px;
+  resize: none;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 20px;
+  tab-size: 4;
+}
+.file-preview .file-editor:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.file-preview-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 10px;
+  min-height: 26px;
+  border-top: 1px solid var(--border);
 }
 .file-preview .file-md {
   margin: 0;
@@ -8398,6 +8420,7 @@ body.resizing {
   /* The drawer floats above the content, so the sidebar no longer owns a grid column; leaving one
      behind would strand the transcript in a 280px-wide cell. */
   .app {
+    --file-drawer-left: 0px;
     grid-template-columns: minmax(0, 1fr) var(--panel);
   }
   .app.no-panel {

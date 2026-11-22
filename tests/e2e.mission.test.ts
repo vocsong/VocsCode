@@ -505,13 +505,14 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     expect(await win.getByTestId('panel-bottom-subagents').count()).toBe(0);
     await win.getByLabel('Mission workspace', { exact: true }).selectOption(work.worker.id);
     await win.getByTestId('mission-changes').getByText(/specialist unaccepted edit/).waitFor();
-    // A transcript file previews beside the lead, read from the lead's own workspace whatever the
-    // panel's workspace picker is showing.
-    await win.locator('.transcript .file-ref').click();
-    await expect.poll(() => win.getByTestId('file-pane').locator('.file-preview pre').innerText()).toBe('lead unaccepted edit\n');
-    expect(await win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe(work.worker.id);
-    await win.getByTestId('file-pane').getByRole('button', { name: 'Close preview', exact: true }).click();
-    await win.getByTestId('file-pane').waitFor({ state: 'detached' });
+    // The transcript's file overlay reads from the lead's own workspace and opens Files there.
+    await win.locator('.transcript').getByRole('link', { name: 'result.txt', exact: true }).click();
+    const filePane = win.getByTestId('file-pane');
+    await expect.poll(() => filePane.getByLabel('File contents', { exact: true }).inputValue()).toBe('lead unaccepted edit\n');
+    await expect.poll(() => win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe(work.lead.id);
+    expect(await filePane.getByLabel('File contents', { exact: true }).evaluate((el: HTMLTextAreaElement) => el.readOnly)).toBe(true);
+    await filePane.getByRole('button', { name: 'Close preview', exact: true }).click();
+    await filePane.waitFor({ state: 'detached' });
     await win.getByRole('button', { name: 'Mission result', exact: true }).click();
     expect(await win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe('');
     await win.getByRole('button', { name: 'Source discussion: Native project | Original discussion', exact: true }).click();
