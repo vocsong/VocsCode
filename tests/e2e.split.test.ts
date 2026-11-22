@@ -64,6 +64,10 @@ async function launch(userData: string): Promise<Page> {
 }
 
 const pane = (win: Page, i: number) => win.locator('[data-testid="session-pane"]').nth(i);
+const focusRing = (win: Page, i: number) => pane(win, i).evaluate((el) => {
+  const ring = getComputedStyle(el, '::after');
+  return { visible: ring.content !== 'none' && ring.borderTopStyle === 'solid' && parseFloat(ring.borderTopWidth) >= 2, animation: ring.animationName, iterations: ring.animationIterationCount };
+});
 
 describe.runIf(enabled)('electron e2e: split view', () => {
   it('shows two sessions side by side, follows the active pane, resizes, restores and closes', async () => {
@@ -95,6 +99,8 @@ describe.runIf(enabled)('electron e2e: split view', () => {
     await expect.poll(() => pane(win, 0).locator('.transcript').innerText(), { timeout: 15_000 }).toContain('Design the state machine');
     expect(await win.locator('[data-testid="session-pane"]').count(), 'one pane until the user splits').toBe(1);
     expect(await win.locator('.pane-divider').count()).toBe(0);
+    expect((await focusRing(win, 0)).visible, 'single panes have no focus ring').toBe(false);
+    await win.emulateMedia({ reducedMotion: 'no-preference' });
 
     // The open pane lists both same-titled choices with their project names.
     await pane(win, 0).getByRole('button', { name: 'Split right' }).click();
@@ -124,12 +130,20 @@ describe.runIf(enabled)('electron e2e: split view', () => {
     await expect.poll(() => win.locator('.file-list').innerText(), { timeout: 10_000 }).toContain('architecture-only.txt');
     expect(await win.locator('.file-list').innerText()).not.toContain('tests-only.txt');
     expect(await pane(win, 0).getAttribute('class')).toContain('active');
+    const selected = await focusRing(win, 0);
+    expect(selected.visible, 'the focus ring follows the selected pane').toBe(true);
+    expect(selected.animation).not.toBe('none');
+    expect(selected.iterations, 'selection plays once, not continuously').toBe('1');
+    expect((await focusRing(win, 1)).visible).toBe(false);
 
     // Typing in a pane makes it the active one and leaves the other composer untouched.
+    await win.emulateMedia({ reducedMotion: 'reduce' });
     await pane(win, 1).locator('.composer textarea').fill('draft for the tests pane');
     expect(await pane(win, 0).locator('.composer textarea').inputValue()).toBe('');
     await expect.poll(() => pane(win, 1).getAttribute('class')).toContain('active');
     await expect.poll(() => win.locator('.file-list').innerText(), { timeout: 10_000 }).toContain('tests-only.txt');
+    expect(await focusRing(win, 1), 'reduced motion keeps the ring but skips the pulse').toMatchObject({ visible: true, animation: 'none' });
+    expect((await focusRing(win, 0)).visible).toBe(false);
 
     // Drag the divider right: the left pane grows, and the right one stops at its minimum width.
     const divider = await win.locator('.pane-divider').boundingBox();
