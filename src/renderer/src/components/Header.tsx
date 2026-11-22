@@ -73,7 +73,7 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
             title={session.mission ? 'Archive Mission (retain worktrees)' : session.worktreeBranch ? 'Archive & remove worktree' : 'Archive'}
             aria-label="Archive session"
             disabled={!!session.archived}
-            onClick={() => void archiveSession(session, toast)}
+            onClick={(e) => void archiveSession(session, toast, e.currentTarget)}
           />
         </div>
         <span className="header-divider" aria-hidden />

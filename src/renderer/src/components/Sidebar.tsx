@@ -589,13 +589,17 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
       toast(e instanceof Error ? e.message : String(e), 'error');
     }
   };
-  const deleteRow = async () => {
+  // Confirmations open at the control that asked; from the right-click menu, whose item is gone by
+  // then, they open at the row.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const deleteRow = async (anchor: HTMLElement | null) => {
     if (s.mission) { toast('Archive the Mission to retain its artifacts. Use explicit managed cleanup after execution settles.', 'info'); return; }
     const ok = await askConfirm({
       title: `Delete session "${s.title}"?`,
       body: s.worktreeBranch ? `Its worktree and the branch ${s.worktreeBranch} are removed with it.` : 'Its transcript is removed. This cannot be undone.',
       confirmLabel: 'Delete',
-      danger: true
+      danger: true,
+      anchor
     });
     if (ok) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch });
   };
@@ -626,8 +630,8 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
     { separator: true },
     s.archived
       ? { label: 'Restore session', icon: 'restore', onSelect: () => void invoke('sessions:archive', { id: s.id, archived: false }) }
-      : { label: s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast) },
-    { label: s.mission ? 'Mission deletion unavailable — archive retains work' : 'Delete session', icon: 'trash', danger: true, disabled: !!s.mission, onSelect: () => !s.mission && void deleteRow() }
+      : { label: s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast, rowRef.current) },
+    { label: s.mission ? 'Mission deletion unavailable — archive retains work' : 'Delete session', icon: 'trash', danger: true, disabled: !!s.mission, onSelect: () => !s.mission && void deleteRow(rowRef.current) }
   ];
 
   // Any live row drags into the workspace to open it in a pane; only pinned rows also reorder.
@@ -636,6 +640,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
   const indicator = dnd.overId === s.id && dnd.dragId && dnd.dragId !== s.id ? (dnd.pos === 'before' ? ' drag-above' : ' drag-below') : '';
   return (
     <div
+      ref={rowRef}
       className={`session-row ${active ? 'active' : ''}${inPane ? ' in-pane' : ''}${s.unseenAt !== undefined ? ' unseen' : ''}${dragClass}${indicator}`}
       data-testid="session-row"
       data-session-id={s.id}
@@ -714,14 +719,14 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
                 <button type="button" className="row-act-btn" title="Restore session" aria-label="Restore session" onClick={() => void invoke('sessions:archive', { id: s.id, archived: false })}>
                   <Icon name="restore" size={15} />
                 </button>
-                <button type="button" className="row-act-btn danger" disabled={!!s.mission} title={s.mission ? 'Mission deletion unavailable; archive retains artifacts' : 'Delete session'} aria-label="Delete session" onClick={() => void deleteRow()}>
+                <button type="button" className="row-act-btn danger" disabled={!!s.mission} title={s.mission ? 'Mission deletion unavailable; archive retains artifacts' : 'Delete session'} aria-label="Delete session" onClick={(e) => void deleteRow(e.currentTarget)}>
                   <Icon name="trash" size={15} />
                 </button>
               </>
             ) : (
               <>
                 <ForkIntoDropdown session={s} />
-                <button type="button" className="row-act-btn" title={s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveSession(s, toast)}>
+                <button type="button" className="row-act-btn" title={s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={(e) => void archiveSession(s, toast, e.currentTarget)}>
                   <Icon name="archive" size={15} />
                 </button>
               </>

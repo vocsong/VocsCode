@@ -1178,6 +1178,17 @@ h4 {
   padding: 12px 16px;
   border-top: 1px solid var(--border);
 }
+/* A confirmation opened from a control pops up at it: no dimming, so the row it is about stays in
+   view, and a click outside still cancels. */
+.modal-backdrop.is-anchored {
+  display: block;
+  padding: 0;
+  background: transparent;
+}
+.modal.is-anchored {
+  position: fixed;
+  overflow-wrap: anywhere;
+}
 .field {
   display: flex;
   flex-direction: column;
@@ -1975,8 +1986,13 @@ h4 {
   box-shadow: 0 0 0 1px var(--border), var(--shadow-sm);
 }
 .session-row:hover .row-actions,
-.row-actions:focus-within {
+.row-actions:focus-within,
+.row-actions:has([data-dialog-anchor]) {
   display: flex;
+}
+/* The row a confirmation is about stays marked while the dialog takes the pointer's hover away. */
+.session-row:is([data-dialog-anchor], :has([data-dialog-anchor])):not(.active) {
+  background: var(--bg-hover);
 }
 /* Anchor the fork menu to the row edge so labels beside the toolbar leave room for the menu. */
 .row-actions > .dropdown {

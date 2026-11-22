@@ -1,5 +1,5 @@
 /** Shared presentational primitives: icons, buttons, badges, dropdowns, modals and toggles. */
-import React, { useEffect, useId, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 
 const ICONS: Record<string, string> = {
   logo: 'M6.4 7.2L12 17L17.6 7.2M9.2 19h5.6',
@@ -252,9 +252,59 @@ export function MenuItem({ children, onClick, active, checked, danger, hint, dis
   );
 }
 
-export function Modal({ title, onClose, children, width = 720, footer }: { title: React.ReactNode; onClose: () => void; children: React.ReactNode; width?: number; footer?: React.ReactNode }) {
+type Box = { top: number; right: number; bottom: number; left: number };
+
+/**
+ * Where an anchored dialog goes: just below the control that opened it, right edges lined up so the
+ * dialog's buttons land under the pointer, flipped above when the window has no room below, and
+ * always kept `margin` inside the window.
+ */
+export function placeBeside(anchor: Box, size: { width: number; height: number }, viewport: { width: number; height: number }, gap = 6, margin = 8): { top: number; left: number } {
+  const clamp = (v: number, max: number) => Math.max(margin, Math.min(v, max));
+  const left = clamp(anchor.right - size.width, viewport.width - margin - size.width);
+  const below = anchor.bottom + gap;
+  const above = anchor.top - gap - size.height;
+  const fitsBelow = below + size.height <= viewport.height - margin;
+  const top = fitsBelow ? below : above >= margin ? above : clamp(below, viewport.height - margin - size.height);
+  return { top, left };
+}
+
+/** Set on the element an anchored dialog points at, while it is open. CSS keys on it to keep the
+ *  anchor on screen: Zen's rail stays open and a row keeps its hover actions. */
+const DIALOG_ANCHOR_ATTR = 'data-dialog-anchor';
+
+export function Modal({ title, onClose, children, width = 720, footer, anchor }: {
+  title: React.ReactNode;
+  onClose: () => void;
+  children: React.ReactNode;
+  width?: number;
+  footer?: React.ReactNode;
+  /** Opens the dialog as a popover at this element instead of centred over a dimmed window. An
+   *  element that has already left the page falls back to the centred dialog. */
+  anchor?: HTMLElement | null;
+}) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
+  const anchored = !!anchor?.isConnected;
+  const [placed, setPlaced] = useState<{ top: number; left: number } | null>(null);
+  // Layout effect, so the dialog is placed and its anchor held before the first paint: the
+  // transparent backdrop takes the pointer's hover away from the anchor's row in the same commit.
+  useLayoutEffect(() => {
+    if (!anchor?.isConnected) return;
+    anchor.setAttribute(DIALOG_ANCHOR_ATTR, '');
+    const place = () => {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const box = dialog.getBoundingClientRect();
+      setPlaced(placeBeside(anchor.getBoundingClientRect(), { width: box.width, height: box.height }, { width: window.innerWidth, height: window.innerHeight }));
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('resize', place);
+      anchor.removeAttribute(DIALOG_ANCHOR_ATTR);
+    };
+  }, [anchor]);
   // Captured during the first render, before autoFocus can move focus into the dialog.
   const restoreRef = useRef<HTMLElement | null | undefined>(undefined);
   if (restoreRef.current === undefined) {
@@ -304,9 +354,10 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
+  const position: React.CSSProperties = anchored ? (placed ? { top: placed.top, left: placed.left } : { visibility: 'hidden' }) : {};
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div ref={dialogRef} className="modal" style={{ width, maxWidth: '96vw' }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
+    <div className={`modal-backdrop${anchored ? ' is-anchored' : ''}`} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div ref={dialogRef} className={`modal${anchored ? ' is-anchored' : ''}`} style={{ width, maxWidth: '96vw', ...position }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <div className="modal-header">
           <div className="modal-title" id={titleId}>{title}</div>
           <Button variant="ghost" size="sm" icon="x" onClick={onClose} aria-label="Close" />
@@ -325,6 +376,8 @@ export interface ConfirmOptions {
   cancelLabel?: string;
   /** Styles the confirming button as destructive. */
   danger?: boolean;
+  /** The control that asked: the dialog opens as a popover there rather than centred. */
+  anchor?: HTMLElement | null;
   /** Adds an editable field to the dialog; askPrompt resolves its text instead of a boolean. */
   input?: {
     label?: React.ReactNode;
@@ -393,7 +446,8 @@ export function ConfirmHost() {
   return (
     <Modal
       title={pending.title}
-      width={pending.input ? 560 : 460}
+      width={pending.input ? 560 : pending.anchor ? 380 : 460}
+      anchor={pending.anchor}
       onClose={() => answer(null)}
       footer={
         <>
