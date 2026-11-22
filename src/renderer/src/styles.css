@@ -57,8 +57,9 @@
   --panel: 420px;
   /** Must match TITLEBAR_HEIGHT in src/main/index.ts. */
   --titlebar: 36px;
-  /* The conversation's reading column: transcript and composer share it. */
+  /* Cap prose separately: the rest of the desktop conversation can use more of the pane. */
   --reading: 780px;
+  --conversation-gutter: clamp(12px, 2.5%, 24px);
   --radius-lg: 14px;
   /* Neutral elevation that reads on light and dark palettes alike (a theme's --shadow is for overlays). */
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.06);
@@ -297,6 +298,7 @@ h4 {
   flex-direction: column;
 }
 .pane {
+  --conversation-width: 1120px;
   position: relative;
   flex: 1 1 0;
   min-width: 0;
@@ -2461,13 +2463,13 @@ h4 {
   --transcript-gap: 8px;
   flex: 1;
   overflow-y: auto;
-  padding: 16px 24px 24px;
+  padding: 16px var(--conversation-gutter) 24px;
   display: flex;
   flex-direction: column;
   gap: var(--transcript-gap);
 }
 .transcript > * {
-  max-width: var(--reading);
+  max-width: var(--conversation-width, var(--reading));
   width: 100%;
   margin: 0 auto;
   /* The transcript is a scrolling flex column: without this, items whose min-height resolves to 0
@@ -2757,7 +2759,10 @@ h4 {
 .md {
   font-size: 14px;
   line-height: 1.65;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.msg-assistant > .md > :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6) {
+  max-inline-size: var(--reading);
 }
 .md > :first-child {
   margin-top: 0;
@@ -2790,32 +2795,48 @@ h4 {
   font-weight: 650;
   letter-spacing: -0.005em;
 }
-/* Shrink-wrapped and scrollable; rules between rows only, the header on a tinted band. */
-.md table {
+/* Keep the table's intrinsic columns; scroll the wrapper rather than squeezing the cells.
+   Raw HTML tables have no wrapper, so retain the table-as-scrollport fallback for those. */
+:is(.md, .markdown) :is(.md-table, table:not(.md-table > table)) {
   display: block;
-  width: max-content;
-  max-width: 100%;
+  inline-size: max-content;
+  max-inline-size: 100%;
   overflow-x: auto;
-  border-collapse: collapse;
   margin: 10px 0;
-  font-size: 13px;
   border: 1px solid var(--border);
   border-radius: 10px;
 }
-.md th,
-.md td {
+.md-table:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+:is(.md, .markdown) table {
+  border-collapse: collapse;
+  font-size: 13px;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+.md-table > table {
+  inline-size: max-content;
+}
+:is(.md, .markdown) :is(th, td) {
+  /* Wrap long cell prose at a reasonable measure, not at the viewport's remaining width. */
+  max-inline-size: 30ch;
   border: none;
   border-bottom: 1px solid var(--border);
   padding: 6px 14px;
-  text-align: left;
+  vertical-align: top;
 }
-.md th {
+:is(.md, .markdown) :is(th, td):not([align]) {
+  text-align: start;
+}
+:is(.md, .markdown) th {
   font-weight: 600;
   background: var(--bg-sunken);
   color: var(--fg-muted);
   font-size: 12px;
 }
-.md tr:last-child td {
+:is(.md, .markdown) tbody tr:last-child > * {
   border-bottom: none;
 }
 .md blockquote {
@@ -2864,11 +2885,15 @@ h4 {
 .transcript.no-file-links .file-ref:hover {
   color: inherit;
 }
+.md pre {
+  overflow-x: auto;
+}
 .md pre code {
   background: none;
   padding: 0;
 }
-.md.streaming > :last-child::after {
+.md.streaming > :last-child:not(.md-table)::after,
+.md.streaming:has(> .md-table:last-child)::after {
   content: '▍';
   color: var(--accent);
   animation: pulse 1s infinite;
@@ -3719,7 +3744,7 @@ h4 {
    above, the controls it is sent with along its foot. The transcript fades out behind it. (The web
    shell has its own composer and keeps the rules above.) */
 .pane > .composer {
-  padding: 4px 24px 16px;
+  padding: 4px var(--conversation-gutter) 16px;
   border-top: none;
   background: var(--bg);
 }
@@ -3734,7 +3759,7 @@ h4 {
   pointer-events: none;
 }
 .pane .composer-box {
-  max-width: var(--reading);
+  max-width: var(--conversation-width);
   border: 1px solid var(--border-strong);
   border-radius: 16px;
   background: var(--bg-elev);
@@ -3787,7 +3812,7 @@ h4 {
 .pane .composer-hint,
 .pane .attachments,
 .pane .composer-warn {
-  max-width: var(--reading);
+  max-width: var(--conversation-width);
 }
 .dictation {
   display: inline-flex;

@@ -15,9 +15,9 @@ File / Edit / View / Help menu bar.
   open, an accent fill when it finished unseen, and breathes blue while working or red while waiting
   on you. A pinned session's dot is a rounded square. Folders are short rules. Hovering the rail (or
   tabbing into it) slides the full list open over the conversation.
-- The conversation is one centered reading column. Your messages read as lines with an accent rule
-  rather than bubbles. A turn's work is its bare numbers (`2m 34s · 4 · ±2`). A completed turn's
-  footer appears only when pointed at; a failed or interrupted one stays visible.
+- The conversation is one centered column. Your messages read as lines with an accent rule rather
+  than bubbles. A turn's work is its bare numbers (`2m 34s · 4 · ±2`). A completed turn's footer
+  appears only when pointed at; a failed or interrupted one stays visible.
 - The composer is a floating pill. Its model, permission, attach and voice controls appear when you
   point at it or tab into them; Send never hides.
 - The side panel is a drawer floating beside the column, with icon tabs. The column moves out of its
@@ -45,10 +45,14 @@ File / Edit / View / Help menu bar.
 - Tokens are overridden on `:root[data-ui='zen'][data-theme]` so they outrank the injected theme
   blocks.
 
+In both modes, the transcript and composer grow with the pane up to a shared maximum. Prose has
+its own narrower line length. Markdown tables size to their content and scroll horizontally within
+the message when they don't fit; focus the table and use the arrow keys to scroll it.
+
 When you change a component Zen restyles (sidebar, header, transcript, composer, side panel,
 settings), look at it in Zen too. `tests/e2e.ui-modes.test.ts` covers switching, Zen's geometry,
-state surviving a switch and restart persistence; see [TESTING.md](TESTING.md) for the change →
-suite row.
+responsive conversation sizing, state surviving a switch and restart persistence; see
+[TESTING.md](TESTING.md) for the change → suite row.
 
 ## Review screenshots
 
