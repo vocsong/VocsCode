@@ -302,14 +302,15 @@ h4 {
 .panes-vertical.split > .pane {
   min-height: 200px;
 }
-/* Keep the selected pane outlined after the one-shot glow, without shifting content or catching clicks. */
+/* Keep a thin outline and a soft inner glow while selected, without shifting content or catching clicks. */
 .panes.split:not(.narrow) > .pane.active::after {
   content: '';
   position: absolute;
   inset: 0;
   z-index: 4;
   pointer-events: none;
-  border: 2px solid var(--accent);
+  border: 1px solid var(--accent);
+  box-shadow: inset 0 0 9px color-mix(in srgb, var(--accent) 24%, transparent);
 }
 @media (prefers-reduced-motion: no-preference) {
   .panes.split:not(.narrow) > .pane.active::after {
@@ -318,10 +319,7 @@ h4 {
 }
 @keyframes pane-focus-pulse {
   from {
-    box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 18px color-mix(in srgb, var(--accent) 55%, transparent);
-  }
-  to {
-    box-shadow: inset 0 0 0 0 transparent, inset 0 0 0 transparent;
+    box-shadow: inset 0 0 26px color-mix(in srgb, var(--accent) 80%, transparent);
   }
 }
 .panes.split > .pane:not(.active) > .header .header-name {
@@ -5112,24 +5110,10 @@ body.resizing {
   min-height: 0;
   overflow: auto;
 }
-.file-preview .file-editor {
-  margin: 0;
-  padding: 14px 16px;
-  resize: none;
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  border: 0;
-  border-radius: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-size: 13px;
-  line-height: 20px;
-  tab-size: 4;
-}
-.file-preview .file-editor:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
+.file-match-list-with-preview {
+  flex: 0 1 auto;
+  max-height: 55%;
+  border-bottom: 1px solid var(--border);
 }
 .file-preview-status {
   display: flex;

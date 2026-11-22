@@ -1,0 +1,122 @@
+.file-source-editor {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+
+  /* Blend semantic hues toward foreground for text contrast on both palette bases. */
+  --file-code-keyword: color-mix(in srgb, var(--purple) 75%, var(--fg));
+  --file-code-string: color-mix(in srgb, var(--green) 70%, var(--fg));
+  --file-code-type: color-mix(in srgb, var(--cyan) 70%, var(--fg));
+  --file-code-number: color-mix(in srgb, var(--amber) 65%, var(--fg));
+  --file-code-name: color-mix(in srgb, var(--blue) 75%, var(--fg));
+  --file-code-error: color-mix(in srgb, var(--red) 75%, var(--fg));
+}
+
+.file-source-editor .cm-editor {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  font-size: var(--code-size);
+}
+
+.file-source-editor .cm-editor.cm-focused {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.file-source-editor .cm-editor .cm-scroller {
+  overflow: auto;
+  font-family: var(--mono);
+  line-height: 1.55;
+}
+
+.file-source-editor .cm-editor .cm-content {
+  padding-block: 10px;
+  caret-color: var(--fg);
+}
+
+.file-source-editor .cm-editor .cm-line {
+  padding-inline: 10px 16px;
+}
+
+.file-source-editor .cm-editor .cm-gutters {
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  border-color: var(--border);
+}
+
+.file-source-editor .cm-editor .cm-lineNumbers .cm-gutterElement {
+  min-width: 3ch;
+  padding-inline: 8px;
+}
+
+.file-source-editor .cm-editor .cm-activeLine {
+  background: var(--bg-hover);
+}
+
+.file-source-editor .cm-editor .cm-activeLineGutter {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.file-source-editor .cm-editor .cm-cursor,
+.file-source-editor .cm-editor .cm-dropCursor {
+  border-left-color: var(--fg);
+}
+
+.file-source-editor .cm-editor .cm-selectionBackground {
+  background: var(--bg-active);
+}
+
+.file-source-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.file-source-editor .cm-editor .cm-matchingBracket {
+  background: var(--accent-soft);
+  outline: 1px solid var(--accent);
+}
+
+.file-source-editor .cm-editor .cm-nonmatchingBracket,
+.file-source-editor .cm-editor .cm-specialChar {
+  color: var(--file-code-error);
+}
+
+.file-source-editor :is(.tok-keyword, .tok-atom, .tok-bool, .tok-meta) {
+  color: var(--file-code-keyword);
+}
+
+.file-source-editor :is(.tok-string, .tok-string2, .tok-inserted) {
+  color: var(--file-code-string);
+}
+
+.file-source-editor :is(.tok-typeName, .tok-className, .tok-namespace) {
+  color: var(--file-code-type);
+}
+
+.file-source-editor :is(.tok-number, .tok-literal) {
+  color: var(--file-code-number);
+}
+
+.file-source-editor :is(.tok-propertyName, .tok-variableName2, .tok-definition, .tok-link, .tok-url, .tok-heading) {
+  color: var(--file-code-name);
+}
+
+.file-source-editor .tok-comment {
+  color: var(--fg-muted);
+}
+
+.file-source-editor :is(.tok-invalid, .tok-deleted) {
+  color: var(--file-code-error);
+}
+
+.file-source-editor :is(.tok-heading, .tok-strong) {
+  font-weight: 600;
+}
+
+.file-source-editor .tok-emphasis {
+  font-style: italic;
+}

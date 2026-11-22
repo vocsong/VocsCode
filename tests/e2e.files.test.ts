@@ -23,6 +23,11 @@ afterEach(async () => {
   app = null;
 });
 
+// All lines of these short fixtures fit in CodeMirror's rendered viewport.
+async function expectEditorText(editor: Locator, text: string) {
+  await expect.poll(() => editor.locator('.cm-line').allTextContents(), { timeout: 10_000 }).toEqual(text.split('\n'));
+}
+
 describe.runIf(enabled)('workspace file previews and editing', () => {
   it('decodes and previews inline Markdown screenshots from the session checkout without activating enclosing links', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-inline-images-'));
@@ -57,6 +62,16 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
       '![Missing screenshot](tests/artifacts/missing.png)',
       '![Outside screenshot](../outside.png)',
       '![Not an image](.env)',
+      [
+        '[External site](https://example.invalid/docs)',
+        '[Demo pull request](https://github.com/demo/repo/pull/1)',
+        '[Workspace readme](README.md)',
+        '[Artifact folder](tests/artifacts/)',
+        '[Screenshot file](tests/artifacts/shot%20with%20spaces.png)',
+        `[Outside file](<${path.join(tmp, 'outside.png').replace(/\\/g, '/')}>)`,
+        '[Send mail](mailto:help@example.com)',
+        '[Section anchor](#section)',
+      ].join(' · '),
     ].join('\n\n');
     const item: TranscriptItem = { id: 'answer', kind: 'assistant', ts: 1, text };
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([meta]));
@@ -75,10 +90,33 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
       await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 15_000 }).toBe(1);
       expect(await image.getAttribute('src')).toBe(`data:image/png;base64,${data}`);
     }
-    const message = win.locator('[data-item-id="answer"]');
+    const message = win.locator('.transcript [data-item-id="answer"]');
     expect(await message.getByRole('img').count()).toBe(3);
     expect(await message.innerText()).not.toContain('DO_NOT_RENDER_THIS_SECRET');
     await expect.poll(() => message.innerText(), { timeout: 15_000 }).toMatch(/unavailable/i);
+
+    // Read the actual painted colors without following links or opening the network or file manager.
+    const markdown = message.locator('.md');
+    const actions = [
+      ['external', 'External site'], ['pr', 'Demo pull request'], ['file', 'Workspace readme'],
+      ['folder', 'Artifact folder'], ['image-file', 'Screenshot file'], ['explorer', 'Outside file'],
+      ['image-preview', 'Preview Relative screenshot'],
+    ] as const;
+    const colors = await Promise.all(actions.map(async ([kind, name]) => {
+      const action = markdown.getByRole(kind === 'image-preview' ? 'button' : 'link', { name, exact: true });
+      await action.waitFor({ timeout: 10_000 });
+      expect(await action.getAttribute('data-link-kind'), name).toBe(kind);
+      return action.evaluate((el) => getComputedStyle(el).color);
+    }));
+    expect(new Set(colors).size).toBe(actions.length);
+    for (const name of ['Send mail', 'Section anchor']) {
+      const plain = markdown.getByText(name, { exact: true });
+      expect(await markdown.getByRole('link', { name, exact: true }).count()).toBe(0);
+      expect(await plain.evaluate((el) => {
+        const { color, cursor } = getComputedStyle(el);
+        return { kind: el.getAttribute('data-link-kind'), inheritsColor: color === getComputedStyle(el.parentElement!).color, cursor };
+      })).toEqual({ kind: null, inheritsColor: true, cursor: 'text' });
+    }
 
     const preview = win.getByRole('dialog', { name: 'Image preview', exact: true });
     const expectPreview = async (name: string, data: string) => {
@@ -106,9 +144,10 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
 
     // Clicking the image inside a file link must only preview the image, not reveal README.md.
     const activeTabs = await win.locator('.panel-tab.active').allTextContents();
-    expect(await message.locator('a.file-ref[data-file="README.md"]').count()).toBe(1);
+    const linkedImage = message.locator('a.file-ref[data-file="README.md"]').getByRole('button', { name: 'Preview Linked screenshot', exact: true });
+    expect(await linkedImage.count()).toBe(1);
     expect(await win.locator('.file-preview').count()).toBe(0);
-    await message.getByRole('button', { name: 'Preview Linked screenshot', exact: true }).click();
+    await linkedImage.click();
     await expectPreview('Linked screenshot', png);
     expect(await win.locator('.panel-tab.active').allTextContents()).toEqual(activeTabs);
     expect(await win.locator('.file-preview').count()).toBe(0);
@@ -127,7 +166,9 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await fs.mkdir(project, { recursive: true });
     await fs.mkdir(path.join(checkout, 'src', 'app', 'api', 'mcp'), { recursive: true });
     await fs.mkdir(userData, { recursive: true });
-    const body = Array.from({ length: 400 }, (_, i) => `export const line${i + 1} = ${i + 1};`).join('\n') + '\n';
+    const body = Array.from({ length: 400 }, (_, i) => i === 299
+      ? 'export const line300 = "target";'
+      : `export const line${i + 1} = ${i + 1};`).join('\n') + '\n';
     await fs.writeFile(path.join(checkout, 'src', 'hello.ts'), body);
     const toolsBody = 'export const sessionCheckoutTools = true;\n';
     await fs.writeFile(path.join(checkout, 'src', 'app', 'api', 'mcp', 'tools.ts'), toolsBody);
@@ -147,7 +188,7 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await fs.writeFile(path.join(checkout, 'src', 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
     // A zip's local file header: binary, so the panel must say so rather than decode it.
     await fs.writeFile(path.join(checkout, 'src', 'bundle.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]));
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { theme: 'system' }));
 
     const sid = 's_file_e2e';
     const session = {
@@ -203,18 +244,33 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
 
     // The preview overlays the transcript without becoming a session split or taking its active slot.
     const filePane = win.getByTestId('file-pane');
-    const editor = filePane.getByLabel('File contents', { exact: true });
+    const editor = filePane.locator('.cm-editor').getByRole('textbox', { name: 'File contents', exact: true });
     const previewPath = filePane.locator('.file-preview-path');
     const closePreview = async () => {
       await filePane.getByRole('button', { name: 'Close preview', exact: true }).click();
       await filePane.waitFor({ state: 'detached', timeout: 10_000 });
     };
-    const expectFile = async (relativePath: string, content: string) => {
-      await expect.poll(() => editor.inputValue(), { timeout: 10_000 }).toBe(content);
+    const expectPath = async (relativePath: string) => {
       expect(await previewPath.innerText()).toBe(relativePath);
       expect(await filePane.getByRole('region', { name: 'Choose a file', exact: true }).count()).toBe(0);
     };
-    await expectFile('src/hello.ts', body);
+    const expectFile = async (relativePath: string, content: string) => {
+      await expectEditorText(editor, content);
+      await expectPath(relativePath);
+    };
+    const expectHelloLine = async (lineNumber: number) => {
+      const line = editor.locator('.cm-line.cm-activeLine').filter({ hasText: new RegExp(`^export const line${lineNumber} = `) });
+      await line.waitFor({ timeout: 10_000 });
+      // CodeMirror virtualizes the document and can render lines just outside the scroll viewport.
+      await expect.poll(() => line.evaluate((el) => {
+        const scroller = el.closest('.cm-scroller')!;
+        const row = el.getBoundingClientRect();
+        const top = scroller.getBoundingClientRect().top + scroller.clientTop;
+        return row.height > 0 && row.top >= top && row.bottom <= top + scroller.clientHeight;
+      }, undefined, { timeout: 1_000 }), { timeout: 10_000 }).toBe(true);
+      await expectPath('src/hello.ts');
+    };
+    await expectHelloLine(300);
     expect(await win.getByTestId('session-panes').getByTestId('file-pane').count()).toBe(0);
     expect(await win.locator('[data-testid="session-pane"].active').count()).toBe(1);
     expect(await win.getByTestId('session-pane').isVisible()).toBe(true);
@@ -228,11 +284,25 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     expect(await previewLabel.locator(':scope > span').allTextContents()).toEqual(sessionLabel);
     const conversationColors = await pillColors(win.locator('.pane.active .header .session-label'));
     expect(await pillColors(previewLabel)).toEqual(conversationColors);
-    // The mention carried a line number, so the preview scrolled it into view instead of staying at the top.
-    await expect.poll(() => editor.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
-
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'files-01-preview.png') });
+
+    // Check the real computed colors once the TypeScript grammar has loaded. Change the System
+    // theme's color scheme while the same source editor is open, without touching transcript links.
+    const syntaxLine = editor.locator('.cm-line').filter({ hasText: /^export const line300 = "target";$/ });
+    const keyword = syntaxLine.locator('span').filter({ hasText: /^export$/ });
+    const string = syntaxLine.locator('span').filter({ hasText: /^"target"$/ });
+    const syntaxColors = () => Promise.all([keyword, string].map((token) => token.evaluate((el) => getComputedStyle(el).color)));
+    await win.emulateMedia({ colorScheme: 'light' });
+    await keyword.waitFor({ timeout: 10_000 });
+    await string.waitFor({ timeout: 10_000 });
+    const lightColors = await syntaxColors();
+    expect(lightColors[0]).not.toBe(lightColors[1]);
+    await win.emulateMedia({ colorScheme: 'dark' });
+    await expect.poll(syntaxColors, { timeout: 10_000 }).not.toEqual(lightColors);
+    const darkColors = await syntaxColors();
+    expect(darkColors[0]).not.toBe(darkColors[1]);
+    await win.emulateMedia({ colorScheme: null });
 
     // Use the keyboard to follow the covered link without closing the current preview. A missing
     // name must keep that preview and report the folder searched without IPC or realpath noise.
@@ -243,7 +313,7 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     expect(await notFound.innerText()).toContain(checkout);
     expect(await notFound.innerText()).not.toContain(project);
     expect(await win.locator('.toast', { hasText: 'Error invoking remote method' }).count()).toBe(0);
-    await expectFile('src/hello.ts', body);
+    await expectHelloLine(300);
     await closePreview();
 
     // The zip that is there opens as a binary file, with no editor or Save action.
@@ -274,7 +344,7 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     // can open is plain text, not a coloured link that does nothing.
     const links = win.locator('[data-item-id="a4"]');
     await links.getByRole('link', { name: 'the greeting', exact: true }).click();
-    await expectFile('src/hello.ts', body);
+    await expectHelloLine(12);
     expect(await links.getByRole('link').count()).toBe(1);
     expect(await links.locator('.md-link-text').innerText()).toBe('write to support');
     expect(await links.locator('a:not([href]):not([data-file])').count()).toBe(0);
@@ -321,7 +391,7 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await expect.poll(() => win.locator('.transcript.virtual').count(), { timeout: 10_000 }).toBe(1);
     expect(await win.locator('.transcript-row').count()).toBeLessThan(80);
     await match.getByRole('link', { name: 'src/hello.ts:300' }).click();
-    await expectFile('src/hello.ts', body);
+    await expectHelloLine(300);
     await closePreview();
 
     // The Files tab browses; opening the PNG previews it as a decoded picture, not editable text.
@@ -378,7 +448,12 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     const link = transcript.getByRole('link', { name: 'notes.md', exact: true });
     const panel = win.locator('.panel');
     const preview = win.getByTestId('file-pane');
-    const editor = preview.getByLabel('File contents', { exact: true });
+    const editor = preview.getByRole('textbox', { name: 'File contents', exact: true });
+    const replaceEditorText = async (text: string) => {
+      await editor.press('ControlOrMeta+a');
+      await win.keyboard.insertText(text);
+      await expectEditorText(editor, text);
+    };
     await link.waitFor();
     await panel.waitFor({ state: 'attached' });
 
@@ -388,7 +463,7 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     const closedTranscript = await transcript.boundingBox();
     expect(closedTranscript).not.toBeNull();
     await link.click();
-    await expect.poll(() => editor.inputValue(), { timeout: 10_000 }).toBe(markdownBefore);
+    await expectEditorText(editor, markdownBefore);
     expect(await transcript.boundingBox()).toEqual(closedTranscript);
     await win.keyboard.press('ControlOrMeta+j');
     await preview.waitFor({ state: 'detached' });
@@ -407,7 +482,7 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     expect(originalPanel).not.toBeNull();
 
     await markdownRow.click();
-    await expect.poll(() => editor.inputValue(), { timeout: 10_000 }).toBe(markdownBefore);
+    await expectEditorText(editor, markdownBefore);
     await editor.click(); // Moving from the Files tree into the editor must not fold Zen's drawer.
     expect(await transcript.boundingBox()).toEqual(originalTranscript);
     expect(await panel.boundingBox()).toEqual(originalPanel);
@@ -425,21 +500,21 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await heading.waitFor();
     expect(await editor.isVisible()).toBe(false);
     await preview.getByRole('button', { name: 'Show source', exact: true }).click();
-    expect(await editor.inputValue()).toBe(markdownBefore);
+    await expectEditorText(editor, markdownBefore);
 
     // Drive the real UI and read the actual files; the Electron IPC and filesystem are not mocked.
     const markdownAfter = '# Workspace notes\n\nSaved from the button.\n';
     const save = preview.getByRole('button', { name: 'Save', exact: true });
-    await editor.fill(markdownAfter);
+    await replaceEditorText(markdownAfter);
     expect(await fs.readFile(markdown, 'utf8')).toBe(markdownBefore);
     await save.click();
     await expect.poll(() => fs.readFile(markdown, 'utf8'), { timeout: 10_000 }).toBe(markdownAfter);
     await expect.poll(() => save.isDisabled()).toBe(true);
 
     await extensionlessRow.click();
-    await expect.poll(() => editor.inputValue(), { timeout: 10_000 }).toBe(licenseBefore);
+    await expectEditorText(editor, licenseBefore);
     const licenseAfter = 'Revised terms — saved from the keyboard.\n';
-    await editor.fill(licenseAfter);
+    await replaceEditorText(licenseAfter);
     expect(await fs.readFile(extensionless, 'utf8')).toBe(licenseBefore);
     await editor.press('ControlOrMeta+s');
     await expect.poll(() => fs.readFile(extensionless, 'utf8'), { timeout: 10_000 }).toBe(licenseAfter);
@@ -450,6 +525,8 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await preview.waitFor({ state: 'detached', timeout: 10_000 });
     await panel.getByRole('button', { name: 'Files', exact: true }).hover();
     await extensionlessRow.click();
-    await expect.poll(() => editor.inputValue(), { timeout: 10_000 }).toBe(licenseAfter);
+    await expectEditorText(editor, licenseAfter);
+    await markdownRow.click();
+    await expectEditorText(editor, markdownAfter);
   }, 120_000);
 });
