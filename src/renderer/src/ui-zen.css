@@ -117,8 +117,11 @@
   box-shadow: none;
   transition: width 0.2s ease 0.08s, box-shadow 0.2s ease 0.08s, background-color 0.2s ease 0.08s;
 }
+/* A confirmation anchored in the rail (archive, delete) holds it open: its transparent backdrop takes
+   the hover away, and a rail that folded shut would leave the dialog pointing at nothing. */
 :root[data-ui='zen'] .sidebar:hover,
 :root[data-ui='zen'] .sidebar:has(:focus-visible),
+:root[data-ui='zen'] .sidebar:has([data-dialog-anchor]),
 :root[data-ui='zen'] body.resizing .sidebar {
   width: var(--sidebar);
   background: var(--bg-elev);
@@ -211,7 +214,8 @@
 }
 /* Open, the list shows a thin scrollbar so a long list reads as scrollable; the closed rail stays bare. */
 :root[data-ui='zen'] .sidebar:hover .sidebar-list,
-:root[data-ui='zen'] .sidebar:has(:focus-visible) .sidebar-list {
+:root[data-ui='zen'] .sidebar:has(:focus-visible) .sidebar-list,
+:root[data-ui='zen'] .sidebar:has([data-dialog-anchor]) .sidebar-list {
   scrollbar-width: thin;
 }
 :root[data-ui='zen'] .sidebar-views {
@@ -249,7 +253,7 @@
 :root[data-ui='zen'] .sidebar-bottom .update-pill {
   margin: 4px 12px 0 14px;
 }
-:root[data-ui='zen'] .sidebar:not(:hover):not(:has(:focus-visible)) .update-pill {
+:root[data-ui='zen'] .sidebar:not(:hover):not(:has(:focus-visible)):not(:has([data-dialog-anchor])) .update-pill {
   /* Collapsed, a pending update is a dot under the gear rather than a cut-off pill. */
   width: 10px;
   height: 10px;
@@ -899,6 +903,14 @@
 :root[data-ui='zen'] .modal-backdrop {
   background: rgb(0 0 0 / 0.28);
   backdrop-filter: blur(6px);
+}
+:root[data-ui='zen'] .modal-backdrop.is-anchored {
+  background: transparent;
+  backdrop-filter: none;
+}
+/* Undimmed, the borderless dialog needs the open rail's hairline to stand off what is under it. */
+:root[data-ui='zen'] .modal.is-anchored {
+  box-shadow: 0 0 0 1px var(--border), var(--shadow);
 }
 :root[data-ui='zen'] .modal,
 :root[data-ui='zen'] .palette {
