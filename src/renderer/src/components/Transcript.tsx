@@ -1,6 +1,10 @@
 import React, { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalDecision, ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
-import { invoke, isWeb } from '../api';
+import { parseGitHubPullRequestUrl } from '../../../shared/github-pull-request';
+import { imageMimeType } from '../../../shared/image-files';
+import { invoke, isWeb, platform } from '../api';
+import { fileManagerName, fileScope } from '../file-open';
+import { workspaceRelativePath } from '../file-refs';
 import { useCanInvoke, useTranscriptCapabilities } from '../capabilities';
 import { fmtCost, fmtDuration, fmtRate, fmtStamp, fmtStampFull, fmtTokens } from '../format';
 import { installMarkdownHandlers } from '../markdown';
@@ -17,6 +21,7 @@ import { HarnessPill } from './SessionTitle';
 import { TranscriptFind } from './TranscriptFind';
 import { askConfirm, Badge, Button, Icon, Spinner } from './ui';
 import { MissionCompletion } from './mission/MissionCompletion';
+import './transcript-links.css';
 
 interface ImageLightboxState {
   images: LightboxImage[];
@@ -58,6 +63,25 @@ function pinnedPromptIndex(userChunks: number[], tops: number[], base: number, s
   }
   if (at < 0) return -1;
   return base + tops[at + 1]! <= scrollTop + 24 ? at : -1;
+}
+
+function canOpenTranscriptPullRequest(session: SessionMeta | undefined, activeId: string | null): boolean {
+  return !isWeb && !!session && !session.mission && session.id === activeId;
+}
+
+/** Mirrors revealFile's routing without reading or resolving files ahead of a click. */
+function transcriptFileKind(path: string, root: string, canRevealOutside: boolean) {
+  const target = path.trim();
+  if (!target || /^[\\/]{2}/.test(target)) return;
+  const relative = workspaceRelativePath(root, target);
+  if (relative === null) {
+    const drivePath = /^[A-Za-z]:[\\/]/.test(target);
+    const local = platform === 'win32' ? drivePath : target.startsWith('/') || (platform === 'unknown' && drivePath);
+    if (canRevealOutside && local) return 'explorer';
+    return;
+  }
+  if (relative === '' || /[\\/]$/.test(target)) return 'folder';
+  return imageMimeType(relative) ? 'image-file' : 'file';
 }
 
 /** `active` is false for a split pane the user is not working in: it keeps streaming, but window-wide keys skip it. */
@@ -203,11 +227,12 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
     const el = ref.current;
     if (!el) return;
     const openLink = (url: string) => {
-      if (!isWeb && !session.mission && useStore.getState().openPullRequestLink(session.id, url)) return;
+      const state = useStore.getState();
+      if (canOpenTranscriptPullRequest(session, state.activeId) && state.openPullRequestLink(session.id, url)) return;
       void invoke('app:openExternal', { url });
     };
-    return installMarkdownHandlers(el, openLink, caps.openFile ? openFile : undefined);
-  }, [openFile, caps.openFile, session.id, session.mission]);
+    return installMarkdownHandlers(el, openLink, !isWeb && caps.openFile ? openFile : undefined);
+  }, [openFile, caps.openFile, session]);
 
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
@@ -703,8 +728,43 @@ function AssistantMessage({ item, sessionId, showThinking, onImageExpand }: { it
   // open === null means the user has not toggled; then reasoning shows only while it is being written.
   const [open, setOpen] = useState<boolean | null>(null);
   const html = useStreamingMarkdown(item.text, item.streaming);
-  const cwd = useStore((s) => s.sessions.find((session) => session.id === sessionId)?.cwd);
+  // React must leave the hydrated DOM alone when only the active pane or link capability changes.
+  const markup = useMemo(() => ({ __html: html }), [html]);
+  const session = useStore((s) => s.sessions.find((candidate) => candidate.id === sessionId));
+  const mission = useStore((s) => session?.mission ? s.missions[session.mission.missionId] : undefined);
+  const canOpenPr = useStore((s) => canOpenTranscriptPullRequest(session, s.activeId));
+  const { openFile } = useTranscriptCapabilities();
+  const canRevealOutside = useCanInvoke('app:showInFolder');
+  const root = !isWeb && openFile && session ? fileScope(session, mission).root : undefined;
+  const cwd = session?.cwd;
   const body = useMarkdownImages(html, sessionId, cwd, onImageExpand);
+  useLayoutEffect(() => {
+    // Use only the sanitized targets, not labels or Markdown-supplied link-kind attributes.
+    // Reclassify cached HTML in place when the session or capability changes.
+    for (const el of body.current?.querySelectorAll<HTMLElement>('a[href], [data-file]') ?? []) {
+      const path = el.getAttribute('data-file');
+      const href = el.getAttribute('href');
+      const kind = path && root !== undefined ? transcriptFileKind(path, root, canRevealOutside)
+        : path === null && href && /^https?:\/\//i.test(href) ? (canOpenPr && parseGitHubPullRequestUrl(href) ? 'pr' : 'external')
+        : undefined;
+      if (kind) el.dataset.linkKind = kind;
+      else delete el.dataset.linkKind;
+      if (path && el.classList.contains('file-ref')) {
+        if (kind) {
+          el.setAttribute('role', 'link');
+          el.tabIndex = 0;
+          const line = el.getAttribute('data-line');
+          el.title = kind === 'explorer' ? `Show ${path} in ${fileManagerName()}`
+            : kind === 'folder' ? `Show ${path} in the Files panel`
+            : `Preview ${path}${line ? ` at line ${line}` : ''}`;
+        } else {
+          el.removeAttribute('role');
+          el.removeAttribute('tabindex');
+          el.removeAttribute('title');
+        }
+      }
+    }
+  }, [body, markup, cwd, root, canOpenPr, canRevealOutside]);
   // A deep-search jump into a row that is only reasoning matched that reasoning: show it.
   const jumpHere = useStore((s) => !!s.searchJump && s.searchJump.sessionId === sessionId && s.searchJump.itemId === item.id);
   const proseless = !item.text;
@@ -729,7 +789,7 @@ function AssistantMessage({ item, sessionId, showThinking, onImageExpand }: { it
           {expanded && <div className="thinking-body">{item.thinking}</div>}
         </div>
       )}
-      {item.text && <div key={`${sessionId}:${cwd}`} ref={body} className={`md ${item.streaming ? 'streaming' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />}
+      {item.text && <div key={`${sessionId}:${cwd}`} ref={body} className={`md ${item.streaming ? 'streaming' : ''}`} dangerouslySetInnerHTML={markup} />}
       {item.phase === 'plan' && <Badge tone="purple">plan</Badge>}
     </div>
   );

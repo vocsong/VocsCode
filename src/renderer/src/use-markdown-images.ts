@@ -85,6 +85,7 @@ export function useMarkdownImages(html: string, sessionId: string, cwd: string |
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'msg-image-btn';
+        button.dataset.linkKind = 'image-preview';
         button.setAttribute('aria-label', `Preview ${alt}`);
         button.title = 'View full image';
         button.onclick = (event) => {

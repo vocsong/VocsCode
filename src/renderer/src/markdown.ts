@@ -146,6 +146,8 @@ export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
     // Attributes the narrowed ALLOWED_URI_REGEXP would otherwise treat as URI-valued and drop:
     // none of the three is a URI, so they need the URI check waived by name.
     ADD_URI_SAFE_ATTR: ['tabindex', 'target', 'rel'],
+    // Transcript link kinds are assigned by the UI after sanitization, never supplied by Markdown.
+    FORBID_ATTR: ['data-link-kind'],
     FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input', ...(web ? ['img', 'image', 'feimage'] : [])],
     ALLOWED_URI_REGEXP: /^https?:\/\//i
   });
