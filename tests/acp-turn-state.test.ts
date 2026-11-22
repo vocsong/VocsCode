@@ -136,6 +136,7 @@ interface Harness {
 }
 
 const created: Harness[] = [];
+const tempDirs: string[] = [];
 const antigravityBin = path.join(os.tmpdir(), 'fake-agy.exe');
 const antigravityModes: acp.SessionModeState = {
   currentModeId: 'auto',
@@ -236,6 +237,7 @@ describe('acp adapter', () => {
       h.child.stdout.destroy();
       h.child.stderr.destroy();
     }
+    for (const dir of tempDirs.splice(0)) await fs.rm(dir, { recursive: true, force: true });
   });
 
   it('uses the official Antigravity account launch and resumes an existing session', async () => {
@@ -328,7 +330,10 @@ describe('acp adapter', () => {
     { mode: 'auto', kind: 'execute', command: 'sudo rm -rf /', prompted: true, outcome: 'deny' },
     { mode: 'full-auto', kind: 'execute', command: 'sudo rm -rf /', prompted: false, outcome: 'allow-once' }
   ] as const)('applies Antigravity $mode to a $kind request ($command) with one-time grants only', async ({ mode, kind, command, prompted, outcome }) => {
-    const h = makeHarness({ harness: 'antigravity', permissionMode: mode });
+    // The outside-project check follows real paths, so the project directory has to exist.
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-antigravity-tier-'));
+    tempDirs.push(cwd);
+    const h = makeHarness({ harness: 'antigravity', permissionMode: mode, cwd });
     const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'deny' }));
     h.ctx.requestApproval = decide;
     scriptBasics(h);
@@ -338,7 +343,7 @@ describe('acp adapter', () => {
     h.agent.on('session/prompt', async ({ sessionId }) => {
       const response = await h.agent.serverRequest('session/request_permission', {
         sessionId,
-        toolCall: { toolCallId: 'tool-1', kind, title: 'Tool', rawInput: command ? { command } : { path: 'a.txt' }, locations: [{ path: '/proj/a.txt' }] },
+        toolCall: { toolCallId: 'tool-1', kind, title: 'Tool', rawInput: command ? { command } : { path: 'a.txt' }, locations: [{ path: path.join(cwd, 'a.txt') }] },
         options: [
           { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
           { optionId: 'allow-once', name: 'Allow', kind: 'allow_once' },
@@ -701,5 +706,127 @@ describe('acp adapter', () => {
     h.child.emit('close', 0);
     expect(h.adapter.busy).toBe(false);
     expect(h.events.at(-1)).toEqual({ type: 'status', status: 'stopped', detail: 'Test Agent exited (0)' });
+  });
+
+  describe('tier contract for generic ACP agents', () => {
+    const vendorOptions = [
+      { optionId: 'always', name: 'Always allow', kind: 'allow_always' },
+      { optionId: 'once', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'no', name: 'Reject', kind: 'reject_once' }
+    ];
+    const ask = (h: Harness, toolCallId: string, extra: AnyRecord = {}, options: AnyRecord[] = vendorOptions) =>
+      h.agent.serverRequest('session/request_permission', {
+        sessionId: 'sess-1',
+        toolCall: { toolCallId, kind: 'execute', title: 'Run tests', rawInput: { command: 'npm test' }, ...extra },
+        options
+      });
+
+    /** A project directory holding a junction (`linked`) that leads to a sibling outside it. */
+    async function linkedProject(): Promise<{ cwd: string; elsewhere: string }> {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-acp-link-'));
+      tempDirs.push(root);
+      const cwd = path.join(root, 'project');
+      const elsewhere = path.join(root, 'elsewhere');
+      await fs.mkdir(cwd);
+      await fs.mkdir(elsewhere);
+      await fs.symlink(elsewhere, path.join(cwd, 'linked'), 'junction');
+      return { cwd, elsewhere };
+    }
+
+    it('answers an "always allow" choice with the one-time option and keeps the grant app-side', async () => {
+      const h = makeHarness({ permissionMode: 'ask' });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'always' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      await h.adapter.start();
+
+      const first = await ask(h, 'tc1');
+      expect(first.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+      expect(decide).toHaveBeenCalledTimes(1);
+      // The card offers the vendor's "always" as a session grant, not a persistent rule.
+      expect(decide.mock.calls[0][0].options.find((o) => o.id === 'always')).toMatchObject({ kind: 'allow_session', label: 'Allow for session' });
+
+      // The same kind is now allowed app-side, and still answered one-time.
+      const second = await ask(h, 'tc2');
+      expect(second.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+      expect(decide).toHaveBeenCalledTimes(1);
+      // A dangerous command is never covered by the session grant.
+      const dangerous = await ask(h, 'tc3', { rawInput: { command: 'sudo rm -rf /' } });
+      expect(decide).toHaveBeenCalledTimes(2);
+      expect(dangerous.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+    });
+
+    it('forwards the chosen "always" option only when the agent offered no one-time option', async () => {
+      const h = makeHarness({ permissionMode: 'ask' });
+      h.ctx.requestApproval = vi.fn(async () => ({ optionId: 'always' }));
+      scriptBasics(h);
+      await h.adapter.start();
+      const res = await ask(h, 'tc1', {}, [vendorOptions[0], vendorOptions[2]]);
+      expect(res.result).toEqual({ outcome: { outcome: 'selected', optionId: 'always' } });
+    });
+
+    it('clears a session grant on a tier change so the next request prompts again', async () => {
+      const h = makeHarness({ permissionMode: 'ask' });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'always' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      await h.adapter.start();
+      await ask(h, 'tc1');
+      await ask(h, 'tc2');
+      expect(decide).toHaveBeenCalledTimes(1);
+
+      h.meta.config.permissionMode = 'accept-edits';
+      await h.adapter.setPermissionMode('accept-edits');
+      decide.mockImplementation(async () => ({ optionId: 'no' }));
+      const after = await ask(h, 'tc3');
+      expect(decide).toHaveBeenCalledTimes(2);
+      expect(after.result).toEqual({ outcome: { outcome: 'selected', optionId: 'no' } });
+    });
+
+    it('answers allow_once in Full access even when the agent lists "always" first', async () => {
+      const h = makeHarness({ permissionMode: 'full-auto' });
+      scriptBasics(h);
+      await h.adapter.start();
+      const res = await ask(h, 'tc1', { rawInput: { command: 'sudo rm -rf /' } });
+      expect(res.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+      expect(h.approvals).toHaveLength(0);
+    });
+
+    it('asks in Auto for a tool location that leads out of the project through a link', async () => {
+      const { cwd } = await linkedProject();
+      const h = makeHarness({ permissionMode: 'auto', cwd });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'no' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      await h.adapter.start();
+
+      const inside = await ask(h, 'tc1', { kind: 'edit', rawInput: {}, locations: [{ path: path.join(cwd, 'a.txt') }] });
+      expect(inside.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+      expect(decide).not.toHaveBeenCalled();
+
+      const linked = await ask(h, 'tc2', { kind: 'edit', rawInput: {}, locations: [{ path: path.join(cwd, 'linked', 'a.txt') }] });
+      expect(decide).toHaveBeenCalledTimes(1);
+      expect(decide.mock.calls[0][0].description).toMatch(/outside/i);
+      expect(linked.result).toEqual({ outcome: { outcome: 'selected', optionId: 'no' } });
+    });
+
+    it('asks in Auto before fs/write_text_file writes through a link that leaves the project', async () => {
+      const { cwd, elsewhere } = await linkedProject();
+      const h = makeHarness({ permissionMode: 'auto', cwd });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'deny' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      await h.adapter.start();
+
+      const inside = await h.agent.serverRequest('fs/write_text_file', { sessionId: 'sess-1', path: path.join(cwd, 'in.txt'), content: 'in' });
+      expect(inside.error).toBeUndefined();
+      expect(await fs.readFile(path.join(cwd, 'in.txt'), 'utf8')).toBe('in');
+      expect(decide).not.toHaveBeenCalled();
+
+      const escaped = await h.agent.serverRequest('fs/write_text_file', { sessionId: 'sess-1', path: path.join(cwd, 'linked', 'out.txt'), content: 'out' });
+      expect(decide).toHaveBeenCalledTimes(1);
+      expect(escaped.error).toBeDefined();
+      await expect(fs.stat(path.join(elsewhere, 'out.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
   });
 });

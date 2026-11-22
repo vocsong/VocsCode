@@ -2,14 +2,21 @@
  * Offline tests for the Codex app-server approval handlers. The legacy applyPatchApproval request
  * must not auto-approve patches that write outside the workspace (issue #125).
  */
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
 import type { ApprovalDecision, PermissionMode, SessionEvent } from '../src/shared/types';
 import { deferred } from '../src/main/util/async';
 
-const ROOT = path.resolve(path.sep, 'tmp', 'vocs-codex-approvals');
+// A real directory: outside-project checks follow real paths, and an unresolvable project root
+// counts as outside.
+const BASE = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vocs-codex-approvals-')));
+const ROOT = path.join(BASE, 'project');
+fs.mkdirSync(ROOT);
+afterAll(() => fs.rmSync(BASE, { recursive: true, force: true }));
 
 type ApprovalHandler = (params: unknown) => Promise<unknown>;
 

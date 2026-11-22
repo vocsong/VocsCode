@@ -376,6 +376,21 @@ it('inherits project defaults and rejects unapproved creation modes rather than 
   expect(f.journal.snapshot().operations.map((op) => op.state)).toEqual(['succeeded', 'failed']);
 });
 
+it('creates a remote Cursor session in a tier Cursor offers, never an unsandboxed Ask', async () => {
+  const f = await fixture();
+  f.settings.defaultHarness = 'cursor';
+  await f.service.grant({ ...f.grant, harnesses: ['cursor'], permissionModes: ['ask', 'plan'] });
+  const { sessionId: _id, text: _text, ...params } = f.params;
+  await f.service.handle(f.principal, { method: 'sessions.create', params }); await f.service.settle();
+  expect(f.createControlled).toHaveBeenCalledTimes(1);
+  expect(f.createControlled.mock.calls[0]).toEqual([{ config: expect.objectContaining({ harness: 'cursor', permissionMode: 'plan' }) }, expect.any(String), await fs.realpath(f.project)]);
+  // A grant that only allows the requested Ask no longer matches the tier Cursor would run.
+  await f.service.grant({ ...f.grant, harnesses: ['cursor'], permissionModes: ['ask'] });
+  await f.service.handle(f.principal, { method: 'sessions.create', params: { ...params, idempotencyKey: 'ask-only' } }); await f.service.settle();
+  expect(f.createControlled).toHaveBeenCalledTimes(1);
+  expect(f.journal.snapshot().operations.map((op) => op.state)).toEqual(['succeeded', 'failed']);
+});
+
 it('persists authority only after a successful write and fails closed on corrupt journal reads', async () => {
   const f = await fixture();
   let fail = false;

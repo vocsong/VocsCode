@@ -1228,6 +1228,11 @@ export interface HarnessCapabilities {
   systemPrompt: boolean;
   /** Which app-level permission modes are meaningful. */
   permissionModes: PermissionMode[];
+  /**
+   * Where this harness can only approximate a tier, what differs from the tier's Vocs Code meaning.
+   * Shown beside the tier wherever it is picked.
+   */
+  permissionModeNotes?: Partial<Record<PermissionMode, string>>;
   /** Whether model selection is provider-scoped (native) or harness-provided list. */
   modelSource: 'harness' | 'providers' | 'acp-config';
 }
