@@ -1,6 +1,7 @@
 [
   "tests/test-inventory.test.ts",
   "tests/ci-workflow.test.ts",
+  "tests/test-changed.test.ts",
   "tests/release-artifacts.test.ts",
   "tests/release-publish.test.ts",
   "tests/update-script.test.ts",
