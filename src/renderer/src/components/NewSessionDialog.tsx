@@ -52,6 +52,8 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const [modelsLoading, setModelsLoading] = useState(!!projectRoot);
   const [modelsError, setModelsError] = useState<string | undefined>();
   const [modelRefresh, setModelRefresh] = useState(0);
+  // Set by Recheck and consumed by the next discovery, so only that one bypasses main's cache.
+  const forceModelRefresh = useRef(false);
   const onboardingOpen = useStore((s) => s.onboardingOpen);
   const previousSetupOpen = useRef(onboardingOpen);
   useEffect(() => {
@@ -182,7 +184,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
     if (!projectRoot) return;
     // Publish the same discovery to existing sessions; opening this dialog must not leave their
     // composer pickers on an older, private snapshot.
-    useStore.getState().refreshModelCatalog(harness, { acpAgent, projectRoot })
+    // Main serves a cached catalog for a week; only the Recheck button rediscovers.
+    const refresh = forceModelRefresh.current;
+    forceModelRefresh.current = false;
+    useStore.getState().refreshModelCatalog(harness, { acpAgent, projectRoot, ...(refresh ? { refresh } : {}) })
       .then((r) => {
         if (cancelled) return;
         setModels(r.models);
@@ -426,7 +431,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
           <section className="ns-col">
             <div className="ns-model-heading">
               <span className="field-label">Model</span>
-              <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
+              <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { forceModelRefresh.current = true; setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
             </div>
             {modelsError && !modelsAfterStart && <p className="muted small ns-model-notice">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
             <ModelPicker
