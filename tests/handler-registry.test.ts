@@ -154,6 +154,24 @@ describe('handler registry', () => {
     expect(list).not.toHaveBeenCalled();
   });
 
+  it('validates the Housekeep override before scanning and accepts it only with a new preview', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list').mockReturnValue([]);
+    for (const recentDaysOverride of [null, '3', -1, 1.5, 3651]) {
+      await expect(registry.invoke('housekeep:preview', { protectedIds: [], recentDaysOverride }, 'desktop')).rejects.toThrow();
+    }
+    expect(list).not.toHaveBeenCalled();
+    const preview = await registry.invoke('housekeep:preview', { protectedIds: [], recentDaysOverride: 3 }, 'desktop') as { id: string; recentDays: number };
+    expect(preview.recentDays).toBe(3);
+    for (const [channel, payload] of [
+      ['housekeep:assess', { previewId: preview.id }],
+      ['housekeep:apply', { previewId: preview.id, ids: ['s_test'], protectedIds: [] }]
+    ] as const) {
+      await expect(registry.invoke(channel, { ...payload, recentDaysOverride: 0 }, 'desktop')).rejects.toThrow(/Unrecognized key/);
+    }
+    expect(deps.settings.get().housekeepRecentDays).toBe(7);
+  });
+
   it('keeps all account channels local-only and accepts no endpoint/credential configuration', async () => {
     const snapshot = { realm: 'staging', status: 'signed_out', refreshing: false, revision: 0, connections: [] } as const;
     const account = { get: vi.fn(() => snapshot), signIn: vi.fn(async () => snapshot), cancel: vi.fn(() => snapshot), signOut: vi.fn(async () => snapshot), refresh: vi.fn(async () => snapshot), dispose: vi.fn() };

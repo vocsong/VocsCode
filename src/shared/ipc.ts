@@ -328,7 +328,7 @@ export interface IpcContract {
   'sessions:label': [{ id: string; label?: string }, SessionMeta];
   'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean; forceWorktree?: boolean }, SessionMeta];
   /** Local desktop only; review first, then apply a one-use preview. */
-  'housekeep:preview': [{ protectedIds: string[] }, HousekeepPreview];
+  'housekeep:preview': [{ protectedIds: string[]; recentDaysOverride?: number }, HousekeepPreview];
   'housekeep:assess': [{ previewId: string }, HousekeepPreview];
   'housekeep:apply': [{ previewId: string; ids: string[]; protectedIds: string[] }, HousekeepOutcome[]];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
