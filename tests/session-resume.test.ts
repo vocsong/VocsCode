@@ -26,7 +26,7 @@ import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
 import { PiAdapter } from '../src/main/harness/pi';
 import { ClaudeAdapter } from '../src/main/harness/claude';
 import { NativeAdapter } from '../src/main/harness/native';
-import { deferred } from '../src/main/util/async';
+import { deferred, withTimeout } from '../src/main/util/async';
 
 type AnyRecord = Record<string, any>;
 
@@ -34,7 +34,8 @@ const mocks = vi.hoisted(() => ({
   spawnChildren: [] as AnyRecord[],
   spawnCalls: [] as { file: string; args: string[]; opts: AnyRecord }[],
   queryCalls: [] as AnyRecord[],
-  adapterCalls: [] as { id: HarnessId; ctx: HarnessContext }[]
+  adapterCalls: [] as { id: HarnessId; ctx: HarnessContext }[],
+  useRealPi: false
 }));
 
 vi.mock('../src/main/harness/spawn', () => ({
@@ -53,9 +54,11 @@ vi.mock('../src/main/harness/spawn', () => ({
 vi.mock('../src/main/harness/registry', () => ({
   createAdapter: (id: HarnessId, ctx: HarnessContext) => {
     mocks.adapterCalls.push({ id, ctx });
-    return makeStubAdapter();
+    return id === 'pi' && mocks.useRealPi ? new PiAdapter(ctx) : makeStubAdapter();
   }
 }));
+
+vi.mock('../src/main/pi-agents', () => ({ installPiAgentOverrides: vi.fn() }));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (args: AnyRecord) => {
@@ -168,7 +171,7 @@ class FakePiServer {
   private buf = '';
   private readonly handlers = new Map<string, (params: AnyRecord) => unknown>();
 
-  constructor(private readonly child: AnyRecord, private readonly ready = true) {
+  constructor(private readonly child: AnyRecord, private readonly ready = true, private readonly unanswered?: string) {
     child.stdin.on('data', (d: Buffer) => this.onData(d.toString('utf8')));
   }
 
@@ -192,7 +195,7 @@ class FakePiServer {
             this.child.stdout.write(JSON.stringify({ type: 'extension_ui_request', method: 'notify', id: capability, message: 'VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce, capability, ready: true }) }) + '\n');
           }
         }
-        this.child.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: true, data }) + '\n');
+        if (msg.type !== this.unanswered) this.child.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: true, data }) + '\n');
       }
       idx = this.buf.indexOf('\n');
     }
@@ -482,9 +485,121 @@ describe('codex app-server resume', () => {
 });
 
 describe('pi resume seam', () => {
+  const runtime = { resolve: () => ({ path: 'C:/fake/pi.cmd', source: 'app-runtime' }), resource: () => 'C:/fake/extension.ts' };
+
   beforeEach(() => {
     mocks.spawnChildren.length = 0;
     mocks.spawnCalls.length = 0;
+  });
+
+  it.each(['missing', 'not a directory', 'present'] as const)('rejects a resumed send on spawn error without waiting for close (session folder %s)', async (folder) => {
+    const home = nextSessionDir();
+    const store = new SessionStore(home);
+    await store.load();
+    const meta = persistedMeta('pi', REFS_BY_HARNESS.pi);
+    meta.config.projectRoot = home;
+    meta.cwd = path.join(home, 'worktree');
+    if (folder === 'present') await fs.mkdir(meta.cwd, { recursive: true });
+    else if (folder === 'not a directory') await fs.writeFile(meta.cwd, 'not a checkout');
+    await store.upsert(meta);
+    const manager = new SessionManager({ ...makeManagerDeps(store), runtime: runtime as never });
+    const child = makeFakeChild();
+    child.pid = undefined;
+    const launchError = Object.assign(new Error('spawn cmd.exe ENOENT'), { code: 'ENOENT' });
+    const commands: string[] = [];
+    child.stdin.on('data', (data: Buffer) => {
+      commands.push(JSON.parse(data.toString()).type);
+      queueMicrotask(() => child.emit('error', launchError));
+    });
+    mocks.spawnChildren.push(child);
+    mocks.useRealPi = true;
+    try {
+      const detail = folder === 'present' ? 'pi failed to start: spawn cmd.exe ENOENT' : `session folder is missing or not a directory: ${meta.cwd}`;
+      await expect(withTimeout(manager.send(meta.id, { text: 'Do not dispatch' }), 4_000, 'send after spawn error')).rejects.toThrow(detail);
+      expect(commands).toEqual(['get_state']);
+      expect(manager.get(meta.id)).toMatchObject({ status: 'error', lastError: expect.stringContaining(detail), cwd: meta.cwd, harnessRef: meta.harnessRef });
+      const errors = (await manager.transcript(meta.id)).filter((item) => item.kind === 'info' && item.level === 'error');
+      expect(errors).toEqual([expect.objectContaining({ text: expect.stringContaining(detail) })]);
+
+      if (folder === 'missing') await fs.mkdir(meta.cwd);
+      else if (folder === 'not a directory') { await fs.unlink(meta.cwd); await fs.mkdir(meta.cwd); }
+      const replacement = makeFakeChild();
+      new FakePiServer(replacement).respond('get_available_models', { models: [] });
+      const prompts: string[] = [];
+      replacement.stdin.on('data', (data: Buffer) => {
+        const { type, message } = JSON.parse(data.toString());
+        if (type === 'prompt') prompts.push(message);
+      });
+      mocks.spawnChildren.push(replacement);
+      await manager.send(meta.id, { text: 'Retry on the same worktree' });
+      child.emit('close', -4058);
+      expect(prompts).toEqual(['Retry on the same worktree']);
+      expect(manager.get(meta.id)?.status).toBe('running');
+      expect(mocks.spawnCalls.map(({ opts }) => opts.cwd)).toEqual([meta.cwd, meta.cwd]);
+    } finally {
+      mocks.useRealPi = false;
+      await manager.stopAll();
+    }
+  });
+
+  it('unblocks a send waiting on get_state when explicitly stopped, without a child close', async () => {
+    const home = nextSessionDir();
+    const store = new SessionStore(home);
+    await store.load();
+    const meta = persistedMeta('pi', REFS_BY_HARNESS.pi);
+    meta.cwd = meta.config.projectRoot = home;
+    await store.upsert(meta);
+    const manager = new SessionManager({ ...makeManagerDeps(store), runtime: runtime as never });
+    const child = makeFakeChild();
+    const stateRequested = deferred<void>();
+    const commands: string[] = [];
+    child.stdin.on('data', (data: Buffer) => {
+      const { type } = JSON.parse(data.toString());
+      commands.push(type);
+      if (type === 'get_state') stateRequested.resolve();
+    });
+    mocks.spawnChildren.push(child);
+    mocks.useRealPi = true;
+    try {
+      const send = manager.send(meta.id, { text: 'Do not dispatch' });
+      void send.catch(() => undefined);
+      await withTimeout(stateRequested.promise, 4_000, 'get_state dispatch');
+      await withTimeout(manager.stop(meta.id), 4_000, 'stop with an unanswered get_state');
+      await expect(withTimeout(send, 4_000, 'canceled send')).rejects.toThrow('Pi stopped before its RPC requests completed.');
+      expect(commands).toEqual(['get_state']);
+      expect(manager.get(meta.id)?.status).toBe('idle');
+    } finally {
+      mocks.useRealPi = false;
+      await manager.stopAll();
+    }
+  });
+
+  it('rejects a ready Pi RPC on child error without publishing stopped on later close', async () => {
+    const h = makeAdapterCtx({ harness: 'pi', runtime });
+    const child = makeFakeChild();
+    new FakePiServer(child, true, 'prompt').respond('get_available_models', { models: [] });
+    const promptRequested = deferred<void>();
+    child.stdin.on('data', (data: Buffer) => {
+      if (JSON.parse(data.toString()).type === 'prompt') promptRequested.resolve();
+    });
+    mocks.spawnChildren.push(child);
+    const adapter = new PiAdapter(h.ctx);
+    try {
+      await adapter.start();
+      const pending = adapter.send({ text: 'Wait for transport failure' });
+      void pending.catch(() => undefined);
+      await withTimeout(promptRequested.promise, 4_000, 'prompt dispatch');
+      child.emit('error', new Error('RPC transport failed'));
+      const message = 'pi process failed: RPC transport failed';
+      await expect(withTimeout(pending, 4_000, 'ready Pi RPC')).rejects.toThrow(message);
+      const fatal = { type: 'error', message, fatal: true };
+      expect(h.events).toContainEqual(fatal);
+      child.emit('close', 1);
+      expect(h.events.filter((e) => e.type === 'error')).toEqual([fatal]);
+      expect(h.events.filter((e) => e.type === 'status').map((e) => e.status)).toEqual(['idle', 'running']);
+    } finally {
+      await adapter.dispose();
+    }
   });
 
   it('refuses a runtime without the required extension handshake before sending any prompt', async () => {
