@@ -8,6 +8,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { Transcript, UserMessage } from '../src/renderer/src/components/Transcript';
 import { TranscriptCapabilitiesProvider } from '../src/renderer/src/capabilities';
 import { useStore } from '../src/renderer/src/store';
+import { fmtStamp, fmtStampFull } from '../src/renderer/src/format';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
 const scrollPos = new WeakMap<Element, number>();
@@ -54,9 +55,13 @@ describe('user message actions', () => {
   it('shows its timestamp, copies its text, and opens an edit control', async () => {
     const writeText = vi.fn(async () => undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
-    render(<UserMessage sessionId="s1" item={{ id: 'u1', kind: 'user', ts: new Date('2026-03-14T15:15:00').getTime(), text: 'Message to copy' }} />);
+    const ts = new Date('2026-03-14T15:15:00').getTime();
+    const { container } = render(<UserMessage sessionId="s1" item={{ id: 'u1', kind: 'user', ts, text: 'Message to copy' }} />);
 
-    expect(screen.getByText(/Saturday 3:15 (AM|PM|am|pm)/)).toBeTruthy();
+    const time = container.querySelector('.msg-user-meta time.stamp');
+    expect(time?.getAttribute('datetime')).toBe(new Date(ts).toISOString());
+    expect(time?.textContent).toBe(fmtStamp(ts));
+    expect(time?.getAttribute('title')).toBe(fmtStampFull(ts));
     fireEvent.click(screen.getByRole('button', { name: 'Copy message' }));
     expect(writeText).toHaveBeenCalledWith('Message to copy');
     fireEvent.click(screen.getByRole('button', { name: 'Edit and rerun message' }));
