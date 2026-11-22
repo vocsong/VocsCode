@@ -264,6 +264,34 @@ describe('cursor harness adapter', () => {
     }
   });
 
+  it('applies a permission change made during a turn to the next turn', async () => {
+    const { ctx, meta } = makeCtx();
+    meta.config.permissionMode = 'full-auto';
+    const a = new CursorAdapter(ctx);
+    await a.start();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    scriptRuns([makeRun([textMsg('first')], { gate }), makeRun([textMsg('second')])]);
+    await a.send({ text: 'one' });
+    expect(a.busy).toBe(true);
+
+    meta.config.permissionMode = 'plan';
+    await a.setPermissionMode('plan');
+    release();
+    await vi.waitFor(() => expect(a.busy).toBe(false));
+    await a.send({ text: 'two' });
+    await vi.waitFor(() => expect(sdk.sends).toHaveLength(2));
+    await vi.waitFor(() => expect(a.busy).toBe(false));
+
+    // The first turn ran unsandboxed; the second must not reuse that agent handle.
+    expect(sdk.sends.map((s) => s.agentId)).toEqual(['local-agent-1', 'resumed-1']);
+    expect(sdk.resumes).toHaveLength(1);
+    expect(sdk.resumes[0].opts.mode).toBe('plan');
+    expect(sdk.resumes[0].opts.tools).toEqual(expect.arrayContaining(['read', 'grep', 'glob']));
+    expect(sdk.resumes[0].opts.tools).not.toEqual(expect.arrayContaining(['shell', 'edit']));
+    await a.dispose();
+  });
+
   it('normalizes assistant text, thinking, tool calls and usage into SessionEvents', async () => {
     const { ctx, events, items } = makeCtx();
     const a = new CursorAdapter(ctx);

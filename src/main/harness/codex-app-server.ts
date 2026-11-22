@@ -12,7 +12,7 @@ import { codexProviderModels } from '../models/codex-catalog';
 import { toCodex } from '../mcp/effective';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { applyCodexMcpSuppression, getCodexMcpServers } from './codex-mcp-config';
-import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
+import { gateAction, OPTIONS_ALLOW_DENY, requiresPathApproval } from './permissions';
 import { questionAnswerWithNote } from './question-answers';
 import { spawnTool } from './spawn';
 import { fastModePricing } from './native/fast-mode-pricing';
@@ -64,19 +64,28 @@ type ThreadItem =
   | { type: string; id: string; [k: string]: unknown };
 
 /**
- * Codex approval policies: `untrusted` asks for every command except known read-only ones
- * (what our Ask / Accept-edits modes promise), `on-request` asks only when the sandboxed run
- * needs escalation (our Auto), `never` for full access.
+ * Codex approval policies. Below Full every tier uses `untrusted`: Codex runs only its known-safe
+ * read-only commands unasked and sends an approval request for every other command and every
+ * patch, so the app's tier gate (`gateAction`) decides each one. `on-request` is never used: under
+ * it Codex runs any command that stays inside the sandbox without asking, which would let a
+ * dangerous command run silently in Auto. `never` is Full access.
  */
 function approvalPolicyFor(mode: PermissionMode): AskForApproval {
-  switch (mode) {
-    case 'full-auto':
-      return 'never';
-    case 'auto':
-      return 'on-request';
-    default:
-      return 'untrusted';
-  }
+  return mode === 'full-auto' ? 'never' : 'untrusted';
+}
+
+/** Session grants are keyed per tool, never per command line: one for shell, one for patches. */
+type SessionGrant = 'command' | 'file_change';
+
+/**
+ * True when a command approval asks to run outside the sandbox. Codex attaches a reason only to
+ * those: the model's `justification` is accepted only with `sandbox_permissions:
+ * "require_escalated"`, and a sandbox-denied run is retried with "Command failed; retry without
+ * sandbox?". A managed-network approval carries its own context and stays an ordinary command.
+ * Escaping the sandbox reaches beyond the project, so the gate treats it as an outside action.
+ */
+function requestsUnsandboxedRun(n: { reason?: string | null; networkApprovalContext?: unknown }): boolean {
+  return !n.networkApprovalContext && !!n.reason?.trim();
 }
 
 function sandboxPolicyFor(mode: PermissionMode, cwd: string): SandboxPolicy {
@@ -112,8 +121,11 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private unknownFastCostReported = false;
   private items = new Map<string, TranscriptItem>();
   private fileChangeItems = new Map<string, FileChange[]>();
-  /** Exact command lines the user approved "for session"; Codex keeps its own per-command memory too. */
-  private sessionAllowedCommands = new Set<string>();
+  /**
+   * Tools the user allowed "for session". Kept only here: Codex is always sent a one-time accept,
+   * so no grant outlives a tier change inside Codex's own approval memory.
+   */
+  private sessionGrants = new Set<SessionGrant>();
   private queue: UserInput[] = [];
   private turnStartedAt = 0;
   private readonly usage: TurnUsageTracker;
@@ -431,47 +443,32 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   private wireServerRequests(rpc: JsonRpcStdioClient): void {
+    // Every grant goes back to Codex as a one-time accept; "allow for session" lives in sessionGrants.
     rpc.onServerRequest('item/commandExecution/requestApproval', async (p) => {
-      const n = p as { itemId: string; command?: string | null; cwd?: string | null; reason?: string | null; proposedExecpolicyAmendment?: unknown };
-      const command = n.command ?? '(command)';
-      const mode = this.ctx.permissionMode();
-      const verdict = gateAction(mode, { mutating: true, isEdit: false, command, sessionAllowed: this.sessionAllowedCommands.has(command) });
-      if (mode === 'plan') return { decision: 'decline' };
-      if (verdict === 'allow') return { decision: 'accept' };
-      const decision = await this.ctx.requestApproval({
-        kind: 'command',
-        title: 'Codex wants to run a command',
-        description: n.reason ?? undefined,
-        command,
-        cwd: n.cwd ?? this.ctx.session().cwd,
-        toolItemId: n.itemId,
-        options: OPTIONS_ALLOW_DENY
+      const n = p as { itemId: string; command?: string | null; cwd?: string | null; reason?: string | null; networkApprovalContext?: unknown };
+      const verdict = await this.approveCommand({
+        command: n.command ?? '(command)',
+        cwd: n.cwd ?? undefined,
+        reason: n.reason ?? undefined,
+        unsandboxed: requestsUnsandboxedRun(n),
+        toolItemId: n.itemId
       });
-      if (decision.optionId === 'allow') return { decision: 'accept' };
-      if (decision.optionId === 'allow_session') {
-        this.sessionAllowedCommands.add(command);
-        return { decision: 'acceptForSession' };
-      }
-      return { decision: 'decline' };
+      return { decision: verdict.allowed ? 'accept' : 'decline' };
     });
     rpc.onServerRequest('item/fileChange/requestApproval', async (p) => {
       const n = p as { itemId: string; reason?: string | null; grantRoot?: string | null };
-      const mode = this.ctx.permissionMode();
-      if (mode === 'plan') return { decision: 'decline' };
-      // A grantRoot request means the patch writes outside the sandboxed workspace: always ask below full access.
-      if (mode === 'full-auto' || ((mode === 'accept-edits' || mode === 'auto') && !n.grantRoot)) return { decision: 'accept' };
       const changes = this.fileChangeItems.get(n.itemId);
-      const decision = await this.ctx.requestApproval({
-        kind: 'file_change',
+      // The item/started notification names the patch's paths; without it the paths are unknown,
+      // and an unknown target is treated as outside the project.
+      const verdict = await this.approveFileChange({
+        paths: changes ? changes.flatMap((c) => [c.path, c.oldPath]) : undefined,
+        grantRoot: n.grantRoot ?? undefined,
         title: changes?.length ? `Apply changes to ${changes.length} file${changes.length === 1 ? '' : 's'}?` : 'Apply file changes?',
         description: n.reason ?? (n.grantRoot ? `Requests write access under ${n.grantRoot}` : undefined),
         changes,
-        toolItemId: n.itemId,
-        options: OPTIONS_ALLOW_DENY
+        toolItemId: n.itemId
       });
-      if (decision.optionId === 'allow') return { decision: 'accept' };
-      if (decision.optionId === 'allow_session') return { decision: 'acceptForSession' };
-      return { decision: 'decline' };
+      return { decision: verdict.allowed ? 'accept' : 'decline' };
     });
     rpc.onServerRequest('item/tool/requestUserInput', async (p) => {
       const n = p as { questions: { id: string; header: string; question: string; isOther: boolean; isSecret: boolean; options: { label: string; description: string }[] | null }[] };
@@ -497,46 +494,90 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     });
     rpc.onServerRequest('mcpServer/elicitation/request', async () => ({ action: 'decline', content: null, _meta: null }));
     rpc.onServerRequest('execCommandApproval', async (p) => {
-      const n = p as { command?: string[] | string; cwd?: string; reason?: string };
-      const command = Array.isArray(n.command) ? n.command.join(' ') : (n.command ?? '(command)');
-      const mode = this.ctx.permissionMode();
-      if (mode === 'plan') return { decision: { denied: { rejection: 'Plan mode' } } };
-      if (gateAction(mode, { mutating: true, isEdit: false, command, sessionAllowed: this.sessionAllowedCommands.has(command) }) === 'allow') return { decision: 'approved' };
-      const d = await this.ctx.requestApproval({ kind: 'command', title: 'Codex wants to run a command', command, cwd: n.cwd, description: n.reason, options: OPTIONS_ALLOW_DENY });
-      if (d.optionId === 'allow') return { decision: 'approved' };
-      if (d.optionId === 'allow_session') {
-        this.sessionAllowedCommands.add(command);
-        return { decision: 'approved_for_session' };
-      }
-      return { decision: { denied: { rejection: d.note || 'User declined' } } };
+      const n = p as { command?: string[] | string; cwd?: string; reason?: string | null };
+      const verdict = await this.approveCommand({
+        command: Array.isArray(n.command) ? n.command.join(' ') : (n.command ?? '(command)'),
+        cwd: n.cwd,
+        reason: n.reason ?? undefined,
+        unsandboxed: requestsUnsandboxedRun(n)
+      });
+      return { decision: verdict.allowed ? 'approved' : { denied: { rejection: verdict.rejection } } };
     });
     rpc.onServerRequest('applyPatchApproval', async (p) => {
       const n = p as { reason?: string; fileChanges?: Record<string, unknown>; grantRoot?: string | null };
-      const mode = this.ctx.permissionMode();
-      if (mode === 'plan') return { decision: { denied: { rejection: 'Plan mode' } } };
       const files = Object.keys(n.fileChanges ?? {});
       // This legacy request carries no item id, so resolve the affected paths here: the keys are
-      // the written paths and an update may also move a file to a new path. Like the fileChange
-      // handler, a patch that leaves the workspace always asks below full access.
-      const cwd = this.ctx.session().cwd;
-      const outsideWorkspace =
-        !!n.grantRoot ||
-        Object.entries(n.fileChanges ?? {}).some(([file, change]) => {
-          const move = (change as { move_path?: string | null } | null)?.move_path;
-          return isOutsideWorkspace(cwd, file, path) || (typeof move === 'string' && isOutsideWorkspace(cwd, move, path));
-        });
-      if (gateAction(mode, { mutating: true, isEdit: true, outsideWorkspace }) === 'allow') return { decision: 'approved' };
-      const d = await this.ctx.requestApproval({
-        kind: 'file_change',
+      // the written paths and an update may also move a file to a new path.
+      const moves = Object.values(n.fileChanges ?? {}).map((change) => (change as { move_path?: unknown } | null)?.move_path);
+      const verdict = await this.approveFileChange({
+        paths: [...files, ...moves.filter((m): m is string => typeof m === 'string')],
+        grantRoot: n.grantRoot ?? undefined,
         title: 'Apply file changes?',
         description: n.reason ?? (n.grantRoot ? `Requests write access under ${n.grantRoot}` : files.join(', ')),
-        changes: files.map((f) => ({ path: f, kind: 'update' as const })),
-        options: OPTIONS_ALLOW_DENY
+        changes: files.map((f) => ({ path: f, kind: 'update' as const }))
       });
-      if (d.optionId === 'allow') return { decision: 'approved' };
-      if (d.optionId === 'allow_session') return { decision: 'approved_for_session' };
-      return { decision: { denied: { rejection: d.note || 'User declined' } } };
+      return { decision: verdict.allowed ? 'approved' : { denied: { rejection: verdict.rejection } } };
     });
+  }
+
+  /** True when any target resolves outside the project once symlinks and junctions are followed. */
+  private async leavesProject(targets: (string | undefined)[]): Promise<boolean> {
+    const cwd = this.ctx.session().cwd;
+    const checks = targets.filter((t): t is string => !!t).map((t) => requiresPathApproval(cwd, t));
+    return (await Promise.all(checks)).some(Boolean);
+  }
+
+  /** The Vocs Code tier gate for one Codex shell approval; prompts only when the tier says ask. */
+  private async approveCommand(req: { command: string; cwd?: string; reason?: string; unsandboxed: boolean; toolItemId?: string }): Promise<{ allowed: boolean; rejection: string }> {
+    const mode = this.ctx.permissionMode();
+    if (mode === 'plan') return { allowed: false, rejection: 'Plan mode' };
+    const outsideWorkspace = mode !== 'full-auto' && (req.unsandboxed || (await this.leavesProject([req.cwd])));
+    const verdict = gateAction(mode, { mutating: true, isEdit: false, command: req.command, sessionAllowed: this.sessionGrants.has('command'), outsideWorkspace });
+    if (verdict === 'allow') return { allowed: true, rejection: '' };
+    if (verdict === 'deny') return { allowed: false, rejection: 'Denied by the permission mode' };
+    const decision = await this.ctx.requestApproval({
+      kind: 'command',
+      title: 'Codex wants to run a command',
+      description: req.reason,
+      command: req.command,
+      cwd: req.cwd ?? this.ctx.session().cwd,
+      toolItemId: req.toolItemId,
+      options: OPTIONS_ALLOW_DENY
+    });
+    if (decision.optionId === 'allow_session') this.sessionGrants.add('command');
+    if (decision.optionId === 'allow' || decision.optionId === 'allow_session') return { allowed: true, rejection: '' };
+    return { allowed: false, rejection: decision.note || 'User declined' };
+  }
+
+  /**
+   * The tier gate for one Codex patch. `paths` undefined means the targets are unknown, which
+   * counts as outside the project; so does a grantRoot that leaves it.
+   */
+  private async approveFileChange(req: {
+    paths: (string | undefined)[] | undefined;
+    grantRoot?: string;
+    title: string;
+    description?: string;
+    changes?: FileChange[];
+    toolItemId?: string;
+  }): Promise<{ allowed: boolean; rejection: string }> {
+    const mode = this.ctx.permissionMode();
+    if (mode === 'plan') return { allowed: false, rejection: 'Plan mode' };
+    const outsideWorkspace = mode !== 'full-auto' && (!req.paths || (await this.leavesProject([...req.paths, req.grantRoot])));
+    const verdict = gateAction(mode, { mutating: true, isEdit: true, sessionAllowed: this.sessionGrants.has('file_change'), outsideWorkspace });
+    if (verdict === 'allow') return { allowed: true, rejection: '' };
+    if (verdict === 'deny') return { allowed: false, rejection: 'Denied by the permission mode' };
+    const decision = await this.ctx.requestApproval({
+      kind: 'file_change',
+      title: req.title,
+      description: req.description,
+      changes: req.changes,
+      toolItemId: req.toolItemId,
+      options: OPTIONS_ALLOW_DENY
+    });
+    if (decision.optionId === 'allow_session') this.sessionGrants.add('file_change');
+    if (decision.optionId === 'allow' || decision.optionId === 'allow_session') return { allowed: true, rejection: '' };
+    return { allowed: false, rejection: decision.note || 'User declined' };
   }
 
   private upsertItem(item: ThreadItem, completed: boolean): void {
@@ -797,7 +838,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
     // Session grants made under a looser mode must not carry into a stricter one.
-    this.sessionAllowedCommands.clear();
+    this.sessionGrants.clear();
     if (this._busy) this.info(`Permission mode "${mode}" applies to Codex from the next turn; the running turn keeps its current sandbox.`, 'warn');
   }
 

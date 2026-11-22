@@ -1,6 +1,6 @@
 /** The option lists the desktop header and the web control sheets both render (docs/REMOTE-ACCESS.md
  *  §4), so a new permission mode or effort level appears in one place rather than two. */
-import { HARNESS_BY_ID, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../shared/harness-meta';
+import { HARNESS_BY_ID, PERMISSION_MODE_LABELS, effortOptionsFor, permissionModeHint } from '../../shared/harness-meta';
 import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, SessionMeta } from '../../shared/types';
 
 export interface SessionControlOption<T> {
@@ -32,6 +32,6 @@ export function permissionOptions(session: SessionMeta): SessionControlOption<Pe
   return HARNESS_BY_ID[session.config.harness].capabilities.permissionModes.map((mode) => ({
     value: mode,
     label: PERMISSION_MODE_LABELS[mode].label,
-    hint: PERMISSION_MODE_LABELS[mode].description
+    hint: permissionModeHint(session.config.harness, mode)
   }));
 }

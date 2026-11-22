@@ -74,7 +74,7 @@ afterEach(async () => {
   spawn.mockReset();
 });
 
-async function setup(defs: McpServerDef[], resume?: string) {
+async function setup(defs: McpServerDef[], resume?: string, mode = 'ask') {
   const cwd = await mkdtemp(path.join(tmpdir(), 'vocs-claude-memory-'));
   const cli = scriptedCli();
   const log = vi.fn();
@@ -85,15 +85,15 @@ async function setup(defs: McpServerDef[], resume?: string) {
     settings: () => ({ claude: { settingSources: ['project'] }, providers: [] }),
     mcpServers: async () => defs.map((def) => ({ def, missing: [], secretEnvKeys: [], secretHeaderKeys: [] })),
     runtime: { resolve: () => ({ path: process.execPath }) },
-    sessionDir: cwd, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined,
+    sessionDir: cwd, permissionMode: () => mode, effort: () => undefined, getApiKey: async () => undefined,
     emit, log, updateMeta: () => {}
   } as unknown as HarnessContext);
   cleanups.push(async () => { await adapter.dispose(); await rm(cwd, { recursive: true, force: true }); });
   return { adapter, cli, cwd, emit, log };
 }
 
-async function launch(defs: McpServerDef[], resume?: string) {
-  const fixture = await setup(defs, resume);
+async function launch(defs: McpServerDef[], resume?: string, mode = 'ask') {
+  const fixture = await setup(defs, resume, mode);
   await fixture.adapter.start();
   const spawned = spawn.mock.calls[0][0];
   const index = spawned.args.indexOf('--mcp-config');
@@ -161,4 +161,15 @@ it('keeps standalone memory and an unrelated server on their existing stdio and 
 
 it('does not send MCP config when there are no injected servers', async () => {
   expect((await launch([])).processMcp).toBeUndefined();
+});
+
+it('trusts the gateway memory bridge read-only tools in Plan only under the source it registered as', async () => {
+  const { adapter } = await launch([memory, other], undefined, 'plan');
+  type Use = (tool: string, input: Record<string, unknown>, opts: { signal: AbortSignal; mcpServer?: { name: string; source: string } }) => Promise<{ behavior: string }>;
+  const canUseTool = (adapter as unknown as { canUseTool: Use }).canUseTool;
+  const signal = new AbortController().signal;
+  // The bridge is an in-process SDK server, so Claude reports it as `sdk`, not `dynamic`.
+  await expect(canUseTool('mcp__vocs-memory__knowledge_search', { query: 'x' }, { signal, mcpServer: { name: 'vocs-memory', source: 'sdk' } })).resolves.toMatchObject({ behavior: 'allow' });
+  await expect(canUseTool('mcp__vocs-memory__knowledge_search', { query: 'x' }, { signal, mcpServer: { name: 'vocs-memory', source: 'dynamic' } })).resolves.toMatchObject({ behavior: 'deny' });
+  await expect(canUseTool('mcp__vocs-memory__knowledge_propose', { title: 'x' }, { signal, mcpServer: { name: 'vocs-memory', source: 'sdk' } })).resolves.toMatchObject({ behavior: 'deny' });
 });

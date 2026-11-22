@@ -370,12 +370,9 @@ export class NativeAdapter implements HarnessAdapter {
       const mode: PermissionMode = this.ctx.permissionMode();
       const command = typeof args.command === 'string' ? (args.command as string) : undefined;
       const outsideCwd = def.isEdit && typeof args.path === 'string' && await requiresPathApproval(cwd, args.path);
-      let verdict = gateAction(mode, { mutating: true, isEdit: def.isEdit, command, sessionAllowed: this.sessionAllowed.has(call.name) });
-      if (outsideCwd && mode !== 'full-auto' && verdict === 'allow') verdict = 'ask';
-      // An MCP tool from a server the app does not own is never "safe": below Full access it asks
-      // even in Auto mode, the same rule pi's gate applies to `mcp__*` tools. "Allow for session"
-      // still silences it.
-      if (mcpTool && mode !== 'full-auto' && !this.sessionAllowed.has(call.name) && verdict === 'allow') verdict = 'ask';
+      // An MCP tool that is not a built-in read-only one follows the tier like a shell command: it
+      // asks in Ask and Accept edits and runs in Auto and Full access.
+      const verdict = gateAction(mode, { mutating: true, isEdit: def.isEdit, command, outsideWorkspace: outsideCwd, sessionAllowed: this.sessionAllowed.has(call.name) });
       if (verdict === 'deny') {
         item.status = 'declined';
         item.output = PLAN_MODE_DENIAL;

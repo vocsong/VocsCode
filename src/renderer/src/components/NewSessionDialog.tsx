@@ -2,7 +2,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { branchNameFromText, branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
-import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
+import { HARNESSES, PERMISSION_MODE_LABELS, closestPermissionMode, effortOptionsFor, permissionModeHint } from '../../../shared/harness-meta';
 import { harnessNeedsSetup, harnessStatus } from '../../../shared/harness-setup';
 import { FAST_MODE_COST_WARNING, fastModeSupport } from '../../../shared/fast-mode';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
@@ -172,7 +172,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const modelsAfterStart = descriptor.capabilities.modelSource === 'acp-config';
 
   useEffect(() => {
-    if (!modes.includes(mode)) setMode(modes.includes('ask') ? 'ask' : modes[0]);
+    if (!modes.includes(mode)) setMode(closestPermissionMode(harness, mode));
   }, [harness]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -469,7 +469,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                   ))}
                 </select>
               </label>
-              <span id={permissionsHintId} className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</span>
+              <span id={permissionsHintId} className="field-hint">{permissionModeHint(harness, mode)}</span>
             </div>
             <div className="field ns-fast-mode" role="group" aria-labelledby={fastModeLabelId}>
               <span id={fastModeLabelId} className="field-label">Fast mode</span>

@@ -342,17 +342,56 @@ ACP session identifier for resume and receives context usage through `usage_upda
 The account route only accepts human-driven turns. The app goal loop, Missions and external
 controllers cannot dispatch Antigravity prompts. [Google ACP guidance](https://antigravity.google/docs/ide/extensions/acp/) · [Interactive use and quota](https://github.com/google-antigravity/antigravity-cli/issues/1493#issuecomment-6814901159)
 
-## Permission mode mapping
+## Permission tiers
 
-| Mode | Claude | Codex | Pi (extension) | ACP client policy | Native |
+Vocs Code owns the meaning of its five tiers; every harness is driven to match them. The contract
+(✅ runs, ❓ asks, ⛔ denied):
+
+| Action | Plan | Ask | Accept edits | Auto | Full access |
 | --- | --- | --- | --- | --- | --- |
-| Ask | `default` + prompt | `untrusted` (every non-read-only command asks), workspace-write | confirm bash/edit/write | prompt | prompt |
-| Accept edits | `acceptEdits` | `untrusted`, auto-accept in-workspace file changes | confirm bash only | allow in-workspace edits | allow edits |
-| Plan | `plan` | read-only sandbox, decline writes | block mutations | reject mutations | read-only tools |
-| Auto | `default` + auto-allow safe | `on-request`, workspace-write with network | confirm dangerous only | allow unless dangerous | allow unless dangerous |
-| Full access | `bypassPermissions` | `never` + danger-full-access | never ask | allow always | allow |
+| Read, search, web read | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Edits inside the project | ⛔ | ❓ | ✅ | ✅ | ✅ |
+| Shell, ordinary | ⛔ | ❓ | ❓ | ✅ | ✅ |
+| Shell, dangerous (`isDangerousCommand`) | ⛔ | ❓ | ❓ | ❓ | ✅ |
+| Anything outside the project (real path, links followed) | ⛔ | ❓ | ❓ | ❓ | ✅ |
+| Third-party MCP tools | ⛔ | ❓ | ❓ | ✅ | ✅ |
+| Vocs Code's own read-only tools (`BUILTIN_READ_ONLY_TOOLS`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping curl into a shell, …) and any write outside the project directory always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`.
+- **The tier wins over vendor settings.** An allow rule in a vendor's own settings cannot skip a
+  tier, and "Allow for session" is kept by the app: keyed per tool name, never covering a dangerous
+  command or anything outside the project, cleared on every tier change, and never handed to the
+  vendor as an "always" or "for session" rule.
+- **Vocs Code's own tools.** `src/shared/builtin-tools.ts` lists the read-only tools of the servers
+  the app ships (vocs-memory, GitNexus, CUA). Trust keys on the server's app-set provenance or its
+  reserved built-in id, never on a name or annotation a server supplies. A tool not on the list
+  follows the tier. Add a new built-in server there and every harness picks it up.
+- **One decision function.** `gateAction` and `requiresPathApproval` in
+  `src/main/harness/permissions.ts`; Pi's extension runs inside Pi and keeps pinned mirrors in
+  `resources/pi/`.
+- **Only offered tiers run.** A harness only ever runs a tier it offers
+  (`capabilities.permissionModes`). The main process refuses an explicit choice it does not offer —
+  on create, on a mode switch and from remote control — and gives an inherited one (saved defaults,
+  a cross-harness fork, a session saved before this rule) the closest stricter tier it does offer,
+  never a looser one (`closestPermissionMode` in `src/shared/harness-meta.ts`). Where a harness can
+  only approximate a tier, `capabilities.permissionModeNotes` says how, beside the tier in the picker.
+
+How each harness is driven (✓ exact, ≈ closest match, — not offered):
+
+| Harness | Plan | Ask | Accept edits | Auto | Full access |
+| --- | --- | --- | --- | --- | --- |
+| Claude | ✓ CLI `plan` + app gate | ✓ app gate on every call (`PreToolUse`, so settings allow rules cannot skip it) | ✓ | ✓ app gate | ✓ app gate allows everything; the CLI stays in `default`, so switching is live |
+| Codex app-server | ✓ read-only sandbox, every request declined | ✓ `untrusted` + app gate | ✓ | ✓ `untrusted` + app gate, workspace-write sandbox with network underneath | ✓ `never` + danger-full-access |
+| Codex exec | ✓ read-only sandbox | — | — | ≈ workspace-write sandbox; cannot ask | ✓ danger-full-access |
+| Cursor | ✓ `plan` + read-only tool allowlist | — | — | ≈ Cursor sandbox; cannot ask | ✓ sandbox off |
+| Pi | ✓ extension gate | ✓ | ✓ | ✓ | ✓ |
+| Native | ✓ mutating tools hidden | ✓ | ✓ | ✓ | ✓ |
+| Antigravity | ✓ vendor `plan` + client policy | ✓ client policy, one-time grants | ✓ | ✓ | ✓ |
+| Generic ACP | ✓ client policy | ≈ the app only sees calls the agent asks about | ≈ | ≈ | ✓ one-time grants |
+
+Known gaps: under ACP the permission request does not name the MCP tool, so Plan cannot tell
+Vocs Code's read-only tools from others and rejects both. Cursor and Codex exec have no approval
+channel, so their Auto is the vendor sandbox, where a dangerous command that stays inside the
+sandbox runs without asking.
 
 ## Security notes
 

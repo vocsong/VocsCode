@@ -6,14 +6,18 @@
  * path and forgotten on the other. No pi SDK imports: the running Pi supplies all execution code
  * and this file stays loadable by jiti and testable in plain Node.
  *
- * Modes (VOCS_CODE_PERMISSION_MODE, re-read from VOCS_CODE_MODE_FILE before each call):
- *   ask          -> confirm bash/edit/write
- *   accept-edits -> confirm bash only (and edits outside the project)
- *   plan         -> block bash/edit/write
- *   auto         -> confirm only dangerous shell commands and edits outside the project
+ * Modes (VOCS_CODE_PERMISSION_MODE, re-read from VOCS_CODE_MODE_FILE before each call), following
+ * the Vocs Code tier contract every harness matches:
+ *   ask          -> confirm shell, edits and MCP tools
+ *   accept-edits -> run in-project edits; confirm shell, MCP tools and edits outside the project
+ *   plan         -> block shell, edits and MCP tools
+ *   auto         -> run shell, in-project edits and MCP tools; confirm only dangerous shell
+ *                   commands and edits outside the project
  *   full-auto    -> never ask
  *
- * A dangerous command always prompts below full access, even after "Allow for session".
+ * The app's own read-only built-in tools (`readOnlyMcp`) run in every mode, Plan included.
+ * A dangerous command or an edit outside the project always prompts below full access, even after
+ * "Allow for session", which is keyed per tool name.
  */
 
 import path from 'node:path';
@@ -34,8 +38,11 @@ export type ApprovalChoice = (typeof APPROVAL_OPTIONS)[number];
 
 export const MUTATING = new Set(['bash', 'powershell', 'edit', 'write']);
 export const EDITS = new Set(['edit', 'write']);
-/** Tools the MCP bridge extension registers. A server's tool can do anything, so it always asks
- * unless the mode is full-auto; unlike shell commands we have no way to classify it. */
+/** Shell tools: the only ones whose `command` is classified as dangerous. */
+export const SHELL = new Set(['bash', 'powershell']);
+/** Tools the MCP bridge extension registers. A server's tool can do anything and cannot be
+ * classified, so it is gated as a whole: blocked in plan, confirmed in ask and accept-edits, run in
+ * auto and full-auto. Only the app's own read-only built-in tools are exempt. */
 export const MCP_PREFIX = 'mcp__';
 
 // Best-effort detection of obviously destructive shell commands; not exhaustive.
@@ -146,8 +153,9 @@ export interface GateInput {
   /** Tools the user already granted for this session ("Allow for session"). */
   sessionAllowed: ReadonlySet<string>;
   /**
-   * MCP tools the app itself marked read-only (its memory server). A server the app does not own
-   * can never appear here, so a third-party tool still asks below full access.
+   * MCP tools of the app's own built-in servers that are on the read-only allowlist
+   * (`mcpReadOnlyToolNames`). A server the app did not build can never appear here, so a
+   * third-party tool still follows the tier.
    */
   readOnlyMcp?: ReadonlySet<string>;
 }
@@ -164,16 +172,16 @@ export type GateDecision =
 export async function decideToolCall({ tool, input, cwd, mode, sessionAllowed, readOnlyMcp }: GateInput): Promise<GateDecision> {
   const isMcp = tool.startsWith(MCP_PREFIX);
   if (!MUTATING.has(tool) && !isMcp) return { action: 'allow' };
-  // The app's own read-only memory tools are reads: they run unprompted and survive plan mode.
+  // The app's own read-only built-in tools are reads: they run unprompted and survive plan mode.
   if (isMcp && readOnlyMcp?.has(tool)) return { action: 'allow' };
   if (mode === 'full-auto') return { action: 'allow' };
   if (mode === 'plan') return { action: 'block', reason: PLAN_REASON };
   const command = typeof input?.command === 'string' ? (input.command as string) : undefined;
-  const dangerous = !!command && isDangerous(command);
+  const dangerous = SHELL.has(tool) && !!command && isDangerous(command);
   const outside = EDITS.has(tool) && (await isOutsideCwd(cwd, input?.path));
   if (!dangerous && !outside) {
-    // auto never classifies an MCP tool as safe; it always asks below full access.
-    if (mode === 'auto' && !isMcp) return { action: 'allow' };
+    // auto runs ordinary shell, in-project edits and MCP tools alike.
+    if (mode === 'auto') return { action: 'allow' };
     if (mode === 'accept-edits' && EDITS.has(tool)) return { action: 'allow' };
     if (sessionAllowed.has(tool)) return { action: 'allow' };
   }

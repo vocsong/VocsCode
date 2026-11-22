@@ -116,6 +116,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       systemPrompt: false,
       mcp: 'inject',
       permissionModes: ['plan', 'auto', 'full-auto'],
+      permissionModeNotes: { auto: 'Closest match: sandboxed by Codex. It cannot ask, so a dangerous command that stays inside the sandbox runs without asking.' },
       modelSource: 'harness'
     }
   },
@@ -144,6 +145,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       systemPrompt: false,
       mcp: 'inherit',
       permissionModes: ['plan', 'auto', 'full-auto'],
+      permissionModeNotes: { auto: 'Closest match: sandboxed by Cursor. It cannot ask, so a dangerous command that stays inside the sandbox runs without asking.' },
       modelSource: 'harness'
     }
   },
@@ -199,6 +201,11 @@ export const HARNESSES: HarnessDescriptor[] = [
       systemPrompt: false,
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
+      permissionModeNotes: {
+        ask: 'Closest match: Vocs Code only sees the tool calls the agent asks about.',
+        'accept-edits': 'Closest match: Vocs Code only sees the tool calls the agent asks about.',
+        auto: 'Closest match: Vocs Code only sees the tool calls the agent asks about.'
+      },
       modelSource: 'acp-config'
     }
   },
@@ -240,29 +247,64 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, { label: string; sho
   ask: {
     label: 'Ask before acting',
     short: 'Ask',
-    description: 'Approve commands and file changes before they run.'
+    description: 'Approve file changes, commands and MCP tools before they run.'
   },
   'accept-edits': {
     label: 'Accept edits',
     short: 'Edits',
-    description: 'File edits apply automatically; shell commands still ask.'
+    description: 'File edits in the project apply automatically; commands and MCP tools still ask.'
   },
   plan: {
     label: 'Plan mode',
     short: 'Plan',
-    description: 'Read-only exploration and planning. No mutations.'
+    description: 'Read-only exploration and planning. Nothing is changed.'
   },
   auto: {
     label: 'Auto',
     short: 'Auto',
-    description: 'Run inside the harness sandbox; ask only on escalation or failure.'
+    description: 'Edits, commands and MCP tools run; dangerous commands and anything outside the project ask.'
   },
   'full-auto': {
     label: 'Full access',
     short: 'Full',
-    description: 'No prompts, no sandbox. Use only in a disposable environment.'
+    description: 'Nothing asks. Use only in a disposable environment.'
   }
 };
+
+/** What a tier means on this harness: the tier's description, or the harness's note where it can only approximate it. */
+export function permissionModeHint(harness: HarnessId, mode: PermissionMode): string {
+  return HARNESS_BY_ID[harness].capabilities.permissionModeNotes?.[mode] ?? PERMISSION_MODE_LABELS[mode].description;
+}
+
+/** The Vocs Code permission tiers from most to least restrictive. */
+export const PERMISSION_TIER_ORDER: readonly PermissionMode[] = ['plan', 'ask', 'accept-edits', 'auto', 'full-auto'];
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return typeof value === 'string' && (PERMISSION_TIER_ORDER as readonly string[]).includes(value);
+}
+
+/**
+ * The tier a harness actually runs for a requested one: the request itself when the harness offers
+ * it, otherwise the closest offered tier that is stricter — never a looser one. Cursor and Codex
+ * exec cannot ask, so Ask and Accept edits become Plan there rather than running unprompted.
+ */
+export function closestPermissionMode(harness: HarnessId, mode: PermissionMode): PermissionMode {
+  const offered = HARNESS_BY_ID[harness].capabilities.permissionModes;
+  if (offered.includes(mode)) return mode;
+  for (let i = PERMISSION_TIER_ORDER.indexOf(mode) - 1; i >= 0; i--) {
+    if (offered.includes(PERMISSION_TIER_ORDER[i])) return PERMISSION_TIER_ORDER[i];
+  }
+  return 'plan';
+}
+
+/** Throws unless the harness offers the tier; for explicit user or controller choices. */
+export function assertPermissionModeOffered(harness: HarnessId, mode: unknown): asserts mode is PermissionMode {
+  const descriptor = HARNESS_BY_ID[harness];
+  if (!isPermissionMode(mode) || !descriptor.capabilities.permissionModes.includes(mode)) {
+    const offered = descriptor.capabilities.permissionModes.map((m) => PERMISSION_MODE_LABELS[m].label).join(', ');
+    throw new Error(`${descriptor.name} does not offer that permission mode. Choose one of: ${offered}.`);
+  }
+}
 
 export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
