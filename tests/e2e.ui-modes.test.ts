@@ -8,8 +8,8 @@
  * - nothing is lost on a switch: the open session, its unsent draft and the open side panel stay;
  * - Zen still works: a rail dot opens its session whether the rail is open or closed, and the
  *   composer's controls wait for the pointer while Send never hides;
- * - a confirmation asked from the rail (archiving a worktree session) opens at its button and holds
- *   the rail open until it is answered;
+ * - a confirmation asked from the rail (archiving a worktree session) opens at its button, holds
+ *   the rail open, and focuses the action so Enter or Space can confirm it;
  * - the side panel is one rail of icons on the right whose drawer slides out on hover or a peek and
  *   shows one view at a time, and either side pins open (the column moves aside) across a restart;
  * - every message, thought and step carries its time: always on in Standard, and in Zen only on
@@ -643,15 +643,15 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     expect(await dotX()).toBe(restingDot);
   }, 120_000);
 
-  it('asks to archive a worktree session at its button in Zen’s rail, holding the rail open until answered', async ({ onTestFinished }) => {
+  it.for(['Enter', 'Space'])('keeps the archive confirmation at its rail button and lets %s confirm it', { timeout: 120_000 }, async (key, { onTestFinished }) => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-archive-'));
     onTestFinished(() => fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 }));
     const { userData, project } = await seed(tmp, 'zen');
-    // The second session works on a branch of its own: archiving it asks before removing the worktree.
-    git(project, 'branch', 'agent/flaky-auth');
+    const worktree = path.join(tmp, 'worktree');
+    git(project, 'worktree', 'add', '-b', 'agent/flaky-auth', worktree);
     const file = path.join(userData, 'sessions.json');
     const sessions = JSON.parse(await fs.readFile(file, 'utf8')) as SessionMeta[];
-    await fs.writeFile(file, JSON.stringify(sessions.map((s) => (s.id === SECOND ? { ...s, worktreeBranch: 'agent/flaky-auth' } : s))));
+    await fs.writeFile(file, JSON.stringify(sessions.map((s) => (s.id === SECOND ? { ...s, cwd: worktree, worktreeBranch: 'agent/flaky-auth' } : s))));
     const win = await launch(userData);
     await expect.poll(() => uiMode(win)).toBe('zen');
     const railWidth = () => rect(win, '.sidebar').then((r) => r.width);
@@ -665,6 +665,8 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await archive.click();
     const dialog = win.locator('.modal[role="dialog"]');
     await dialog.getByText('Remove the worktree for "Fix flaky auth refresh test"?').waitFor();
+    const confirm = dialog.getByRole('button', { name: 'Archive & remove', exact: true });
+    expect(await confirm.evaluate((el) => el === document.activeElement)).toBe(true);
     // It opens right under the button, not mid-window, and without dimming what it is about.
     expect(await dialog.evaluate((el) => el.classList.contains('is-anchored'))).toBe(true);
     const button = await archive.boundingBox();
@@ -677,6 +679,7 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await win.waitForTimeout(700);
     expect(await railWidth()).toBe(280);
     expect(await archive.isVisible()).toBe(true);
+    await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'ui-modes-zen-archive-confirm.png') });
 
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -685,7 +688,17 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await expect.poll(railWidth).toBe(52);
     // Cancelled: the session is still listed, not archived.
     expect(await row.count()).toBe(1);
-  }, 120_000);
+
+    await row.hover({ position: { x: 26, y: 10 } });
+    await expect.poll(railWidth).toBe(280);
+    await archive.click();
+    await confirm.waitFor();
+    // Send the key to the window without focusing the button from the test.
+    await win.keyboard.press(key);
+    await row.waitFor({ state: 'detached' });
+    expect(await dialog.count()).toBe(0);
+    await expect(fs.stat(worktree)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 
   it('folds the side panel into one rail on the right whose drawer shows a view at a time, and pins either side open across a restart', async ({ onTestFinished }) => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-panel-'));
