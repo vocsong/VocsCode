@@ -228,9 +228,16 @@ describe.runIf(enabled)('git panel PR details', () => {
     const opened = () => app.evaluate(() => (globalThis as unknown as { __openedGitLinks: string[] }).__openedGitLinks);
 
     expect(await win.locator('html').getAttribute('data-ui')).toBe(uiMode);
-    const closePanel = win.getByRole('button', { name: 'Close panel' });
-    await closePanel.click();
-    await closePanel.waitFor({ state: 'hidden' });
+    if (uiMode === 'zen') {
+      const panel = win.locator('aside.panel');
+      if (await panel.getAttribute('data-pinned') !== null) await win.getByRole('button', { name: 'Unpin side panel' }).click();
+      await win.getByText('Hello', { exact: true }).click();
+      await expect.poll(async () => (await panel.boundingBox())?.width ?? Infinity).toBeLessThan(100);
+    } else {
+      const closePanel = win.getByRole('button', { name: 'Close panel' });
+      await closePanel.click();
+      await closePanel.waitFor({ state: 'hidden' });
+    }
     await win.getByRole('link', { name: 'issue #12', exact: true }).click();
     await expect.poll(opened, { timeout: 10_000 }).toEqual([LINKED_ISSUE_URL]);
 
@@ -395,6 +402,7 @@ describe.runIf(enabled)('git panel branch state', () => {
     // The report's symptom: the local ref outlives the server's branch, so the stale row reads as live.
     expect(await ghostRow.innerText()).toContain('synced');
     expect(await ghostRow.innerText()).not.toContain('Deleted on origin');
+    expect(await ghostRow.locator('.ahead').innerText()).toBe('↑1');
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'git-panel-05-branches-stale.png') });
 
@@ -403,6 +411,7 @@ describe.runIf(enabled)('git panel branch state', () => {
     // The branch is still there — only its server copy is gone, and the panel says so instead of hiding it.
     expect(await win.locator('.branch-row', { hasText: 'feature/ghost' }).count()).toBe(1);
     expect(await ghostRow.innerText()).not.toContain('synced');
+    expect(await ghostRow.locator('.ahead').innerText()).toBe('↑1');
     await win.screenshot({ path: path.join(shots, 'git-panel-06-branches-gone.png') });
 
     await app.close();

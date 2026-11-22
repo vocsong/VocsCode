@@ -33,11 +33,14 @@ const WORKTREE_LIST = [
   ''
 ].join('\n');
 
+const REFS_ARGS = ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)%09%(objectname)'];
+const oid = (n: number) => n.toString(16).padStart(40, '0');
+const BATCH_ARGS = ['for-each-ref', 'refs/heads', `--format=%(objectname)%09%(ahead-behind:${oid(1)})`];
 const REFS = [
-  'develop\t1700000000\tBase branch\torigin/develop\t',
-  'harness/fix\t1701000000\tFix the bug\t\t',
-  'vocscode/current\t1702000000\tCurrent work\torigin/vocscode/current\t[behind 4, ahead 1]',
-  'stale-old\t1690000000\tOld work\t\t'
+  `develop\t1700000000\tBase branch\torigin/develop\t\t${oid(1)}`,
+  `harness/fix\t1701000000\tFix the bug\t\t\t${oid(2)}`,
+  `vocscode/current\t1702000000\tCurrent work\torigin/vocscode/current\t[behind 4, ahead 1]\t${oid(3)}`,
+  `stale-old\t1690000000\tOld work\t\t\t${oid(4)}`
 ].join('\n');
 
 describe('pickBase', () => {
@@ -78,16 +81,11 @@ describe('gitBranchesOverview', () => {
     expect(await gitBranchesOverview('/repo')).toEqual({ isRepo: false, branches: [], worktrees: [] });
   });
 
-  it('collects age, ahead/behind vs base, merged state and worktree binding', async () => {
+  it('reads counts in one batch while preserving branch metadata and worktree binding', async () => {
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
     gitReply(['worktree', 'list', '--porcelain'], { code: 0, stdout: WORKTREE_LIST });
-    gitReply(['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)'], { code: 0, stdout: REFS });
-    gitReply(['rev-list', '--left-right', '--count', 'develop...harness/fix'], { code: 0, stdout: '12\t3\n' });
-    gitReply(['rev-list', '--left-right', '--count', 'develop...vocscode/current'], { code: 0, stdout: '4\t1\n' });
-    gitReply(['rev-list', '--left-right', '--count', 'develop...stale-old'], { code: 0, stdout: '20\t0\n' });
-    gitReply(['merge-base', '--is-ancestor', 'harness/fix', 'develop'], { code: 0 });
-    gitReply(['merge-base', '--is-ancestor', 'vocscode/current', 'develop'], { code: 1 });
-    gitReply(['merge-base', '--is-ancestor', 'stale-old', 'develop'], { code: 0 });
+    gitReply(REFS_ARGS, { code: 0, stdout: REFS });
+    gitReply(BATCH_ARGS, { code: 0, stdout: `${oid(3)}\t1 4\n${oid(1)}\t0 0\n${oid(4)}\t0 20\n${oid(2)}\t3 12\n` });
 
     const r = await gitBranchesOverview('C:/repo/.vocs-code/worktrees/current');
     expect(r.isRepo).toBe(true);
@@ -116,11 +114,26 @@ describe('gitBranchesOverview', () => {
     expect(cur.current).toBe(true);
 
     const old = byName.get('stale-old')!;
-    expect(old.merged).toBe(true);
+    expect(old).toMatchObject({ ahead: 0, behind: 20, merged: true });
     expect(old.upstream).toBeUndefined();
+    expect(runCapture.mock.calls.map(([, args]) => args).filter((args) => ['for-each-ref', 'rev-list', 'merge-base'].includes(args[0]))).toEqual([REFS_ARGS, BATCH_ARGS]);
   });
 
-  it('bounds branch probes across 100 refs and reuses successful ancestry counts', async () => {
+  it('uses one comparison command for 100 branches on modern Git', async () => {
+    const ids = Array.from({ length: 100 }, (_, i) => oid(i + 2));
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    gitReply(['worktree', 'list', '--porcelain'], { code: 0, stdout: WORKTREE_LIST });
+    gitReply(REFS_ARGS, { code: 0, stdout: [`develop\t1\tBase\t\t\t${oid(1)}`, ...ids.map((id, i) => `work-${i}\t${i + 2}\tWork\t\t\t${id}`)].join('\n') });
+    gitReply(BATCH_ARGS, { code: 0, stdout: [`${oid(1)}\t0 0`, ...ids.map((id, i) => `${id}\t${i % 2} ${i}`)].join('\n') });
+
+    const { branches } = await gitBranchesOverview('C:/repo');
+    expect(branches).toHaveLength(101);
+    expect(branches.filter((branch) => branch.merged)).toHaveLength(50);
+    expect(branches[1]).toMatchObject({ name: 'work-99', ahead: 1, behind: 99, merged: false });
+    expect(runCapture.mock.calls.map(([, args]) => args).filter((args) => ['for-each-ref', 'rev-list', 'merge-base'].includes(args[0]))).toEqual([REFS_ARGS, BATCH_ARGS]);
+  });
+
+  it('bounds branch probes across 100 refs on older Git', async () => {
     const names = Array.from({ length: 100 }, (_, i) => `work-${i}`);
     const pending: (() => void)[] = [];
     let active = 0;
@@ -129,9 +142,9 @@ describe('gitBranchesOverview', () => {
     runCapture.mockImplementation((_cmd: string, args: string[]) => {
       if (args[0] === 'rev-parse') return { code: 0, stdout: 'C:/repo', stderr: '' };
       if (args[0] === 'worktree') return { code: 0, stdout: 'worktree C:/repo\nbranch refs/heads/develop\n', stderr: '' };
-      if (args[0] === 'for-each-ref') return {
-        code: 0, stderr: '', stdout: ['develop\t1\tBase\t\t', ...names.map((name, i) => `${name}\t${i + 2}\tWork\t\t`)].join('\n'),
-      };
+      if (args[0] === 'for-each-ref') return args[2].includes('ahead-behind:')
+        ? { code: 128, stdout: '', stderr: 'fatal: unknown field name: ahead-behind' }
+        : { code: 0, stderr: '', stdout: [`develop\t1\tBase\t\t\t${oid(1)}`, ...names.map((name, i) => `${name}\t${i + 2}\tWork\t\t\t${oid(i + 2)}`)].join('\n') };
       const index = Number((args[0] === 'rev-list' ? args[3].split('...')[1] : args[2]).slice(5));
       active++;
       peak = Math.max(peak, active);
@@ -159,9 +172,26 @@ describe('gitBranchesOverview', () => {
         ahead: index % 2, behind: index, merged: index % 2 === 0, current: false,
       });
     }
+    expect(runCapture.mock.calls.filter(([, args]) => args[2] === BATCH_ARGS[2])).toHaveLength(1);
     expect(runCapture.mock.calls.filter(([, args]) => args[0] === 'rev-list')).toHaveLength(100);
     const ancestry = runCapture.mock.calls.filter(([, args]) => args[0] === 'merge-base');
     expect(ancestry).toHaveLength(0);
+  });
+
+  it.each([false, true])('uses individual probes for unobserved tips and never trusts truncated batch output (truncated=%s)', async (truncated) => {
+    runCapture.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'rev-parse') return { code: 0, stdout: 'C:/repo', stderr: '' };
+      if (args[0] === 'worktree') return { code: 0, stdout: WORKTREE_LIST, stderr: '' };
+      if (args[2] === BATCH_ARGS[2]) return { code: 0, stdout: `${oid(1)}\t0 0\n${oid(2)}\t3 12\n${oid(3)}\tbad row\n${oid(5)}\t0 21\n`, stderr: '', truncated };
+      if (args[0] === 'for-each-ref') return { code: 0, stdout: REFS, stderr: '' };
+      if (args[0] === 'rev-list') return { code: 0, stdout: '9\t0\n', stderr: '' };
+      return { code: 1, stdout: '', stderr: '' };
+    });
+    const { branches } = await gitBranchesOverview('C:/repo');
+    expect(branches.find((branch) => branch.name === 'harness/fix')).toMatchObject(truncated
+      ? { ahead: 0, behind: 9, merged: true } : { ahead: 3, behind: 12, merged: false });
+    expect(branches.find((branch) => branch.name === 'stale-old')).toMatchObject({ ahead: 0, behind: 9, merged: true });
+    expect(runCapture.mock.calls.filter(([, args]) => args[0] === 'rev-list')).toHaveLength(truncated ? 3 : 2);
   });
 
   it.each([
@@ -211,7 +241,7 @@ describe('gitBranchesOverview', () => {
     which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
     gitReply(['worktree', 'list', '--porcelain'], { code: 0, stdout: WORKTREE_LIST });
-    gitReply(['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)'], { code: 0, stdout: REFS });
+    gitReply(REFS_ARGS, { code: 0, stdout: REFS });
     gitReply(['rev-list', '--left-right', '--count', 'develop...harness/fix'], { code: 0, stdout: '12\t3\n' });
     gitReply(['rev-list', '--left-right', '--count', 'develop...vocscode/current'], { code: 0, stdout: '4\t1\n' });
     gitReply(['rev-list', '--left-right', '--count', 'develop...stale-old'], { code: 0, stdout: '20\t0\n' });
