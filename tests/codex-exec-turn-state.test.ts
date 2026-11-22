@@ -3,6 +3,9 @@
  * scripted Thread so event normalization, usage accumulation, turn-state tracking, stale-resume
  * fallback and interrupt are all exercised without network access or the Codex CLI.
  */
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HarnessRef, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { HarnessContext } from '../src/main/harness/types';
@@ -140,6 +143,28 @@ function makeCtx(overrides: Partial<SessionMeta> = {}): { ctx: HarnessContext; m
     ownedMcpIds: () => []
   } as unknown as HarnessContext;
   return { ctx, meta, events, items, logs };
+}
+
+/** The shim npm writes for `@openai/codex`: it runs the package's Node launcher, not a native binary. */
+async function writeCodexShim(dir: string): Promise<string> {
+  const shim = path.join(dir, 'codex.cmd');
+  await fs.writeFile(shim, '@ECHO off\r\nGOTO start\r\n:start\r\nSETLOCAL\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n');
+  return shim;
+}
+
+/** The platform package npm installs under `@openai/codex`, holding the native binary the launcher spawns. */
+async function writeCodexPlatformBinary(codexPkg: string): Promise<string> {
+  const triples: Record<string, string> = { 'win32-x64': 'x86_64-pc-windows-msvc', 'win32-arm64': 'aarch64-pc-windows-msvc', 'darwin-x64': 'x86_64-apple-darwin', 'darwin-arm64': 'aarch64-apple-darwin', 'linux-x64': 'x86_64-unknown-linux-musl', 'linux-arm64': 'aarch64-unknown-linux-musl' };
+  const triple = triples[`${process.platform}-${process.arch}`];
+  if (!triple) throw new Error(`no Codex target triple for ${process.platform}-${process.arch}`);
+  const name = `@openai/codex-${process.platform}-${process.arch}`;
+  const platformPkg = path.join(codexPkg, 'node_modules', ...name.split('/'));
+  const exe = path.join(platformPkg, 'vendor', triple, 'bin', process.platform === 'win32' ? 'codex.exe' : 'codex');
+  await fs.mkdir(path.dirname(exe), { recursive: true });
+  await fs.writeFile(path.join(codexPkg, 'package.json'), JSON.stringify({ name: '@openai/codex', version: '0.0.0' }));
+  await fs.writeFile(path.join(platformPkg, 'package.json'), JSON.stringify({ name, version: '0.0.0' }));
+  await fs.writeFile(exe, '');
+  return exe;
 }
 
 const turnItems = (items: Map<string, TranscriptItem>): Extract<TranscriptItem, { kind: 'turn' }>[] => [...items.values()].filter((i): i is Extract<TranscriptItem, { kind: 'turn' }> => i.kind === 'turn');
@@ -321,6 +346,28 @@ describe('codex-exec adapter', () => {
     // The spend the session header and the analytics rollup read is the running total, not the row.
     expect(usageEvent(events)?.totals.costUsd).toBeCloseTo(expected, 10);
     await a.dispose();
+  });
+
+  // An app-runtime install of Codex is an npm `codex.cmd` shim. Running the SDK-bundled binary in
+  // its place ran an older Codex than the one the model picker listed, so a model only the newer
+  // install knew was rejected ("model is not supported when using Codex with a ChatGPT account").
+  it('runs the native binary behind an npm codex.cmd shim instead of the SDK-bundled one', async () => {
+    const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-shim-'));
+    try {
+      const shim = await writeCodexShim(runtimeDir);
+      const native = await writeCodexPlatformBinary(path.join(runtimeDir, 'node_modules', '@openai', 'codex'));
+      const { ctx, logs } = makeCtx();
+      (ctx as AnyRecord).runtime = { resolve: () => ({ path: shim, source: 'app-runtime' }), runtimePaths: { appRoot: runtimeDir } };
+      scriptThreads([{ id: 't1', events: [] }]);
+      const a = new CodexExecAdapter(ctx);
+      await a.start();
+
+      expect(sdk.codexOptions.at(-1)?.codexPathOverride).toBe(native);
+      expect(logs.some((l) => l.message.includes(native) && l.message.includes(shim))).toBe(true);
+      await a.dispose();
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
   });
 
   it('prices a turn at the rates of the model in use when the model changes mid-session', async () => {

@@ -271,6 +271,49 @@ export function bundledCodexPath(appRoot: string): string | null {
   return null;
 }
 
+/**
+ * The native binary an npm `codex.cmd` shim launches. Unlike Claude's shim, Codex's runs
+ * `node …\@openai\codex\bin\codex.js`, which spawns the platform package's binary; this resolves it
+ * the way that launcher does (the platform package beside the package, then its own vendor dir).
+ */
+export function codexShimExecutable(shim: string): string | null {
+  const triple = codexTargetTriple();
+  if (!triple) return null;
+  try {
+    const script = /"%dp0%\\([^"%]*@openai\\codex\\bin\\codex\.js)"/i.exec(readFileSync(shim, 'utf8'))?.[1];
+    if (!script) return null;
+    const pkgRoot = path.dirname(path.dirname(path.join(path.dirname(shim), ...script.split('\\'))));
+    const exe = isWin ? 'codex.exe' : 'codex';
+    const candidates: string[] = [];
+    try {
+      const req = createRequire(path.join(pkgRoot, 'package.json'));
+      candidates.push(path.join(path.dirname(req.resolve(`@openai/codex-${process.platform}-${process.arch}/package.json`)), 'vendor', triple, 'bin', exe));
+    } catch { /* platform package not installed beside it */ }
+    candidates.push(path.join(pkgRoot, 'vendor', triple, 'bin', exe));
+    for (const candidate of candidates) {
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch { /* try next */ }
+    }
+  } catch { /* unreadable shim */ }
+  return null;
+}
+
+/**
+ * The Codex executable a shell-less spawn can start. The exec SDK spawns `codexPathOverride`
+ * directly, which fails with EINVAL for a `.cmd`/`.bat` shim on Windows, so a shim is swapped for
+ * the native binary behind it, and the bundled binary stands in only when that cannot be found.
+ * Codex exec must list its models from this same binary: an app-runtime install is often newer
+ * than the bundled one and lists models the bundled binary does not know (the backend rejects them).
+ */
+export function spawnableCodex(bin: ResolvedBinary | null, appRoot: string | undefined): ResolvedBinary | null {
+  if (!bin || !/[.](cmd|bat)$/i.test(bin.path)) return bin;
+  const behind = codexShimExecutable(bin.path);
+  if (behind) return { path: behind, source: bin.source };
+  const bundled = appRoot ? bundledCodexPath(appRoot) : null;
+  return bundled ? { path: bundled, source: 'bundled' } : null;
+}
+
 function codexTargetTriple(): string | null {
   const { platform, arch } = process;
   if (platform === 'linux') return arch === 'x64' ? 'x86_64-unknown-linux-musl' : arch === 'arm64' ? 'aarch64-unknown-linux-musl' : null;
