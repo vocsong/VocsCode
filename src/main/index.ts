@@ -500,15 +500,12 @@ async function main(): Promise<void> {
     log
   });
   await terminals.load();
-  let controlWorkspaceRevision = 0;
   missions = new MissionRuntime({
     userData, sessions: sessionsRef, settings, terminals,
     windowsJobHelper,
-    changed: (view) => {
-      controlWorkspaceRevision++;
-      pushAll(PUSH_CHANNELS.missionsChanged, view.record);
-    }, log: logTo,
+    changed: (view) => pushAll(PUSH_CHANNELS.missionsChanged, view.record), log: logTo,
   });
+  const missionStore = missions.store;
   // Recovery restores blocked/paused coordination state; it never launches a model on boot.
   await missions.load();
 
@@ -528,7 +525,7 @@ async function main(): Promise<void> {
   });
   const localControl = new LocalControl({
     supported: process.platform === 'win32', userData, roots: () => settings.get().folders,
-    sessions: sessionsRef, guard: guardControlResource, workspaceRevision: () => controlWorkspaceRevision,
+    sessions: sessionsRef, guard: guardControlResource, workspaceRevision: () => missionStore.publicationRevision,
     open: windowsLocalPipe(runtime.resource('control', 'windows-pipe.ps1')),
   });
   remoteHost = new RemoteHost({

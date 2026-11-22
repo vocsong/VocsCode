@@ -416,7 +416,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     // aliases. Session ownership is a second, independent fence; planning's original source is
     // not a managed worktree and deliberately has no worktreeBranch marker.
     const real = await realResource(target);
-    for (const session of sessions.list().filter((s) => s.mission && s.worktreeBranch)) {
+    for (const session of sessions.list({ refreshGit: false }).filter((s) => s.mission && s.worktreeBranch)) {
       const root = await realResource(session.cwd);
       if (containsPath(root, real) || includeDescendants && containsPath(real, root)) denyMissionControl();
     }

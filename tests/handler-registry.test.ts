@@ -1227,6 +1227,16 @@ describe('external control owner boundary', () => {
     for (const channel of ['control:get', 'control:enable', 'control:grant', 'control:revoke']) expect(isRemoteChannel(channel)).toBe(false);
   });
 
+  it('checks project and session ownership for control without starting Git status refreshes', async () => {
+    const root = tmpDir('control-resource');
+    const { registry, deps } = stubDeps();
+    deps.sessions.get('s_test')!.cwd = root;
+    const list = vi.spyOn(deps.sessions, 'list');
+    await registry.assertControlResource!({ projectRoot: root });
+    await registry.assertControlResource!({ sessionId: 's_test' });
+    expect(list.mock.calls).toEqual([[{ refreshGit: false }], [{ refreshGit: false }]]);
+  });
+
   it('does not route local grant setup through browser access or an agent', async () => {
     const state = { supported: true, projects: [], approvedProjectIds: [], target: null };
     const ownerState = vi.fn(async () => state), enable = vi.fn(async () => state), disable = vi.fn(async () => state);

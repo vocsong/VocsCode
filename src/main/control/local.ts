@@ -203,7 +203,7 @@ export class LocalControl {
           if (params.instanceId !== instanceId || !project || !await this.liveProject(project)) return denied;
           // Limit filesystem work to the requested page of candidates. A page may omit stale or
           // unavailable rows; its next offset refers to the scan, not the number of rows returned.
-          const candidatePage = page(this.deps.sessions.list().filter((session) => !session.mission && !session.archived &&
+          const candidatePage = page(this.deps.sessions.list({ refreshGit: false }).filter((session) => !session.mission && !session.archived &&
             key(session.config.projectRoot) === key(project.root) && controlIdSchema.safeParse(session.id).success), params.offset, params.limit);
           const checked = [];
           for (const session of candidatePage.items) {
