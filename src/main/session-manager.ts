@@ -289,8 +289,9 @@ export class SessionManager {
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
-  list(): SessionMeta[] {
+  list({ refreshGit = true }: { refreshGit?: boolean } = {}): SessionMeta[] {
     const list = this.deps.store.list();
+    if (!refreshGit) return list;
     // Sessions restored while parked on a PR resume polling for their merge. A harness that
     // died while the app was closed ('stopped') gets its git-derived status re-checked once,
     // so a quit that killed the harness does not erase a parked pr/merged badge for good.
