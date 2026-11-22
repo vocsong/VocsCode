@@ -106,7 +106,7 @@ export function OnboardingWizard({ initialHarness, onClose }: { initialHarness?:
       const providerResult = requiresApi ? await invoke('providers:refreshModels', { id: providerId }) : undefined;
       // For CLI agents, intersect the selected provider with the agent's own catalog rather than
       // assuming every model on a provider's API is usable by that coding agent.
-      let result = providerResult && (harness === 'native' || harness === 'cursor') ? providerResult : await invoke('harness:models', { harness });
+      let result = providerResult && (harness === 'native' || harness === 'cursor') ? providerResult : await invoke('harness:models', { harness, refresh: true });
       if (providerResult && harness !== 'native' && harness !== 'cursor') result = { models: result.models.filter((m) => m.provider === providerId), error: providerResult.error ?? result.error };
       if (request !== requests.current) return;
       setModels(result.models);
