@@ -4,6 +4,7 @@
  */
 import type { TerminalSettings } from './terminal';
 import type { PaletteId, ThemeMode } from './themes';
+import type { TypographySettings } from './typography';
 import type { UiModeId } from './ui-modes';
 import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
@@ -1295,6 +1296,8 @@ export interface AppSettings {
   theme: ThemeMode;
   /** Color palette, applied in the mode above. Absent means Default. */
   palette?: PaletteId;
+  /** Text & fonts: interface size, font roles, text sizes, line spacing, transcript width (shared/typography.ts). */
+  typography?: TypographySettings;
   /** Interface layout, independent of the color theme (shared/ui-modes.ts). Absent means Standard. */
   uiMode?: UiModeId;
   defaultHarness: HarnessId;

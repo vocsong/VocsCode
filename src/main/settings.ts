@@ -15,6 +15,7 @@ import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigE
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { DEFAULT_PALETTE, migrateTheme } from '../shared/themes';
+import { DEFAULT_TYPOGRAPHY, normalizeTypography } from '../shared/typography';
 import { DEFAULT_UI_MODE, isUiModeId } from '../shared/ui-modes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
@@ -213,6 +214,7 @@ export function defaultSettings(): AppSettings {
     missionProjects: {},
     theme: 'system',
     palette: DEFAULT_PALETTE,
+    typography: { ...DEFAULT_TYPOGRAPHY },
     uiMode: DEFAULT_UI_MODE,
     defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
@@ -514,6 +516,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     // Mode and palette are stored apart; a legacy single-variant theme id is split into both, and
     // anything this build does not know falls back to System + Default.
     ...migrateTheme(stored.theme, stored.palette),
+    // Unknown fonts fall back to the default, sizes are clamped, custom family names are kept as typed.
+    typography: normalizeTypography(stored.typography),
     // Same for an interface mode this build does not know: the full layout is always safe.
     uiMode: isUiModeId(stored.uiMode) ? stored.uiMode : d.uiMode,
     autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,

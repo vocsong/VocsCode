@@ -59,6 +59,8 @@ function init(): void {
   });
   // theme.ts re-resolves data-scheme when the OS flips, so the attributes are the one signal to watch.
   new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-scheme', 'data-palette'] });
+  // The code font (Settings → Appearance → Text & fonts) arrives as --mono in <html>'s inline style.
+  new MutationObserver(applyFont).observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
 }
 
 function settings(): TerminalSettings {
@@ -216,7 +218,7 @@ function create(id: string, host: HTMLElement): Instance {
     cursorBlink: ts.cursorBlink,
     cursorStyle: ts.cursorStyle,
     fontSize: ts.fontSize,
-    fontFamily: cssVar('--mono') || 'Consolas, Menlo, monospace',
+    fontFamily: monoFont(),
     scrollback: ts.scrollback,
     theme: theme(),
     macOptionIsMeta: true,
@@ -430,4 +432,18 @@ export function theme(): ITheme {
 function applyTheme(): void {
   const t = theme();
   for (const i of instances.values()) i.term.options.theme = t;
+}
+
+function monoFont(): string {
+  return cssVar('--mono') || 'Consolas, Menlo, monospace';
+}
+
+/** Follows the code font; a new family changes the cell size, so each terminal refits. */
+function applyFont(): void {
+  const family = monoFont();
+  for (const i of instances.values()) {
+    if (i.term.options.fontFamily === family) continue;
+    i.term.options.fontFamily = family;
+    scheduleFit(i);
+  }
 }

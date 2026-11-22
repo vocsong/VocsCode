@@ -600,10 +600,13 @@ async function main(): Promise<void> {
     // A palette switch leaves themeSource as it was, so nativeTheme stays silent — repaint the
     // caption from the palette directly.
     applyChrome();
+    currentUiScale = s.typography?.uiScale ?? 1;
+    applyZoom();
     terminals?.updateSettings(s.terminal);
     ordinaryProcessOwnership(); // Configuring Missions starts the Job helper probe.
   });
   currentPalette = settings.get().palette ?? DEFAULT_PALETTE;
+  currentUiScale = settings.get().typography?.uiScale ?? 1;
   nativeTheme.themeSource = themeSourceFor(settings.get().theme);
 
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
@@ -851,6 +854,19 @@ function chrome(): { color: string; symbolColor: string; height: number } {
   return { ...chromeFor(currentPalette, nativeTheme.shouldUseDarkColors ? 'dark' : 'light'), height: TITLEBAR_HEIGHT };
 }
 
+/** Settings → Appearance → Interface size, applied as the window's zoom factor. */
+let currentUiScale = 1;
+
+/**
+ * Applies the interface size. The chrome's type is authored in fixed pixels, so zoom is what scales
+ * it without breaking layout; it is reapplied after every load because a reload can reset it.
+ */
+function applyZoom(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const wc = mainWindow.webContents;
+  if (Math.abs(wc.getZoomFactor() - currentUiScale) > 0.001) wc.setZoomFactor(currentUiScale);
+}
+
 /** Repaints the window background and the OS-drawn caption buttons for the active theme. */
 function applyChrome(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -961,6 +977,7 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
 
   // A reload drops every xterm instance; stop streaming to it and let paused shells run until it re-attaches.
   win.webContents.on('did-start-loading', () => terminals?.detachAll());
+  win.webContents.on('did-finish-load', applyZoom);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);

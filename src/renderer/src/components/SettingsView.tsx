@@ -30,6 +30,7 @@ import { ChatImport } from './ChatImport';
 
 import { SETTINGS_GROUPS, SETTINGS_PAGES, searchSettings, type SettingsSection } from '../settings-catalog';
 import { SettingsGroup, SettingsNote } from './SettingsPrimitives';
+import { TypographySettings } from './TypographySettings';
 import './settings.css';
 
 export type { SettingsSection } from '../settings-catalog';
@@ -344,6 +345,9 @@ function Appearance({ settings, update }: { settings: AppSettings; update: (p: P
     </SettingsGroup>
     <SettingsGroup id="appearance-theme" title="Color theme" description="Pick light or dark once, then any palette. Every palette has both variants, and System follows your computer." icon="palette">
       <ThemePicker mode={settings.theme} palette={settings.palette ?? DEFAULT_PALETTE} onMode={(next) => update({ theme: next })} onPalette={(next) => update({ palette: next })} />
+    </SettingsGroup>
+    <SettingsGroup id="appearance-typography" title="Text & fonts" description="Size, fonts and line length, tuned for long reading sessions. The sample below shows each change as you make it." icon="type">
+      <TypographySettings value={settings.typography} onChange={(next) => update({ typography: next })} />
     </SettingsGroup>
   </div>;
 }

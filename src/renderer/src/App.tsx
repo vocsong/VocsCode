@@ -23,7 +23,7 @@ import { Welcome } from './components/Welcome';
 import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
-import { applyTheme, applyUiMode } from './theme';
+import { applyTheme, applyTypography, applyUiMode } from './theme';
 import { isTopLevelSession, pauseMissionSession } from './missions';
 import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
 import { activeComposer } from './panes';
@@ -74,6 +74,10 @@ export function App() {
   useEffect(() => {
     applyTheme(settings?.theme ?? 'system', settings?.palette);
   }, [settings?.theme, settings?.palette]);
+
+  useEffect(() => {
+    applyTypography(settings?.typography);
+  }, [settings?.typography]);
 
   useEffect(() => {
     applyUiMode(settings?.uiMode);
