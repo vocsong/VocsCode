@@ -295,6 +295,7 @@ export function Sidebar() {
   // Zen keeps only the icons of these links; their names move into tooltips.
   const minimal = useMinimalUi();
   const tip = (label: string) => (minimal ? label : undefined);
+  const pinned = useStore((s) => s.pins.left);
 
   return (
     <aside className="sidebar">
@@ -326,6 +327,8 @@ export function Sidebar() {
           )}
           <Button variant="ghost" size="sm" icon="search" className="btn-icon" onClick={() => useStore.getState().openSearch(true)} title="Search sessions (Ctrl+Shift+F)" aria-label="Search sessions" />
           <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
+          {/* Zen: hold the list open instead of folding back to the rail of dots. */}
+          {minimal && <Button variant={pinned ? 'subtle' : 'ghost'} size="sm" icon={pinned ? 'pinOff' : 'pin'} className="btn-icon" onClick={() => useStore.getState().togglePin('left')} title={pinned ? 'Unpin: fold back to the rail' : 'Pin open'} aria-label={pinned ? 'Unpin sidebar' : 'Pin sidebar'} aria-pressed={pinned} />}
         </div>
       </div>
       <div className="sidebar-nav">
