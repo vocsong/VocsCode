@@ -147,6 +147,9 @@
 .type-font-custom { width: 100%; }
 .type-font-preview { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 7px 10px; border: 1px dashed var(--border); border-radius: 7px; color: var(--fg); font-size: 15px; }
 .type-spacing { display: flex; flex-direction: column; gap: 6px; }
+/* Line spacing shares a grid column with two selects: fill it, never wrap. */
+.type-spacing .segmented { display: flex; flex-wrap: nowrap; }
+.type-spacing .segmented-option { flex: 1 1 0; min-width: 0; padding-inline: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .type-width { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .type-width-option { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; padding: 10px 12px 11px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); color: var(--fg); font: inherit; text-align: left; cursor: pointer; transition: border-color 0.12s, box-shadow 0.12s; }
 .type-width-option:hover { border-color: var(--border-strong); }

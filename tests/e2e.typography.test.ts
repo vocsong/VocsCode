@@ -92,6 +92,12 @@ describe.runIf(enabled)('text & fonts (e2e)', () => {
     await win.waitForSelector("html[data-width='wide']", { timeout: 10_000 });
     expect(await rootVar(win, '--reading')).toBe(`${wide.reading}px`);
 
+    if (process.env.VOCS_CODE_E2E_CAPTURE_THEMES === '1') {
+      await fs.mkdir(shots, { recursive: true });
+      await win.mouse.move(0, 0);
+      await win.locator('#appearance-typography').screenshot({ path: path.join(shots, 'typography-custom.png') });
+    }
+
     const stored = JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')) as { typography: Record<string, unknown> };
     expect(stored.typography).toMatchObject({ uiScale: 1.1, contentSize: 18, lineSpacing: 'relaxed', codeSize: 14, contentFont: 'serif', codeFont: 'custom', codeFontCustom: 'Courier New', width: 'wide' });
 
