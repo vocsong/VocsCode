@@ -112,8 +112,10 @@ checkout and pass all changed no-provider suites in one guarded invocation. For 
 npm run build && node scripts/e2e-guard.mjs tests/e2e.themes.test.ts tests/e2e.ui-modes.test.ts
 # Standalone web-only check builds its own web output (no desktop bundle needed):
 node scripts/e2e-guard.mjs tests/e2e.remote-web.test.ts
+# If npm run build just passed in the same checkout and sources haven't changed, reuse its web output:
+VOCS_CODE_E2E_WEB_PREBUILT=1 node scripts/e2e-guard.mjs tests/e2e.remote-web.test.ts
 # Reproduce the full release E2E job when diagnosing release CI:
-npm run build && npm run test:e2e:ci
+npm run build && VOCS_CODE_E2E_WEB_PREBUILT=1 npm run test:e2e:ci
 ```
 
 The guard sets the UI and terminal gates and rejects skipped or uncollected tests. Run the

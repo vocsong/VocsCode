@@ -51,9 +51,10 @@ it('uses the branch diff for fallback, but still sees local toolchain edits', ()
 
     writeFileSync(file('package-lock.json'), '{"local":true}');
     git('add', 'package-lock.json');
-    writeFileSync(file('package-lock.json'), '{}'); // Staged, even if the working copy reverted it.
+    // Leave the working tree identical to the index so only the cached diff sees the edit.
+    expect(git('ls-files', '--modified', '--', 'package-lock.json').toString()).toBe('');
     expect(selected()).toEqual(['run', ...excludeLive]);
-    git('reset', '--', 'package-lock.json');
+    git('restore', '--source=HEAD', '--staged', '--worktree', '--', 'package-lock.json');
 
     writeFileSync(file('vitest.config.ts'), 'export default {};'); // Untracked config is also global.
     expect(selected('--list')).toEqual(['list', '--filesOnly', ...excludeLive]);
