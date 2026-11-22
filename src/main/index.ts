@@ -12,12 +12,18 @@ import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
 import { DesktopFocusTracker, forgetVisibleOnRendererReset } from './desktop-focus';
 import { watchEventLoop } from './diag';
-import { setGitLog } from './git';
+import { gitIdentityFacts, gitResolveCommit, setGitLog } from './git';
 import { PRODUCT_APP_ID, resolveAppIdentity } from './identity';
 import { registerIpc, pushToRenderer } from './ipc';
 import { KnowledgeService } from './knowledge/service';
 import { createKnowledgeCompleter } from './knowledge/llm';
 import { createGitnexusAnchorResolver } from './knowledge/anchors';
+import { IntelligenceGateway, callIntelligenceTool } from './intelligence/gateway';
+import { GraphifyProvider, TESTED_GRAPHIFY_VERSION } from './intelligence/graphify';
+import { MemoryStore } from './intelligence/memory-store';
+import { ProjectRegistry } from './intelligence/registry';
+import { IntelligenceService } from './intelligence/service';
+import { resolveIntelligenceSettings } from '../shared/intelligence';
 import { GITNEXUS_SERVER_ID, gitnexusSharedRoots, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './mcp/gitnexus';
 import { GitnexusIndexer } from './mcp/indexer';
 import { createLogger, describeError, type Logger } from './log';
@@ -174,10 +180,17 @@ async function main(): Promise<void> {
   // Deep search index: derived from transcripts, so it lives beside them and rebuilds itself.
   const search = new SearchIndex(userData, { store, log });
   await search.init();
+  // Assigned further down; a deleted session takes its capability and its unverified memory with it.
+  let intelligence: IntelligenceService | null = null;
+  let intelligenceGateway: IntelligenceGateway | null = null;
   store.hooks = {
     onAppend: (id, item) => search.indexItem(id, item),
     onRewrite: (id) => search.resyncSession(id),
-    onRemove: (id) => search.dropSession(id)
+    onRemove: (id) => {
+      search.dropSession(id);
+      intelligenceGateway?.revoke(id);
+      intelligence?.onSessionRemoved(id);
+    }
   };
 
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
@@ -223,22 +236,24 @@ async function main(): Promise<void> {
 
   // Layer 2 project knowledge: the wiki store, its background jobs, and the digest every new
   // session may be primed with. The MCP server it feeds is a built-in, materialized per session.
+  const transcriptLines = async (sessionId: string): Promise<string[]> => {
+    const items = await store.readTranscript(sessionId);
+    const lines: string[] = [];
+    for (const item of items.slice(-60)) {
+      if (item.kind === 'user') lines.push(`user: ${item.text.slice(0, 500)}`);
+      else if (item.kind === 'assistant' && item.text.trim()) lines.push(`assistant: ${item.text.slice(0, 500)}`);
+      else if (item.kind === 'tool') lines.push(`tool ${item.name} [${item.status}] ${(item.summary ?? item.title ?? '').slice(0, 200)}`);
+      else if (item.kind === 'turn' && item.error) lines.push(`turn ${item.status}: ${item.error.slice(0, 200)}`);
+    }
+    return lines;
+  };
+  const knowledgeCompleter = createKnowledgeCompleter({ settings: () => settings.get(), getSecret: providerSecrets((id) => secrets.get(id)), log });
   const knowledge = new KnowledgeService({
     log,
     settings: () => settings.get(),
-    transcript: async (sessionId) => {
-      const items = await store.readTranscript(sessionId);
-      const lines: string[] = [];
-      for (const item of items.slice(-60)) {
-        if (item.kind === 'user') lines.push(`user: ${item.text.slice(0, 500)}`);
-        else if (item.kind === 'assistant' && item.text.trim()) lines.push(`assistant: ${item.text.slice(0, 500)}`);
-        else if (item.kind === 'tool') lines.push(`tool ${item.name} [${item.status}] ${(item.summary ?? item.title ?? '').slice(0, 200)}`);
-        else if (item.kind === 'turn' && item.error) lines.push(`turn ${item.status}: ${item.error.slice(0, 200)}`);
-      }
-      return lines;
-    },
+    transcript: transcriptLines,
     synth: {
-      completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: providerSecrets((id) => secrets.get(id)), log })
+      completer: knowledgeCompleter
     },
     anchors: createGitnexusAnchorResolver({
       // A cold shared server is started lazily; the panel must not wait on it forever.
@@ -251,6 +266,67 @@ async function main(): Promise<void> {
       log
     })
   });
+
+  // The intelligence core: stable project identity and collections, the memory ledger, the optional
+  // graph provider, and the local gateway. Reflection alone can call the configured utility model
+  // when explicitly requested or opted in.
+  const intelligenceDir = path.join(userData, 'intelligence');
+  const projectRegistry = new ProjectRegistry(intelligenceDir, { log, facts: (root) => gitIdentityFacts(root) });
+  const memoryStore = new MemoryStore(intelligenceDir, { log });
+  memoryStore.init();
+  const graphify = new GraphifyProvider({
+    // Looked up on every call, so installing Graphify does not need an app restart.
+    command: () => {
+      const configured = resolveIntelligenceSettings(settings.get().intelligence).graphify.command;
+      return configured && path.isAbsolute(configured) ? configured : which('graphify');
+    },
+    requireVersion: TESTED_GRAPHIFY_VERSION,
+    cacheRoot: path.join(intelligenceDir, 'graphs'),
+    headRevision: async (cwd) => (await gitIdentityFacts(cwd)).head ?? null,
+    log
+  });
+  intelligence = new IntelligenceService({
+    log,
+    settings: () => settings.get(),
+    knowledge,
+    registry: projectRegistry,
+    memory: memoryStore,
+    graph: graphify,
+    sessions: () => store.list().map((s) => ({ id: s.id, title: s.title, projectRoot: s.config.projectRoot, ...(s.archived ? { archived: true } : {}) })),
+    history: (query, sessionIds, limit, opts) => search.recall({ q: query, sessionIds, limit, strict: opts?.strict }),
+    transcript: transcriptLines,
+    completer: knowledgeCompleter,
+    git: {
+      head: async (cwd) => (await gitIdentityFacts(cwd)).head ?? null,
+      resolveCommit: (cwd, revision) => gitResolveCommit(cwd, revision)
+    },
+    gatewayState: () => intelligenceGateway?.state() ?? { listening: false, sessions: 0 }
+  });
+  const intelligenceCore = intelligence;
+  intelligenceGateway = new IntelligenceGateway({
+    log,
+    enabled: () => resolveIntelligenceSettings(settings.get().intelligence).gateway,
+    // Scope comes from live app state. Plans can read but not write, and widening scope only
+    // queues a request. Deleting durable memory is a desktop-owner action.
+    session: (sessionId) => {
+      const meta = store.get(sessionId);
+      if (!meta || meta.archived || meta.mission) return null;
+      return {
+        sessionId,
+        projectRoot: meta.config.projectRoot,
+        cwd: meta.cwd,
+        ...(meta.worktreeBranch ? { branch: meta.worktreeBranch } : {}),
+        actions: meta.config.permissionMode === 'plan' ? ['read'] : ['read', 'record', 'promote'],
+        allowCollections: resolveIntelligenceSettings(settings.get().intelligence).collections
+      };
+    },
+    call: (session, tool, args, signal) => callIntelligenceTool({ intelligence: intelligenceCore, knowledge }, session, tool, args, signal)
+  });
+  await intelligenceGateway.start();
+  const memoryGateway = intelligenceGateway;
+  // Session-end reflection, when the user chose `auto`: archiving a session or merging its PR is the
+  // signal that it is finished. Remembered per session so a restart does not reflect on old ones.
+  const reflectedStates = new Map(store.list().map((session) => [session.id, session.archived === true || session.status === 'merged']));
 
   // Git state can change outside the app (an agent may run `gh` itself). Remember the last state so
   // the existing PR/merge poll becomes a passive indexing hook too, without re-indexing old parked
@@ -274,6 +350,9 @@ async function main(): Promise<void> {
     gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
     memoryUserData: userData,
+    memoryGateway: (sessionId) => memoryGateway.attach(sessionId),
+    revokeMemoryGateway: (sessionId) => memoryGateway.revoke(sessionId),
+    restrictMemoryGateway: (sessionId) => memoryGateway.restrictToRead(sessionId),
     appInstructions: (harness) => appInstructions.effective(harness),
     withWorkspaceDispatch: (meta, dispatch) => missions ? missions.admission.dispatch(meta.cwd, dispatch) : dispatch(),
     ordinaryProcessOwnership,
@@ -302,6 +381,16 @@ async function main(): Promise<void> {
         }
       }
       for (const id of indexedGitStates.keys()) if (!liveIds.has(id)) indexedGitStates.delete(id);
+      for (const session of list) {
+        const finished = session.archived === true || session.status === 'merged';
+        const before = reflectedStates.get(session.id);
+        reflectedStates.set(session.id, finished);
+        if (!finished || before !== false || session.mission || resolveIntelligenceSettings(settings.get().intelligence).reflection !== 'auto') continue;
+        void intelligenceCore
+          .reflect({ sessionId: session.id, projectRoot: session.config.projectRoot, cwd: session.cwd, ...(session.worktreeBranch ? { branch: session.worktreeBranch } : {}) }, { title: session.title }, 'auto')
+          .catch((e) => log('debug', `intelligence: automatic reflection skipped: ${e instanceof Error ? e.message : String(e)}`));
+      }
+      for (const id of reflectedStates.keys()) if (!liveIds.has(id)) reflectedStates.delete(id);
       for (const hook of sessionsChangedHooks) hook();
       remoteMirror?.notifyIndex();
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
@@ -465,6 +554,8 @@ async function main(): Promise<void> {
     analytics,
     search,
     knowledge,
+    intelligence: intelligenceCore,
+    revokeMemoryGrants: () => memoryGateway.revokeAll(),
     gitnexusIndexer,
     appInstructions,
     remote: remoteHost,
@@ -579,6 +670,8 @@ async function main(): Promise<void> {
       safe('session drain', drainSessions),
       safe('terminal shutdown', terminals?.shutdown(deadline)),
       safe('search close', search?.close()),
+      safe('intelligence gateway close', intelligenceGateway?.close()),
+      safe('memory ledger close', Promise.resolve().then(() => memoryStore.close())),
       safe('web server stop', webServer?.stop()),
       safe('vesta shutdown', registry.shutdown()),
       safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop())),
