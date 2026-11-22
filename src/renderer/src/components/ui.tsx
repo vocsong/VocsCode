@@ -359,7 +359,8 @@ export function Modal({ title, onClose, children, width = 720, footer, anchor }:
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
-  const position: React.CSSProperties = anchored ? (placed ? { top: placed.top, left: placed.left } : { visibility: 'hidden' }) : {};
+  // Keep the dialog transparent until placed, but let its children receive autoFocus on mount.
+  const position: React.CSSProperties = anchored ? (placed ? { top: placed.top, left: placed.left } : { opacity: 0 }) : {};
   return (
     <div className={`modal-backdrop${anchored ? ' is-anchored' : ''}`} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div ref={dialogRef} className={`modal${anchored ? ' is-anchored' : ''}`} style={{ width, maxWidth: '96vw', ...position }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
