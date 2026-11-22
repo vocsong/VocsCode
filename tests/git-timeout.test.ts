@@ -36,7 +36,7 @@ const NUMSTAT = ['diff', '--numstat', 'HEAD'];
 const UPSTREAM = ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'];
 const DIFF_HEAD = ['diff', 'HEAD'];
 const UNTRACKED = ['ls-files', '--others', '--exclude-standard'];
-const REFS = ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)'];
+const REFS = ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)%09%(objectname)'];
 
 let root: string;
 
