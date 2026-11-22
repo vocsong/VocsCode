@@ -5119,24 +5119,10 @@ body.resizing {
   min-height: 0;
   overflow: auto;
 }
-.file-preview .file-editor {
-  margin: 0;
-  padding: 14px 16px;
-  resize: none;
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-  border: 0;
-  border-radius: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-size: 13px;
-  line-height: 20px;
-  tab-size: 4;
-}
-.file-preview .file-editor:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
+.file-match-list-with-preview {
+  flex: 0 1 auto;
+  max-height: 55%;
+  border-bottom: 1px solid var(--border);
 }
 .file-preview-status {
   display: flex;

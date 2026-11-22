@@ -14,6 +14,7 @@ const invokeMock = vi.fn();
 };
 
 import { StrictMode } from 'react';
+import { EditorView } from '@codemirror/view';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { FilePreviewPane } from '../src/renderer/src/components/FilePreviewPane';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
@@ -38,13 +39,20 @@ const session = {
 const target = () => useStore.getState().layout.filePreview;
 const reads = () => invokeMock.mock.calls.filter(([channel]) => channel === 'fs:read');
 const writes = () => invokeMock.mock.calls.filter(([channel]) => channel === 'fs:writeText');
-const findEditor = () => screen.findByRole<HTMLTextAreaElement>('textbox', { name: 'File contents' });
+const findEditor = async () => EditorView.findFromDOM((await screen.findByRole('textbox', { name: 'File contents' })).closest<HTMLElement>('.cm-editor')!)!;
+const expectEditor = async (text: string) => expect((await findEditor()).state.doc.toString()).toBe(text);
+const changeEditor = (editor: EditorView, text: string) => act(() => editor.dispatch({
+  changes: { from: 0, to: editor.state.doc.length, insert: text }, userEvent: 'input.type'
+}));
 const saveButton = () => screen.getByRole<HTMLButtonElement>('button', { name: 'Save' });
-const pressSave = (element: HTMLElement) => fireEvent.keyDown(element, { key: 's', ctrlKey: true });
+const pressSave = (element: HTMLElement | EditorView) => fireEvent.keyDown(element instanceof EditorView ? element.contentDOM : element, { key: 's', ctrlKey: true });
 const openExact = (path: string) => act(() => useStore.getState().revealFile(session.id, path, undefined, { exact: true }));
 const lines = (prefix: string) => Array.from({ length: 60 }, (_, i) => `${prefix} ${i + 1}`).join('\n');
 
 beforeEach(() => {
+  // jsdom implements Range, but not its layout measurements. Real scrolling is checked in Electron.
+  Range.prototype.getClientRects ??= () => document.createElement('div').getClientRects();
+  Range.prototype.getBoundingClientRect ??= () => new DOMRect();
   invokeMock.mockReset();
   invokeMock.mockResolvedValue({});
   useStore.setState({
@@ -232,10 +240,10 @@ describe('file mentions open the right-panel preview', () => {
     const editor = await findEditor();
     expect(screen.getByRole('region', { name: 'Preview: src/hello.ts' })).toBeTruthy();
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/hello.ts', maxBytes: 200_000 }]]);
-    expect(editor.value).toBe(lines('line'));
-    const offset = editor.value.indexOf('line 30\n');
-    expect([editor.selectionStart, editor.selectionEnd]).toEqual([offset, offset]);
-    expect(editor.scrollTop).toBeGreaterThan(0);
+    expect(editor.state.doc.toString()).toBe(lines('line'));
+    const offset = editor.state.doc.line(30).from;
+    expect(editor.state.selection.main.empty).toBe(true);
+    expect(editor.state.selection.main.head).toBe(offset);
 
     fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
     expect(target()).toBeUndefined();
@@ -257,7 +265,7 @@ describe('file mentions open the right-panel preview', () => {
     expect(screen.getByRole('region', { name: 'Preview: src/app/api/mcp/tools.ts' })).toBeTruthy();
     expect(invokeMock).toHaveBeenCalledWith('fs:resolve', { sessionId: session.id, path: 'tools.ts' });
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/app/api/mcp/tools.ts', maxBytes: 200_000 }]]);
-    expect(editor.selectionStart).toBe(editor.value.indexOf('line 30\n'));
+    expect(editor.state.selection.main.head).toBe(editor.state.doc.line(30).from);
   });
 
   it('asks which full path to open when a basename is ambiguous, without reading either first', async () => {
@@ -276,7 +284,7 @@ describe('file mentions open the right-panel preview', () => {
     expect(screen.getByRole('region', { name: 'Preview: src/lib/tools.ts' })).toBeTruthy();
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/lib/tools.ts', maxBytes: 200_000 }]]);
     expect(screen.queryByRole('region', { name: 'Choose a file' })).toBeNull();
-    expect(editor.selectionStart).toBe(editor.value.indexOf('chosen 30\n'));
+    expect(editor.state.selection.main.head).toBe(editor.state.doc.line(30).from);
   });
 
   it('cancelling an ambiguous reference closes the pane without opening any candidate', async () => {
@@ -309,11 +317,11 @@ describe('file mentions open the right-panel preview', () => {
     });
     render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'src/first.ts'));
-    expect((await findEditor()).value).toBe('first file');
+    await expectEditor('first file');
     act(() => useStore.getState().revealFile(session.id, 'gone.ts'));
     await waitFor(() => expect(useStore.getState().toasts.map((t) => t.text)).toEqual(['gone.ts was not found in G:/proj/a']));
     expect(screen.getByRole('region', { name: 'Preview: src/first.ts' })).toBeTruthy();
-    expect((await findEditor()).value).toBe('first file');
+    await expectEditor('first file');
   });
 
   it('ignores an older resolution when a newer reference has already opened', async () => {
@@ -328,7 +336,7 @@ describe('file mentions open the right-panel preview', () => {
     act(() => useStore.getState().revealFile(session.id, 'old.ts'));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('fs:resolve', expect.objectContaining({ path: 'old.ts' })));
     act(() => useStore.getState().revealFile(session.id, 'new.ts'));
-    expect((await findEditor()).value).toBe('new content');
+    await expectEditor('new content');
     await act(async () => { resolveOld({ status: 'resolved', path: 'src/old.ts' }); await old; });
     expect(screen.getByRole('region', { name: 'Preview: src/new.ts' })).toBeTruthy();
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/new.ts', maxBytes: 200_000 }]]);
@@ -342,7 +350,7 @@ describe('file mentions open the right-panel preview', () => {
     });
     render(<StrictMode><FilePreviewPane /></StrictMode>);
     act(() => useStore.getState().revealFile(session.id, 'tools.ts'));
-    expect((await findEditor()).value).toBe('strict preview');
+    await expectEditor('strict preview');
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:resolve')).toHaveLength(1);
     expect(reads()).toHaveLength(1);
   });
@@ -385,7 +393,7 @@ describe('file mentions open the right-panel preview', () => {
       invokeMock.mockImplementation(async (channel: string) => channel === 'fs:read' ? { content: 'legacy preview', truncated: false } : {});
       render(<FilePreviewPane />);
       act(() => useStore.getState().revealFile(session.id, 'src/tools.ts'));
-      expect((await findEditor()).value).toBe('legacy preview');
+      await expectEditor('legacy preview');
       expect(invokeMock).not.toHaveBeenCalledWith('fs:resolve', expect.anything());
     } finally {
       delete harness.can;
@@ -427,7 +435,7 @@ describe('file mentions open the right-panel preview', () => {
     });
     render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'G:/proj/a/src/hello.ts'));
-    expect((await findEditor()).value).toBe('hello');
+    await expectEditor('hello');
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/hello.ts', maxBytes: 200_000 }]]);
   });
 
@@ -495,12 +503,12 @@ describe('file mentions open the right-panel preview', () => {
     });
     render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'docs/guide.md'));
-    expect((await findEditor()).value).toBe('Read [the code](../src/a.ts#L2).');
+    await expectEditor('Read [the code](../src/a.ts#L2).');
     expect(screen.queryByRole('link', { name: 'the code' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Show markdown preview' }));
     fireEvent.click(await screen.findByRole('link', { name: 'the code' }));
     expect(target()).toMatchObject({ path: 'src/a.ts', line: 2 });
-    expect((await findEditor()).value).toBe('code body');
+    await expectEditor('code body');
   });
 });
 
@@ -519,11 +527,11 @@ describe('file editor saves', () => {
     render(<FilePreviewPane />);
     openExact(path);
     const editor = await findEditor();
-    expect(editor.value).toBe('# Guide\nFirst line\n');
+    expect(editor.state.doc.toString()).toBe('# Guide\nFirst line\n');
     expect(saveButton().disabled).toBe(true);
     pressSave(editor);
 
-    fireEvent.change(editor, { target: { value: edited } });
+    changeEditor(editor, edited);
     expect(screen.getByText('Unsaved changes')).toBeTruthy();
     expect(writes()).toHaveLength(0);
     pressSave(editor);
@@ -534,7 +542,7 @@ describe('file editor saves', () => {
     await act(async () => { finishSave(); await pending; });
     expect(saveButton().disabled).toBe(true);
     expect(screen.queryByText('Unsaved changes')).toBeNull();
-    expect(editor.value).toBe(edited);
+    expect(editor.state.doc.toString()).toBe(edited);
   });
 
   it('retains a rejected draft for retry without leaking it into another opened file', async () => {
@@ -553,18 +561,18 @@ describe('file editor saves', () => {
     });
     render(<FilePreviewPane />);
     openExact(path);
-    fireEvent.change(await findEditor(), { target: { value: draft } });
+    changeEditor(await findEditor(), draft);
     fireEvent.click(saveButton());
     await waitFor(() => expect(useStore.getState().toasts.at(-1)).toMatchObject({ kind: 'error', text: 'File changed on disk' }));
-    expect((await findEditor()).value).toBe(draft);
+    await expectEditor(draft);
     expect(screen.getByText('Unsaved changes')).toBeTruthy();
     expect(saveButton().disabled).toBe(false);
 
     openExact(otherPath);
-    await screen.findByDisplayValue('other notes');
+    await waitFor(() => expectEditor('other notes'));
     expect(saveButton().disabled).toBe(true);
     openExact(path);
-    await screen.findByDisplayValue(draft);
+    await waitFor(() => expectEditor(draft));
     const write = ['fs:writeText', { sessionId: session.id, path, content: draft, expectedContent: original }];
     expect(writes()).toEqual([write]);
 
@@ -572,7 +580,7 @@ describe('file editor saves', () => {
     fireEvent.click(saveButton());
     await waitFor(() => expect(saveButton().disabled).toBe(true));
     expect(writes()).toEqual([write, write]);
-    expect((await findEditor()).value).toBe(draft);
+    await expectEditor(draft);
     expect(screen.queryByText('Unsaved changes')).toBeNull();
   });
 
@@ -589,15 +597,15 @@ describe('file editor saves', () => {
     render(<FilePreviewPane />);
     openExact(path);
     const editor = await findEditor();
-    fireEvent.change(editor, { target: { value: 'after' } });
+    changeEditor(editor, 'after');
     pressSave(editor);
     fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
     openExact(path);
     expect(reads()).toHaveLength(1);
     await act(async () => { finish(); await pending; });
-    expect((await findEditor()).value).toBe('after');
+    await expectEditor('after');
     expect(saveButton().disabled).toBe(true);
-    fireEvent.change(await findEditor(), { target: { value: 'next' } });
+    changeEditor(await findEditor(), 'next');
     fireEvent.click(saveButton());
     await waitFor(() => expect(disk).toBe('next'));
     expect(writes().at(-1)?.[1]).toMatchObject({ path, expectedContent: 'after' });
@@ -608,8 +616,9 @@ describe('file editor saves', () => {
     render(<FilePreviewPane />);
     openExact('large.txt');
     const editor = await findEditor();
-    expect(editor.value).toBe('partial text');
-    expect(editor.readOnly).toBe(true);
+    expect(editor.state.doc.toString()).toBe('partial text');
+    expect(editor.state.readOnly).toBe(true);
+    expect(editor.contentDOM.getAttribute('aria-readonly')).toBe('true');
     expect(screen.getByRole('status').textContent).toMatch(/truncated.*read-only/i);
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
     pressSave(editor);
@@ -628,7 +637,7 @@ describe('the right-panel Files tab', () => {
     render(<><RightPanel session={session} /><FilePreviewPane /></>);
     const row = await screen.findByRole('button', { name: /hello\.ts/ });
     fireEvent.click(row);
-    expect((await findEditor()).value).toBe('row preview');
+    await expectEditor('row preview');
     expect(target()).toMatchObject({ path: 'src/hello.ts', exact: true });
     expect(invokeMock).not.toHaveBeenCalledWith('fs:resolve', expect.anything());
     expect(reads()).toEqual([['fs:read', { sessionId: session.id, path: 'src/hello.ts', maxBytes: 200_000 }]]);

@@ -508,9 +508,12 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     // The transcript's file overlay reads from the lead's own workspace and opens Files there.
     await win.locator('.transcript').getByRole('link', { name: 'result.txt', exact: true }).click();
     const filePane = win.getByTestId('file-pane');
-    await expect.poll(() => filePane.getByLabel('File contents', { exact: true }).inputValue()).toBe('lead unaccepted edit\n');
+    const editor = filePane.getByRole('textbox', { name: 'File contents', exact: true });
+    await expect.poll(() => editor.locator('.cm-line').allTextContents(), { timeout: 10_000 }).toEqual(['lead unaccepted edit', '']);
     await expect.poll(() => win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe(work.lead.id);
-    expect(await filePane.getByLabel('File contents', { exact: true }).evaluate((el: HTMLTextAreaElement) => el.readOnly)).toBe(true);
+    expect(await editor.getAttribute('aria-readonly')).toBe('true');
+    expect(await editor.isEditable()).toBe(false);
+    expect(await filePane.getByRole('button', { name: 'Save', exact: true }).count()).toBe(0);
     await filePane.getByRole('button', { name: 'Close preview', exact: true }).click();
     await filePane.waitFor({ state: 'detached' });
     await win.getByRole('button', { name: 'Mission result', exact: true }).click();
