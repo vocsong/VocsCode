@@ -45,6 +45,49 @@ function pageMeta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
 }
 
 describe('knowledge store scoping', () => {
+  it('does not treat colliding branch slugs as the same branch', async () => {
+    const projectRoot = tmpDir('vocs-kb-branch-');
+    const scope = { projectRoot, cwd: projectRoot, branch: 'topic/one' };
+    const other = { ...scope, branch: 'topic-one' };
+    const store = new KnowledgeStore();
+    expect(store.branchDir(scope)).toBe(store.branchDir(other));
+    await store.write(scope, pageMeta({ scope: 'branch', claim: 'Private to this branch.' }), 'Branch evidence');
+    expect(await store.load(other)).toEqual([]);
+    await expect(store.ingest(other, { pageId: 'conventions/harness-lifecycle', title: 'Changed', claim: 'Different branch', body: '', scope: 'branch' }, 'agent:mcp')).rejects.toThrow(/out-of-scope/);
+    expect(await store.deletePage(other, 'conventions/harness-lifecycle')).toBe(false);
+    expect((await store.read(scope, 'conventions/harness-lifecycle'))?.body).toBe('Branch evidence');
+  });
+
+  it('does not read or write pages through a wiki link into another project', async () => {
+    const left = tmpDir('vocs-kb-left-');
+    const right = tmpDir('vocs-kb-right-');
+    const store = new KnowledgeStore();
+    const source = { projectRoot: right, cwd: right };
+    const scope = { projectRoot: left, cwd: left };
+    await store.write(source, pageMeta({ claim: 'Private to the other project.' }), 'Private body');
+    await fs.mkdir(path.dirname(store.repoDir(scope)), { recursive: true });
+    await fs.symlink(store.repoDir(source), store.repoDir(scope), process.platform === 'win32' ? 'junction' : 'dir');
+    expect(await store.hasWiki(scope)).toBe(false);
+    expect(await store.load(scope)).toEqual([]);
+    await expect(store.ingest(scope, { pageId: 'conventions/harness-lifecycle', title: 'Changed', claim: 'Changed claim.', body: 'Changed body' }, 'agent:mcp')).rejects.toThrow(/linked wiki/);
+    expect((await store.read(source, 'conventions/harness-lifecycle'))?.body).toBe('Private body');
+  });
+
+  it('does not persist a proposal revoked while it waits for the wiki writer', async () => {
+    const projectRoot = tmpDir('vocs-kb-cancel-');
+    const knowledge = service();
+    const scope = { projectRoot, cwd: projectRoot };
+    const controller = new AbortController();
+    let pending!: Promise<unknown>;
+    await withKnowledgeWriteLock(knowledge.store.repoDir(scope), async () => {
+      pending = knowledge.propose(scope, { title: 'Revoked write', claim: 'A revoked call cannot write.', body: 'Not durable.' }, 'agent:mcp', 's_cancel', controller.signal);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      controller.abort(new Error('Capability revoked'));
+    });
+    await expect(pending).rejects.toThrow('Capability revoked');
+    expect(await new KnowledgeStore().load(scope)).toEqual([]);
+  });
+
   it('keeps branch pages inside the project wiki and merges them by id', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const cwd = path.join(projectRoot, '.vocs-code', 'worktrees', 'feature');
@@ -204,13 +247,13 @@ describe('knowledge service ingestion', () => {
     const scope = { projectRoot, cwd: projectRoot };
     const svc = service();
     const id = 'concept/shared';
-    await svc.store.write(scope, pageMeta({ id, claim: 'Original claim.', createdAt: '2020-01-01T00:00:00.000Z', labels: ['original'], review: { state: 'reviewed', by: 'human', note: 'Keep this provenance.' }, confidence: 'high' }), 'old');
+    await svc.store.write(scope, pageMeta({ id, claim: 'Original claim.', createdAt: '2020-01-01T00:00:00.000Z', labels: ['original'], related: ['concept/other'], updatedBy: 'agent:bootstrap', confidence: 'high' }), 'old');
     const writers = Array.from({ length: 4 }, () => service());
     await Promise.all(writers.map((writer) => writer.store.read(scope, id))); // prime stale caches
     const results = await Promise.all(writers.map((writer, index) => writer.propose(scope, { pageId: id, title: 'Shared', claim: `Replacement ${index}`, body: `Complete ${index}`, labels: [`label-${index}`], sources: [{ type: 'file', ref: `${index}.ts` }] }, 'agent', `s${index}`)));
     expect(results).toHaveLength(4);
     const page = await new KnowledgeStore().read(scope, id);
-    expect(page?.meta).toMatchObject({ createdAt: '2020-01-01T00:00:00.000Z', confidence: 'high', evidenceCount: 4, review: { state: 'reviewed', by: 'human', note: 'Keep this provenance.' } });
+    expect(page?.meta).toMatchObject({ createdAt: '2020-01-01T00:00:00.000Z', confidence: 'high', evidenceCount: 4, related: ['concept/other'], updatedBy: 'agent' });
     expect(page?.meta.labels.slice().sort()).toEqual(['label-0', 'label-1', 'label-2', 'label-3', 'original']);
     expect(page?.meta.sources.map((s) => s.ref).sort()).toEqual(['0.ts', '1.ts', '2.ts', '3.ts']);
     expect(page?.body).toBe(`Complete ${page?.meta.claim?.slice(-1)}`);

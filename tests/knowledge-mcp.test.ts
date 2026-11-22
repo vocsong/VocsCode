@@ -235,7 +235,7 @@ describe('vocs-memory MCP server', () => {
     const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
     const id = 'concept/custom';
     const store = new KnowledgeStore();
-    await store.write(scope, pageMeta({ id, labels: ['original'], createdAt: '2020-01-01T00:00:00.000Z', evidenceCount: 5, confidence: 'high', review: { state: 'reviewed', by: 'human', note: 'Preserve me.' }, related: ['concept/other'] }), 'original');
+    await store.write(scope, pageMeta({ id, labels: ['original'], createdAt: '2020-01-01T00:00:00.000Z', evidenceCount: 5, confidence: 'high', review: undefined, updatedBy: 'agent:bootstrap', related: ['concept/other'] }), 'original');
     const svc = new KnowledgeService({ log: () => undefined, settings: () => ({}) as AppSettings, store });
     const clients = Array.from({ length: 3 }, () => start(wiki));
     const results = await Promise.all([
@@ -244,7 +244,7 @@ describe('vocs-memory MCP server', () => {
     ]);
     expect(results).toHaveLength(4);
     const page = await new KnowledgeStore().read(scope, id);
-    expect(page?.meta).toMatchObject({ createdAt: '2020-01-01T00:00:00.000Z', evidenceCount: 9, confidence: 'high', review: { state: 'reviewed', by: 'human', note: 'Preserve me.' }, related: ['concept/other'] });
+    expect(page?.meta).toMatchObject({ createdAt: '2020-01-01T00:00:00.000Z', evidenceCount: 9, confidence: 'high', related: ['concept/other'] });
     expect(page?.meta.labels.slice().sort()).toEqual(['app', 'mcp-0', 'mcp-1', 'mcp-2', 'original']);
     expect(page?.meta.sources.map((s) => s.ref).sort()).toEqual(['app.ts', 'mcp-0.ts', 'mcp-1.ts', 'mcp-2.ts', 'src/main/session-manager.ts']);
     expect(page?.body).toBe(`${page?.meta.claim} body`);
@@ -256,7 +256,7 @@ describe('vocs-memory MCP server', () => {
     const scope = { projectRoot, cwd: projectRoot };
     const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
     const id = 'concept/failure';
-    await new KnowledgeStore().write(scope, pageMeta({ id, createdAt: '2020-01-01T00:00:00.000Z' }), 'complete original body');
+    await new KnowledgeStore().write(scope, pageMeta({ id, createdAt: '2020-01-01T00:00:00.000Z', review: undefined }), 'complete original body');
     const file = path.join(wiki, `${id}.md`);
     const before = await fs.readFile(file, 'utf8');
     // Inject at the real child's filesystem boundary, without a test hook in production code.
@@ -433,7 +433,7 @@ describe('vocs-memory MCP server', () => {
     const branchRoot = path.join(wiki, 'branches', 'vocscode-feature');
     const store = new KnowledgeStore();
     const branchScope: KnowledgeScope = { projectRoot, cwd: projectRoot, branch: 'vocscode/feature' };
-    await store.write(branchScope, pageMeta({ id: 'conventions/branch-only', title: 'Branch note', claim: 'A claim only this branch has.', scope: 'branch', branch: 'vocscode/feature' }), 'branch body');
+    await store.write(branchScope, pageMeta({ id: 'conventions/branch-only', title: 'Branch note', claim: 'A claim only this branch has.', scope: 'branch', branch: 'vocscode/feature', review: undefined }), 'branch body');
 
     const { request } = start(wiki, { VOCS_MEMORY_BRANCH_ROOT: branchRoot, VOCS_MEMORY_BRANCH: 'vocscode/feature' });
     const propose = await request({
@@ -473,7 +473,7 @@ describe('vocs-memory MCP server', () => {
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     await store.write(
       scope,
-      pageMeta({ id: 'conventions/custom-id', title: 'Existing page', claim: 'The first claim.', labels: ['alpha'], createdAt: '2020-01-01T00:00:00.000Z' }),
+      pageMeta({ id: 'conventions/custom-id', title: 'Existing page', claim: 'The first claim.', labels: ['alpha'], createdAt: '2020-01-01T00:00:00.000Z', review: undefined }),
       'original body'
     );
     const { request } = start(wiki);
