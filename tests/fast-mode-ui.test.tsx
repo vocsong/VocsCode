@@ -185,7 +185,8 @@ describe('composer Fast mode request', () => {
     let resolve!: (meta: SessionMeta) => void;
     invoke.mockImplementation((channel: string) => channel === 'sessions:setFastMode' ? new Promise((r) => { resolve = r; }) : Promise.resolve({}));
     render(<LiveControls />);
-    fireEvent.click(screen.getByTitle('Model'));
+    const pill = screen.getByTitle('Model');
+    fireEvent.click(pill);
     const on = fastOption('On');
     const off = fastOption('Off');
     fireEvent.click(off);
@@ -203,9 +204,12 @@ describe('composer Fast mode request', () => {
     expect(on.disabled && off.disabled).toBe(true);
     expect(on.getAttribute('aria-checked')).toBe('false');
     expect(off.getAttribute('aria-checked')).toBe('true');
+    expect(pill.querySelector('[data-icon="bolt"]')).toBeNull();
     await act(async () => resolve(session({ config: { ...session().config, fastMode: true }, fastModeStatus: { state: 'requested' } })));
     expect(on.getAttribute('aria-checked')).toBe('true');
     expect(off.getAttribute('aria-checked')).toBe('false');
+    expect(pill.querySelector('[data-icon="bolt"]')).not.toBeNull();
+    expect(pill.getAttribute('aria-label')).toContain('Fast requested');
     expect(screen.getByRole('status').textContent).toBe('Requested');
     expect(on.disabled || off.disabled).toBe(false);
     expect(useStore.getState().sessions[0].config.effort).toBe('high');
