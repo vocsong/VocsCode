@@ -130,6 +130,43 @@
 .settings .theme-card-name { font-size: 11px; padding: 0 3px 2px; justify-content: space-between; }
 .settings .theme-card.active .theme-card-name { color: var(--accent); font-weight: 650; }
 .settings .theme-card.active .theme-card-name::after { content: '✓'; font-weight: 700; }
+/* Text & fonts (TypographySettings.tsx). */
+.segmented { display: inline-flex; flex-wrap: wrap; padding: 3px; gap: 2px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-sunken); }
+.segmented-option { padding: 5px 13px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-muted); font: inherit; font-size: 12px; font-weight: 550; font-variant-numeric: tabular-nums; cursor: pointer; transition: background 0.12s, color 0.12s, box-shadow 0.12s; }
+.segmented-option:hover { color: var(--fg); background: var(--bg-hover); }
+.segmented-option.active { color: var(--fg); background: var(--bg-elev); box-shadow: var(--shadow-sm), 0 0 0 1px var(--border); }
+.segmented-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.type-settings { display: flex; flex-direction: column; gap: 22px; }
+.type-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; }
+.type-row-stack { flex-direction: column; align-items: stretch; }
+.type-row-label { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.type-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px 18px; align-items: start; }
+.type-grid .field { margin: 0; }
+.type-grid select { width: 100%; }
+.type-font { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.type-font-custom { width: 100%; }
+.type-font-preview { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 7px 10px; border: 1px dashed var(--border); border-radius: 7px; color: var(--fg); font-size: 15px; }
+.type-spacing { display: flex; flex-direction: column; gap: 6px; }
+/* Line spacing shares a grid column with two selects: fill it, never wrap. */
+.type-spacing .segmented { display: flex; flex-wrap: nowrap; }
+.type-spacing .segmented-option { flex: 1 1 0; min-width: 0; padding-inline: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.type-width { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.type-width-option { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; padding: 10px 12px 11px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); color: var(--fg); font: inherit; text-align: left; cursor: pointer; transition: border-color 0.12s, box-shadow 0.12s; }
+.type-width-option:hover { border-color: var(--border-strong); }
+.type-width-option.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.type-width-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.type-width-option strong { font-size: 12px; }
+.type-width-option.active strong { color: var(--accent); }
+.type-width-option small { color: var(--fg-muted); font-size: 11px; }
+.type-width-glyph { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 100%; padding: 9px 0; margin-bottom: 5px; border-radius: 6px; background: var(--bg-sunken); }
+.type-width-glyph i { display: block; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--fg-muted) 45%, transparent); }
+.type-width-option.active .type-width-glyph i:first-child { background: var(--accent); }
+/* The sample reuses the transcript's own classes; only its frame is set here. */
+.type-sample { display: flex; flex-direction: column; gap: 10px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.type-sample .msg-user { display: flex; justify-content: flex-end; margin: 0; padding: 0; }
+.type-sample .codeblock { margin: 0; }
+.type-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+@media (max-width: 560px) { .type-width { grid-template-columns: 1fr; } }
 /* The remaining sections share the same card, field, disclosure and table vocabulary. */
 .settings .provider-card, .settings .harness-row, .settings .mission-card, .settings .shortcut-ref { background: var(--bg-elev); border-radius: 11px; margin: 14px 0; }
 .settings .provider-head { gap: 10px; flex-wrap: wrap; padding: 16px 20px; }

@@ -226,7 +226,7 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     const appearance = sections.getByRole('button', { name: 'Appearance', exact: true });
     await appearance.click();
     const fullSettingsWidth = (await rect(win, '.settings-nav')).width;
-    const picker = win.getByRole('group', { name: 'Interface' });
+    const picker = win.getByRole('group', { name: 'Interface', exact: true });
     await expect.poll(() => picker.getByRole('button').evaluateAll((cards) => cards.map((c) => c.getAttribute('aria-label')))).toEqual(['Standard interface', 'Zen interface']);
     await picker.getByRole('button', { name: 'Zen interface' }).click();
     await expect.poll(() => uiMode(win)).toBe('zen');
