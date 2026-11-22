@@ -1,11 +1,12 @@
 /*
  * Design tokens.
  *
- * `:root` is the Light palette and `[data-theme='dark']` the Dark one; both are authored here so a
- * complete palette exists before any script runs. Every other theme is data in
- * `src/shared/themes.ts` and its block is injected by `src/renderer/src/theme.ts`.
+ * Every palette variant is data in `src/shared/themes.ts`, injected by `src/renderer/src/theme.ts`
+ * and keyed on `[data-palette][data-scheme]`. What is authored here is the Default palette's light
+ * and dark variants as a fallback, so a complete palette exists before any script runs; they must
+ * match the `default` entry in themes.ts (tests/themes.test.ts checks).
  *
- * A theme only needs to declare base hues: the `--*-soft` washes below are derived from them.
+ * A palette only needs to declare base hues: the `--*-soft` washes below are derived from them.
  */
 :root {
   color-scheme: light dark;
@@ -17,18 +18,18 @@
   --bg-hover: rgba(0, 0, 0, 0.045);
   --bg-active: rgba(0, 0, 0, 0.08);
   --fg: #1c1c1f;
-  --fg-muted: #6b6f76;
-  --fg-faint: #9a9ea6;
+  --fg-muted: #62666d;
+  --fg-faint: #8a8e96;
   --border: #e3e4e8;
   --border-strong: #cfd1d6;
   --accent: #5b5bd6;
   --accent-fg: #ffffff;
-  --green: #1f9d55;
-  --amber: #c27a10;
-  --red: #d13438;
-  --blue: #2f6fed;
-  --purple: #8a4fd3;
-  --cyan: #0f8a99;
+  --green: #157c45;
+  --amber: #9c600a;
+  --red: #c8302f;
+  --blue: #2a64d6;
+  --purple: #8247c8;
+  --cyan: #0c7885;
   --user-bubble: #e9e9fb;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.14);
 
@@ -65,10 +66,9 @@
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.06);
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.05), 0 8px 24px -14px rgb(0 0 0 / 0.28);
 }
-/* Only 'system' (or no attribute yet) defers to the OS; a named theme owns its own palette. */
+/* Before theme.ts resolves a scheme, follow the OS. */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme]),
-  :root[data-theme='system'] {
+  :root:not([data-scheme]) {
     --bg: #111318;
     --bg-elev: #191c23;
     --bg-sunken: #0d0f13;
@@ -96,38 +96,6 @@
     --chart-5: #d55181;
     --chart-6: #008300;
   }
-}
-:root[data-theme='dark'] {
-  color-scheme: dark;
-  --bg: #111318;
-  --bg-elev: #191c23;
-  --bg-sunken: #0d0f13;
-  --bg-hover: rgba(255, 255, 255, 0.06);
-  --bg-active: rgba(255, 255, 255, 0.1);
-  --fg: #e6e7ea;
-  --fg-muted: #9aa0aa;
-  --fg-faint: #6b7280;
-  --border: #262a33;
-  --border-strong: #363b47;
-  --accent: #8b8bff;
-  --accent-fg: #0e0e1a;
-  --green: #3ecf7a;
-  --amber: #f0b44c;
-  --red: #ff6b6e;
-  --blue: #6ea0ff;
-  --purple: #c084fc;
-  --cyan: #4dd0e1;
-  --user-bubble: #23263a;
-  --shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-  --chart-1: #3987e5;
-  --chart-2: #d95926;
-  --chart-3: #199e70;
-  --chart-4: #c98500;
-  --chart-5: #d55181;
-  --chart-6: #008300;
-}
-:root[data-theme='light'] {
-  color-scheme: light;
 }
 
 * {
@@ -6528,17 +6496,19 @@ body.resizing {
 }
 
 /* ---------------------------------------------------------------------------
- * Nebula — the animated futuristic theme.
+ * Nebula — the animated palette.
  *
- * Its palette is data like every other theme (src/shared/themes.ts); what lives here is the motion
- * and glow only this theme opts into. App surfaces turn slightly translucent so the drifting aurora
- * painted behind the window shows through them. All of it stops under prefers-reduced-motion.
+ * Its colors are data like every other palette (src/shared/themes.ts); what lives here is the
+ * motion and glow only this palette opts into, in both its light and dark variants. App surfaces
+ * turn slightly translucent so the drifting aurora painted behind the window shows through them.
+ * The light variant keeps the motion but turns the aurora, grid and glows down so they never
+ * compete with text on a bright ground. All of it stops under prefers-reduced-motion.
  * ------------------------------------------------------------------------- */
-:root[data-theme='nebula'] body {
+:root[data-palette='nebula'] body {
   background: var(--bg-sunken);
 }
 /* Layer 1 — the aurora: three blurred blobs on a fixed plane behind #root, drifting and breathing. */
-:root[data-theme='nebula'] body::before {
+:root[data-palette='nebula'] body::before {
   content: '';
   position: fixed;
   inset: -30%;
@@ -6547,12 +6517,16 @@ body.resizing {
     radial-gradient(closest-side, color-mix(in srgb, var(--accent) 55%, transparent), transparent) 18% 24% / 46% 44% no-repeat,
     radial-gradient(closest-side, color-mix(in srgb, var(--red) 50%, transparent), transparent) 78% 70% / 44% 42% no-repeat,
     radial-gradient(closest-side, color-mix(in srgb, var(--purple) 48%, transparent), transparent) 62% 12% / 38% 40% no-repeat;
-  filter: blur(70px) saturate(150%);
-  opacity: 0.55;
+  filter: blur(70px) saturate(140%);
+  opacity: 0.42;
   animation: nebula-drift 30s ease-in-out infinite alternate;
 }
+:root[data-palette='nebula'][data-scheme='light'] body::before {
+  opacity: 0.2;
+  filter: blur(80px) saturate(120%);
+}
 /* Layer 2 — a faint holographic grid sliding diagonally, still behind every app surface. */
-:root[data-theme='nebula'] #root::before {
+:root[data-palette='nebula'] #root::before {
   content: '';
   position: fixed;
   inset: 0;
@@ -6561,8 +6535,11 @@ body.resizing {
     linear-gradient(to right, color-mix(in srgb, var(--border-strong) 55%, transparent) 1px, transparent 1px),
     linear-gradient(to bottom, color-mix(in srgb, var(--border-strong) 55%, transparent) 1px, transparent 1px);
   background-size: 46px 46px;
-  opacity: 0.3;
+  opacity: 0.24;
   animation: nebula-grid 22s linear infinite;
+}
+:root[data-palette='nebula'][data-scheme='light'] #root::before {
+  opacity: 0.16;
 }
 @keyframes nebula-drift {
   0% {
@@ -6581,22 +6558,22 @@ body.resizing {
   }
 }
 /* Frosted chrome, so the aurora reads through the app instead of behind it. */
-:root[data-theme='nebula'] .titlebar,
-:root[data-theme='nebula'] .header,
-:root[data-theme='nebula'] .composer,
-:root[data-theme='nebula'] .panel {
+:root[data-palette='nebula'] .titlebar,
+:root[data-palette='nebula'] .header,
+:root[data-palette='nebula'] .composer,
+:root[data-palette='nebula'] .panel {
   background: color-mix(in srgb, var(--bg-elev) 80%, transparent);
   backdrop-filter: blur(14px) saturate(130%);
 }
-:root[data-theme='nebula'] .main {
+:root[data-palette='nebula'] .main {
   background: color-mix(in srgb, var(--bg) 76%, transparent);
 }
-:root[data-theme='nebula'] .sidebar {
+:root[data-palette='nebula'] .sidebar {
   background: color-mix(in srgb, var(--bg-sunken) 72%, transparent);
   backdrop-filter: blur(12px);
 }
 /* A light bar sweeping along the title bar's edge. */
-:root[data-theme='nebula'] .titlebar::after {
+:root[data-palette='nebula'] .titlebar::after {
   content: '';
   position: absolute;
   left: 0;
@@ -6618,7 +6595,7 @@ body.resizing {
   }
 }
 /* The wordmark cycles through the palette; the mark beside it pulses. */
-:root[data-theme='nebula'] .brand span {
+:root[data-palette='nebula'] .brand span {
   background: linear-gradient(100deg, var(--accent), var(--purple) 30%, var(--red) 50%, var(--accent) 80%);
   background-size: 300% 100%;
   -webkit-background-clip: text;
@@ -6626,7 +6603,7 @@ body.resizing {
   color: transparent;
   animation: nebula-sweep 9s linear infinite;
 }
-:root[data-theme='nebula'] .brand > svg {
+:root[data-palette='nebula'] .brand > svg {
   color: var(--accent);
   filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 70%, transparent));
   animation: nebula-breathe 3.4s ease-in-out infinite;
@@ -6648,59 +6625,59 @@ body.resizing {
   }
 }
 /* Primary buttons: a moving gradient with a soft outer glow. */
-:root[data-theme='nebula'] .btn-primary {
+:root[data-palette='nebula'] .btn-primary {
   background: linear-gradient(100deg, var(--accent), var(--purple) 40%, var(--red) 62%, var(--accent));
   background-size: 260% 100%;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), 0 0 18px color-mix(in srgb, var(--accent) 32%, transparent);
   animation: nebula-sweep 7s linear infinite;
 }
-:root[data-theme='nebula'] .btn-primary:hover {
+:root[data-palette='nebula'] .btn-primary:hover {
   background: linear-gradient(100deg, var(--accent), var(--purple) 40%, var(--red) 62%, var(--accent));
   background-size: 260% 100%;
   filter: brightness(1.12) saturate(115%);
 }
 /* The selected session sits in its own pool of light. */
-:root[data-theme='nebula'] .session-row.active {
+:root[data-palette='nebula'] .session-row.active {
   background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent), inset 3px 0 0 var(--accent),
     0 0 16px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 /* Status lights actually glow. */
-:root[data-theme='nebula'] .status-running,
-:root[data-theme='nebula'] .status-starting {
+:root[data-palette='nebula'] .status-running,
+:root[data-palette='nebula'] .status-starting {
   box-shadow: 0 0 9px color-mix(in srgb, var(--blue) 85%, transparent);
 }
-:root[data-theme='nebula'] .status-awaiting {
+:root[data-palette='nebula'] .status-awaiting {
   box-shadow: 0 0 9px color-mix(in srgb, var(--amber) 85%, transparent);
 }
-:root[data-theme='nebula'] .status-error {
+:root[data-palette='nebula'] .status-error {
   box-shadow: 0 0 9px color-mix(in srgb, var(--red) 85%, transparent);
 }
-:root[data-theme='nebula'] .dot-live {
+:root[data-palette='nebula'] .dot-live {
   box-shadow: 0 0 9px color-mix(in srgb, var(--green) 85%, transparent);
 }
-:root[data-theme='nebula'] .chip.active,
-:root[data-theme='nebula'] .pill.open,
-:root[data-theme='nebula'] .theme-card.active {
+:root[data-palette='nebula'] .chip.active,
+:root[data-palette='nebula'] .pill.open,
+:root[data-palette='nebula'] .theme-card.active {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), 0 0 14px color-mix(in srgb, var(--accent) 25%, transparent);
 }
-:root[data-theme='nebula'] input:focus,
-:root[data-theme='nebula'] select:focus,
-:root[data-theme='nebula'] textarea:focus,
-:root[data-theme='nebula'] .composer-box:focus-within {
+:root[data-palette='nebula'] input:focus,
+:root[data-palette='nebula'] select:focus,
+:root[data-palette='nebula'] textarea:focus,
+:root[data-palette='nebula'] .composer-box:focus-within {
   box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--accent) 28%, transparent);
 }
-:root[data-theme='nebula'] ::-webkit-scrollbar-thumb {
+:root[data-palette='nebula'] ::-webkit-scrollbar-thumb {
   background: linear-gradient(180deg, var(--accent), var(--purple));
   background-clip: padding-box;
 }
 @media (prefers-reduced-motion: reduce) {
-  :root[data-theme='nebula'] body::before,
-  :root[data-theme='nebula'] #root::before,
-  :root[data-theme='nebula'] .titlebar::after,
-  :root[data-theme='nebula'] .brand span,
-  :root[data-theme='nebula'] .brand > svg,
-  :root[data-theme='nebula'] .btn-primary {
+  :root[data-palette='nebula'] body::before,
+  :root[data-palette='nebula'] #root::before,
+  :root[data-palette='nebula'] .titlebar::after,
+  :root[data-palette='nebula'] .brand span,
+  :root[data-palette='nebula'] .brand > svg,
+  :root[data-palette='nebula'] .btn-primary {
     animation: none;
   }
 }

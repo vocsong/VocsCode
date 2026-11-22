@@ -3,7 +3,7 @@
  * Keep this file free of Node/Electron/DOM imports.
  */
 import type { TerminalSettings } from './terminal';
-import type { ThemeId } from './themes';
+import type { PaletteId, ThemeMode } from './themes';
 import type { UiModeId } from './ui-modes';
 import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
@@ -1283,7 +1283,13 @@ export interface AppSettings {
   mission?: MissionConfig;
   missionProjects?: Record<string, MissionProjectOverride>;
   version: 1;
-  theme: ThemeId;
+  /**
+   * Light/dark mode: System, Light or Dark (shared/themes.ts). Kept under the `theme` key so
+   * settings.json stays readable by older builds; a legacy palette id here is migrated on load.
+   */
+  theme: ThemeMode;
+  /** Color palette, applied in the mode above. Absent means Default. */
+  palette?: PaletteId;
   /** Interface layout, independent of the color theme (shared/ui-modes.ts). Absent means Standard. */
   uiMode?: UiModeId;
   defaultHarness: HarnessId;

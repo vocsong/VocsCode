@@ -26,7 +26,7 @@ export const SETTINGS_PAGES = [
   ] },
   { id: 'appearance', label: 'Appearance', icon: 'palette', group: 'Workspace', description: 'Find your focus with a layout and a theme that feel right.', saveHint: 'Interface and theme changes apply immediately', topics: [
     { label: 'Interface', description: 'Standard, or the minimalist Zen layout.', keywords: 'layout minimal minimalist zen focus compact clean simple distraction ui ux chrome', anchor: 'appearance-interface' },
-    { label: 'Color theme', description: 'System, light, dark and expressive themes with a live preview.', keywords: 'colors colour midnight navy abyss blueprint admiral nebula ultraviolet magma solarium blossom citrine cappuccino meadow porcelain lavender evergreen graphite ember lagoon fjord claret contrast', anchor: 'appearance-theme' },
+    { label: 'Color theme', description: 'Light or dark mode, and twenty palettes that each come in both, with a live preview.', keywords: 'colors colour palette mode system light dark night appearance default graphite slate stone midnight navy abyss fjord admiral evergreen meadow lagoon citrine ember cappuccino solarium claret ultraviolet blossom dusk nebula blueprint porcelain lavender magma contrast', anchor: 'appearance-theme' },
   ] },
   { id: 'shortcuts', label: 'Shortcuts', icon: 'keyboard', group: 'Workspace', description: 'Less reaching for the mouse. More staying in flow.', saveHint: 'Use Add to save a new shortcut', topics: [
     { label: 'Custom shortcuts', description: 'Bind your own key combinations to common actions.', keywords: 'keyboard hotkeys bindings command', anchor: 'shortcuts-custom' },

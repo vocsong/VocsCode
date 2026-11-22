@@ -143,7 +143,7 @@ describe.runIf(enabled)('shell layout', () => {
 
     await navigate('Appearance');
     await win.locator('.theme-picker').waitFor();
-    expect(await win.locator('.theme-card.active').innerText()).toContain('Dark');
+    expect(await win.locator('.theme-mode-option.active').innerText()).toContain('Dark');
     await capture('appearance');
 
     // Search is keyboard reachable, announces its results and leads to the setting group, not just a page.
@@ -328,7 +328,7 @@ describe.runIf(enabled)('shell layout', () => {
     expect(await compact.locator('optgroup').evaluateAll((items) => items.map((item) => item.getAttribute('label')))).toEqual(groups);
     await compact.selectOption('appearance');
     await win.getByRole('heading', { name: 'Appearance', level: 1 }).waitFor();
-    expect(await win.locator('.theme-card.active').innerText()).toContain('Dark');
+    expect(await win.locator('.theme-mode-option.active').innerText()).toContain('Dark');
     await compact.selectOption('sessions');
     await win.getByRole('heading', { name: 'Session defaults', level: 1 }).waitFor();
     expect(await win.getByLabel(/^Default harness/).inputValue()).toBe('native');
