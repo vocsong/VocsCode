@@ -571,7 +571,7 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     await archivedMission.hover();
     await archivedMission.getByRole('button', { name: 'Restore session', exact: true }).click();
     await expect.poll(async () => (await persisted(userData)).archived).toBe(false);
-    await win.getByRole('button', { name: 'Show active', exact: true }).click();
+    await win.getByRole('button', { name: 'Archived', pressed: true }).click(); // pressed again: back to active sessions
     await win.getByTestId('session-row').filter({ hasText: 'Seeded Mission' }).click();
     await win.getByRole('button', { name: 'Stop Mission', exact: true }).click();
     await expect.poll(async () => (await persisted(userData)).status, { timeout: 30_000 }).toBe('stopped');

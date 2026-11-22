@@ -131,8 +131,7 @@
 }
 /* Every row keeps its full-width layout; the rail is just its left edge, so opening never reflows. */
 :root[data-ui='zen'] .sidebar > :not(.resizer),
-:root[data-ui='zen'] .sidebar-nav > *,
-:root[data-ui='zen'] .sidebar-section > .sidebar-archived {
+:root[data-ui='zen'] .sidebar-nav > * {
   flex-shrink: 0;
   width: var(--sidebar);
 }
@@ -165,7 +164,6 @@
 }
 :root[data-ui='zen'] .sidebar-new,
 :root[data-ui='zen'] .sidebar-views .sidebar-link,
-:root[data-ui='zen'] .sidebar-archived,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link {
   justify-content: flex-start;
   gap: 0;
@@ -181,7 +179,6 @@
 }
 :root[data-ui='zen'] .sidebar-new > .icon,
 :root[data-ui='zen'] .sidebar-views .sidebar-link > .icon,
-:root[data-ui='zen'] .sidebar-archived > .icon,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link > .icon {
   width: var(--zen-rail);
   height: 16px;
@@ -189,7 +186,6 @@
 }
 :root[data-ui='zen'] .sidebar-new:hover,
 :root[data-ui='zen'] .sidebar-views .sidebar-link:hover,
-:root[data-ui='zen'] .sidebar-archived:hover,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link:hover,
 :root[data-ui='zen'] .sidebar-link.active {
   background: var(--bg-hover);
@@ -223,11 +219,8 @@
   flex-direction: column;
   gap: 0;
 }
-:root[data-ui='zen'] .sidebar-archived {
-  order: 3;
-}
-/* Projects | Recent sits right under New session, above the list it lays out. Closed, the rail
-   shows the current layout's icon; open, the two choices sit beside it. */
+/* Projects | Recent and Archived sit right under New session, above the list they shape. Closed,
+   the rail shows what the list holds (archive, list or folder icon); open, the choices sit beside it. */
 :root[data-ui='zen'] .sidebar-viewswitch {
   order: 1;
   width: var(--sidebar);
@@ -237,10 +230,20 @@
   display: block;
   flex-shrink: 0;
   width: var(--zen-rail);
+  /* Cancels the row gap, so the switch starts where every other row's text does. */
+  margin-right: -6px;
   color: var(--fg-muted);
 }
-:root[data-ui='zen'] .sidebar-viewswitch .segmented {
+:root[data-ui='zen'] .sidebar-viewswitch .segmented,
+:root[data-ui='zen'] .sidebar-viewswitch .segmented-toggle:not(.active) {
   background: none;
+}
+/* The open rail is too narrow for three labels: Archived keeps its icon, its name moves to the tooltip. */
+:root[data-ui='zen'] .sidebar-viewswitch .segmented-toggle {
+  padding: 4px 8px;
+}
+:root[data-ui='zen'] .sidebar-viewswitch .segmented-toggle-label {
+  display: none;
 }
 :root[data-ui='zen'] .sidebar-bottom {
   order: 4;

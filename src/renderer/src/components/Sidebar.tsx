@@ -354,10 +354,12 @@ export function Sidebar() {
           </button>
         </div>
       </div>
-      {/* The list's layout, picked at the top of the sidebar: folder groups or one recency order. */}
-      <div className="sidebar-viewswitch" role="group" aria-label="Session list layout">
-        <Icon name={sidebarView === 'recent' ? 'list' : 'folder'} size={15} className="sidebar-viewswitch-icon" />
-        <div className="segmented">
+      {/* What the list shows, picked at the top of the sidebar: its layout (folder groups or one
+          recency order) and, beside it, which sessions (live or archived). The two are independent:
+          archived sessions list by project or by recent too. */}
+      <div className="sidebar-viewswitch" role="group" aria-label="Session list view">
+        <Icon name={showArchived ? 'archive' : sidebarView === 'recent' ? 'list' : 'folder'} size={15} className="sidebar-viewswitch-icon" />
+        <div className="segmented" role="group" aria-label="Session list layout">
           {([['folders', 'folder', 'Projects', 'Group sessions by project folder'], ['recent', 'list', 'Recent', 'Sort sessions by recent, across folders']] as const).map(([v, icon, label, title]) => (
             <button
               key={v}
@@ -370,16 +372,25 @@ export function Sidebar() {
                 if (sidebarView !== v) void invoke('settings:update', { sidebarView: v }).catch(toastError);
               }}
             >
-              <Icon name={icon} size={12} /> {label}
+              <Icon name={icon} size={12} /> <span className="segment-label">{label}</span>
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          className={`segmented-toggle sidebar-archived ${showArchived ? 'active' : ''}`}
+          data-testid="sidebar-archived"
+          aria-pressed={showArchived}
+          aria-label="Archived"
+          title={showArchived ? 'Back to active sessions' : 'Show archived sessions'}
+          onClick={() => setShowArchived((v) => !v)}
+        >
+          {/* Zen's narrow rail keeps only the icon; the name stays in aria-label and the tooltip. */}
+          <Icon name="archive" size={12} /> <span className="segmented-toggle-label">Archived</span>
+        </button>
       </div>
       <div className="sidebar-section">
         <span className="sidebar-section-label">{showArchived ? 'Archived sessions' : 'Sessions'}</span>
-        <button type="button" className={`sidebar-link sidebar-archived ${showArchived ? 'active' : ''}`} title={tip(showArchived ? 'Show active' : 'Archived')} onClick={() => setShowArchived((v) => !v)}>
-          <Icon name={showArchived ? 'arrowLeft' : 'clock'} size={13} /> {showArchived ? 'Show active' : 'Archived'}
-        </button>
       </div>
       <div
         className="sidebar-list"
