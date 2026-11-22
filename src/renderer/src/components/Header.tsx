@@ -22,7 +22,7 @@ import { canClosePane, canSplit } from '../panes';
 export function Header({ session, paneId }: { session: SessionMeta; paneId?: string }) {
   const { record: mission, error: missionError } = useMission(session);
   const missions = useStore((s) => s.missions);
-  const panelOpen = useStore((s) => s.panelOpen);
+  const panelVisible = useStore((s) => s.panelOpen || !!s.layout.filePreview);
   const togglePanel = useStore((s) => s.togglePanel);
   const setPanelTab = useStore((s) => s.setPanelTab);
   const toast = useStore((s) => s.toast);
@@ -83,7 +83,7 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
         {paneId && split && (
           <Button variant="ghost" size="sm" icon="x" onClick={() => useStore.getState().closePane(paneId)} title="Close pane — the session keeps running" aria-label="Close pane" />
         )}
-        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" className="header-panel-toggle" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
+        <Button variant={panelVisible ? 'subtle' : 'ghost'} size="sm" icon="layout" className="header-panel-toggle" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
       </div>
 
       {session.mission && (

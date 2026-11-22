@@ -5,6 +5,7 @@ import { useActiveSession, useStore, toastError } from './store';
 import { Vesta } from './components/Vesta';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
+import { FilePreviewPane } from './components/FilePreviewPane';
 import { HousekeepDialog } from './components/HousekeepDialog';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { OnboardingWizard } from './components/OnboardingWizard';
@@ -56,6 +57,12 @@ export function App() {
   const paletteOpen = useStore((s) => s.paletteOpen);
   const searchOpen = useStore((s) => s.searchOpen);
   const session = useActiveSession();
+  // An empty active split still needs a right edge for a preview from the other pane.
+  const previewSession = useStore((s) => session ? undefined : s.sessions.find((x) => x.id === s.layout.filePreview?.sessionId));
+  const panelSession = session ?? previewSession;
+  const hasFilePreview = useStore((s) => !!s.layout.filePreview);
+  const showPanel = (panelOpen || hasFilePreview) && !!panelSession && view === 'chat';
+  const previewOnly = showPanel && !panelOpen;
   // Tell main (and through it, paired browsers) which session this window is on.
   useReportDesktopFocus();
   useSessionViewing();
@@ -202,7 +209,7 @@ export function App() {
   return (
     <div className="shell">
       <TitleBar />
-      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'} ${pins.left ? 'pin-left' : ''} ${pins.right ? 'pin-right' : ''}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
+      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${showPanel && panelOpen ? '' : 'no-panel'} ${previewOnly ? 'panel-preview-only' : ''} ${pins.left ? 'pin-left' : ''} ${pins.right ? 'pin-right' : ''}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
         {sidebarOpen && <Sidebar />}
         <main className="main">
@@ -218,7 +225,8 @@ export function App() {
             <SessionPanes empty={<Welcome />} />
           )}
         </main>
-        {panelOpen && session && view === 'chat' && <RightPanel session={session} gitPanelCache={gitPanelCache} />}
+        {showPanel && <RightPanel session={panelSession} gitPanelCache={gitPanelCache} />}
+        <FilePreviewPane visible={showPanel} />
       </div>
       {newSessionOpen && <NewSessionDialog />}
       {(onboardingOpen || (!settings.onboardingDone && !onboardingDismissed)) && <OnboardingWizard initialHarness={onboardingHarness ?? undefined} onClose={() => useStore.getState().dismissOnboarding()} />}

@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { listeners, invoke, mainFrame, contents, ownerChannels } = vi.hoisted(() => {
   const mainFrame = {};
-  const ownerChannels = ['harness:login', 'harness:antigravityQuota', 'control:grant', 'vocsAccount:get', 'vocsAccount:signIn', 'vocsAccount:cancel', 'vocsAccount:refresh', 'vocsAccount:signOut', 'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'intelligence:view', 'intelligence:promote'];
+  const ownerChannels = ['harness:login', 'harness:antigravityQuota', 'control:grant', 'vocsAccount:get', 'vocsAccount:signIn', 'vocsAccount:cancel', 'vocsAccount:refresh', 'vocsAccount:signOut', 'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText', 'intelligence:view', 'intelligence:promote'];
   return { listeners: new Map<string, (event: { sender: unknown; senderFrame: unknown }, req: unknown) => unknown>(), invoke: vi.fn(), mainFrame, contents: { mainFrame }, ownerChannels };
 });
 vi.mock('electron', () => ({ app: {}, BrowserWindow: {}, dialog: {}, shell: {}, ipcMain: { handle: (channel: string, fn: never) => listeners.set(channel, fn) } }));
@@ -39,8 +39,9 @@ describe('local desktop setup authority', () => {
   });
   it.each([
     { channel: 'harness:login', payload: { harness: 'antigravity' }, reply: { ok: true } },
-    { channel: 'harness:antigravityQuota', payload: undefined, reply: { groups: [{ name: 'Gemini', buckets: [{ name: 'Gemini Pro', remainingFraction: 0.73 }] }] } }
-  ])('passes Antigravity $channel through the owner frame', async ({ channel, payload, reply }) => {
+    { channel: 'harness:antigravityQuota', payload: undefined, reply: { groups: [{ name: 'Gemini', buckets: [{ name: 'Gemini Pro', remainingFraction: 0.73 }] }] } },
+    { channel: 'fs:writeText', payload: { sessionId: 's1', path: 'notes.txt', content: 'next', expectedContent: 'before' }, reply: undefined }
+  ])('passes $channel through the owner frame', async ({ channel, payload, reply }) => {
     invoke.mockResolvedValue(reply);
     await expect(listeners.get(channel)!({ sender: contents, senderFrame: mainFrame }, payload)).resolves.toEqual(reply);
     expect(invoke).toHaveBeenCalledExactlyOnceWith(channel, payload, 'desktop');

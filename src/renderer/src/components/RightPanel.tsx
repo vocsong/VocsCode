@@ -50,14 +50,19 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
   const { record: mission } = useMission(session);
   const [workspace, setWorkspace] = useState({ sessionId: session.id, id: '' });
   const reveal = useStore((s) => s.fileReveal);
+  const preview = useStore((s) => s.layout.filePreview);
   const leadWorkspace = mission?.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission?.workspaces.find((w) => w.role === 'lead');
   const workspaceId = reveal?.sessionId === session.id && leadWorkspace ? leadWorkspace.id : workspace.sessionId === session.id ? workspace.id : '';
   useEffect(() => {
-    if (mission && reveal?.sessionId === session.id) {
-      const lead = mission.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission.workspaces.find((w) => w.role === 'lead');
-      if (lead) setWorkspace({ sessionId: session.id, id: lead.id });
+    if (mission && preview?.sessionId === session.id) {
+      setWorkspace({ sessionId: session.id, id: preview.missionWorkspaceId ?? '' });
     }
-  }, [reveal, mission?.id, session.id]);
+  }, [preview, mission?.id, session.id]);
+  useEffect(() => {
+    if (leadWorkspace && reveal?.sessionId === session.id) {
+      setWorkspace({ sessionId: session.id, id: leadWorkspace.id });
+    }
+  }, [reveal, leadWorkspace?.id, session.id]);
   const selectedWorkspace = mission?.workspaces.find((w) => w.id === workspaceId) ?? mission?.workspaces.find((w) => w.role === 'integration');
   const fileSession = session.mission ? { ...session, cwd: selectedWorkspace?.path ?? session.cwd } : session;
   const tab = useStore((s) => s.panelTab);
@@ -82,6 +87,7 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
   // the panel), or stays out while pinned.
   const focus = useStore((s) => (s.panelFocus === 'bottom' && s.panelBottomOpened.includes(s.panelBottomTab) ? 'bottom' : 'top'));
   const peek = useStore((s) => s.panelPeek);
+  const previewOpen = !!preview;
   const pinned = useStore((s) => s.pins.right);
   const togglePin = useStore((s) => s.togglePin);
   const changesVersion = useStore((s) => s.changesVersion);
@@ -120,6 +126,7 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
       data-focus={minimal ? focus : undefined}
       data-peek={minimal && peek ? '' : undefined}
       data-pinned={minimal && pinned ? '' : undefined}
+      data-file-preview={previewOpen ? '' : undefined}
       onPointerLeave={peek ? () => useStore.getState().endPanelPeek() : undefined}
     >
       {minimal && (
@@ -323,17 +330,18 @@ function ChangesTab({ session }: { session: SessionMeta }) {
 }
 
 /**
- * The session folder as a browsable list. Opening a file previews it in the split view beside the
- * session (FilePreviewPane), the same place a transcript mention opens; a transcript folder link
- * opens the list on that folder.
+ * The session folder as a browsable list. Files open in the drawer to the left; a transcript
+ * folder link opens the list on that folder.
  */
 function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missionWorkspaceId?: string }) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const toast = useStore((s) => s.toast);
   const reveal = useStore((s) => s.fileReveal);
-  // The row of the file previewing beside this session, so the list shows where the preview came from.
-  const previewing = useStore((s) => s.layout.panes.find((p) => p.file?.sessionId === session.id && p.file.missionWorkspaceId === missionWorkspaceId)?.file?.path);
+  const previewing = useStore((s) => {
+    const file = s.layout.filePreview;
+    return file?.sessionId === session.id && file.missionWorkspaceId === missionWorkspaceId ? file.path : undefined;
+  });
   /** Keyed by session and workspace; discard pending work after leaving this Files tab. */
   const mounted = useRef(true);
   /** StrictMode runs mount effects twice; the same reveal must not be consumed twice. */
@@ -389,7 +397,7 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
               key={e.path}
               type="button"
               className={`file-row ${!e.isDir && previewing === rel ? 'active' : ''}`}
-              title={e.isDir ? undefined : `Preview ${rel} beside the conversation`}
+              title={e.isDir ? undefined : `Open ${rel} in the file preview`}
               onClick={() => {
                 if (e.isDir) navigate(rel);
                 else openFile(rel);
