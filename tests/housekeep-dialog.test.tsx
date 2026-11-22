@@ -72,22 +72,26 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+function renderAppWithComposer() {
+  const session: SessionMeta = {
+    id: 'in-pane', title: 'Open session', cwd: '/fixture/project', createdAt: 1000, updatedAt: 1000, status: 'idle', harnessRef: {},
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+    config: { harness: 'native', permissionMode: 'ask', projectRoot: '/fixture/project' }
+  };
+  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  useStore.setState({
+    booted: true, bootError: null, sessions: [session], activeId: session.id, layout: singlePaneLayout(session.id),
+    view: 'chat', panelOpen: false, sidebarOpen: false, transcripts: { [session.id]: [] }, loaded: { [session.id]: true },
+    settings: { theme: 'dark', sidebarWidth: 260, panelWidth: 380, providers: [], onboardingDone: true, agent: { enabled: false } } as unknown as AppSettings
+  });
+  render(<App />);
+  return { session, composer: screen.getByPlaceholderText<HTMLTextAreaElement>(/Message the agent/) };
+}
+
 describe('/housekeep', () => {
   it('opens the dialog from the slash menu without sending a harness message or running analysis', async () => {
-    const session: SessionMeta = {
-      id: 'in-pane', title: 'Open session', cwd: '/fixture/project', createdAt: 1000, updatedAt: 1000, status: 'idle', harnessRef: {},
-      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
-      config: { harness: 'native', permissionMode: 'ask', projectRoot: '/fixture/project' }
-    };
-    vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
-    useStore.setState({
-      booted: true, bootError: null, sessions: [session], activeId: session.id, layout: singlePaneLayout(session.id),
-      view: 'chat', panelOpen: false, sidebarOpen: false, transcripts: { [session.id]: [] }, loaded: { [session.id]: true },
-      settings: { theme: 'dark', sidebarWidth: 260, panelWidth: 380, providers: [], onboardingDone: true, agent: { enabled: false } } as unknown as AppSettings
-    });
     reply({ preview: () => preview([]) });
-    render(<App />);
-    const composer = screen.getByPlaceholderText<HTMLTextAreaElement>(/Message the agent/);
+    const { session, composer } = renderAppWithComposer();
     fireEvent.change(composer, { target: { value: '/housek' } });
     const item = screen.getByRole('button', { name: /^\/housekeep\b/ });
     expect(calls()).toEqual([]);
@@ -102,6 +106,33 @@ describe('/housekeep', () => {
     fireEvent.click(button('Housekeep settings'));
     expect(screen.queryByRole('dialog', { name: 'Housekeep sessions' })).toBeNull();
     expect(screen.getByRole('heading', { name: 'Housekeep' })).toBeTruthy();
+  });
+
+  it.each([3, 0])('opens a one-time %i-day review without sending a message, applying, or saving settings', async (days) => {
+    reply({ preview: () => preview([], { recentDays: days }) });
+    const { composer, session } = renderAppWithComposer();
+    fireEvent.change(composer, { target: { value: `/housekeep ${days}` } });
+    fireEvent.keyDown(composer, { key: 'Enter' });
+
+    expect(await screen.findByText('Age rule for this review only:')).toBeTruthy();
+    expect(dialog().getByText(days === 0 ? /0 days: the recent activity window is off/ : /Activity within the last 3 days/)).toBeTruthy();
+    expect(calls()).toEqual([['housekeep:preview', { protectedIds: [session.id], recentDaysOverride: days }]]);
+    expect(invoke.mock.calls.some(([channel]) => channel === 'sessions:send' || channel === 'settings:update')).toBe(false);
+    expect(composer.value).toBe('');
+  });
+
+  it('leaves invalid day arguments in the composer without opening a review or sending a message', () => {
+    reply({ preview: () => preview([]) });
+    const { composer } = renderAppWithComposer();
+    for (const arg of ['-1', '3.0', '3.5', '1e2', '0x3', '3651', '3 settings']) {
+      const text = `/housekeep ${arg}`;
+      fireEvent.change(composer, { target: { value: text } });
+      fireEvent.keyDown(composer, { key: 'Enter' });
+      expect(composer.value).toBe(text);
+    }
+    expect(screen.queryByRole('dialog', { name: 'Housekeep sessions' })).toBeNull();
+    expect(calls()).toEqual([]);
+    expect(invoke.mock.calls.some(([channel]) => channel === 'sessions:send')).toBe(false);
   });
 
   it('discloses what is sent and requires explicit selection of completed, unprotected recommendations', async () => {

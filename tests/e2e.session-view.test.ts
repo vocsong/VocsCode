@@ -157,6 +157,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     const rows = [
       make('s_housekeep_current', 'Current session', T),
       make('s_housekeep_recent', 'Recent report', T - 86_400_000),
+      make('s_housekeep_five_days', 'Five-day report', T - 5 * 86_400_000),
       make('s_housekeep_old', 'Old finished report', old, clean, 'vocscode/report'),
       make('s_housekeep_dirty', 'Old local draft', old, dirty, 'vocscode/draft')
     ];
@@ -190,6 +191,9 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await input.pressSequentially('sessions');
     await input.press('Enter');
     await dialog.getByText(/Activity within the last 7 days/).waitFor();
+    const fiveDayRow = dialog.getByRole('listitem').filter({ has: win.getByText('Five-day report', { exact: true }) });
+    const fiveDayProtected = fiveDayRow.getByText('Protected', { exact: true });
+    await fiveDayProtected.waitFor();
     const eligible = dialog.getByRole('checkbox', { name: 'Select Old finished report' });
     expect(await dialog.getByRole('checkbox', { name: 'Select Recent report' }).isDisabled()).toBe(true);
     expect(await dialog.getByRole('checkbox', { name: 'Select Old local draft' }).isDisabled()).toBe(true);
@@ -223,6 +227,37 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await expect.poll(async () => (await win.evaluate(() => window.harness.invoke('settings:get', undefined))).housekeepRecentDays).toBe(14);
     const settingsOnDisk = JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8'));
     expect(settingsOnDisk.housekeepRecentDays).toBe(14);
+    await win.getByRole('button', { name: 'Back to workspace', exact: true }).click();
+
+    // The shorter window applies only to this review, not the saved setting.
+    await input.fill('/housekeep 3');
+    await input.press('Enter');
+    await dialog.getByText(/Activity within the last 3 days/).waitFor();
+    await dialog.getByText('Age rule for this review only:', { exact: true }).waitFor();
+    expect(await dialog.getByRole('checkbox', { name: 'Select Recent report' }).isDisabled()).toBe(true);
+    await dialog.getByText(/No utility model is available for Housekeep/).waitFor();
+    await fiveDayRow.getByLabel('Conversation excerpts for Five-day report').click();
+    const fiveDayPick = fiveDayRow.getByRole('checkbox', { name: 'Select Five-day report' });
+    await expect.poll(() => fiveDayPick.isEnabled()).toBe(true);
+    expect(await fiveDayPick.isChecked()).toBe(false);
+    expect(await dialog.getByRole('button', { name: 'Review selected', exact: true }).isDisabled()).toBe(true);
+    expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).housekeepRecentDays).toBe(14);
+    const settingsAfterOverride = JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8'));
+    expect(settingsAfterOverride.housekeepRecentDays).toBe(14);
+    await fiveDayPick.check();
+    await dialog.getByRole('button', { name: 'Review selected', exact: true }).click();
+    await dialog.getByRole('heading', { name: 'Final archive review' }).waitFor();
+    await dialog.getByText(/Activity within the last 3 days/).waitFor();
+    const closeReview = dialog.getByRole('button', { name: 'Close', exact: true });
+    await closeReview.click();
+    await dialog.waitFor({ state: 'hidden' });
+
+    await input.fill('/housekeep');
+    await input.press('Enter');
+    await dialog.getByText(/Activity within the last 14 days/).waitFor();
+    await fiveDayProtected.waitFor();
+    await closeReview.click();
+    await dialog.waitFor({ state: 'hidden' });
     await win.getByRole('button', { name: 'Skills', exact: true }).click();
     await win.getByRole('button', { name: 'Run /housekeep', exact: true }).click();
     await dialog.getByText(/Activity within the last 14 days/).waitFor();

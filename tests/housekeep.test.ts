@@ -134,6 +134,43 @@ describe('Housekeep review and apply', () => {
     expect(remove).not.toHaveBeenCalled();
   });
 
+  it('uses a one-time age override through preview, assessment and apply without changing the saved window', async () => {
+    const { service, store, review, manager, settings } = await setup([
+      meta('s_between', { lastViewedAt: NOW - 5 * DAY }), meta('s_between_transcript'),
+      meta('s_cutoff', { lastViewedAt: NOW - 3 * DAY })
+    ]);
+    await store.appendTranscript('s_between_transcript', { kind: 'info', id: 'view', ts: NOW - 4 * DAY, level: 'info', text: 'Checked the report.' });
+    const ordinary = await service.preview([]);
+    expect(ordinary.rows.every(row => row.verdict === 'protected')).toBe(true);
+
+    const overridden = await service.preview([], 3);
+    expect(overridden.recentDays).toBe(3);
+    expect(overridden.rows.filter(row => row.verdict === 'review').map(row => row.sessionId).sort()).toEqual(['s_between', 's_between_transcript']);
+    expect(overridden.rows.find(row => row.sessionId === 's_cutoff')?.verdict).toBe('protected');
+    expect(settings.housekeepRecentDays).toBe(7);
+
+    settings.housekeepRecentDays = 14;
+    review.mockResolvedValue(JSON.stringify({ reviews: [{ index: 0, verdict: 'complete', reason: 'Delivered.' }, { index: 1, verdict: 'complete', reason: 'Delivered.' }] }));
+    const assessed = await service.assess(overridden.id);
+    expect(assessed.rows.filter(row => row.verdict === 'complete')).toHaveLength(2);
+    expect(manager.list().some(row => row.archived)).toBe(false);
+    await expect(service.apply(overridden.id, ['s_cutoff'], [])).rejects.toThrow('eligible sessions');
+    await expect(service.apply(overridden.id, ['s_between_transcript'], [])).resolves.toMatchObject([{ state: 'archived' }]);
+    expect(settings.housekeepRecentDays).toBe(14);
+    const fresh = await service.preview([]);
+    expect(fresh.recentDays).toBe(14);
+    expect(fresh.rows.find(row => row.sessionId === 's_between')?.verdict).toBe('protected');
+  });
+
+  it('interprets a zero-day override as disabling only age protection', async () => {
+    const { service } = await setup([
+      meta('s_recent', { updatedAt: NOW }), meta('s_pinned', { pinned: true }), meta('s_future', { updatedAt: NOW + 1 })
+    ]);
+    const preview = await service.preview([], 0);
+    expect(preview.recentDays).toBe(0);
+    expect(preview.rows.filter(row => row.verdict === 'review').map(row => row.sessionId)).toEqual(['s_recent']);
+  });
+
   it('disallows a canonical checkout alias added after preview, even through a junction', async () => {
     const { service, store, userData, inspect, manager } = await setup([meta('s_owner')]);
     const owner = manager.get('s_owner')!;

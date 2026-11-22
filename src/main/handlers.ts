@@ -57,6 +57,7 @@ import { spawnTool } from './harness/spawn';
 import { DictationService } from './dictation/service';
 import { localModel } from '../shared/dictation';
 import { discoverChatImports } from './chat-import';
+import { MAX_HOUSEKEEP_RECENT_DAYS } from '../shared/housekeep';
 import { configuredHousekeepReviewer, HousekeepService } from './housekeep';
 import { representsChatImport } from './chat-import-identity';
 import { isReservedSecretId, providerSecrets } from './secret-ids';
@@ -1354,8 +1355,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const housekeepIds = z.array(missionIdSchema).max(4096);
   const housekeepPreviewId = z.string().uuid();
   handle('housekeep:preview', input => {
-    const { protectedIds } = z.strictObject({ protectedIds: housekeepIds }).parse(input);
-    return housekeep.preview(protectedIds);
+    const { protectedIds, recentDaysOverride } = z.strictObject({
+      protectedIds: housekeepIds,
+      recentDaysOverride: z.number().int().min(0).max(MAX_HOUSEKEEP_RECENT_DAYS).optional()
+    }).parse(input);
+    return housekeep.preview(protectedIds, recentDaysOverride);
   });
   handle('housekeep:assess', input => {
     const { previewId } = z.strictObject({ previewId: housekeepPreviewId }).parse(input);

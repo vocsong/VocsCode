@@ -40,10 +40,12 @@ Auto-continue and iteration defaults are copied when a new goal is created.
 **Housekeep** configures `/housekeep` on the desktop. It protects sessions used in the last
 **7 days** by default, counting the latest session creation, update, view, or transcript activity. Save a whole
 number from 0 to 3650; 0 turns off only age protection, not the other protections. The age rule is
-checked again before archiving, including when the setting changes after a preview.
+checked again before archiving. A review without an override uses the current setting at that check.
 
 Run `/housekeep sessions` (or the built-in **Housekeep sessions** skill) to preview older sessions one
-by one. Review locally, or explicitly ask your configured utility model to assess short conversation
+by one. Add a whole number from 0 to 3650, such as `/housekeep 3`, to set the protection window for
+that review only. It applies through confirmation and does not change the saved setting. Review
+locally, or explicitly ask your configured utility model to assess short conversation
 excerpts. Results are recommendations and never archive anything before a separate confirmation.
 Sessions with local files, including Git-ignored files, are left alone. Clean worktrees go to the
 operating system’s Trash (Recycle Bin on Windows), never through permanent deletion. Existing

@@ -46,9 +46,9 @@ function worktreeAction(row: HousekeepRow, eligible = true): string {
   return 'No original worktree to remove';
 }
 
-function AgeRule({ days }: { days: number }) {
+function AgeRule({ days, oneTime = false }: { days: number; oneTime?: boolean }) {
   return <p className="muted small">
-    <strong>Age rule: </strong>
+    <strong>{oneTime ? 'Age rule for this review only: ' : 'Age rule: '}</strong>
     {days === 0
       ? '0 days: the recent activity window is off. '
       : `Activity within the last ${days} ${days === 1 ? 'day' : 'days'} (24 hours each, including the cutoff) is protected. `}
@@ -97,7 +97,7 @@ function SessionReview({ row, checked, busy, protectedNow, viewed, onView, onChe
   </li>;
 }
 
-export function HousekeepDialog({ onClose }: { onClose: () => void }) {
+export function HousekeepDialog({ onClose, recentDaysOverride }: { onClose: () => void; recentDaysOverride?: number }) {
   const protectedIds = useStore(useShallow(protectedSessionIds));
   const protectedNow = new Set(protectedIds);
   const [preview, setPreview] = useState<HousekeepPreview | null>(null);
@@ -141,8 +141,9 @@ export function HousekeepDialog({ onClose }: { onClose: () => void }) {
     setViewed(new Set());
     setConfirmation(null);
     setAssessed(false);
-    return invoke('housekeep:preview', { protectedIds: protectedSessionIds(useStore.getState()) });
-  }, setPreview), [run]);
+    const protectedIds = protectedSessionIds(useStore.getState());
+    return invoke('housekeep:preview', recentDaysOverride === undefined ? { protectedIds } : { protectedIds, recentDaysOverride });
+  }, setPreview), [run, recentDaysOverride]);
 
   useEffect(() => {
     let cancelled = false;
@@ -223,6 +224,7 @@ export function HousekeepDialog({ onClose }: { onClose: () => void }) {
         </ul> : <p role="status">No results were returned. Check the session list before trying again.</p>}
       </> : applyFailed ? null : confirmation ? <>
         <h2 ref={stepHeading} tabIndex={-1}>Final archive review</h2>
+        {preview && recentDaysOverride !== undefined && <AgeRule days={preview.recentDays} oneTime />}
         <p>Archive {confirmation.length} {confirmation.length === 1 ? 'session' : 'sessions'} · {removeCount} original {removeCount === 1 ? 'worktree' : 'worktrees'} to remove if still safe.</p>
         <p>Transcripts and branches are kept. Vocs Code rechecks each session and moves only clean worktrees to the system Trash when available.</p>
         {confirmationBlocked && <p className="callout warn" role="alert">A selected session is now protected. Go back to review the selection again.</p>}
@@ -235,7 +237,7 @@ export function HousekeepDialog({ onClose }: { onClose: () => void }) {
         </ul>
       </> : preview && <>
         <h2 ref={stepHeading} tabIndex={-1}>Review sessions</h2>
-        <AgeRule days={preview.recentDays} />
+        <AgeRule days={preview.recentDays} oneTime={recentDaysOverride !== undefined} />
         <p><button className="link-btn" type="button" disabled={busy !== null} onClick={() => { onClose(); openSettings('housekeep'); }}>Housekeep settings</button></p>
         {preview.rows.length === 0 ? <p role="status">No sessions to review.</p> : <>
           <p>Open the conversation excerpts for each session marked Review before selecting it. Protected and Keep sessions can’t be selected.</p>
