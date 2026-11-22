@@ -371,4 +371,38 @@ describe('Pi adapter subagent reporting', () => {
     // The same route the user reads on the subagent's info line.
     expect(events.some((e) => e.type === 'item.upsert' && e.item.kind === 'info' && e.item.text.includes('anthropic/claude-opus-5'))).toBe(true);
   });
+
+  it('dispatches controlSubagent over RPC prompt without aborting a busy parent turn or marking an idle session busy', async () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    const sent: Record<string, unknown>[] = [];
+    const internal = a as unknown as {
+      child: object;
+      extensionCapabilities: Set<string>;
+      _busy: boolean;
+      write: (obj: Record<string, unknown>) => void;
+    };
+    internal.child = {};
+    internal.extensionCapabilities.add('subagents');
+    internal.write = (obj) => {
+      sent.push(obj);
+      feed(a, { type: 'response', id: obj.id, command: obj.type, success: true });
+    };
+
+    // While a parent turn is active, stopping/steering a child must not send `abort` to the parent.
+    internal._busy = true;
+    await a.controlSubagent('agent_1', 'steer', 'check edge cases');
+    await a.controlSubagent('agent_1', 'stop');
+    expect(sent.map((m) => ({ type: m.type, message: m.message }))).toEqual([
+      { type: 'prompt', message: '/vocs-subagent-steer agent_1 check edge cases' },
+      { type: 'prompt', message: '/vocs-subagent-stop agent_1' }
+    ]);
+    expect(internal._busy).toBe(true);
+
+    // While idle, controlSubagent must keep the session idle rather than flipping busy/running.
+    internal._busy = false;
+    await a.controlSubagent('agent_2', 'stop');
+    expect(internal._busy).toBe(false);
+    expect(events.some((e) => e.type === 'status' && e.status === 'running')).toBe(false);
+  });
 });

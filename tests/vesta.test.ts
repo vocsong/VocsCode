@@ -5,11 +5,11 @@
  *  The runtime is scripted rather than spawned: each test plays the app's side of the bridge
  *  (pi's extension asks through `run`, the test answers through the proposal), which is exactly
  *  the sequence tests/vesta-pi.integration.test.ts proves against the real pi. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AGENT_CAPABILITIES, agentChannels, resolveSessionModel, type CapabilityContext } from '../src/shared/agent-manifest';
 import { defaultSettings, normalizeSettings } from '../src/main/settings';
 import type { AppSettings, ImageAttachment, ModelInfo, ProviderConfig, SessionConfig, SessionMeta } from '../src/shared/types';
-import type { VestaRuntime, VestaToolCall, PiAgentOptions } from '../src/main/agents/pi-runtime';
+import { PiAgentRuntime, type VestaRuntime, type VestaToolCall, type PiAgentOptions } from '../src/main/agents/pi-runtime';
 import { isRemoteBlocked } from '../src/main/web-server';
 
 const { Vesta } = await import('../src/main/agents');
@@ -533,5 +533,67 @@ describe('remote transport', () => {
     expect(isRemoteBlocked('agent:send')).toBe(true);
     expect(isRemoteBlocked('agent:resolve')).toBe(true);
     expect(isRemoteBlocked('sessions:list')).toBe(false);
+  });
+});
+
+describe('PiAgentRuntime streaming and nonce verification', () => {
+  function makePiRuntime(nonce = 'vesta-nonce-1') {
+    const deltas: string[] = [];
+    const responses: Record<string, unknown>[] = [];
+    const run = vi.fn(async () => ({ ok: true, detail: 'ok' }));
+    const rt = new PiAgentRuntime({
+      bin: 'pi',
+      extension: 'resources/pi/vocs-code-vesta.ts',
+      tools: [],
+      cwd: 'G:/Vocs-Code',
+      env: {},
+      nonce,
+      log: () => undefined,
+      events: {
+        stepStart: vi.fn(),
+        text: (delta) => deltas.push(delta),
+        stepEnd: vi.fn(),
+        settled: vi.fn(),
+        exited: vi.fn(),
+        run
+      }
+    });
+    const internal = rt as unknown as {
+      handleLine: (line: string) => void;
+      write: (obj: Record<string, unknown>) => void;
+      extensionReady: boolean;
+    };
+    internal.write = (obj) => responses.push(obj);
+    return { rt, internal, deltas, responses, run };
+  }
+
+  it('forwards message_update text_delta events to events.text()', () => {
+    const { internal, deltas } = makePiRuntime();
+    internal.handleLine(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Hello ' } }));
+    internal.handleLine(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'world' } }));
+    internal.handleLine(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'hidden' } }));
+    expect(deltas).toEqual(['Hello ', 'world']);
+  });
+
+  it('validates nonce on ready, error, and capability call envelopes and honors ready: false', async () => {
+    const { internal, responses, run } = makePiRuntime('secret-nonce');
+    // Wrong nonce on ready must be ignored.
+    internal.handleLine(JSON.stringify({ type: 'extension_ui_request', id: 'r1', method: 'notify', message: 'VCODE_VESTA_READY::' + JSON.stringify({ version: 1, nonce: 'wrong', ready: true }) }));
+    expect(internal.extensionReady).toBe(false);
+    // Correct nonce sets ready, then ready: false clears it.
+    internal.handleLine(JSON.stringify({ type: 'extension_ui_request', id: 'r2', method: 'notify', message: 'VCODE_VESTA_READY::' + JSON.stringify({ version: 1, nonce: 'secret-nonce', ready: true }) }));
+    expect(internal.extensionReady).toBe(true);
+    internal.handleLine(JSON.stringify({ type: 'extension_ui_request', id: 'r3', method: 'notify', message: 'VCODE_VESTA_READY::' + JSON.stringify({ version: 1, nonce: 'secret-nonce', ready: false }) }));
+    expect(internal.extensionReady).toBe(false);
+
+    // Wrong or missing nonce on capability call must fail closed without invoking run().
+    internal.handleLine(JSON.stringify({ type: 'extension_ui_request', id: 'c1', method: 'select', title: 'VCODE_VESTA_CALL::' + JSON.stringify({ id: 't1', name: 'list_branches', args: {}, nonce: 'wrong' }) }));
+    await Promise.resolve();
+    expect(run).not.toHaveBeenCalled();
+    expect(responses).toContainEqual({ type: 'extension_ui_response', id: 'c1', value: JSON.stringify({ ok: false, detail: 'The capability call was rejected.' }) });
+
+    // Valid nonce dispatches run().
+    internal.handleLine(JSON.stringify({ type: 'extension_ui_request', id: 'c2', method: 'select', title: 'VCODE_VESTA_CALL::' + JSON.stringify({ id: 't2', name: 'list_branches', args: {}, nonce: 'secret-nonce' }) }));
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
   });
 });

@@ -711,6 +711,21 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     },
   });
 
+  pi.registerCommand?.('vocs-subagent-steer', {
+    description: 'Steer a running Vocs Code subagent run by id',
+    handler: async (args: string) => {
+      const trimmed = args.trim();
+      const split = trimmed.search(/\s/);
+      if (split < 0) return;
+      const runId = trimmed.slice(0, split);
+      const message = trimmed.slice(split + 1).trim();
+      if (!runId || !message) return;
+      const run = runs.get(runId);
+      if (!run || run.status !== 'running' || !run.session) return;
+      await run.session.steer(message);
+    },
+  });
+
   pi.on('session_start', (_event, ctx) => {
     parentCtx = ctx;
     modeFile = process.env.VOCS_CODE_MODE_FILE;

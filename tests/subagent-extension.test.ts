@@ -517,6 +517,21 @@ describe('background runs and lifecycle', () => {
     await vi.waitFor(() => expect(eventsOf(h).some((e) => e.kind === 'end' && e.status === 'stopped')).toBe(true));
   });
 
+  it('steers a running child through the vocs-subagent-steer command path', async () => {
+    const h = harness({ childDriver: neverFinishes });
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const started = (await h.tools.get('subagent')!.execute('call_1', { ...subagentCall, background: true }, undefined, undefined, h.parentCtx)) as { details: Record<string, unknown> };
+    await vi.waitFor(() => expect(h.children).toHaveLength(1));
+    const steerCmd = h.commands.get('vocs-subagent-steer');
+    expect(steerCmd).toBeDefined();
+    await steerCmd!.handler(`${String(started.details.runId)} focus on tests only`);
+    expect(h.children[0]!.steers).toEqual(['focus on tests only']);
+    // Missing message or unknown runId is a safe no-op.
+    await steerCmd!.handler(String(started.details.runId));
+    await steerCmd!.handler('agent_missing hello');
+    expect(h.children[0]!.steers).toEqual(['focus on tests only']);
+  });
+
   it('does not publish child completion or a follow-up before asynchronous disposal settles', async () => {
     const work = deferred<void>(), disposed = deferred<void>();
     const h = harness({ childDriver: () => work.promise });

@@ -324,6 +324,11 @@ export class PiAgentRuntime implements VestaRuntime {
         if ((ev.message as { role?: string } | undefined)?.role === 'assistant') this.opts.events.stepStart();
         return;
       }
+      case 'message_update': {
+        const ame = ev.assistantMessageEvent as { type?: string; delta?: string } | undefined;
+        if (ame?.type === 'text_delta' && ame.delta) this.opts.events.text(ame.delta);
+        return;
+      }
       case 'message_end': {
         const msg = ev.message as AssistantMessage | undefined;
         if (msg?.role !== 'assistant') return;
@@ -368,21 +373,57 @@ export class PiAgentRuntime implements VestaRuntime {
   private async handleUiRequest(req: UiRequest): Promise<void> {
     if (req.method === 'notify') {
       if (req.message?.startsWith(VESTA_READY_MARKER)) {
+        let parsed: { nonce?: unknown; ready?: unknown } | null = null;
+        try {
+          const raw = JSON.parse(req.message.slice(VESTA_READY_MARKER.length)) as unknown;
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) parsed = raw as { nonce?: unknown; ready?: unknown };
+        } catch {
+          return;
+        }
+        if (!parsed || (this.opts.nonce && parsed.nonce !== this.opts.nonce)) return;
+        if (parsed.ready === false) {
+          this.extensionReady = false;
+          return;
+        }
         this.extensionReady = true;
         this.ready?.resolve();
       } else if (req.message?.startsWith(VESTA_ERROR_MARKER)) {
-        this.extensionFailure = `The Vesta capability bridge failed to load. ${req.message.slice(VESTA_ERROR_MARKER.length)}`;
+        const tail = req.message.slice(VESTA_ERROR_MARKER.length);
+        let detail = tail;
+        try {
+          const raw = JSON.parse(tail) as unknown;
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            const obj = raw as { nonce?: unknown; message?: unknown };
+            if (this.opts.nonce && obj.nonce !== this.opts.nonce) return;
+            if (typeof obj.message === 'string' && obj.message) detail = obj.message;
+          } else if (this.opts.nonce) {
+            return;
+          }
+        } catch {
+          if (this.opts.nonce) return;
+        }
+        this.extensionFailure = `The Vesta capability bridge failed to load. ${detail}`;
         this.ready?.reject(new Error(this.extensionFailure));
       }
       return;
     }
     if (req.method === 'select' && req.title?.startsWith(VESTA_CALL_MARKER)) {
       let call: VestaToolCall | null = null;
+      let nonceValid = true;
       try {
-        const parsed = JSON.parse(req.title.slice(VESTA_CALL_MARKER.length)) as VestaToolCall;
-        if (parsed && typeof parsed.name === 'string') call = { id: String(parsed.id ?? ''), name: parsed.name, args: (parsed.args ?? {}) as Record<string, unknown> };
+        const parsed = JSON.parse(req.title.slice(VESTA_CALL_MARKER.length)) as VestaToolCall & { nonce?: unknown };
+        if (this.opts.nonce && parsed?.nonce !== this.opts.nonce) {
+          nonceValid = false;
+        } else if (parsed && typeof parsed.name === 'string') {
+          call = { id: String(parsed.id ?? ''), name: parsed.name, args: (parsed.args ?? {}) as Record<string, unknown> };
+        }
       } catch {
         /* answered below as an unreadable call */
+      }
+      if (!nonceValid) {
+        this.opts.log('warn', '[vesta pi] rejected capability call with invalid nonce');
+        this.respond(req.id, { value: JSON.stringify({ ok: false, detail: 'The capability call was rejected.' } satisfies CapabilityOutcome) });
+        return;
       }
       if (!call) {
         this.respond(req.id, { value: JSON.stringify({ ok: false, detail: 'The tool call was unreadable.' } satisfies CapabilityOutcome) });

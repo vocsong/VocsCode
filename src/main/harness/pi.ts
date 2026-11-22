@@ -1531,6 +1531,18 @@ export class PiAdapter implements HarnessAdapter {
     await this.request('compact', {});
   }
 
+  /**
+   * Executes a subagent stop/steer extension command directly over Pi's RPC `prompt` channel so it
+   * neither aborts an active parent turn nor marks an idle session busy waiting for `agent_settled`.
+   */
+  async controlSubagent(runId: string, kind: 'stop' | 'steer', message?: string): Promise<void> {
+    if (this.ctx.session().mission) throw new Error('Mission owns delegation; use Mission controls.');
+    if (!this.child || this.exited) throw new Error('pi process is not running');
+    if (!this.extensionCapabilities.has('subagents')) throw new Error('Pi subagent extension is unavailable.');
+    const command = kind === 'stop' ? `/vocs-subagent-stop ${runId}` : `/vocs-subagent-steer ${runId} ${(message ?? '').trim()}`;
+    await withTimeout(this.request('prompt', { message: command }), 10_000, `Pi subagent ${kind}`);
+  }
+
   async listModels(): Promise<ModelInfo[]> {
     if (!this.child) return [];
     try {
