@@ -82,12 +82,17 @@ describe('title bar', () => {
 });
 
 describe('sidebar navigation', () => {
-  it('leads with New session, which opens the Ctrl+Shift+N dialog on the open session’s folder', async () => {
+  it('ends the list switch row with a New session icon, which opens the Ctrl+Shift+N dialog on the open session’s folder', async () => {
     useStore.setState({ sessions: [session('s1')], activeId: 's1', newSessionOpen: false, newSessionRoot: null });
     const { container } = render(<Sidebar />);
-    const button = container.querySelector('.sidebar-nav .sidebar-new') as HTMLElement;
-    expect(button.textContent).toContain('New session');
-    expect(button.querySelector('.kbd')?.textContent).toBe('Ctrl+Shift+N');
+    const button = screen.getByRole('button', { name: 'New session' });
+    // One compact row: the icon is the last control beside Projects | Recent and Archived, not a row of its own.
+    const row = container.querySelector('.sidebar-viewswitch') as HTMLElement;
+    expect(row.lastElementChild).toBe(button);
+    expect(button.textContent?.trim()).toBe('');
+    expect(button.title).toBe('New session in this folder (Ctrl+Shift+N)');
+    expect(button.getAttribute('aria-keyshortcuts')).toBe('Control+Shift+N');
+    expect(container.querySelectorAll('.sidebar-nav .sidebar-new')).toHaveLength(0);
     await act(async () => {
       fireEvent.click(button);
     });
