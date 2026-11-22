@@ -189,5 +189,34 @@ describe.runIf(enabled)('electron e2e: split view', () => {
     const stored = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
     expect(stored.find((s) => s.id === b.meta.id)?.archived ?? false).toBe(false);
     await win.screenshot({ path: path.join(shots, 'split-02-closed.png') });
+
+    const row = (id: string) => win.locator(`.session-row[data-session-id="${id}"] .session-title`);
+    const clickRight = (id: string) => row(id).click({ modifiers: [process.platform === 'darwin' ? 'Meta' : 'Control'] });
+    const shown = () => win.getByTestId('session-pane').locator('.transcript .msg-user').allTextContents();
+    await clickRight(b.meta.id);
+    await expect.poll(shown).toEqual([expect.stringContaining('Design the state machine'), expect.stringContaining('Run the integration tests')]);
+    expect(await win.getByTestId('session-panes').getAttribute('class')).toContain('panes-horizontal');
+    expect(await pane(win, 1).getAttribute('class')).toContain('active');
+
+    // Recent and Projects use the same gesture. The right pane is targeted even from the left.
+    await win.getByRole('button', { name: 'Recent', exact: true }).click();
+    await row(a.meta.id).click();
+    expect(await pane(win, 0).getAttribute('class')).toContain('active');
+    await clickRight(c.meta.id);
+    await expect.poll(shown).toEqual([expect.stringContaining('Design the state machine'), expect.stringContaining('Check the other project')]);
+    await expect.poll(() => pane(win, 1).getAttribute('class')).toContain('active');
+
+    // An ordinary click on a new session still replaces whichever pane is selected.
+    await row(b.meta.id).click();
+    await expect.poll(shown).toEqual([expect.stringContaining('Design the state machine'), expect.stringContaining('Run the integration tests')]);
+    await row(a.meta.id).click();
+    await row(c.meta.id).click();
+    await expect.poll(shown).toEqual([expect.stringContaining('Check the other project'), expect.stringContaining('Run the integration tests')]);
+
+    // An explicit move of the left session to the right swaps instead of duplicating it.
+    await clickRight(c.meta.id);
+    await expect.poll(shown).toEqual([expect.stringContaining('Run the integration tests'), expect.stringContaining('Check the other project')]);
+    expect(await pane(win, 1).getAttribute('class')).toContain('active');
+    expect(await win.getByTestId('session-pane').count()).toBe(2);
   }, 240_000);
 });

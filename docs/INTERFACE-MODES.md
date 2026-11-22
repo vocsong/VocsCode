@@ -38,6 +38,13 @@ File / Edit / View / Help menu bar.
 - Settings becomes an icon rail. Hover over it or tab to a section to reveal the full menu
   over the page.
 
+## Open a session on the right
+
+In either mode, **Ctrl+click** a sidebar session (**Command+click** on Mac) to open it on the right.
+This creates a split if needed or reuses the right pane. If the panes are stacked, it puts them
+side by side. A plain click still opens the session in the active pane, or focuses it where it
+is already open.
+
 ## How it is built
 
 - `src/shared/ui-modes.ts` is the catalogue; `AppSettings.uiMode` stores the choice, and
