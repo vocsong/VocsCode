@@ -169,34 +169,7 @@ export function fileVersionKey(cwd: string, p: string): string {
   return process.platform === 'win32' ? abs.toLowerCase() : abs;
 }
 
-/** Missing descendants are resolved through their nearest existing ancestor. Uncertainty prompts. */
-export async function requiresPathApproval(cwd: string, target: string): Promise<boolean> {
-  const outside = (root: string, file: string) => {
-    const rel = path.relative(root, file);
-    return rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
-  };
-  const absolute = path.resolve(cwd, target);
-  if (outside(path.resolve(cwd), absolute)) return true;
-  try {
-    const root = await fs.realpath(cwd);
-    const missing: string[] = [];
-    let ancestor = absolute;
-    for (;;) {
-      try {
-        await fs.lstat(ancestor);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
-        const parent = path.dirname(ancestor);
-        if (parent === ancestor) return true;
-        missing.unshift(path.basename(ancestor));
-        ancestor = parent;
-        continue;
-      }
-      // A dangling link or inaccessible realpath throws rather than authorizing its descendants.
-      return outside(root, path.join(await fs.realpath(ancestor), ...missing));
-    }
-  } catch { return true; }
-}
+export { requiresPathApproval } from '../permissions';
 
 function fileError(cwd: string, file: string, error: unknown): ToolExecResult {
   return { output: `File error for ${file} (cwd: ${cwd}): ${(error as Error).message}`, isError: true };

@@ -72,8 +72,8 @@ export function App() {
   }, [boot]);
 
   useEffect(() => {
-    applyTheme(settings?.theme ?? 'system');
-  }, [settings?.theme]);
+    applyTheme(settings?.theme ?? 'system', settings?.palette);
+  }, [settings?.theme, settings?.palette]);
 
   useEffect(() => {
     applyUiMode(settings?.uiMode);

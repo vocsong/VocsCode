@@ -3,12 +3,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
 import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { HARNESS_BY_ID, isEffortLevel } from '../../shared/harness-meta';
+import { HARNESS_BY_ID, assertPermissionModeOffered, isEffortLevel } from '../../shared/harness-meta';
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
 import { toAcp } from '../mcp/effective';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
-import { isOutsideWorkspace } from './permissions';
+import { requiresPathApproval } from './permissions';
 import { shutdownChild, spawnTool } from './spawn';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -293,8 +293,8 @@ export class AcpAdapter implements HarnessAdapter {
         const abs = path.isAbsolute(p.path) ? p.path : path.join(cwd(), p.path);
         const mode = this.ctx.permissionMode();
         if (mode === 'plan') throw new Error('Plan mode: writes are disabled');
-        const outside = isOutsideWorkspace(cwd(), abs, path);
-        if (mode === 'ask' || (outside && mode !== 'full-auto')) {
+        const outside = mode !== 'full-auto' && mode !== 'ask' && await requiresPathApproval(cwd(), abs);
+        if (mode === 'ask' || outside) {
           let before = '';
           try {
             before = await fs.readFile(abs, 'utf8');
@@ -338,10 +338,12 @@ export class AcpAdapter implements HarnessAdapter {
     const command = typeof raw.command === 'string' ? raw.command : Array.isArray(raw.command) ? raw.command.join(' ') : undefined;
     const dangerous = !!command && isDangerousCommand(command);
     const cwd = this.ctx.session().cwd;
-    const outsideWorkspace = (tc.locations ?? []).some((l) => isOutsideWorkspace(cwd, l.path, path));
 
     const selected = (optionId: string): acp.RequestPermissionResponse => ({ outcome: { outcome: 'selected', optionId } });
     const cancelled: acp.RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
+    // Every grant the agent receives is one-time: an "always" answer would let the agent stop asking,
+    // and a later, stricter Vocs Code tier could no longer gate that tool. A generic agent that offers
+    // no allow_once option still gets its allow_always one, or it could never run anything.
     const allow = () => {
       const id = pick(this.id === 'antigravity' ? ['allow_once'] : ['allow_once', 'allow_always']);
       return id ? selected(id) : cancelled;
@@ -352,11 +354,9 @@ export class AcpAdapter implements HarnessAdapter {
     };
     if (isRead) return allow();
     if (mode === 'plan') return reject();
-    if (mode === 'full-auto') {
-      // Antigravity persists "always" choices into its own settings; keep every grant one-time.
-      const id = pick(this.id === 'antigravity' ? ['allow_once'] : ['allow_always', 'allow_once']);
-      return id ? selected(id) : cancelled;
-    }
+    if (mode === 'full-auto') return allow();
+    // Real-path check: a symlink or junction inside the project that leads out of it counts as outside.
+    const outsideWorkspace = (await Promise.all((tc.locations ?? []).map((l) => requiresPathApproval(cwd, l.path)))).some(Boolean);
     if (!dangerous && !outsideWorkspace) {
       if (mode === 'auto') return allow();
       if (mode === 'accept-edits' && isEdit) return allow();
@@ -365,11 +365,13 @@ export class AcpAdapter implements HarnessAdapter {
 
     const offered = this.id === 'antigravity' ? options.filter((option) => option.kind === 'allow_once' || option.kind === 'reject_once') : options;
     if (!offered.length) return cancelled;
-    const ourOptions: ApprovalOption[] = offered.map((o) => ({
-      id: o.optionId,
-      label: o.name,
-      kind: o.kind === 'allow_once' ? 'allow' : o.kind === 'allow_always' ? 'allow_always' : o.kind === 'reject_once' ? 'deny' : 'deny_always'
-    }));
+    // The agent's "always allow" becomes an app-side "Allow for session": it is kept here, cleared on
+    // any tier change, and never forwarded to the agent as a persistent rule.
+    const ourOptions: ApprovalOption[] = offered.map((o) =>
+      o.kind === 'allow_always'
+        ? { id: o.optionId, label: 'Allow for session', kind: 'allow_session', description: `Do not ask again for ${kind} actions in this session.` }
+        : { id: o.optionId, label: o.name, kind: o.kind === 'allow_once' ? 'allow' : o.kind === 'reject_once' ? 'deny' : 'deny_always' }
+    );
     const changes = this.changesFromContent(tc.content ?? undefined);
     const decision = await this.ctx.requestApproval({
       kind: command ? 'command' : isEdit ? 'file_change' : 'tool',
@@ -384,8 +386,13 @@ export class AcpAdapter implements HarnessAdapter {
       options: ourOptions
     });
     const chosen = offered.find((o) => o.optionId === decision.optionId);
-    if (chosen?.kind === 'allow_always') this.sessionAllowedKinds.add(kind);
     if (!chosen) return { outcome: { outcome: 'cancelled' } };
+    if (chosen.kind === 'allow_always') {
+      this.sessionAllowedKinds.add(kind);
+      // Answer with the agent's one-time option. Only when it offered none is the chosen option sent,
+      // since cancelling would refuse an action the user just allowed.
+      return selected(pick(['allow_once']) ?? chosen.optionId);
+    }
     return selected(chosen.optionId);
   }
 
@@ -646,8 +653,10 @@ export class AcpAdapter implements HarnessAdapter {
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
+    // A grant made under one tier must not outlive it, for every ACP agent.
+    this.sessionAllowedKinds.clear();
     if (this.id !== 'antigravity') return; // Other ACP agents use client-side policy.
-    if (!HARNESS_BY_ID[this.id].capabilities.permissionModes.includes(mode)) throw new Error(`Antigravity does not support the ${mode} permission mode.`);
+    assertPermissionModeOffered(this.id, mode);
     if (!this.conn || !this.sessionId) return;
     if (this.busy || this.applyingMode) throw new Error('Wait for the current Antigravity activity before changing permissions.');
     // Every mode but Plan runs the CLI in `default` under its strict tool policy, so each tool call

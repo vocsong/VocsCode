@@ -424,9 +424,9 @@ describe('permission gate in a child', () => {
       bridge = undefined;
     });
     const third = (id: string) => ({ id, transport: 'http', url: 'https://mcp.example.invalid/mcp' });
-    const cases: [id: string, mode: string, outcome: 'ask' | 'block'][] = [];
+    const cases: [id: string, mode: string, outcome: 'ask' | 'block' | 'run'][] = [];
     for (const id of ['vocs_memory', 'vocs.memory', 'Vocs-Memory', 'vocs-memory', 'notes']) {
-      for (const [mode, outcome] of [['ask', 'ask'], ['auto', 'ask'], ['plan', 'block']] as const) cases.push([id, mode, outcome]);
+      for (const [mode, outcome] of [['ask', 'ask'], ['auto', 'run'], ['plan', 'block']] as const) cases.push([id, mode, outcome]);
     }
 
     it.each(cases)('gates a third-party %s tool like any other in %s mode', async (id, mode, outcome) => {
@@ -434,7 +434,8 @@ describe('permission gate in a child', () => {
       const { h, gate } = await gateFor(mode, async () => 'Deny');
       const tool = 'mcp__' + id.toLowerCase().replace(/[^a-z0-9_]/g, '_') + '__knowledge_search';
       const result = (await gate({ toolName: tool, toolCallId: 't1', input: {} })) as { block?: boolean; reason?: string } | undefined;
-      expect(result?.block).toBe(true);
+      // Auto runs third-party MCP tools; below it they ask (denied here) or are blocked in Plan.
+      expect(result?.block).toBe(outcome === 'run' ? undefined : true);
       expect(h.select).toHaveBeenCalledTimes(outcome === 'ask' ? 1 : 0);
       if (outcome === 'block') expect(result?.reason).toBe(PLAN_REASON);
       expect(bridge.calls).toEqual([]);
@@ -446,8 +447,9 @@ describe('permission gate in a child', () => {
       const { h, gate } = await gateFor(mode, async () => 'Deny');
       await expect(gate({ toolName: 'mcp__vocs_memory__knowledge_search', toolCallId: 't1', input: {} })).resolves.toBeUndefined();
       const write = (await gate({ toolName: 'mcp__vocs_memory__knowledge_propose', toolCallId: 't2', input: {} })) as { block?: boolean } | undefined;
-      expect(write?.block).toBe(true);
-      expect(h.select).toHaveBeenCalledTimes(mode === 'plan' ? 0 : 1);
+      // The write tool follows the tier: asked (and denied) in Ask, blocked in Plan, run in Auto.
+      expect(write?.block).toBe(mode === 'auto' ? undefined : true);
+      expect(h.select).toHaveBeenCalledTimes(mode === 'ask' ? 1 : 0);
     });
   });
 

@@ -8,7 +8,7 @@ import { BrowserWindow, Menu, Notification, app, nativeTheme, net, screen, shell
 import { PUSH_CHANNELS } from '../shared/ipc';
 import { sessionTitleText } from '../shared/session-title';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
-import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
+import { DEFAULT_PALETTE, chromeFor, themeSourceFor, type PaletteId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
 import { DesktopFocusTracker, forgetVisibleOnRendererReset } from './desktop-focus';
 import { watchEventLoop } from './diag';
@@ -595,16 +595,16 @@ async function main(): Promise<void> {
   }
 
   settings.onChange((s) => {
-    currentTheme = s.theme;
+    currentPalette = s.palette ?? DEFAULT_PALETTE;
     nativeTheme.themeSource = themeSourceFor(s.theme);
-    // Two themes can share one themeSource (Midnight and Abyss are both 'dark'), so nativeTheme
-    // may stay silent on a switch — repaint the caption from the theme id directly.
+    // A palette switch leaves themeSource as it was, so nativeTheme stays silent — repaint the
+    // caption from the palette directly.
     applyChrome();
     terminals?.updateSettings(s.terminal);
     ordinaryProcessOwnership(); // Configuring Missions starts the Job helper probe.
   });
-  currentTheme = settings.get().theme;
-  nativeTheme.themeSource = themeSourceFor(currentTheme);
+  currentPalette = settings.get().palette ?? DEFAULT_PALETTE;
+  nativeTheme.themeSource = themeSourceFor(settings.get().theme);
 
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
   // buttons over it, so their colors have to follow the theme.
@@ -793,8 +793,8 @@ function reconcileDevShortcut(appRoot: string): void {
 /** Title bar height in CSS pixels; must match --titlebar in styles.css. */
 const TITLEBAR_HEIGHT = 36;
 
-/** The active theme id, so the native caption can follow themes the OS knows nothing about. */
-let currentTheme: ThemeId = 'system';
+/** The active palette, so the native caption can follow colors the OS knows nothing about. */
+let currentPalette: PaletteId = DEFAULT_PALETTE;
 
 /**
  * The one-time sweep for spend a fork inherited from the session it was forked from: it reads every
@@ -847,7 +847,8 @@ async function reconcileForkInheritance(analytics: AnalyticsStore, store: Sessio
 
 /** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
 function chrome(): { color: string; symbolColor: string; height: number } {
-  return { ...chromeFor(currentTheme, nativeTheme.shouldUseDarkColors), height: TITLEBAR_HEIGHT };
+  // themeSource carries the mode, so shouldUseDarkColors is the scheme the renderer resolved too.
+  return { ...chromeFor(currentPalette, nativeTheme.shouldUseDarkColors ? 'dark' : 'light'), height: TITLEBAR_HEIGHT };
 }
 
 /** Repaints the window background and the OS-drawn caption buttons for the active theme. */

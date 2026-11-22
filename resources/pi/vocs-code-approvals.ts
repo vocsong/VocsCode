@@ -2,8 +2,9 @@
  * Vocs Code approvals extension for pi (loaded with `pi -e <this file>`).
  *
  * pi has no built-in permission prompts, so this extension gates mutating tools
- * (bash, edit, write) and every MCP tool the vocs-code-mcp bridge registers
- * (`mcp__*`) according to the Vocs Code permission mode and asks the host through
+ * (bash, powershell, edit, write) and every MCP tool the vocs-code-mcp bridge registers
+ * (`mcp__*`, except the app's own built-in read-only tools) according to the Vocs Code
+ * permission mode and asks the host through
  * the RPC extension-UI channel. The `select` title carries a JSON payload prefixed
  * with VCODE_APPROVAL:: which the desktop app renders as an approval card.
  *

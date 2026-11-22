@@ -39,8 +39,9 @@ interface PiLike {
 
 export interface McpBridgeTool extends PiToolDefinition {
   /**
-   * The app's own memory server may mark a tool read-only; only that server is trusted for it, and
-   * only when the host's provenance marker says the definition is that server.
+   * True only for a tool on the built-in read-only allowlist (`BUILTIN_READ_ONLY_TOOLS`) of a server
+   * whose host-set provenance marker says the definition is that built-in. A server's name or its
+   * own readOnly annotation never grants it.
    */
   readOnly: boolean;
   /** App-owned coordination mutates Mission records, NOT a read-only MCP annotation. */
@@ -188,6 +189,31 @@ const MEMORY_GATEWAY_TOKEN_ENV = 'VOCS_MEMORY_GATEWAY_TOKEN';
  * reserved in every spelling that folds to the same tool names (see `reservedKey`).
  */
 export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', MISSION_SERVER_ID];
+
+/**
+ * Tools the app's own built-in servers expose read-only, mirroring `BUILTIN_READ_ONLY_TOOLS` in
+ * src/shared/builtin-tools.ts (pi loads this file on its own, so it cannot import from `src/`).
+ * Every permission tier, Plan included, runs these without asking; every other tool of these
+ * servers follows the tier. tests/pi-mcp-builtin-trust.test.ts pins this copy to the host's.
+ */
+export const BUILTIN_READ_ONLY_TOOLS: Readonly<Record<string, readonly string[]>> = {
+  [MEMORY_SERVER]: [
+    'knowledge_search', 'knowledge_read', 'knowledge_related', 'knowledge_status', 'session_history_search',
+    'intelligence_search', 'intelligence_trace', 'context_compile', 'memory_recall'
+  ],
+  [CODE_GRAPH_SERVER]: ['query', 'context', 'impact', 'detect_changes', 'api_impact', 'route_map', 'tool_map', 'shape_check', 'list_repos'],
+  'cua-driver': [
+    'check_permissions', 'check_for_update', 'debug_window_info', 'get_accessibility_tree', 'get_agent_cursor_state',
+    'get_browser_state', 'get_config', 'get_cursor_position', 'get_desktop_state', 'get_recording_state', 'get_screen_size',
+    'get_session', 'get_session_state', 'get_window_state', 'health_report', 'list_apps', 'list_sessions', 'list_windows',
+    'verify_state', 'zoom'
+  ]
+};
+
+/** True when `tool` (its MCP name, before sanitizing) is a read-only tool of the built-in `serverId`. */
+export function isBuiltinReadOnlyTool(serverId: string, tool: string): boolean {
+  return Object.prototype.hasOwnProperty.call(BUILTIN_READ_ONLY_TOOLS, serverId) && BUILTIN_READ_ONLY_TOOLS[serverId]!.includes(tool);
+}
 
 /**
  * Mirrors `mcpIdKey` in src/shared/mcp-ids.ts: case and every run of `-`, `_`, `.` fold together.
@@ -351,7 +377,8 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
         promptSnippet: promptSnippetFor(tool.description, tool.name),
         ...(guidelines ? { promptGuidelines: [...guidelines] } : {}),
         parameters: tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
-        readOnly: builtin === MEMORY_SERVER && tool.readOnly === true,
+        // The allowlist decides, keyed by provenance; the server's own readOnly annotation does not.
+        readOnly: !!builtin && isBuiltinReadOnlyTool(builtin, tool.name),
         ...(mission ? { missionCoordination: true } : {}),
         async execute(_id, params, signal) {
           let result;
@@ -393,7 +420,7 @@ export async function mcpToolNames(): Promise<string[]> {
   return (await loadMcpBridge()).map((tool) => tool.name);
 }
 
-/** Names the gate may treat as reads even below full access (the app's own read-only tools). */
+/** Names the gate runs in every tier, Plan included: the app's own built-in read-only tools. */
 export async function mcpReadOnlyToolNames(): Promise<ReadonlySet<string>> {
   return new Set((await loadMcpBridge()).filter((tool) => tool.readOnly).map((tool) => tool.name));
 }

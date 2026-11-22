@@ -1,6 +1,7 @@
 /** What the New Session dialog opens on for one project folder: the folder's own remembered
  *  choices where it has them, the app-wide defaults (Settings) everywhere else. */
 import { DEFAULT_BRANCH_PREFIX, branchPrefixOptions } from './branch-prefix';
+import { closestPermissionMode } from './harness-meta';
 import type { AppSettings, EffortLevel, FolderSessionDefaults, HarnessId, ModelRef, PermissionMode } from './types';
 
 /** The dialog's initial state for a folder; `effort: ''` is the select's "Default" option. */
@@ -49,7 +50,7 @@ export function resolveNewSessionDefaults(settings: AppSettings, root: string | 
     harness,
     model: rememberedModel(settings, root, harness),
     effort: (folder?.effort ?? settings.defaultEffort) ?? '',
-    permissionMode: harness === 'antigravity' && mode !== 'plan' ? 'ask' : mode,
+    permissionMode: closestPermissionMode(harness, mode),
     useWorktree: folder?.useWorktree ?? false,
     branchPrefix: prefix && branchPrefixOptions(settings.customBranchPrefixes).includes(prefix) ? prefix : DEFAULT_BRANCH_PREFIX,
     acpAgent: folder?.acpAgent ?? settings.acpAgents[0]?.id

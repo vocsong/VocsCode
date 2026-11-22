@@ -11,8 +11,9 @@
  * come from the active theme.
  */
 
-/* Tokens. `[data-theme]` lifts these above the data-driven theme blocks (html:root[data-theme]). */
-:root[data-ui='zen'][data-theme] {
+/* Tokens. `[data-palette][data-scheme]` lifts these above the data-driven palette blocks
+   (html:root[data-palette][data-scheme], specificity 0,3,1). */
+:root[data-ui='zen'][data-palette][data-scheme] {
   --border: color-mix(in srgb, var(--fg) 7%, transparent);
   --border-strong: color-mix(in srgb, var(--fg) 13%, transparent);
   --radius: 14px;
