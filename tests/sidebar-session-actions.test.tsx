@@ -150,7 +150,7 @@ describe('sidebar session actions', () => {
     useStore.setState({ sessions: [session('s_a', { title: 'A', archived: true, worktreeBranch: 'agent/a' })], settings, activeId: null, view: 'chat' });
     const { container } = render(<Sidebar />);
     // Archived sessions only appear once the Archived toggle is on.
-    const archived = [...container.querySelectorAll('.sidebar-link')].find((b) => (b.textContent ?? '').includes('Archived')) as HTMLElement;
+    const archived = container.querySelector('[data-testid="sidebar-archived"]') as HTMLElement;
     fireEvent.click(archived);
     const row = container.querySelector('.session-row') as HTMLElement;
     const btns = [...(row.querySelector('.row-actions') as HTMLElement).querySelectorAll('.row-act-btn')] as HTMLElement[];
@@ -164,7 +164,7 @@ describe('sidebar session actions', () => {
     useStore.setState({ sessions: [session('s_a', { title: 'A', archived: true, pinned: true, pinnedAt: 5 })], settings, activeId: null, view: 'chat' });
     const { container } = render(<Sidebar />);
     // Archived sessions only appear once the Archived toggle is on.
-    const archived = [...container.querySelectorAll('.sidebar-link')].find((b) => (b.textContent ?? '').includes('Archived')) as HTMLElement;
+    const archived = container.querySelector('[data-testid="sidebar-archived"]') as HTMLElement;
     fireEvent.click(archived);
     const row = container.querySelector('.session-row') as HTMLElement;
     // A pinned archived row shows the pin as state, in the leading gutter, and offers unpin.
@@ -181,7 +181,7 @@ describe('sidebar session actions', () => {
   it('pins an unpinned archived row', () => {
     useStore.setState({ sessions: [session('s_a', { title: 'A', archived: true })], settings, activeId: null, view: 'chat' });
     const { container } = render(<Sidebar />);
-    const archived = [...container.querySelectorAll('.sidebar-link')].find((b) => (b.textContent ?? '').includes('Archived')) as HTMLElement;
+    const archived = container.querySelector('[data-testid="sidebar-archived"]') as HTMLElement;
     fireEvent.click(archived);
     const row = container.querySelector('.session-row') as HTMLElement;
     const pin = row.querySelector('[data-testid="session-pin"]') as HTMLElement;

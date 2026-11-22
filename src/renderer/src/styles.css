@@ -1489,10 +1489,12 @@ h4 {
   text-transform: uppercase;
   color: var(--fg-faint);
 }
-/* Projects | Recent: the session list's layout, above the list and apart from the nav links. */
+/* Projects | Recent, then Archived: what the session list shows, above the list and apart from the
+   nav links. The layout is one segmented choice; Archived is a separate on/off filter beside it. */
 .sidebar-viewswitch {
   display: flex;
   align-items: center;
+  gap: 6px;
   padding: 0 10px 10px;
 }
 .sidebar-viewswitch-icon {
@@ -1502,18 +1504,48 @@ h4 {
   display: flex;
   flex: 1;
 }
+.sidebar-viewswitch .segmented {
+  min-width: 0;
+}
 .sidebar-viewswitch .segment {
   flex: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
+  min-width: 0;
 }
-.sidebar-section .sidebar-archived {
+/* A narrow sidebar shortens the labels instead of pushing Archived out of the row. */
+.sidebar-viewswitch .segment-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* An on/off button drawn like one segment of .segmented, so it lines up with the switch beside it. */
+.segmented-toggle {
   flex: 0 0 auto;
-  margin-left: auto;
-  padding: 3px 7px;
-  font-size: 11.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.segmented-toggle:hover {
+  color: var(--fg);
+}
+.segmented-toggle.active {
+  background: var(--bg-active);
+  color: var(--fg);
+  font-weight: 600;
+}
+.segmented-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .sidebar-list {
   flex: 1;
