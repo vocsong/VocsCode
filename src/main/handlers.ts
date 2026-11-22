@@ -57,6 +57,7 @@ import { spawnTool } from './harness/spawn';
 import { DictationService } from './dictation/service';
 import { localModel } from '../shared/dictation';
 import { discoverChatImports } from './chat-import';
+import { configuredHousekeepReviewer, HousekeepService } from './housekeep';
 import { representsChatImport } from './chat-import-identity';
 import { isReservedSecretId, providerSecrets } from './secret-ids';
 
@@ -81,6 +82,8 @@ export interface DesktopBridge {
   openPath(p: string): Promise<void>;
   /** Opens the system file manager at `p`'s folder with `p` selected; never opens `p` itself. */
   showItemInFolder(p: string): void;
+  /** Optional trusted desktop operation; no permanent-delete fallback. */
+  trashItem?(p: string): Promise<void>;
   showOpenDialog(opts: OpenDialogOptions): Promise<{ canceled: boolean; filePaths: string[] }>;
   showSaveDialog(opts: SaveDialogOptions): Promise<{ canceled: boolean; filePath?: string }>;
   notify(title: string, body: string): Promise<void>;
@@ -251,6 +254,23 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       log: deps.log,
       push: (status) => deps.push(PUSH_CHANNELS.dictationStatus, status)
     }));
+  let housekeepSettingsWrites = 0;
+  const housekeep = new HousekeepService({
+    sessions,
+    settings: () => settings.get(),
+    savingRecentDays: () => housekeepSettingsWrites > 0,
+    // Partial registry hosts may not have a desktop bridge; without Trash, removal fails closed.
+    trashDirectory: deps.desktop?.trashItem?.bind(deps.desktop),
+    hasTerminalOrView: id => deps.desktopFocus?.state().sessionId === id || !!deps.desktopFocus?.isViewing(id) || terminals.list().some(terminal => terminal.sessionId === id),
+    runningOwners: deps.processes && (async () => {
+      try {
+        const snapshot = await deps.processes!.list();
+        return snapshot.error ? null : new Set(snapshot.processes.flatMap(process => process.owner.sessionId ? [process.owner.sessionId] : []));
+      } catch { return null; }
+    }),
+    authorize: async id => { if (missionOwnershipPossible()) await assertOrdinarySession(id); },
+    reviewer: () => configuredHousekeepReviewer(settings.get(), { getSecret: providerSecrets(id => secrets.get(id)), log: deps.log })
+  });
   const handlers = new Map<IpcChannel, (req: never) => unknown>();
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
   let availabilityGeneration = 0;
@@ -296,6 +316,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' | 'desktop' = 'user'): Promise<unknown> {
     if (channel.startsWith('vocsAccount:') && actor !== 'desktop') throw new Error('Vocs account sign-in requires the local desktop owner.');
     if (channel.startsWith('control:') && actor !== 'desktop') throw new Error('External control grants require the local desktop owner.');
+    if (channel.startsWith('housekeep:') && actor !== 'desktop') throw new Error('Housekeep requires the local desktop owner.');
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
     if (channel === 'harness:antigravityQuota' && actor !== 'desktop') throw new Error('Antigravity quota requires the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
@@ -803,7 +824,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   handle('settings:get', () => settings.get());
   handle('settings:update', async (patch) => {
-    const next = await settings.update(patch);
+    const changesHousekeep = !!patch && typeof patch === 'object' && Object.hasOwn(patch, 'housekeepRecentDays');
+    if (changesHousekeep) housekeepSettingsWrites++;
+    const next = await settings.update(patch).finally(() => { if (changesHousekeep) housekeepSettingsWrites--; });
     // Keys only: provider entries carry custom headers, and window bounds change every drag.
     const keys = patch && typeof patch === 'object' ? Object.keys(patch).filter((k) => k !== 'windowBounds') : [];
     if (keys.length) deps.log('debug', `settings updated: ${keys.join(', ')}`);
@@ -1328,6 +1351,20 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (archived) await terminals.closeForSession(id);
     return sessions.setArchived(id, archived, removeWorktree, forceWorktree);
   });
+  const housekeepIds = z.array(missionIdSchema).max(4096);
+  const housekeepPreviewId = z.string().uuid();
+  handle('housekeep:preview', input => {
+    const { protectedIds } = z.strictObject({ protectedIds: housekeepIds }).parse(input);
+    return housekeep.preview(protectedIds);
+  });
+  handle('housekeep:assess', input => {
+    const { previewId } = z.strictObject({ previewId: housekeepPreviewId }).parse(input);
+    return housekeep.assess(previewId);
+  });
+  handle('housekeep:apply', input => {
+    const { previewId, ids, protectedIds } = z.strictObject({ previewId: housekeepPreviewId, ids: housekeepIds.min(1), protectedIds: housekeepIds }).parse(input);
+    return housekeep.apply(previewId, ids, protectedIds);
+  });
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
   handle('sessions:markViewed', (input) => sessions.markViewed(missionIdSchema.parse(z.strictObject({ id: z.string() }).parse(input).id)));
@@ -1796,6 +1833,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('terminal:screen', ({ terminalId, lines }) => terminals.screenText(String(terminalId ?? ''), typeof lines === 'number' ? lines : undefined));
   handle('terminal:shells', () => terminals.shells());
   handle('terminal:create', ({ sessionId, shell, cols, rows }) => {
+    sessions.assertNotHousekeeping?.(sessionId);
     const info = terminals.create(sessionId, { shell, cols, rows });
     // The guard just cleared this session's cwd (or nothing could own it); keystrokes reuse that.
     const session = sessions.get(sessionId);

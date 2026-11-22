@@ -26,7 +26,7 @@ availability/sign-in only; **Check for updates** checks CLI versions.
 | Workspace | General, Appearance, Shortcuts, Terminal, Voice |
 | Agent behavior | Session defaults, Instructions, Mission, Vesta & utility |
 | Connections | Vocs account, Providers & keys, Harnesses, Pi, ACP agents |
-| System | Import chats, Remote access, About & doctor |
+| System | Import chats, Remote access, Housekeep, About & doctor |
 
 General is the starting point for daily preferences and common destinations. Appearance owns the
 interface mode (Standard, or the minimalist Zen layout), the live theme preview and the theme
@@ -36,6 +36,18 @@ goals and worktree branch prefixes. Remembered per-project choices still take pr
 new-session harness, permission and effort defaults. Compaction is app-wide and can affect existing
 sessions at an idle boundary; the harness-native `/goal` preference updates existing sessions too.
 Auto-continue and iteration defaults are copied when a new goal is created.
+
+**Housekeep** configures `/housekeep` on the desktop. It protects sessions used in the last
+**7 days** by default, counting the latest session creation, update, view, or transcript activity. Save a whole
+number from 0 to 3650; 0 turns off only age protection, not the other protections. The age rule is
+checked again before archiving, including when the setting changes after a preview.
+
+Run `/housekeep sessions` (or the built-in **Housekeep sessions** skill) to preview older sessions one
+by one. Review locally, or explicitly ask your configured utility model to assess short conversation
+excerpts. Results are recommendations and never archive anything before a separate confirmation.
+Sessions with local files, including Git-ignored files, are left alone. Clean worktrees go to the
+operating system’s Trash (Recycle Bin on Windows), never through permanent deletion. Existing
+branches and transcripts are retained. Housekeep is not available to paired browsers or agents.
 
 - Search finds settings by topic and vocabulary, including controls inside other pages. Enter opens
   the first result; Down moves into results; Escape clears the query even from a focused result and

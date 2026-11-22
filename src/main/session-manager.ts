@@ -261,6 +261,8 @@ export class SessionManager {
   private antigravityModeUpdates = new Set<string>();
   /** Reserve send-first dispatches before startup/preamble awaits expose an idle gap. */
   private configDispatches = new Map<string, number>();
+  /** Blocks turn admission and ordinary edits during the checked housekeeping commit. */
+  private housekeepArchives = new Set<string>();
   /** Last runtime created per session. An ordinary runtime is fenced only once a newer one exists. */
   private runtimeSeq = new Map<string, number>();
   /** Ordinary runtimes still disposing after Stop released their session. Mission admission only:
@@ -952,6 +954,7 @@ export class SessionManager {
    * reordering pins must not reshuffle the rest of the list.
    */
   async setPinned(id: string, pinned: boolean): Promise<SessionMeta> {
+    this.assertNotHousekeeping(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (pinned) {
@@ -1005,6 +1008,54 @@ export class SessionManager {
       changed = true;
     }
     if (changed) this.pushSessions();
+  }
+
+  /** Housekeeping must not stop a harness or acknowledge an unproven workspace writer. */
+  canHousekeep(id: string): boolean {
+    return !this.housekeepArchives.has(id) && this.housekeepIdle(id);
+  }
+
+  private housekeepIdle(id: string): boolean {
+    const meta = this.get(id);
+    if (!meta || meta.archived || meta.mission || meta.pinned || this.configDispatches.has(id) || this.persistTimers.has(id) ||
+        this.fastModeUpdates.has(id) || this.antigravityModeUpdates.has(id)) return false;
+    const activity = this.activity(id);
+    return !activity.active && activity.quiescent;
+  }
+
+  assertNotHousekeeping(id: string): void {
+    if (this.housekeepArchives.has(id)) throw new Error('This session is being archived by Housekeep.');
+  }
+
+  /** A reservation covers the async verification and removal. This path never uses legacy worktree
+   * fallback cleanup. `prepare` returns whether it verified a worktree removal. */
+  async archiveForHousekeep(id: string, prepare: (assertIdle: () => void) => Promise<boolean>): Promise<boolean> {
+    const assertIdle = () => {
+      if (!this.housekeepIdle(id)) throw new Error('Session is no longer idle or eligible.');
+    };
+    this.assertNotHousekeeping(id);
+    assertIdle();
+    this.housekeepArchives.add(id);
+    try {
+      const removed = await prepare(assertIdle);
+      assertIdle();
+      const meta = this.get(id)!;
+      const before = { archived: meta.archived, updatedAt: meta.updatedAt };
+      // Keep the same object: other session bookkeeping can have a reference to the live row.
+      Object.assign(meta, { archived: true, updatedAt: Date.now() });
+      try {
+        await this.deps.store.upsert(meta);
+      } catch (error) {
+        // upsert sets the in-memory row before writing the index. Restore the visible state on failure.
+        Object.assign(meta, before);
+        throw new Error(removed ? 'Worktree removed; the session archive could not be saved. Its branch is retained.' : 'The session archive could not be saved.', { cause: error });
+      }
+      this.deps.log('info', `[${id}] session archived by Housekeep${removed ? ' (worktree removed)' : ''}`);
+      this.pushSessions();
+      return removed;
+    } finally {
+      this.housekeepArchives.delete(id);
+    }
   }
 
   /** Archives a session; with `removeWt` it also deletes the worktree (the branch is kept so unarchive can restore it). */
@@ -1098,6 +1149,10 @@ export class SessionManager {
 
   transcript(id: string): Promise<TranscriptItem[]> {
     return this.transcriptSnapshot(id).then((snapshot) => snapshot.items);
+  }
+
+  housekeepTranscript(id: string): Promise<TranscriptItem[]> {
+    return this.deps.store.readHousekeepTranscript(id);
   }
 
   /** The transcript plus the event-sequence floor its live overlay reflects. A remote client keeps
@@ -1361,6 +1416,7 @@ export class SessionManager {
   }
 
   private assertNotControlled(id: string): void {
+    this.assertNotHousekeeping(id);
     if (this.controlled.has(id)) throw new Error('Session is busy with a controlled turn');
   }
 

@@ -124,6 +124,110 @@ async function launch(userData: string): Promise<Page> {
 }
 
 describe.runIf(enabled)('electron e2e: session view layout', () => {
+  it('runs the built-in Housekeep command with a preview, a protected age window, and one checked archive batch', async ({ onTestFinished }) => {
+    const tmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-housekeep-ui-')));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    const worktrees = path.join(project, '.vocs-code', 'worktrees');
+    const clean = path.join(worktrees, 'clean');
+    const dirty = path.join(worktrees, 'dirty');
+    onTestFinished(async () => {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+    });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(project, 'README.md'), 'Fixture.\n');
+    git(project, 'init', '-q', '-b', 'main');
+    git(project, 'config', 'user.name', 'e2e');
+    git(project, 'config', 'user.email', 'e2e@example.invalid');
+    git(project, 'add', '--', 'README.md');
+    git(project, 'commit', '-qm', 'fixture');
+    await fs.mkdir(worktrees, { recursive: true });
+    git(project, 'worktree', 'add', '-qb', 'vocscode/report', clean);
+    git(project, 'worktree', 'add', '-qb', 'vocscode/draft', dirty);
+    await fs.writeFile(path.join(dirty, 'draft.txt'), 'Keep this local file.\n');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const old = T - 9 * 86_400_000;
+    const make = (id: string, title: string, ts: number, cwd = project, worktreeBranch?: string): SessionMeta => ({
+      id, title, cwd, worktreeBranch, status: 'idle', config: { projectRoot: project, harness: 'native', permissionMode: 'ask' },
+      createdAt: ts, updatedAt: ts + 3, lastUserMessageAt: ts, usage: usage(), harnessRef: {}
+    });
+    const rows = [
+      make('s_housekeep_current', 'Current session', T),
+      make('s_housekeep_recent', 'Recent report', T - 86_400_000),
+      make('s_housekeep_old', 'Old finished report', old, clean, 'vocscode/report'),
+      make('s_housekeep_dirty', 'Old local draft', old, dirty, 'vocscode/draft')
+    ];
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(rows));
+    for (const row of rows) {
+      const dir = path.join(userData, 'sessions', row.id);
+      const items: TranscriptItem[] = [
+        { kind: 'user', id: 'u1', ts: row.createdAt, text: `Deliver ${row.title}.` },
+        { kind: 'assistant', id: 'a1', ts: row.createdAt + 1, text: 'Delivered and verified.' },
+        { kind: 'turn', id: 't1', ts: row.createdAt + 2, status: 'completed' }
+      ];
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'transcript.jsonl'), items.map(item => JSON.stringify(item)).join('\n') + '\n');
+    }
+    const win = await launch(userData);
+    // Exercise the actual Git staging/unregistration flow without littering the real system Trash.
+    const trashFixture = path.join(tmp, 'trash-fixture');
+    await app!.evaluate(({ shell }, target) => {
+      shell.trashItem = original => process.getBuiltinModule('node:fs')!.promises.rename(original, target);
+    }, trashFixture);
+    await win.locator('[data-session-id="s_housekeep_current"]').click();
+    const input = win.locator('.composer-box textarea');
+    const dialog = win.getByRole('dialog', { name: 'Housekeep sessions', exact: true });
+    const suggestion = win.getByRole('button', { name: /^\/housekeep\b/ });
+    await input.pressSequentially('/');
+    await suggestion.waitFor({ state: 'visible' });
+    await input.pressSequentially('hou');
+    await suggestion.waitFor({ state: 'visible' });
+    await input.press('Tab');
+    expect(await input.inputValue()).toBe('/housekeep ');
+    await input.pressSequentially('sessions');
+    await input.press('Enter');
+    await dialog.getByText(/Activity within the last 7 days/).waitFor();
+    const eligible = dialog.getByRole('checkbox', { name: 'Select Old finished report' });
+    expect(await dialog.getByRole('checkbox', { name: 'Select Recent report' }).isDisabled()).toBe(true);
+    expect(await dialog.getByRole('checkbox', { name: 'Select Old local draft' }).isDisabled()).toBe(true);
+    expect(await eligible.isChecked()).toBe(false);
+    await dialog.getByLabel('Conversation excerpts for Old finished report').click();
+    await dialog.getByText('Delivered and verified.', { exact: true }).waitFor();
+    await eligible.check();
+    await dialog.getByRole('button', { name: 'Review selected' }).click();
+    await dialog.getByRole('heading', { name: 'Final archive review' }).waitFor();
+    await dialog.getByRole('button', { name: 'Back to review' }).click();
+    const originalReadme = await fs.readFile(path.join(clean, 'README.md')); // May use CRLF on Windows.
+    await dialog.getByRole('button', { name: 'Review selected' }).click();
+    await dialog.getByRole('button', { name: 'Confirm archive (1)' }).click();
+    await dialog.getByText(/Old finished report.*Archived.*worktree removed/).waitFor();
+    await expect(fs.stat(clean)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fs.readFile(path.join(trashFixture, 'README.md'))).toEqual(originalReadme);
+    expect(await fs.readFile(path.join(dirty, 'draft.txt'), 'utf8')).toBe('Keep this local file.\n');
+    git(project, 'show-ref', '--verify', 'refs/heads/vocscode/report');
+    const saved = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
+    expect(saved.filter(row => row.archived).map(row => row.id)).toEqual(['s_housekeep_old']);
+    const current = await fs.readFile(path.join(userData, 'sessions', 's_housekeep_current', 'transcript.jsonl'), 'utf8');
+    expect(current).not.toContain('/housekeep');
+    expect(await fs.readFile(path.join(userData, 'sessions', 's_housekeep_old', 'transcript.jsonl'), 'utf8')).toContain('Delivered and verified.');
+    await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+    await input.fill('/housekeep settings');
+    await input.press('Enter');
+    const days = win.getByRole('spinbutton', { name: 'Protect sessions used in the last (days)' });
+    expect(await days.inputValue()).toBe('7');
+    await days.fill('14');
+    await days.press('Enter');
+    await expect.poll(async () => (await win.evaluate(() => window.harness.invoke('settings:get', undefined))).housekeepRecentDays).toBe(14);
+    const settingsOnDisk = JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8'));
+    expect(settingsOnDisk.housekeepRecentDays).toBe(14);
+    await win.getByRole('button', { name: 'Skills', exact: true }).click();
+    await win.getByRole('button', { name: 'Run /housekeep', exact: true }).click();
+    await dialog.getByText(/Activity within the last 14 days/).waitFor();
+  }, 90_000);
+
   it('reopens setup from Home without creating a session or changing the returning user’s defaults', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-home-setup-'));
     const userData = path.join(tmp, 'userData');

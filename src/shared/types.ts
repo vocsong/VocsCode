@@ -1292,6 +1292,8 @@ export interface AppSettings {
   defaultEffort?: EffortLevel;
   /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
   autoCompactionThreshold?: AutoCompactionThreshold;
+  /** Days of recent-use protection for /housekeep; 0 disables only the age guard. */
+  housekeepRecentDays?: number;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
   /**
    * New-session choices remembered per project folder; a folder with no record starts on the

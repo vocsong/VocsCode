@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { sessionTitleText } from '../../../shared/session-title';
 import type { SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
+import { canHousekeepHere, openHousekeep } from '../housekeep';
 import { useStore } from '../store';
 import { isTopLevelSession, MISSION_MANAGED_REASON, pauseMissionSession } from '../missions';
 import { createTerminal } from '../terminal/host';
@@ -51,6 +52,7 @@ export function CommandPalette() {
       // The interface mode is one keystroke away from anywhere, so trying Zen costs nothing.
       ...UI_MODES.filter((m) => m.id !== (st.settings?.uiMode ?? 'standard')).map((m) => ({ id: `ui:${m.id}`, label: `Switch to the ${m.name} interface`, hint: m.tagline, icon: 'layout', run: () => setUiMode(m.id) }))
     ];
+    if (canHousekeepHere()) base.push({ id: 'housekeep', label: 'Housekeep sessions', hint: '/housekeep', icon: 'archive', run: openHousekeep });
     if (activeId) {
       base.push(
         { id: 'new-here', label: 'New session in this folder', hint: 'Ctrl+Shift+N', icon: 'sessionPlus', run: () => void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot) },
