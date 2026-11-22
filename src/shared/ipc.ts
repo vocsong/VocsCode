@@ -1,6 +1,7 @@
 import type { VocsAccountSignInRequest, VocsAccountState } from './vocs-account';
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
+import type { HousekeepOutcome, HousekeepPreview } from './housekeep';
 import type { AntigravityQuota, HarnessSetupStatus, LoginHarnessId } from './harness-setup';
 import type {
   AnalyticsSummary,
@@ -326,6 +327,10 @@ export interface IpcContract {
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
   'sessions:label': [{ id: string; label?: string }, SessionMeta];
   'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean; forceWorktree?: boolean }, SessionMeta];
+  /** Local desktop only; review first, then apply a one-use preview. */
+  'housekeep:preview': [{ protectedIds: string[] }, HousekeepPreview];
+  'housekeep:assess': [{ previewId: string }, HousekeepPreview];
+  'housekeep:apply': [{ previewId: string; ids: string[]; protectedIds: string[] }, HousekeepOutcome[]];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];

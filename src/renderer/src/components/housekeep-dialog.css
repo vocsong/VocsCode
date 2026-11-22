@@ -1,0 +1,101 @@
+.housekeep-dialog {
+  overflow-wrap: anywhere;
+}
+
+.housekeep-dialog h2 {
+  margin: 0 0 8px;
+}
+
+.housekeep-dialog p {
+  margin: 0 0 10px;
+}
+
+.housekeep-analysis {
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+
+.housekeep-analysis > :last-child {
+  margin-bottom: 0;
+}
+
+.housekeep-analysis > [role='status'] {
+  margin: 8px 0 0;
+}
+
+.housekeep-analysis > span[role='status'] {
+  display: block;
+}
+
+.housekeep-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  display: grid;
+  gap: 8px;
+}
+
+.housekeep-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.housekeep-row-heading,
+.housekeep-row-heading label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.housekeep-row-heading {
+  justify-content: space-between;
+}
+
+.housekeep-row-heading input[type='checkbox'] {
+  inline-size: 16px;
+  block-size: 16px;
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.housekeep-row summary {
+  width: fit-content;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.housekeep-row :is(input, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.housekeep-excerpts {
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+
+.housekeep-excerpts dt {
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+.housekeep-excerpts dd {
+  margin: 2px 0 8px;
+  white-space: pre-wrap;
+}
+
+.housekeep-excerpts dd:last-child {
+  margin-bottom: 0;
+}
