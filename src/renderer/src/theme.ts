@@ -36,9 +36,10 @@ export function applyTheme(mode: ThemeMode, palette: PaletteId = DEFAULT_PALETTE
   root.setAttribute('data-theme', isThemeMode(mode) ? mode : DEFAULT_THEME_MODE);
   root.setAttribute('data-palette', isPaletteId(palette) ? palette : DEFAULT_PALETTE);
   paintScheme();
-  if (!followingOs) {
+  const query = darkQuery();
+  if (!followingOs && query) {
     followingOs = true;
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paintScheme);
+    query.addEventListener('change', paintScheme);
   }
 }
 
@@ -59,8 +60,14 @@ export function activeScheme(): ColorScheme {
   return resolveScheme(activeThemeMode(), systemPrefersDark());
 }
 
+/** The OS dark-mode query, or null where the host has no matchMedia (jsdom). */
+export function darkQuery(): MediaQueryList | null {
+  return typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+}
+
+/** Whether the OS asks for dark. Without a media query to ask, System paints light. */
 export function systemPrefersDark(): boolean {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return darkQuery()?.matches ?? false;
 }
 
 /**

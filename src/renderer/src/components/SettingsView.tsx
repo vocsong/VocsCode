@@ -14,7 +14,7 @@ import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccel
 import { invoke, isMac, on, platform } from '../api';
 import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
-import { systemPrefersDark } from '../theme';
+import { darkQuery, systemPrefersDark } from '../theme';
 import { UI_MODES, type UiModeId } from '../../../shared/ui-modes';
 import { useMinimalUi } from '../ui-mode';
 import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
@@ -223,7 +223,8 @@ const MODE_ICONS: Record<ThemeMode, string> = { system: 'monitor', light: 'sun',
 function useSystemDark(): boolean {
   const [dark, setDark] = useState(systemPrefersDark);
   useEffect(() => {
-    const query = window.matchMedia('(prefers-color-scheme: dark)');
+    const query = darkQuery();
+    if (!query) return;
     const sync = (): void => setDark(query.matches);
     query.addEventListener('change', sync);
     return () => query.removeEventListener('change', sync);
