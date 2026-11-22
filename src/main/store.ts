@@ -223,6 +223,36 @@ export class SessionStore {
     return order.map((i) => byId.get(i) as TranscriptItem);
   }
 
+  /** A damaged or unbounded history is viewable, but is not reliable evidence for housekeeping. */
+  async readHousekeepTranscript(id: string): Promise<TranscriptItem[]> {
+    await (this.transcriptWrites.get(id) ?? Promise.resolve());
+    const maxBytes = 64 * 1024 * 1024;
+    const file = await fs.open(path.join(this.sessionDir(id), 'transcript.jsonl'), 'r');
+    try {
+      const initial = await file.stat();
+      if (!initial.isFile() || initial.size > maxBytes) throw new Error('Transcript is unavailable or too large to review.');
+      const bytes = Buffer.alloc(initial.size);
+      let offset = 0;
+      while (offset < initial.size) {
+        const { bytesRead } = await file.read(bytes, offset, initial.size - offset, offset);
+        if (!bytesRead) throw new Error('Transcript changed while reading.');
+        offset += bytesRead;
+      }
+      const current = await file.stat();
+      if (current.size !== initial.size || current.mtimeMs !== initial.mtimeMs) throw new Error('Transcript changed while reading.');
+      const byId = new Map<string, TranscriptItem>();
+      for (const line of new TextDecoder('utf-8', { fatal: true }).decode(bytes).split('\n')) {
+        if (!line.trim()) continue;
+        const row = JSON.parse(line) as TranscriptItem;
+        if (!row || typeof row.id !== 'string' || !Number.isFinite(row.ts) || typeof row.kind !== 'string') throw new Error('Transcript is incomplete or damaged.');
+        byId.set(row.id, row);
+      }
+      return [...byId.values()];
+    } finally {
+      await file.close();
+    }
+  }
+
   /** Rewrites the transcript file from a compacted item list (used after clear). */
   async rewriteTranscript(id: string, items: TranscriptItem[]): Promise<void> {
     const file = path.join(this.sessionDir(id), 'transcript.jsonl');

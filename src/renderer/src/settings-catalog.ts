@@ -80,6 +80,9 @@ export const SETTINGS_PAGES = [
   { id: 'import', label: 'Import chats', icon: 'download', group: 'System', description: 'Bring your earlier conversations along, without changing the originals.', saveHint: 'Review your selection before importing', topics: [
     { label: 'Import chat history', description: 'Scan and import existing Claude Code and Codex conversations.', keywords: 'history migration import chats scan conversations' },
   ] },
+  { id: 'housekeep', label: 'Housekeep', icon: 'archive', group: 'System', description: 'Choose how recently used sessions are protected when you run /housekeep.', saveHint: 'Changes save when you leave the field or press Enter', topics: [
+    { label: 'Recent session protection', description: 'Keep recently used sessions out of cleanup.', keywords: '/housekeep archive age guard protect sessions days', anchor: 'housekeep-recent' },
+  ] },
   { id: 'remote', label: 'Remote access', icon: 'globe', group: 'System', description: 'Your workspace, wherever you are. You stay in control of who can connect.', saveHint: 'Access changes require explicit actions', topics: [
     { label: 'Browser access & pairing', description: 'Connect this computer, pair a browser and manage devices.', keywords: 'phone mobile qr github login relay pair remote devices view only offline mirror', anchor: 'remote-browser' },
     { label: 'External controllers', description: 'Manage desktop grants and remote MCP control.', keywords: 'control controller mcp oauth grants permissions access', anchor: 'remote-controllers' },
