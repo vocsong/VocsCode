@@ -31,7 +31,9 @@ export function SessionControls({ session }: { session: SessionMeta }) {
   const effort = session.activeEffort ?? session.config.effort ?? undefined;
   // Keep the complete identity/settings accessible even when the compact label truncates.
   const effortLabel = h.capabilities.effort && effortLevels.length ? effort ?? 'default' : undefined;
-  const fastLabel = session.config.fastMode ? `Fast ${session.fastModeStatus?.state ?? 'requested'}` : undefined;
+  // The visual cue marks the saved preference, not the runtime's reported tier.
+  const fastSelected = session.config.fastMode;
+  const fastLabel = fastSelected ? `Fast ${session.fastModeStatus?.state ?? 'requested'}` : undefined;
   const modelDetail = [modelRefName(current) ?? 'default model', effortLabel && `Effort: ${effortLabel}`, fastLabel].filter(Boolean).join(' · ');
 
   const setModel = async (m: ModelInfo) => {
@@ -47,9 +49,10 @@ export function SessionControls({ session }: { session: SessionMeta }) {
       <Dropdown
         align="left"
         trigger={(open) => (
-          <button type="button" className={`pill pill-model ${open ? 'open' : ''}`} title="Model" aria-label={`Model: ${modelDetail}`}>
+          <button type="button" className={`pill pill-model${fastSelected ? ' is-fast' : ''}${open ? ' open' : ''}`} title="Model" aria-label={`Model: ${modelDetail}`}>
+            <Icon name={fastSelected ? 'bolt' : 'sparkles'} size={13} />
             {/* Provider first: the same model can be reached through more than one provider. */}
-            <Icon name="sparkles" size={13} /> <span className="pill-text" title={modelRefName(current)}>{current ? modelName(current.provider, currentInfo?.displayName ?? current.model) : 'Default model'}</span>
+            <span className="pill-text" title={modelRefName(current)}>{current ? modelName(current.provider, currentInfo?.displayName ?? current.model) : 'Default model'}</span>
             {effortLabel && <span className="pill-effort">{effortLabel}</span>}
             <Icon name="chevron" size={12} />
           </button>
