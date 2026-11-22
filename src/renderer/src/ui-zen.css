@@ -19,6 +19,7 @@
   --radius-sm: 9px;
   --radius-lg: 20px;
   --reading: 700px;
+  --conversation-gutter: clamp(12px, 3%, 32px);
   --shadow-sm: none;
   --shadow-card: 0 0 0 1px var(--border), 0 16px 44px -24px rgb(0 0 0 / 0.5);
   --shadow: 0 0 0 1px var(--border), 0 24px 60px -22px rgb(0 0 0 / 0.55);
@@ -484,7 +485,7 @@
 /* ---------- Transcript: one quiet reading column ---------- */
 :root[data-ui='zen'] .transcript {
   --transcript-gap: 10px;
-  padding: 24px 32px 32px;
+  padding-block: 24px 32px;
 }
 :root[data-ui='zen'] .md {
   font-size: 15px;
@@ -586,11 +587,9 @@
 
 /* ---------- Composer: a floating pill whose controls wait for you ---------- */
 :root[data-ui='zen'] .pane > .composer {
-  padding: 4px 32px 24px;
-  background: var(--bg);
+  padding-block-end: 24px;
 }
 :root[data-ui='zen'] .pane .composer-box {
-  max-width: calc(var(--reading) - 20px);
   border: none;
   border-radius: 26px;
   background: var(--bg-elev);

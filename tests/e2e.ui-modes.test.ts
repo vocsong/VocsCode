@@ -10,7 +10,8 @@
  *   composer's controls wait for the pointer while Send never hides;
  * - a confirmation asked from the rail (archiving a worktree session) opens at its button and holds
  *   the rail open until it is answered;
- * - the choice survives a restart.
+ * - the choice survives a restart;
+ * - both modes make room for tables and the composer without widening prose or scrolling the pane sideways.
  * Sessions, transcripts and a git checkout are seeded on disk, so no harness or provider key is
  * involved. Review screenshots land in tests/artifacts/ui-modes-*.png.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
@@ -21,7 +22,7 @@ import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
-import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
 
@@ -78,10 +79,31 @@ function transcript(): TranscriptItem[] {
   ];
 }
 
+const TABLE_HEADERS = ['Client', 'Region', 'Project', 'Branch', 'Runtime', 'Version', 'Status', 'Owner', 'Team', 'Retry', 'Quota', 'Latency', 'Budget', 'Fallback', 'Updated', 'Result'];
+const LAYOUT_PROSE = 'The rollout will start in one region before expanding to the remaining clients.';
+
+function chatLayoutTranscript(): TranscriptItem[] {
+  const tableRow = (cells: string[]) => `| ${cells.join(' | ')} |`;
+  return [{
+    id: 'chat-layout', kind: 'assistant', ts: T, phase: 'final',
+    text: [
+      `${LAYOUT_PROSE} Before adding another region, confirm that the current clients can reconnect after a restart. Compare the retry rate with the previous release and give the support team time to review the results. Record any exceptions in the handoff notes so the next team can make the decision without reconstructing the timeline.`,
+      '',
+      tableRow(TABLE_HEADERS),
+      tableRow(TABLE_HEADERS.map(() => '---')),
+      tableRow(['Northwind', 'North America', 'Notifications', 'release candidate', 'Node.js LTS', 'v22.12.0', 'In progress', 'Casey Morgan', 'Release Engineering', 'Exponential', '120 requests/min', '45 milliseconds', 'Within budget', 'Secondary region', 'Monday morning', 'Ready for review']),
+      '',
+      '| Check | State |',
+      '| --- | --- |',
+      '| Smoke | Pass |'
+    ].join('\n')
+  }];
+}
+
 const usage = (): SessionMeta['usage'] => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 });
 
 /** `extra` adds that many idle sessions, enough of them to overflow the window's height. */
-async function seed(tmp: string, uiMode?: string, extra = 0): Promise<{ userData: string; project: string }> {
+async function seed(tmp: string, uiMode?: string, extra = 0, firstTranscript = transcript()): Promise<{ userData: string; project: string }> {
   const userData = path.join(tmp, 'userData');
   const project = path.join(tmp, 'project');
   await fs.mkdir(userData, { recursive: true });
@@ -95,7 +117,7 @@ async function seed(tmp: string, uiMode?: string, extra = 0): Promise<{ userData
   await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
   for (const s of sessions) {
     await fs.mkdir(path.join(userData, 'sessions', s.id), { recursive: true });
-    const items = s.id === FIRST ? transcript() : [{ id: 'u1', kind: 'user', ts: T - 1000, text: s.title } as TranscriptItem];
+    const items = s.id === FIRST ? firstTranscript : [{ id: 'u1', kind: 'user', ts: T - 1000, text: s.title } as TranscriptItem];
     await fs.writeFile(path.join(userData, 'sessions', s.id, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
   }
   return { userData, project };
@@ -131,6 +153,10 @@ const uiMode = (win: Page) => win.evaluate(() => document.documentElement.getAtt
 const rect = (win: Page, selector: string) => win.locator(selector).first().evaluate((el) => {
   const r = el.getBoundingClientRect();
   return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+});
+const horizontalBox = (locator: Locator) => locator.evaluate((el) => {
+  const { left, right, width } = el.getBoundingClientRect();
+  return { left, right, width, overflow: el.scrollWidth - el.clientWidth };
 });
 const style = (win: Page, selector: string, prop: string) => win.locator(selector).first().evaluate((el, p) => getComputedStyle(el).getPropertyValue(p), prop);
 const draft = (win: Page) => win.locator('.pane.active .composer textarea').inputValue();
@@ -299,6 +325,111 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     expect(await win.locator('.panel').count()).toBe(1);
     expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).uiMode).toBe('standard');
   }, 180_000);
+
+  it.for(['standard', 'zen'])('lays out chat and scrolls Markdown tables locally in %s', { timeout: 120_000 }, async (mode, { onTestFinished }) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-chat-layout-'));
+    onTestFinished(() => fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 }));
+    const { userData } = await seed(tmp, mode, 0, chatLayoutTranscript());
+    const win = await launch(userData);
+    // Zen animates the main area's padding when its drawer closes. Measure the settled layout.
+    await win.emulateMedia({ reducedMotion: 'reduce' });
+    await expect.poll(() => uiMode(win)).toBe(mode);
+    if (mode === 'zen') await clickDot(win, FIRST);
+    else await win.locator(`[data-session-id="${FIRST}"]`).click();
+
+    const pane = win.locator('.pane.active');
+    const transcriptView = pane.locator('.transcript');
+    const row = transcriptView.locator('.transcript-row').filter({ hasText: LAYOUT_PROSE });
+    const prose = row.getByText(LAYOUT_PROSE, { exact: false });
+    await prose.waitFor({ timeout: 30_000 });
+    if (await win.locator('.panel').count()) await pane.getByRole('button', { name: 'Toggle panel', exact: true }).click();
+    await win.locator('.panel').waitFor({ state: 'hidden' });
+    await park(win);
+    await win.evaluate(() => document.fonts.ready.then(() => undefined));
+
+    const wide = row.getByRole('region', { name: 'Scrollable table', exact: true })
+      .and(row.locator('div.md-table')).filter({ has: win.getByRole('columnheader', { name: 'Client', exact: true }) });
+    const smallTable = row.getByRole('table').filter({ has: win.getByRole('columnheader', { name: 'Check', exact: true }) });
+    const readLayout = async (width: number) => {
+      await win.setViewportSize({ width, height: 860 });
+      // Read all parent and child bounds in the same renderer evaluation.
+      const [paneBounds, transcriptBounds, rowBounds, composerBounds, boxBounds, actionsBounds] = await pane.evaluate((el) => {
+        const measure = (target: Element) => {
+          const { left, right, width } = target.getBoundingClientRect();
+          return { left, right, width, overflow: target.scrollWidth - target.clientWidth };
+        };
+        const descendants = ['.transcript', '.transcript-row:has([data-item-id="chat-layout"])', '.composer', '.composer-box', '.composer-actions'];
+        return [measure(el), ...descendants.map((selector) => {
+          const target = el.querySelector(selector);
+          if (!target) throw new Error(`Missing chat layout element: ${selector}`);
+          return measure(target);
+        })];
+      });
+      for (const [label, bounds, parent] of [
+        ['transcript', transcriptBounds, paneBounds], ['transcript row', rowBounds, transcriptBounds],
+        ['composer', composerBounds, paneBounds], ['composer box', boxBounds, composerBounds], ['composer controls', actionsBounds, boxBounds]
+      ] as const) {
+        expect(bounds.overflow, `${width}px viewport: ${label} has no horizontal overflow`).toBeLessThanOrEqual(1);
+        expect(bounds.left, `${width}px viewport: ${label} stays inside its parent`).toBeGreaterThanOrEqual(parent.left - 1);
+        expect(bounds.right, `${width}px viewport: ${label} stays inside its parent`).toBeLessThanOrEqual(parent.right + 1);
+      }
+      return { row: rowBounds, composer: boxBounds };
+    };
+
+    // Make the pane wider than the target cap; check layout independently of the table wrapper.
+    const roomy = await readLayout(1600);
+    for (const [label, box] of [['transcript row', roomy.row], ['composer', roomy.composer]] as const) {
+      expect(box.width, `roomy ${label} uses more than the old reading column`).toBeGreaterThan(1000);
+      expect(box.width, `roomy ${label} still caps its width`).toBeLessThan(1180);
+    }
+    const proseLines = await prose.evaluate((el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      return Array.from(range.getClientRects(), (line) => line.width);
+    });
+    expect(proseLines.length, 'the long paragraph still wraps').toBeGreaterThan(1);
+    expect(Math.max(...proseLines), 'prose has a shorter measure than its row').toBeLessThan(roomy.row.width - 150);
+
+    await wide.waitFor();
+    const roomyTable = await horizontalBox(wide);
+    expect(roomyTable.width, 'the wide table uses the wider row').toBeGreaterThan(roomy.row.width * 0.9);
+    const narrow = await readLayout(900);
+    expect(roomy.row.width - narrow.row.width).toBeGreaterThan(100);
+    expect(roomy.composer.width - narrow.composer.width).toBeGreaterThan(100);
+    const narrowTable = await horizontalBox(wide);
+    expect(roomyTable.width - narrowTable.width, 'more of the wide table is visible in the roomy pane').toBeGreaterThan(100);
+    expect(narrowTable.overflow, 'the wide table overflows its own region in the narrow pane').toBeGreaterThan(0);
+
+    const nativeTable = wide.getByRole('table');
+    expect(await nativeTable.evaluate((el) => el.tagName)).toBe('TABLE');
+    expect(await nativeTable.getByRole('row').count()).toBe(2);
+    expect(await nativeTable.getByRole('cell', { name: 'Ready for review', exact: true }).count()).toBe(1);
+    const headerLines = await nativeTable.getByRole('columnheader').evaluateAll((headers) => headers.map((el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      return { label: el.textContent, lines: range.getClientRects().length };
+    }));
+    expect(headerLines, 'short headers do not break across lines in the narrow pane')
+      .toEqual(TABLE_HEADERS.map((label) => ({ label, lines: 1 })));
+
+    const small = await horizontalBox(smallTable);
+    expect(small.width, 'the small native table remains compact').toBeLessThan(narrow.row.width / 2);
+    expect(small.overflow, 'the small table needs no horizontal scroll').toBeLessThanOrEqual(1);
+    expect(await smallTable.evaluate((el) => {
+      const wrapper = el.closest('.md-table');
+      return wrapper ? wrapper.scrollWidth - wrapper.clientWidth : 0;
+    }), 'a wrapper around the small table does not scroll either').toBeLessThanOrEqual(1);
+
+    await shot(win, `${mode}-narrow-table`);
+    expect(await wide.getAttribute('tabindex')).toBe('0');
+    await wide.focus();
+    expect(await wide.evaluate((el) => document.activeElement === el)).toBe(true);
+    const scrollLeft = () => wide.evaluate((el) => el.scrollLeft);
+    const before = await scrollLeft();
+    await win.keyboard.press('ArrowRight');
+    await expect.poll(scrollLeft, { message: 'the focused table scrolls with the keyboard' }).toBeGreaterThan(before);
+    expect(await transcriptView.evaluate((el) => el.scrollLeft)).toBe(0);
+  });
 
   it('edits a session label and title while its Zen row actions are showing', async ({ onTestFinished }) => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-label-'));
