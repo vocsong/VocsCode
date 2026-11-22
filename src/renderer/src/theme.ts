@@ -9,6 +9,7 @@
  */
 import { DEFAULT_PALETTE, DEFAULT_THEME_MODE, isPaletteId, isThemeMode, resolveScheme, themeCss, type ColorScheme, type PaletteId, type ThemeMode } from '../../shared/themes';
 import { DEFAULT_UI_MODE, isUiModeId, type UiModeId } from '../../shared/ui-modes';
+import { normalizeTypography, typographyVars, type TypographySettings } from '../../shared/typography';
 
 const STYLE_ID = 'vocs-theme-palettes';
 
@@ -68,6 +69,19 @@ export function darkQuery(): MediaQueryList | null {
 /** Whether the OS asks for dark. Without a media query to ask, System paints light. */
 export function systemPrefersDark(): boolean {
   return darkQuery()?.matches ?? false;
+}
+
+/**
+ * Applies Text & fonts (shared/typography.ts): font roles and text sizes as custom properties on
+ * `<html>`, transcript width as `data-width`. Interface size is a window zoom the main process owns.
+ */
+export function applyTypography(t: TypographySettings | undefined): void {
+  const root = document.documentElement;
+  const typography = normalizeTypography(t);
+  for (const [name, value] of Object.entries(typographyVars(typography))) {
+    if (root.style.getPropertyValue(name) !== value) root.style.setProperty(name, value);
+  }
+  root.setAttribute('data-width', typography.width);
 }
 
 /**

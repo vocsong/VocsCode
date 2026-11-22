@@ -12,6 +12,11 @@
   color-scheme: light dark;
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable', 'Segoe UI', Inter, Roboto, system-ui, sans-serif;
   --mono: 'Cascadia Code', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace;
+  /* Text & fonts (shared/typography.ts): theme.ts overrides these on <html> from settings. */
+  --content-font: var(--font);
+  --content-size: 14px;
+  --content-leading: 1.65;
+  --code-size: 12.5px;
   --bg: #f7f7f8;
   --bg-elev: #ffffff;
   --bg-sunken: #efeff1;
@@ -276,6 +281,20 @@ h4 {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+/* Transcript width (Settings → Appearance → Text & fonts): moves the column and the prose line length
+   together. Normal is the defaults above; the numbers mirror TRANSCRIPT_WIDTHS in shared/typography.ts. */
+:root[data-width='narrow'] {
+  --reading: 640px;
+}
+:root[data-width='narrow'] .pane {
+  --conversation-width: 820px;
+}
+:root[data-width='wide'] {
+  --reading: 980px;
+}
+:root[data-width='wide'] .pane {
+  --conversation-width: 1480px;
 }
 .panes-horizontal.split > .pane {
   min-width: 360px;
@@ -2624,8 +2643,9 @@ h4 {
   border-radius: 18px 18px 6px 18px;
   padding: 10px 15px;
   max-width: 80%;
-  font-size: 14px;
-  line-height: 1.55;
+  font-family: var(--content-font);
+  font-size: var(--content-size);
+  line-height: calc(var(--content-leading) - 0.1);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2817,8 +2837,9 @@ h4 {
   padding-left: 12px;
 }
 .md {
-  font-size: 14px;
-  line-height: 1.65;
+  font-family: var(--content-font);
+  font-size: var(--content-size);
+  line-height: var(--content-leading);
   overflow-wrap: anywhere;
 }
 .msg-assistant > .md > :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6) {
@@ -2909,7 +2930,8 @@ h4 {
   background: color-mix(in srgb, var(--fg) 6%, transparent);
   padding: 1px 5px;
   border-radius: 5px;
-  font-size: 12.5px;
+  /* Inline code sits in prose, so it scales with the transcript text rather than the code size. */
+  font-size: 0.9em;
 }
 /* A file mentioned in a reply: clicking previews it in the split view. */
 :is(.md, .markdown) code.file-ref,
@@ -2992,7 +3014,7 @@ h4 {
   margin: 0;
   padding: 10px 14px;
   overflow-x: auto;
-  font-size: 12.5px;
+  font-size: var(--code-size);
   line-height: 1.55;
 }
 .thinking {
@@ -3656,6 +3678,9 @@ h4 {
   white-space: pre;
   line-height: 1.5;
 }
+.diff-line.mono {
+  font-size: calc(var(--code-size) - 0.5px);
+}
 .diff-line .ln {
   width: 40px;
   flex-shrink: 0;
@@ -3721,7 +3746,7 @@ h4 {
   box-shadow: none;
   padding: 10px 12px 4px;
   resize: none;
-  font-size: 13.5px;
+  font-size: calc(var(--content-size) - 0.5px);
   max-height: 320px;
 }
 .composer-actions {
