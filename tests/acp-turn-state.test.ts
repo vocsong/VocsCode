@@ -318,6 +318,45 @@ describe('acp adapter', () => {
     }
   });
 
+  it.each([
+    { mode: 'accept-edits', kind: 'edit', command: undefined, prompted: false, outcome: 'allow-once' },
+    { mode: 'accept-edits', kind: 'execute', command: 'npm test', prompted: true, outcome: 'deny' },
+    { mode: 'auto', kind: 'execute', command: 'npm test', prompted: false, outcome: 'allow-once' },
+    { mode: 'auto', kind: 'execute', command: 'sudo rm -rf /', prompted: true, outcome: 'deny' },
+    { mode: 'full-auto', kind: 'execute', command: 'sudo rm -rf /', prompted: false, outcome: 'allow-once' }
+  ] as const)('applies Antigravity $mode to a $kind request ($command) with one-time grants only', async ({ mode, kind, command, prompted, outcome }) => {
+    const h = makeHarness({ harness: 'antigravity', permissionMode: mode });
+    const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'deny' }));
+    h.ctx.requestApproval = decide;
+    scriptBasics(h);
+    h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+    const toolResponses: unknown[] = [];
+    h.agent.on('session/prompt', async ({ sessionId }) => {
+      const response = await h.agent.serverRequest('session/request_permission', {
+        sessionId,
+        toolCall: { toolCallId: 'tool-1', kind, title: 'Tool', rawInput: command ? { command } : { path: 'a.txt' }, locations: [{ path: '/proj/a.txt' }] },
+        options: [
+          { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
+          { optionId: 'allow-once', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' }
+        ]
+      });
+      toolResponses.push(response.result);
+      return { stopReason: 'end_turn' };
+    });
+
+    await h.adapter.start();
+    // Only Plan switches the CLI's own mode; the rest stay `default` under the strict tool policy.
+    expect(h.agent.requests.filter((r) => r.method === 'session/set_mode').map((r) => r.params)).toEqual([{ sessionId: 'sess-1', modeId: 'default' }]);
+    await h.adapter.send({ text: 'Run the tool.' });
+    await vi.waitFor(() => expect(toolResponses).toEqual([{ outcome: { outcome: 'selected', optionId: outcome } }]));
+    expect(decide).toHaveBeenCalledTimes(prompted ? 1 : 0);
+    if (prompted) expect(decide.mock.calls[0][0].options.map((o) => o.id)).toEqual(['allow-once', 'deny']);
+    await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+    expect(turnItems(h.items).map((item) => item.status)).toEqual(['completed']);
+  });
+
   it('preserves the Antigravity session when Google sign-in is required to resume it', async () => {
     const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask', ref: { acpSessionId: 'agy-saved' } });
     scriptBasics(h, { sessionCapabilities: { resume: {} } });

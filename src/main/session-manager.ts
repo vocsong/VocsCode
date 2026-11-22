@@ -662,7 +662,7 @@ export class SessionManager {
     const settings = this.settings();
     let cfg = { ...req.config, fastMode: req.config.fastMode === true };
     if (cfg.harness === 'antigravity') {
-      if (!HARNESS_BY_ID.antigravity.capabilities.permissionModes.includes(cfg.permissionMode)) throw new Error('Antigravity supports Ask and Plan modes.');
+      if (!HARNESS_BY_ID.antigravity.capabilities.permissionModes.includes(cfg.permissionMode)) throw new Error(`Antigravity does not support the ${cfg.permissionMode} permission mode.`);
       if (controlCreation || req.goal?.trim()) throw new Error('Antigravity sessions are driven by direct user prompts.');
     }
     if (cfg.fastMode) {
@@ -2233,7 +2233,7 @@ export class SessionManager {
     const antigravity = meta.config.harness === 'antigravity';
     const active = this.active.get(id);
     if (antigravity) {
-      if (!HARNESS_BY_ID.antigravity.capabilities.permissionModes.includes(mode)) throw new Error('Antigravity supports Ask and Plan modes.');
+      if (!HARNESS_BY_ID.antigravity.capabilities.permissionModes.includes(mode)) throw new Error(`Antigravity does not support the ${mode} permission mode.`);
       if ((this.configDispatches.get(id) ?? 0) > 1 || active?.starting || active?.turnPending || active?.adapter.busy || meta.queued) {
         throw new Error('Wait for the current Antigravity activity before changing permissions.');
       }
@@ -3117,7 +3117,7 @@ export class SessionManager {
         acpAgent: undefined,
         codexModelProvider: undefined,
         fastMode: false,
-        permissionMode: target === 'antigravity' && src.config.permissionMode !== 'plan' ? 'ask' : src.config.permissionMode,
+        permissionMode: src.config.permissionMode,
         useWorktree: !!own
       };
       meta.activeModel = meta.config.model;

@@ -126,7 +126,7 @@ loses the Git panel.
 | **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | all pages of Codex's dynamic `model/list` via a short-lived app-server probe (static fallback only) | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |
 | **Pi** | `pi --mode rpc` + bundled approvals and MCP-bridge extensions | interactive | pi's registry plus the app's bundled catalogs for every provider pi already lists (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, OpenCode Go, Ollama, custom) | injected — the bridge extension registers each MCP tool with pi |
-| **Google Antigravity** | Google's `agy acp` over stdio, using the saved Google sign-in | Ask and Plan through ACP and the CLI's strict tool policy | account-advertised Gemini models and thinking levels after connection | stdio servers injected through `session/new.mcpServers` |
+| **Google Antigravity** | Google's `agy acp` over stdio, using the saved Google sign-in | every mode: the CLI's strict tool policy routes each tool call to the ACP client policy; Plan also sets the vendor `plan` mode | account-advertised Gemini models and thinking levels after connection | stdio servers injected through `session/new.mcpServers` |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
@@ -329,8 +329,12 @@ descriptor/capabilities in `src/shared/harness-meta.ts`, and wire detection/inst
 `src/main/runtime.ts`. Permission modes must map through the shared model (see the table below).
 
 Antigravity and the generic ACP choice share one adapter. Antigravity uses the CLI's strict tool
-policy and sets the vendor session mode explicitly. Ask uses `default` and presents one-time
-approvals. Plan uses `plan` and denies mutations through the ACP callback. The app keeps the
+policy and sets the vendor session mode explicitly. Plan uses `plan` and denies mutations through
+the ACP callback. Every other mode uses `default`, so each tool call reaches the ACP client policy
+and Ask, Accept edits, Auto and Full access are enforced there. Antigravity only ever receives
+one-time grants (`allow_once`): its "always" options would persist into the CLI's own settings and
+outlive the app's mode. Google permits auto-approval in a session a person drives; what consumer
+sign-in rules out is automated prompting (see below). The app keeps the
 ACP session identifier for resume and receives context usage through `usage_update`.
 The account route only accepts human-driven turns. The app goal loop, Missions and external
 controllers cannot dispatch Antigravity prompts. [Google ACP guidance](https://antigravity.google/docs/ide/extensions/acp/) · [Interactive use and quota](https://github.com/google-antigravity/antigravity-cli/issues/1493#issuecomment-6814901159)

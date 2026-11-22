@@ -311,7 +311,8 @@ export class AcpAdapter implements HarnessAdapter {
     if (isRead) return allow();
     if (mode === 'plan') return reject();
     if (mode === 'full-auto') {
-      const id = pick(['allow_always', 'allow_once']);
+      // Antigravity persists "always" choices into its own settings; keep every grant one-time.
+      const id = pick(this.id === 'antigravity' ? ['allow_once'] : ['allow_always', 'allow_once']);
       return id ? selected(id) : cancelled;
     }
     if (!dangerous && !outsideWorkspace) {
@@ -552,9 +553,11 @@ export class AcpAdapter implements HarnessAdapter {
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
     if (this.id !== 'antigravity') return; // Other ACP agents use client-side policy.
-    if (!HARNESS_BY_ID[this.id].capabilities.permissionModes.includes(mode)) throw new Error('Antigravity supports Ask and Plan modes.');
+    if (!HARNESS_BY_ID[this.id].capabilities.permissionModes.includes(mode)) throw new Error(`Antigravity does not support the ${mode} permission mode.`);
     if (!this.conn || !this.sessionId) return;
     if (this._busy || this.applyingMode) throw new Error('Wait for the current Antigravity activity before changing permissions.');
+    // Every mode but Plan runs the CLI in `default` under its strict tool policy, so each tool call
+    // reaches onRequestPermission and Accept edits / Auto / Full access are enforced client-side.
     const modeId = mode === 'plan' ? 'plan' : 'default';
     if (!this.sessionModes?.availableModes.some((value) => value.id === modeId)) {
       throw new Error('Antigravity CLI did not offer the requested permission mode. Update the CLI and retry.');

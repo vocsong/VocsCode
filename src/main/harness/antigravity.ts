@@ -9,7 +9,7 @@ import { acpModelCatalog, type ConfigOptionLike } from './acp-config';
 import { shutdownChild, spawnTool } from './spawn';
 
 // Ask the ACP client about every tool. A vendor allowlist or saved Auto preference must not
-// make Vocs Code's Ask and Plan modes silently less restrictive.
+// make Vocs Code's permission mode silently less restrictive: the app's mode alone decides.
 const antigravitySettings = JSON.stringify({ modelProvider: '', toolPermission: 'strict', allowNonWorkspaceAccess: false });
 export const ANTIGRAVITY_ACP_ARGS = ['--settings', antigravitySettings, 'acp'] as const;
 export const ANTIGRAVITY_QUOTA_ARGS = ['--settings', antigravitySettings, '-p', '/usage', '--output-format', 'json'] as const;
