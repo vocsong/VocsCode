@@ -25,6 +25,9 @@ src/main
                   the app started (sampled tree under main, saved for the next run), who it works for, and ending it;
                   the Windows table reader (and per-session Job Objects) is resources/processes/windows-process-snapshot.ps1
   models/         provider clients and model discovery, with offline catalogs and pricing
+  model-catalog-cache.ts   <userData>/model-catalog-cache.json: each harness's last clean
+                  `harness:models` discovery, reused for 7 days while its settings/runtime fingerprint
+                  matches; Recheck passes `refresh`, and a sign-in, install or key change clears it
   dictation/      composer voice to text: a provider's transcription endpoint (cloud.ts), or whisper.cpp's
                   server downloaded into <userData>/dictation and run on loopback while in use (local.ts)
   util/           fs and async helpers shared by the adapters (no Electron imports)

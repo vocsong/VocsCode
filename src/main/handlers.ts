@@ -31,10 +31,11 @@ import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
 import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, clearCuaVersionCache, cuaBaseDef, cuaDefState, cuaInstallCommand, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
 import { listHarnessModels } from './harness/registry';
+import { ModelCatalogCache } from './model-catalog-cache';
 import { assertProviderEndpoint, fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { assertEndpointUrl } from '../shared/endpoint-policy';
 import { enrichModelsFromProviders } from './models/static-models';
-import type { RuntimeResolver } from './runtime';
+import type { RuntimeResolver, ToolName } from './runtime';
 import type { SearchIndex } from './search';
 import { clearWhichCache, clearRuntimeProbeCache, HARNESS_PACKAGES, runCapture, which } from './runtime';
 import { assertHarnessId, openHarnessLogin, readHarnessSetup, withAppCredentials } from './harness-setup';
@@ -153,6 +154,8 @@ export interface HandlerRegistry {
 
 /** A handler holding the host process this long has already frozen the UI; say so. */
 const SLOW_HANDLER_MS = 1000;
+/** The CLI whose catalog `harness:models` reads, so a switched runtime misses the model cache. */
+const HARNESS_BINARY: Partial<Record<HarnessId, ToolName>> = { claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi', antigravity: 'agy' };
 
 const missionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/, 'Invalid Mission/session identifier');
 const missionKeySchema = z.string().min(1).max(200);
@@ -252,6 +255,14 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
   let availabilityGeneration = 0;
   const invalidateAvailability = () => { availabilityGeneration++; availabilityCache.clear(); clearRuntimeProbeCache(); };
+  // Built on first use: a registry that never lists models must not need a userData path.
+  let modelCatalogCache: ModelCatalogCache | undefined;
+  const modelCatalog = (): ModelCatalogCache => {
+    if (modelCatalogCache) return modelCatalogCache;
+    let dir: string | undefined;
+    try { dir = deps.desktop.userDataPath(); } catch { dir = undefined; }
+    return (modelCatalogCache = new ModelCatalogCache(dir, { log: deps.log }));
+  };
 
   function handle<K extends IpcChannel>(channel: K, fn: (req: IpcRequest<K>) => Promise<IpcResponse<K>> | IpcResponse<K>): void {
     handlers.set(channel, fn as (req: never) => unknown);
@@ -842,11 +853,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     assertProviderSecretId(providerId);
     await secrets.set(providerId, apiKey);
     await syncProviderKeyFlags();
+    await modelCatalog().clear();
   });
   handle('secrets:clear', async ({ providerId }) => {
     assertProviderSecretId(providerId);
     await secrets.clear(providerId);
     await syncProviderKeyFlags();
+    await modelCatalog().clear();
   });
   handle('secrets:has', ({ providerId }) => !isReservedSecretId(providerId) && secrets.has(providerId));
   handle('secrets:status', () => secrets.status);
@@ -946,6 +959,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const { harness, device } = z.strictObject({ harness: z.enum(['claude', 'codex', 'pi', 'antigravity']), device: z.boolean().optional() }).parse(input);
     const result = await openHarnessLogin(runtime, harness, device);
     invalidateAvailability();
+    await modelCatalog().clear(harness);
     return result;
   });
   handle('harness:antigravityQuota', () => runtime.antigravityQuota());
@@ -971,10 +985,20 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     );
     return out;
   });
-  handle('harness:models', async ({ harness }) => {
+  handle('harness:models', async ({ harness, refresh }) => {
     assertHarnessId(harness);
     const current = settings.get();
-    const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: providerSecrets((id) => secrets.get(id)) });
+    // Discovery spawns the CLI or calls the vendor, so a clean catalog is reused for a week unless
+    // the user asks for a recheck. The fingerprint is what discovery reads besides keys (a key
+    // change clears the cache): a new endpoint, override or binary misses instead of going stale.
+    const binary = HARNESS_BINARY[harness];
+    const fingerprint = JSON.stringify([harness, current.modelOverrides, current.providers, current.binaries, current.claude, binary ? runtime.resolve(binary)?.path ?? null : null]);
+    const result = await modelCatalog().get(
+      harness,
+      fingerprint,
+      () => listHarnessModels({ harness, settings: current, runtime, getApiKey: providerSecrets((id) => secrets.get(id)) }),
+      { refresh: refresh === true }
+    );
     return { ...result, models: enrichModelsFromProviders(result.models, current.providers) };
   });
   handle('harness:install', async ({ id }) => {
@@ -982,6 +1006,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     deps.log('info', `installing ${id} into the app runtime directory`);
     const r = await runtime.install(id);
     invalidateAvailability();
+    // A new runtime can list models the old one did not.
+    await modelCatalog().clear();
     // npm's output is the renderer's to show in full; the log keeps the verdict and the tail of a failure.
     if (r.ok) deps.log('info', `installed ${id}`);
     else deps.log('warn', `install of ${id} failed: ${r.log.trim().split('\n').slice(-5).join(' | ').slice(0, 600)}`);
