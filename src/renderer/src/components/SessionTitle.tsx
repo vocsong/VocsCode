@@ -14,17 +14,22 @@ export function HarnessPill({ harness, acpAgent }: { harness: string; acpAgent?:
   );
 }
 
-export function SessionTitle({ session, className, nameTestId }: {
+export function SessionTitle({ session, className, nameTestId, showProject = true }: {
   session: SessionTitleMeta;
   className?: string;
   nameTestId?: string;
+  showProject?: boolean;
 }) {
   const { title, config } = session;
   return (
     <span className={className ? 'session-label ' + className : 'session-label'} title={sessionTitleText(session)}>
       <HarnessPill harness={config.harness} acpAgent={config.acpAgent} />{' '}
-      <span className="session-label-project" title={config.projectRoot}>{basename(config.projectRoot)}</span>{' '}
-      <span className="session-label-separator">|</span>{' '}
+      {showProject && (
+        <>
+          <span className="session-label-project" title={config.projectRoot}>{basename(config.projectRoot)}</span>{' '}
+          <span className="session-label-separator">|</span>{' '}
+        </>
+      )}
       <span className="session-label-name" data-testid={nameTestId} title={title}>{title}</span>
     </span>
   );
