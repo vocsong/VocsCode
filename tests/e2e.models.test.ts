@@ -370,6 +370,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     const win = await launch(userData);
     await win.setViewportSize(viewport);
+    await win.emulateMedia({ reducedMotion: 'no-preference' });
     await openNewSession(win);
     await pickModel(win, 'openai/gpt-5.4');
     const creationToggle = win.getByRole('checkbox', { name: 'Fast mode', exact: true });
@@ -401,6 +402,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const off = fast.getByRole('menuitemradio', { name: 'Off', exact: true });
     const requested = fast.getByText('Requested', { exact: true });
     const confirm = win.getByRole('button', { name: 'Enable Fast mode', exact: true });
+    const bolt = modelPill.locator('[data-icon="bolt"]');
+    const chargeAnimation = () => modelPill.evaluate((el) => getComputedStyle(el, '::after').animationName);
     const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
 
     await modelPill.click({ timeout: 60_000 });
@@ -422,6 +425,12 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await modelPill.locator('.pill-text').getAttribute('title')).toBe('openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('Model: openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('high');
+    expect(await bolt.isVisible()).toBe(true);
+    expect(await chargeAnimation()).not.toBe('none');
+    await win.emulateMedia({ reducedMotion: 'reduce' });
+    expect(await chargeAnimation()).toBe('none');
+    expect(await bolt.isVisible()).toBe(true);
+    await win.emulateMedia({ reducedMotion: 'no-preference' });
 
     // More models follows the shortlist; the arrow keys reach both sets of inline radio items.
     await starred.press('ArrowDown');
@@ -437,6 +446,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await on.getAttribute('aria-checked')).toBe('false');
     expect(await requested.isVisible()).toBe(false);
     expect(await confirm.count()).toBe(0);
+    expect(await chargeAnimation()).toBe('none');
+    expect(await bolt.count()).toBe(0);
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(false);
     expect(await high.getAttribute('aria-checked')).toBe('true');
     expect(await menu.evaluate((el) => el.scrollHeight <= el.clientHeight + 1), 'all groups fit in the review screenshot').toBe(true);
@@ -460,6 +471,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await modelPill.click();
     await expect.poll(() => on.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
     expect(await off.getAttribute('aria-checked')).toBe('false');
+    expect(await chargeAnimation()).not.toBe('none');
     await requested.waitFor();
     expect(await low.getAttribute('aria-checked')).toBe('true');
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
