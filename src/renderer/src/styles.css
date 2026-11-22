@@ -312,12 +312,27 @@ h4 {
 .panes-vertical.split > .pane {
   min-height: 200px;
 }
-/* The active pane: a thin accent rule on its header; the others recede a little. */
-.panes.split > .pane > .header {
-  box-shadow: inset 0 2px 0 transparent;
+/* Keep the selected pane outlined after the one-shot glow, without shifting content or catching clicks. */
+.panes.split:not(.narrow) > .pane.active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  border: 2px solid var(--accent);
 }
-.panes.split > .pane.active > .header {
-  box-shadow: inset 0 2px 0 var(--accent);
+@media (prefers-reduced-motion: no-preference) {
+  .panes.split:not(.narrow) > .pane.active::after {
+    animation: pane-focus-pulse 650ms ease-out;
+  }
+}
+@keyframes pane-focus-pulse {
+  from {
+    box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 18px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  to {
+    box-shadow: inset 0 0 0 0 transparent, inset 0 0 0 transparent;
+  }
 }
 .panes.split > .pane:not(.active) > .header .header-name {
   color: var(--fg-muted);
@@ -493,9 +508,6 @@ h4 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.panes.split > .pane.active > .pane-picker {
-  border-color: var(--accent);
 }
 .boot {
   flex: 1 1 auto;

@@ -496,9 +496,6 @@
 :root[data-ui='zen'] .header-title > .btn:last-child {
   opacity: 0.6;
 }
-:root[data-ui='zen'] .panes.split > .pane.active > .header {
-  box-shadow: inset 0 2px 0 var(--accent-soft);
-}
 :root[data-ui='zen'] .pane-divider {
   background: var(--border);
 }
