@@ -41,6 +41,25 @@ const EMPTY: never[] = [];
 /** Below this many chunks the reconciliation cost is small enough to skip windowing entirely. */
 const VIRTUALIZE_MIN = 150;
 
+/** Space left above a message the pinned prompt jumps to, so it lands just under the top edge. */
+const PROMPT_JUMP_MARGIN = 12;
+
+/**
+ * Which of your messages the pinned prompt shows: the one whose stretch of the transcript is at
+ * the top of the viewport, once that message itself has scrolled out of view. While any of it is
+ * still on screen there is nothing to pin, so jumping to a message makes the bar give way to it.
+ * Offsets are content coordinates: `base` is where the first row starts, `tops` the row offsets.
+ */
+function pinnedPromptIndex(userChunks: number[], tops: number[], base: number, scrollTop: number): number {
+  let at = -1;
+  for (const i of userChunks) {
+    if (base + tops[i]! > scrollTop + PROMPT_JUMP_MARGIN + 4) break;
+    at = i;
+  }
+  if (at < 0) return -1;
+  return base + tops[at + 1]! <= scrollTop + 24 ? at : -1;
+}
+
 /** `active` is false for a split pane the user is not working in: it keeps streaming, but window-wide keys skip it. */
 export function Transcript({ session, active = true }: { session: SessionMeta; active?: boolean }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
@@ -269,6 +288,54 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
     };
   }, [jump, loaded, session.id]);
 
+  // Your message for the stretch being read floats at the top once it scrolls away. Row offsets
+  // cover unmounted rows too, so this works the same with windowing on.
+  const userChunks = useMemo(() => chunks.flatMap((c, i) => (c.kind === 'single' && c.item.kind === 'user' ? [i] : [])), [chunks]);
+  const [pinned, setPinned] = useState(-1);
+  const rowBase = useRef(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !userChunks.length) return setPinned(-1);
+    const first = el.querySelector<HTMLElement>(':scope > .transcript-row');
+    if (first) rowBase.current = first.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - tops[range.start]!;
+    setPinned(pinnedPromptIndex(userChunks, tops, rowBase.current, el.scrollTop));
+  });
+  const pinnedChunk = chunks[pinned];
+  const pinnedItem = pinnedChunk?.kind === 'single' && pinnedChunk.item.kind === 'user' ? pinnedChunk.item : null;
+
+  /** Jump target: scrolled to by its offset first, then aligned exactly once its row is mounted. */
+  const [promptJump, setPromptJump] = useState<string | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
+  const jumpToPrompt = (index: number) => {
+    const el = ref.current;
+    const chunk = chunks[index];
+    if (!el || chunk?.kind !== 'single') return;
+    setStick(false);
+    el.scrollTop = Math.max(0, rowBase.current + tops[index]! - PROMPT_JUMP_MARGIN);
+    setScrollTop(el.scrollTop);
+    setPromptJump(chunk.item.id);
+  };
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!promptJump || !el) return;
+    const row = el.querySelector<HTMLElement>(`[data-item-id="${CSS.escape(promptJump)}"]`);
+    if (!row) {
+      // Windowing mounts the row on the next scroll frame; without windowing it is simply gone.
+      if (!virtual) setPromptJump(null);
+      return;
+    }
+    setPromptJump(null);
+    el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - PROMPT_JUMP_MARGIN;
+    setScrollTop(el.scrollTop);
+    const target = row.querySelector<HTMLElement>('.msg-bubble') ?? row;
+    target.classList.remove('prompt-jump-hl');
+    void target.offsetWidth; // restart the flash when the same message is reached twice
+    target.classList.add('prompt-jump-hl');
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => target.classList.remove('prompt-jump-hl'), 1600);
+  });
+
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
   // Count what arrived since the reader left the bottom; switching sessions in this pane starts over.
   // Anchored on the last item seen rather than a length, so `loadEarlier` prepending a page of
@@ -366,6 +433,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
           onClose={() => setLightbox(null)}
         />
       )}
+      {pinnedItem && <PinnedPrompt key={pinnedItem.id} item={pinnedItem} onJump={() => jumpToPrompt(pinned)} />}
       <TranscriptFind open={findOpen} onClose={() => setFindOpen(false)} container={ref} revision={chunks} />
       {!stick && (
         <button type="button" className="jump-bottom" onClick={() => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }}>
@@ -373,6 +441,21 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
         </button>
       )}
     </div>
+  );
+}
+
+/** Your message for the part of the transcript on screen, floating at the top; a click goes back to it. */
+function PinnedPrompt({ item, onJump }: { item: Extract<TranscriptItem, { kind: 'user' }>; onJump: () => void }) {
+  const text = item.text.trim() || (item.images?.length ? (item.images.length === 1 ? 'Image' : `${item.images.length} images`) : 'Attachment');
+  const time = new Date(item.ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return (
+    <button type="button" className="pinned-prompt" onClick={onJump} title="Go to this message" aria-label={`Go to your message: ${text}`}>
+      <span className="pinned-prompt-text">{text}</span>
+      <span className="pinned-prompt-meta">
+        <time dateTime={new Date(item.ts).toISOString()}>{time}</time>
+        <Icon name="arrowUp" size={12} />
+      </span>
+    </button>
   );
 }
 
