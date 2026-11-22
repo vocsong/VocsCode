@@ -686,6 +686,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
           {renaming ? (
             <input
               className="session-rename"
+              aria-label="Rename session"
               autoFocus
               onFocus={(e) => e.currentTarget.select()}
               value={title}
@@ -705,7 +706,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
           ) : (
             <div className="session-title">
               {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
-              <SessionTitle session={s} onRename={startRename} />
+              <SessionTitle session={s} />
             </div>
           )}
           <div className="row-actions" onClick={(e) => e.stopPropagation()}>

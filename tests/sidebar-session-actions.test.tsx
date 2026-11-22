@@ -10,7 +10,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { fireEvent, render, waitFor, within } from '@testing-library/react';
 import { Sidebar, sortSessionRows } from '../src/renderer/src/components/Sidebar';
 import { useStore } from '../src/renderer/src/store';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
@@ -69,13 +69,17 @@ describe('sidebar session actions', () => {
     expect(chip.getAttribute('title')).toBe('openrouter/deepseek/deepseek-flash');
   });
 
-  it('starts renaming from the title without selecting the row', () => {
-    const setActive = vi.fn();
-    useStore.setState({ sessions: [session('s_a', { title: 'A' })], settings, activeId: null, view: 'chat', setActive } as never);
-    const { container } = render(<Sidebar />);
-    fireEvent.click(container.querySelector('.session-title span[title="Click to rename"]') as HTMLElement);
-    expect(setActive).not.toHaveBeenCalled();
-    expect(container.querySelector('.session-rename')).toBeTruthy();
+  it('selects the session on a single title click and edits it on a double-click', () => {
+    useStore.setState({ sessions: [session('s_a', { title: 'A task' })], settings, activeId: null, view: 'chat', loaded: { s_a: true } });
+    const sidebar = within(render(<Sidebar />).container);
+    const title = sidebar.getByText('A task', { exact: true });
+
+    fireEvent.click(title);
+    expect(useStore.getState().activeId).toBe('s_a');
+    expect(sidebar.queryByRole('textbox')).toBeNull();
+
+    fireEvent.doubleClick(title);
+    expect(sidebar.getByRole('textbox', { name: 'Rename session' })).toHaveProperty('value', 'A task');
   });
 
   it('pinned rows offer unpin and are draggable', () => {

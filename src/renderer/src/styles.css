@@ -1877,10 +1877,6 @@ h4 {
   border-radius: 50%;
   background: var(--accent);
 }
-.session-title .session-label-name {
-  cursor: text;
-  border-radius: 3px;
-}
 .session-row:hover .session-label-name {
   text-decoration: underline dotted;
   text-underline-offset: 3px;
