@@ -14,11 +14,10 @@ export function HarnessPill({ harness, acpAgent }: { harness: string; acpAgent?:
   );
 }
 
-export function SessionTitle({ session, className, nameTestId, onRename }: {
+export function SessionTitle({ session, className, nameTestId }: {
   session: SessionTitleMeta;
   className?: string;
   nameTestId?: string;
-  onRename?: () => void;
 }) {
   const { title, config } = session;
   return (
@@ -26,14 +25,7 @@ export function SessionTitle({ session, className, nameTestId, onRename }: {
       <HarnessPill harness={config.harness} acpAgent={config.acpAgent} />{' '}
       <span className="session-label-project" title={config.projectRoot}>{basename(config.projectRoot)}</span>{' '}
       <span className="session-label-separator">|</span>{' '}
-      <span
-        className="session-label-name"
-        data-testid={nameTestId}
-        title={onRename ? 'Click to rename' : title}
-        onClick={onRename && ((event) => { event.stopPropagation(); onRename(); })}
-      >
-        {title}
-      </span>
+      <span className="session-label-name" data-testid={nameTestId} title={title}>{title}</span>
     </span>
   );
 }
