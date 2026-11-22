@@ -7,7 +7,7 @@ import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { AsyncQueue, LineSplitter } from '../src/main/util/async';
+import { AsyncQueue, deferred, LineSplitter } from '../src/main/util/async';
 import { globToRegExp } from '../src/main/harness/native/tools';
 import { parseUnifiedDiff } from '../src/shared/diff-parse';
 import { JsonRpcStdioClient } from '../src/main/harness/jsonrpc';
@@ -1345,6 +1345,93 @@ describe('custom status label settings', () => {
 });
 
 describe('SessionManager PR state refresh', () => {
+  it.each(['an already-busy adapter', 'an adapter that becomes busy during the lookup', 'a pending send that later rejects'] as const)(
+    'defers publishing or persisting Git labels for %s', async (phase) => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-pr-state-'));
+      const store = new SessionStore(dir);
+      const session: SessionMeta = {
+        id: 'pr_live_session', title: 'Live turn', createdAt: 1_000, updatedAt: 2_000,
+        config: { harness: 'antigravity', projectRoot: dir, permissionMode: 'ask' },
+        cwd: dir, worktreeBranch: 'harness/pr-live-session', status: 'idle', harnessRef: {},
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+      };
+      const published: SessionMeta['status'][] = [];
+      const manager = new SessionManager({
+        store,
+        settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+        runtime: undefined as unknown as RuntimeResolver,
+        analytics: { recordUserMessage: vi.fn(), recordTurn: vi.fn() } as unknown as AnalyticsStore,
+        getSecret: async () => undefined,
+        pushEvent: vi.fn(),
+        pushSessions: ([meta]) => published.push(meta!.status),
+        notify: vi.fn(),
+        log: vi.fn()
+      });
+      const lookup = deferred<{ pr: boolean; merged: boolean }>();
+      const accepted = deferred<void>();
+      const adapter = {
+        busy: phase === 'an already-busy adapter',
+        send: vi.fn(() => accepted.promise),
+        interrupt: vi.fn(async () => undefined)
+      };
+      const active = { adapter, approvals: new Map(), liveItems: new Map(), dirty: new Set(), starting: null };
+      const testManager = manager as unknown as { active: Map<string, typeof active>; emit: (id: string, event: SessionEvent) => void };
+      const check = vi.mocked(branchGitState).mockClear().mockReturnValueOnce(lookup.promise).mockResolvedValue({ pr: true, merged: false });
+      vi.useFakeTimers();
+      try {
+        await store.upsert(session);
+        testManager.active.set(session.id, active);
+        // Keep the fake-clock boundary deterministic; only the Git result is delayed.
+        vi.spyOn(manager, 'sessionPrRefs').mockResolvedValue([]);
+        manager.refreshGitState(session.id);
+        await vi.advanceTimersByTimeAsync(1_000);
+        let sending: Promise<void> | undefined;
+        if (phase === 'a pending send that later rejects') {
+          sending = manager.send(session.id, { text: 'Follow up' });
+          await vi.advanceTimersByTimeAsync(0);
+          expect(adapter.send).toHaveBeenCalledOnce();
+        } else {
+          adapter.busy = true;
+        }
+        published.length = 0;
+        // Models a stale idle status while the adapter is busy or accepting the turn.
+        expect(session.status).toBe('idle');
+        lookup.resolve({ pr: false, merged: true });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(check).toHaveBeenCalledTimes(phase === 'an already-busy adapter' ? 0 : 1);
+        expect(published).toEqual([]);
+        expect(session.status).toBe('idle');
+        await manager.flushPendingPersists();
+        expect(JSON.parse(await fs.readFile(path.join(dir, 'sessions.json'), 'utf8'))[0].status).toBe('idle');
+        await manager.interrupt(session.id);
+        expect(adapter.interrupt).toHaveBeenCalledOnce();
+
+        check.mockReset().mockResolvedValueOnce({ pr: true, merged: false }).mockResolvedValue({ pr: false, merged: true });
+        adapter.busy = false;
+        if (sending) {
+          // A rejection can return to idle without a terminal turn item (e.g. a refused turn/start).
+          testManager.emit(session.id, { type: 'status', status: 'idle' });
+          accepted.reject(new Error('Prompt refused'));
+          await expect(sending).rejects.toThrow('Prompt refused');
+        } else {
+          testManager.emit(session.id, { type: 'item.upsert', item: { id: 'finished_turn', kind: 'turn', ts: Date.now(), status: 'interrupted' } });
+          testManager.emit(session.id, { type: 'status', status: 'idle' });
+        }
+        await vi.advanceTimersByTimeAsync(4_000);
+        expect(published).toEqual(['idle', 'pr']);
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(published).toEqual(['idle', 'pr', 'merged']);
+        await manager.flushPendingPersists();
+        expect(JSON.parse(await fs.readFile(path.join(dir, 'sessions.json'), 'utf8'))[0].status).toBe('merged');
+      } finally {
+        check.mockReset().mockResolvedValue({ pr: false, merged: false });
+        vi.useRealTimers();
+        await store.readTranscript(session.id);
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    }
+  );
+
   it.each([
     { when: 'the first check finds the merge', unchangedPolls: 0 },
     { when: 'the PR stays open across multiple checks', unchangedPolls: 2 }
