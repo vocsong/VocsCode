@@ -189,17 +189,12 @@
   color: var(--fg);
   box-shadow: none;
 }
+/* Keep the transcript's themed scrollbar: `scrollbar-width: thin` would replace it with native
+   chrome. The list keeps its full width, so the closed rail clips the scrollbar without reflow. */
 :root[data-ui='zen'] .sidebar-list {
   order: 2;
   padding: 8px 0;
   overflow-x: hidden;
-  scrollbar-width: none;
-}
-/* Open, the list shows a thin scrollbar so a long list reads as scrollable; the closed rail stays bare. */
-:root[data-ui='zen'] .sidebar:hover .sidebar-list,
-:root[data-ui='zen'] .sidebar:has(:focus-visible) .sidebar-list,
-:root[data-ui='zen'] .sidebar:has([data-dialog-anchor]) .sidebar-list {
-  scrollbar-width: thin;
 }
 :root[data-ui='zen'] .sidebar-views {
   order: 3;
