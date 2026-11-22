@@ -205,8 +205,9 @@ export interface IpcContract {
   'harness:login': [{ harness: LoginHarnessId; device?: boolean }, { ok: boolean; error?: string }];
   /** Desktop-owner action only. Returns account quota bars, never credentials or raw CLI output. */
   'harness:antigravityQuota': [void, AntigravityQuota];
+  /** Served from a 7-day disk cache of the last clean discovery; `refresh` rediscovers now. */
   'harness:models': [
-    { harness: HarnessId; acpAgent?: string; projectRoot?: string },
+    { harness: HarnessId; acpAgent?: string; projectRoot?: string; refresh?: boolean },
     { models: ModelInfo[]; error?: string }
   ];
   'harness:install': [{ id: 'pi' | 'dsh' | 'codex' | 'claude' }, { ok: boolean; log: string }];

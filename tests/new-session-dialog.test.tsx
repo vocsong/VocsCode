@@ -66,6 +66,27 @@ afterEach(() => {
 });
 
 describe('NewSessionDialog', () => {
+  it('asks main for its cached catalog on open and harness switches, and rediscovers only on Recheck', async () => {
+    render(<NewSessionDialog />);
+    const modelCalls = () => invoke.mock.calls.filter(([channel]) => channel === 'harness:models').map(([, req]) => req as { harness: string; refresh?: boolean });
+    await waitFor(() => expect(modelCalls()).toHaveLength(1));
+    expect(modelCalls()[0]).toMatchObject({ harness: 'claude' });
+    expect(modelCalls()[0].refresh).toBeUndefined();
+
+    const recheck = screen.getByRole('button', { name: 'Recheck models and sign-in' }) as HTMLButtonElement;
+    await waitFor(() => expect(recheck.disabled).toBe(false));
+    fireEvent.click(recheck);
+    await waitFor(() => expect(modelCalls()).toHaveLength(2));
+    expect(modelCalls()[1]).toMatchObject({ harness: 'claude', refresh: true });
+
+    // The recheck was for that harness only: the next switch is served from the cache again.
+    await waitFor(() => expect(recheck.disabled).toBe(false));
+    fireEvent.click([...document.querySelectorAll('.harness-card')].find((card) => card.textContent?.startsWith('Pi'))!);
+    await waitFor(() => expect(modelCalls()).toHaveLength(3));
+    expect(modelCalls()[2]).toMatchObject({ harness: 'pi' });
+    expect(modelCalls()[2].refresh).toBeUndefined();
+  });
+
   it.each(['codex', 'codex-exec', 'cursor', 'acp'] as const)('labels %s additions as first-message session instructions and submits them', async (harness) => {
     useStore.setState({ settings: { ...settings, defaultHarness: harness } });
     render(<NewSessionDialog />);

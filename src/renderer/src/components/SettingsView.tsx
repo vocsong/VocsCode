@@ -898,7 +898,7 @@ function HarnessLogins() {
     try {
       // Both Codex adapters use the same runtime but have separate renderer catalog caches.
       const ids: HarnessId[] = id === 'codex' ? ['codex', 'codex-exec'] : [id];
-      const results = await Promise.all(ids.map(async (harness) => ({ harness, ...await refreshModels(harness) })));
+      const results = await Promise.all(ids.map(async (harness) => ({ harness, ...await refreshModels(harness, { refresh: true }) })));
       const failures = results.filter((r) => r.error);
       const error = failures.length > 0;
       const text = error

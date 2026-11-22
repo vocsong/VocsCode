@@ -27,9 +27,11 @@ import { openHarnessLogin, readHarnessSetup } from '../src/main/harness-setup';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 import { discoverChatImports } from '../src/main/chat-import';
+import { listHarnessModels } from '../src/main/harness/registry';
 import type { ChatImportPreview } from '../src/shared/chat-import';
 
 vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
+vi.mock('../src/main/harness/registry', async (original) => ({ ...await original<typeof import('../src/main/harness/registry')>(), listHarnessModels: vi.fn() }));
 vi.mock('../src/main/harness-setup', async (original) => ({ ...await original<typeof import('../src/main/harness-setup')>(), openHarnessLogin: vi.fn(), readHarnessSetup: vi.fn() }));
 
 const dirs: string[] = [];
@@ -1146,5 +1148,66 @@ describe('remote sign-in handlers', () => {
       expect(((await registry.invoke('remote:get', undefined)) as { signInAvailable: boolean }).signInAvailable).toBe(expected);
     }
     expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual(['http://127.0.0.1:9911/v1/me', 'http://127.0.0.1:9912/v1/me', 'http://127.0.0.1:9913/v1/me']);
+  });
+});
+
+describe('harness:models catalog cache', () => {
+  const opus = { id: 'claude-opus-5-5', provider: 'anthropic', displayName: 'Opus 5.5' };
+  const sonnet = { id: 'claude-sonnet-5-5', provider: 'anthropic', displayName: 'Sonnet 5.5' };
+  const rig = (userData: string) => {
+    const { bridge } = bridgeStub();
+    return stubDeps({ desktop: { ...bridge, userDataPath: () => userData } });
+  };
+  const ids = (r: unknown) => (r as { models: { id: string }[] }).models.map((m) => m.id);
+
+  it('reuses a clean catalog across dialog opens and restarts, and rediscovers only on an explicit refresh', async () => {
+    const discover = vi.mocked(listHarnessModels).mockReset().mockResolvedValue({ models: [opus] });
+    const userData = tmpDir('models');
+    const { registry } = rig(userData);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', projectRoot: 'G:/a' }))).toEqual(['claude-opus-5-5']);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', projectRoot: 'G:/b' }))).toEqual(['claude-opus-5-5']);
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    // A restarted app reads the catalog back from userData instead of spawning the CLI again.
+    expect(ids(await rig(userData).registry.invoke('harness:models', { harness: 'claude' }))).toEqual(['claude-opus-5-5']);
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    discover.mockResolvedValue({ models: [opus, sonnet] });
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', refresh: true }))).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude' }))).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
+    expect(discover).toHaveBeenCalledTimes(2);
+    // Each harness has its own entry.
+    await registry.invoke('harness:models', { harness: 'pi' });
+    expect(discover).toHaveBeenCalledTimes(3);
+  });
+
+  it('never caches a failed discovery, and a key, sign-in or catalog-settings change rediscovers', async () => {
+    const discover = vi.mocked(listHarnessModels).mockReset().mockResolvedValue({ models: [opus], error: 'Claude model discovery failed; showing the saved catalog.' });
+    const { registry, deps } = rig(tmpDir('models'));
+    await registry.invoke('harness:models', { harness: 'claude' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(2);
+
+    discover.mockResolvedValue({ models: [opus] });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(3);
+
+    await registry.invoke('secrets:set', { providerId: 'testprov', apiKey: 'sk-new' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(4);
+
+    vi.mocked(openHarnessLogin).mockReset().mockResolvedValue({ ok: true });
+    await registry.invoke('harness:login', { harness: 'claude' }, 'desktop');
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(5);
+
+    await deps.settings.update({ modelOverrides: { 'anthropic::claude-opus-5-5': { supportsImages: true } } });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(6);
+
+    for (const harness of ['__proto__', 'unknown', 1]) await expect(registry.invoke('harness:models', { harness })).rejects.toThrow();
+    expect(discover).toHaveBeenCalledTimes(6);
   });
 });

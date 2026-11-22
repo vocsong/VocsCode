@@ -229,7 +229,8 @@ interface State {
   /** Fetches one harness's model catalog only when it has no cached or pending entry. */
   ensureModelCatalog(harness: HarnessId): Promise<void>;
   /** Re-probes the selected runtime; preserves usable models on failure and fences stale responses. */
-  refreshModelCatalog(harness: HarnessId, context?: { acpAgent?: string; projectRoot?: string }): Promise<ModelCatalogEntry>;
+  /** `refresh` skips main's 7-day catalog cache: the user's explicit recheck. */
+  refreshModelCatalog(harness: HarnessId, context?: { acpAgent?: string; projectRoot?: string; refresh?: boolean }): Promise<ModelCatalogEntry>;
   clearTranscriptLocal(id: string): void;
   /** Replaces a loaded transcript after a server-side rewrite (for example, editing a past prompt). */
   replaceTranscript(id: string, items: TranscriptItem[]): void;
