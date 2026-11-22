@@ -17,6 +17,8 @@ import type { HarnessRef, PermissionMode, SessionEvent, SessionMeta, TranscriptI
 import { emptyUsage } from '../src/main/models/static-models';
 import { defaultSettings } from '../src/main/settings';
 import { createAdapter } from '../src/main/harness/registry';
+import { ANTIGRAVITY_CANCEL_GRACE_MS, ANTIGRAVITY_PROMPT_QUIET_MS } from '../src/main/harness/acp';
+import { deferred } from '../src/main/util/async';
 
 type AnyRecord = Record<string, any>;
 
@@ -226,6 +228,7 @@ describe('acp adapter', () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     for (const h of created) {
       await h.adapter.dispose().catch(() => undefined);
@@ -569,6 +572,73 @@ describe('acp adapter', () => {
     expect(turnItems(h.items).at(-1)?.status).toBe('completed');
     expect(h.events.some((e) => e.type === 'usage')).toBe(true);
     expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
+  });
+
+  it('keeps a quiet Antigravity reply, records a failure, and never replays a queued message', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask' });
+    scriptBasics(h);
+    h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+    const finish = deferred<{ stopReason: string }>();
+    h.agent.on('session/prompt', () => finish.promise);
+    const update = (update: AnyRecord) => h.agent.notify('session/update', { sessionId: 'sess-1', update });
+    await h.adapter.start();
+    await h.adapter.send({ text: 'first' });
+    await h.adapter.send({ text: 'queued' });
+    update({ sessionUpdate: 'tool_call', toolCallId: 'work', title: 'Working', status: 'in_progress' });
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Reply' } });
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS);
+    expect(h.adapter.busy).toBe(true); // A known running tool prevents an automatic stop.
+    expect(turnItems(h.items)).toEqual([]);
+    const approval = deferred<{ optionId: string }>();
+    h.ctx.requestApproval = vi.fn(() => approval.promise);
+    const request = h.agent.serverRequest('session/request_permission', {
+      sessionId: 'sess-1', toolCall: { toolCallId: 'pending', title: 'Run pwd', kind: 'execute', rawInput: { command: 'pwd' } },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }]
+    });
+    update({ sessionUpdate: 'tool_call_update', toolCallId: 'work', status: 'completed' });
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS);
+    expect(h.ctx.requestApproval).toHaveBeenCalledOnce();
+    expect(h.adapter.busy).toBe(true); // Time spent waiting for approval is not quiet time.
+    approval.resolve({ optionId: 'allow' });
+    expect(await request).toMatchObject({ result: { outcome: { outcome: 'selected', optionId: 'allow' } } });
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS - 1);
+    expect(h.adapter.busy).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.adapter.busy).toBe(false);
+    expect(turnItems(h.items)).toEqual([expect.objectContaining({ status: 'failed', error: expect.stringContaining('without confirming') })]);
+    expect([...h.items.values()].filter((item) => item.kind === 'assistant')).toEqual([expect.objectContaining({ text: 'Reply', streaming: false })]);
+    expect(h.meta.queued).toBe(0);
+    expect(infoTexts(h.items, 'warn')).toEqual([expect.stringContaining('Queued messages were not sent')]);
+    expect(h.events.at(-1)).toMatchObject({ type: 'status', status: 'stopped' });
+
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'late' } });
+    finish.resolve({ stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS);
+    expect(turnItems(h.items)).toHaveLength(1);
+    expect(h.agent.requests.filter(({ method }) => method === 'session/prompt')).toHaveLength(1);
+    expect([...h.items.values()].filter((item) => item.kind === 'assistant')).toEqual([expect.objectContaining({ text: 'Reply', streaming: false })]);
+    expect(h.events.at(-1)).toMatchObject({ type: 'status', status: 'stopped' });
+  });
+
+  it('keeps interrupt bounded when Antigravity never returns its prompt result', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ harness: 'antigravity' });
+    scriptBasics(h);
+    h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+    h.agent.on('session/prompt', () => deferred().promise);
+    await h.adapter.start();
+    await h.adapter.send({ text: 'still thinking' });
+    await h.adapter.interrupt();
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_CANCEL_GRACE_MS - 1);
+    expect(h.agent.requests.filter(({ method }) => method === 'session/cancel')).toHaveLength(1);
+    expect(h.adapter.busy).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(turnItems(h.items)).toEqual([expect.objectContaining({ status: 'interrupted', error: expect.stringContaining('did not acknowledge') })]);
+    expect(h.adapter.busy).toBe(false);
+    expect(h.events.at(-1)).toMatchObject({ type: 'status', status: 'stopped' });
   });
 
   it('marks a refusal prompt as a failed turn', async () => {

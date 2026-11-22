@@ -39,6 +39,7 @@ Worth grepping for when a feature misbehaves:
 - `<harness> failed to start after <n>ms` and the `spawning <harness>: <path> (<source> runtime)` line above it — which binary was used and why it did not come up.
 - `is not valid JSON` / `skipped <n> unparsable line(s)` — a store or transcript was damaged and quarantined.
 - `could not decrypt the stored API key for <provider>` — the OS keychain no longer opens the stored key; re-enter it.
+- `Antigravity stopped sending updates without confirming the turn ended` — the CLI sent reply text but did not return a turn result after three quiet minutes with no known running tool or pending approval. Vocs Code keeps the reply and stops the CLI instead of marking the turn complete. Interrupt also stops an unresponsive CLI if the prompt has not ended after five seconds. Check the workspace for any changes before resending; queued messages are not replayed after this recovery.
 - `git … timed out` / `gh … timed out` — why the Changes or Branches panel is missing data.
 - `log file … is not writable` (console only) — the log itself could not be opened; this run is console-only.
 

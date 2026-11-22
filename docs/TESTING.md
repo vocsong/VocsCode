@@ -107,6 +107,7 @@ npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.goal.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.doctor.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.context-menu.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.transcript.test.ts
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.antigravity-turn.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.session-view.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.mission-settings.test.ts tests/e2e.mission.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.layout.test.ts tests/e2e.subagents.test.ts
@@ -124,7 +125,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
-`npm run test:e2e:ci` runs twenty-six no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes` and the
+`npm run test:e2e:ci` runs twenty-seven no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes` and the
 seeded `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
@@ -161,7 +162,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | Approval cards and structured questions, `harness/permissions.ts` | `tests/approval-card.test.tsx`, `tests/pi-questions.test.ts`, `tests/claude-questions.test.ts`, `tests/codex-approvals.test.ts` + `e2e.transcript` (seeded question layout/state only), `e2e.pi-tools` (real question answer/context → Pi, Skip, and restart), `e2e.approval` (live). Pi question transport also requires `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-questions.integration.test.ts` (scripted provider, cancellation/stale reply recovery). |
 | Mission configuration, orchestration, controls or managed workspaces | `tests/mission-*.test.ts` + `e2e.mission-settings`, `e2e.mission`; managed or ordinary Pi process ownership also needs `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/mission-pi.integration.test.ts tests/mission-ordinary-pi.integration.test.ts`. Suites that need Windows Job Objects (`mission-check-job`, `mission-terminal-windows`, `mission-receipt-recovery`, `mission-ordinary-pi`, the app-death part of `mission-restart-recovery`) skip on macOS/Linux, so the ubuntu CI gate does not cover them. Live demonstrations: see below and `docs/MISSION-STATUS.md`. |
 | First-time onboarding and setup recovery (`harness-setup.ts`, `OnboardingWizard`, `HarnessSetup`, `OnboardingProvider`, Home/Settings/New Session entry points) | `tests/harness-readiness.test.ts`, `tests/runtime.test.ts`, `tests/harness-setup.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/onboarding-ui.test.tsx`, `tests/handler-registry.test.ts`, `tests/review-fixes.test.ts` + `e2e.models`, `e2e.vision`, `e2e.instructions`, `e2e.session-view`. Retain draft/save failure recovery, unknown sign-in, catalog fallback, stale-response, owner-main-frame dispatch and restart coverage. Use isolated, existing vendor homes and APPDATA directories; no live OAuth or paid prompts in these suites. See [Onboarding](ONBOARDING.md). |
-| Google Antigravity CLI, account quota and ACP session dispatch | `tests/acp-turn-state.test.ts`, `tests/session-resume.test.ts`, `tests/harness-readiness.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.models` + live `HARNESS_SMOKE_ONLY=antigravity HARNESS_SMOKE_RESUME=1`. Verify every permission mode at dispatch (Plan denials, one-time grants only) and a resumed signed-in Gemini session. |
+| Google Antigravity CLI, account quota and ACP session dispatch | `tests/acp-turn-state.test.ts`, `tests/session-resume.test.ts`, `tests/harness-readiness.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.models`, `e2e.antigravity-turn` + live `HARNESS_SMOKE_ONLY=antigravity HARNESS_SMOKE_RESUME=1`. Verify every permission mode at dispatch (Plan denials, one-time grants only), stalled-prompt recovery, and a resumed signed-in Gemini session. |
 | Harness CLI update check (`runtime.ts` `checkUpdates`, Harness logins card) | `tests/harness-updates.test.ts`, `tests/harness-update-ui.test.tsx` + `e2e.vision` |
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |
 | Updater, `main/updater*.ts`, sidebar update button, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
