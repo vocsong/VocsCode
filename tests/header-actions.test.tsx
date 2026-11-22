@@ -137,6 +137,9 @@ describe('header actions', () => {
     // Confirmation dialog first; nothing is archived until confirmed.
     expect(invokeMock).not.toHaveBeenCalledWith('sessions:archive', expect.anything());
     expect(document.querySelector('.modal')).toBeTruthy();
+    // It pops up at the button rather than centred.
+    expect(document.querySelector('.modal')?.classList.contains('is-anchored')).toBe(true);
+    expect(container.querySelector('[aria-label="Archive session"]')?.hasAttribute('data-dialog-anchor')).toBe(true);
   });
 
   it('sums the changed files into one button that opens Changes', async () => {
