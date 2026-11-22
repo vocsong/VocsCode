@@ -1,4 +1,4 @@
-import type { EffortLevel, HarnessDescriptor, HarnessId, ModelInfo, PermissionMode } from './types';
+import type { EffortLevel, HarnessDescriptor, HarnessId, ModelInfo, PermissionMode } from './harness-types';
 
 export const HARNESSES: HarnessDescriptor[] = [
   {

@@ -1,6 +1,6 @@
 /** Mission configuration is data, not an execution grant. Main must recheck live eligibility at dispatch. */
 import { HARNESS_BY_ID, HARNESSES, isEffortLevel } from './harness-meta';
-import type { EffortLevel, HarnessAvailability, HarnessCapabilities, HarnessId, ModelInfo, ModelRef } from './types';
+import type { EffortLevel, HarnessAvailability, HarnessCapabilities, HarnessId, ModelInfo, ModelRef } from './harness-types';
 
 export type TierId = 1 | 2 | 3 | 4 | 5;
 export type ReasoningSelection = { kind: 'default' } | { kind: 'explicit'; value: EffortLevel };

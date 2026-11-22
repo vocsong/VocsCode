@@ -38,7 +38,8 @@ src/main
   runtime.ts      binary discovery (PATH, app runtime dir, bundled), the npm update check, doctor, installer
   secrets.ts      API keys encrypted at rest via Electron safeStorage
   terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
-  handlers.ts     transport-agnostic IPC handler registry (Electron-free, unit-tested in Node)
+  handlers.ts     transport-agnostic IPC handler registry composer (Electron-free, unit-tested in Node)
+  handlers/       domain IPC registrars + Mission boundary guard (`mission-guard.ts`, `sessions.ts`, `git-fs.ts`, …)
   web-server.ts   localhost web client (VOCS_CODE_WEB=1): serves the built renderer, bridges the registry over WebSocket
   git.ts / settings.ts / store.ts / ipc.ts / index.ts   (ipc.ts binds handlers.ts to ipcMain)
 src/preload       contextBridge (window.harness)
@@ -264,8 +265,8 @@ audit is requested only once the goal is achieved and verified.
 
 Layering is enforced by convention and by `tsconfig` project boundaries:
 
-- `src/shared` — types, IPC contract, harness metadata, diff parser. **No runtime deps, no Electron imports**; importable from every process.
-- `src/main` — all privileged work. `harness/` holds the adapters, `models/` holds provider clients, and `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
+- `src/shared` — domain type modules (`types.ts` barrel), IPC contract (`ipc.ts`), exhaustive channel policy (`ipc-policy.ts`), harness metadata, diff parser. **No runtime deps, no Electron imports**; importable from every process.
+- `src/main` — all privileged work. `harness/` holds the adapters, `models/` holds provider clients, and `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` + `handlers/*` form the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
 - `src/preload` — the only bridge. Renderer calls go through `window.harness`; channels and payloads are defined once in `src/shared/ipc.ts`.
 - `src/renderer` — React 19 + zustand. **Never touches Node or Electron directly.** `terminal/host.ts` keeps xterm.js instances alive outside React.
 - `src/web` — the browser shell. It may import `src/renderer/src`, `src/shared` and `relay/src/web-client.ts`; it must **never** import `src/main`, Electron or `terminal/host` (xterm). It binds its own `window.harness` before any renderer module loads (`install-transport.ts`).

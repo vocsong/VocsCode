@@ -595,6 +595,3 @@ export type PushPayloads = {
 };
 
 export type PushChannel = keyof PushPayloads;
-
-/** The API exposed on window.harness by the preload script — the shared Transport shape (see ./transport). */
-export type { Transport as VocsCodeApi } from './transport';

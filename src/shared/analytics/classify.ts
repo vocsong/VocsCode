@@ -9,7 +9,8 @@
  * Because step 2 needs nothing but stored facts, every record can be reclassified when the rules
  * change (OUTCOME_CLASSIFIER_VERSION) without touching the history it was derived from.
  */
-import type { HarnessId, ToolKindHint } from '../types';
+import type { HarnessId } from '../harness-types';
+import type { ToolKindHint } from '../transcript-types';
 import { analyzeCommand, FILTER_EXES, isKnownToolchain, isOtherShellVocabulary, normalizeExecutable, type CommandComplexity, type CommandShape } from './command';
 import { classifyProcessOutcome, isTerminationCode } from './exit-semantics';
 import {

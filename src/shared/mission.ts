@@ -1,6 +1,8 @@
 /** Mission control-plane contracts. SessionManager still owns each harness and its usage ledger. */
 import type { ExecutionPreset, MissionConfig, MissionProviderRestrictions, TierId } from './mission-config';
-import type { FileAttachment, ImageAttachment, PermissionMode, TranscriptItem, UsageTotals } from './types';
+import type { PermissionMode } from './harness-types';
+import type { FileAttachment, ImageAttachment, TranscriptItem } from './transcript-types';
+import type { UsageTotals } from './usage-types';
 
 export type MissionMode = 'interactive_plan' | 'autonomous';
 export type MissionPhase = 'planning' | 'executing' | 'verifying' | 'delivering' | 'done';

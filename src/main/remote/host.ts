@@ -12,7 +12,7 @@ import { assertEndpointUrl, credentialFetch, endpointSocketUrl } from '../../sha
 import { isRemoteChannel, isRemoteHostChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
 import { REMOTE_TERMINAL_INPUT_MAX, type RemoteTerminalFrame } from '../../shared/remote-terminal';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
-import type { HandlerRegistry } from '../handlers';
+import type { HandlerRegistry } from '../handlers/registry-types';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';

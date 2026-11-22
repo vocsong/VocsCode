@@ -1,96 +1,30 @@
 /** The remote surface (docs/REMOTE-ACCESS.md §5): which channels a paired browser may invoke and
- *  which pushes it receives. Shared so the desktop host enforces it and the web client can hide
- *  what it will be refused before sending anything. The host stays authoritative; the web copy
- *  only spares the user a refused control and the desktop an audit entry. */
+ *  which pushes it receives. Derived from the exhaustive `IPC_CHANNEL_POLICY` table so no channel
+ *  can be classified inconsistently across desktop-owner, remote, and Mission gates. */
 import type { IpcChannel, PushChannel } from './ipc';
+import { channelsWithExposure } from './ipc-policy';
 
-/** View-only mode (P4) admits the read half and refuses the write half. Every remote channel is
- *  classified as one or the other; a test asserts the two halves are disjoint, so a newly added
- *  channel cannot silently become writable when view-only. */
-const READ: readonly IpcChannel[] = [
-  'app:info',
-  'settings:get',
-  'desktop:focus',
-  'harness:availability',
-  'harness:models',
-  'sessions:list',
-  'sessions:get',
-  'sessions:transcript',
-  'sessions:transcriptPage',
-  'sessions:search',
-  'missions:list',
-  'missions:get',
-  'missions:exportPlan',
-  'analytics:summary',
-  'analytics:executions',
-  'skills:list',
-  'skills:read',
-  'git:folderBranch',
-  'git:folderIsRepo',
-  'git:folderBranches',
-  'git:summary',
-  'git:diff',
-  'git:branches',
-  'git:branchesOverview',
-  'git:worktrees',
-  'git:pullRequests',
-  'git:issues',
-  'git:issueComments',
-  'git:prComments',
-  'fs:list',
-  'fs:search',
-  'fs:read',
-  'fs:readImage',
-  // P3.5: list terminals, read a plain-text screen, and stream one to this browser. Watching never
-  // attaches, resizes or pauses the desktop's terminal; typing into it is the write half.
-  'terminal:list',
-  'terminal:screen',
-  'terminal:watch',
-  'terminal:unwatch',
-  'terminal:watchAck'
-];
-
-/** Interactive P3: chat send/interrupt/stop, session lifecycle and per-session model controls.
- *  Destructive git stays desktop-only. */
-const WRITE: readonly IpcChannel[] = [
-  'missions:create',
-  'missions:control',
-  // Even `/mission status` travels on a mixed command channel: never classify it as a read.
-  'missions:command',
-  'sessions:send',
-  'sessions:interrupt',
-  'sessions:stop',
-  'sessions:create',
-  // Spends background-model credit, so it is part of starting a session, not of viewing.
-  'git:suggestBranchName',
-  'sessions:rename',
-  'sessions:setModel',
-  'sessions:setEffort',
-  'sessions:setPermissionMode',
-  'approvals:respond',
-  // P3.5 read/write: type into a session's terminal or open a new one for it. Both pass the same
-  // Mission terminal guards as the desktop's own keystrokes. Resize, kill and close stay local:
-  // the desktop owns its terminals' geometry and lifetime.
-  'terminal:input',
-  'terminal:create'
-];
-
-/** Remote channels the remote host serves itself rather than the handler registry, because the
- *  answer depends on which browser asked: a watched terminal streams to that browser alone. */
-const HOST: readonly IpcChannel[] = ['terminal:watch', 'terminal:unwatch', 'terminal:watchAck'];
+/** View-only mode (P4) admits the read half (including remote-host terminal watches) and refuses
+ *  the write half. Both sets are derived from disjoint exposure values in `IPC_CHANNEL_POLICY`. */
+const READ: readonly IpcChannel[] = channelsWithExposure('remote-read', 'remote-host');
+const WRITE: readonly IpcChannel[] = channelsWithExposure('remote-write');
+const HOST: readonly IpcChannel[] = channelsWithExposure('remote-host');
 
 /** Push channels broadcast to every paired browser: the ones the remote surface consumes.
  *  Everything else the desktop pushes stays on this machine — raw terminal output (a watched
  *  terminal reaches only its watcher, as push:remoteTerminal sealed to it), the assistant panel,
  *  update prompts, and push:remoteState, which carries the live pairing code and pending pairing
  *  requests. */
-const PUSH: readonly PushChannel[] = ['push:sessionEvent', 'push:sessionsChanged',
+const PUSH: readonly PushChannel[] = [
+  'push:sessionEvent',
+  'push:sessionsChanged',
   // Mission records contain public coordination state, not broker credentials or provider keys.
   'push:missionsChanged',
-  'push:settingsChanged', 'push:remotePolicy', 'push:desktopFocus'];
+  'push:settingsChanged',
+  'push:remotePolicy',
+  'push:desktopFocus'
+];
 
-/** A typed runtime lookup: the arrays above are checked against the contract where they are
- *  written, and callers get channel names back rather than arbitrary strings. */
 const lookup = <T extends string>(values: readonly T[]): ReadonlySet<T> => new Set(values);
 
 /** Channels a paired web client may invoke. */

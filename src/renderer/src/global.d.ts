@@ -1,5 +1,5 @@
 /** Ambient declarations for the renderer, including the window.harness bridge type. */
-import type { VocsCodeApi } from '../../shared/ipc';
+import type { Transport as VocsCodeApi } from '../../shared/transport';
 
 declare global {
   interface Window {

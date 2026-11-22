@@ -1,6 +1,6 @@
 /** Binds the transport-agnostic handler registry (handlers.ts) to Electron's ipcMain and pushes events to the renderer window. */
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
-import { isIntelligenceOwnerRequest } from '../shared/intelligence';
+import { desktopOwnerError } from '../shared/ipc-policy';
 import { createHandlerRegistry, type DesktopBridge, type HandlerDeps, type HandlerRegistry, type MissionHandlerService } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
@@ -155,17 +155,11 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     desktop: desktopBridge(deps)
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
-    const intelligenceOwner = isIntelligenceOwnerRequest(channel, req);
-    if (intelligenceOwner || channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'harness:antigravityQuota' || channel === 'fs:writeText') {
+    const ownerError = desktopOwnerError(channel, req);
+    if (ownerError) {
       const contents = deps.getWindow()?.webContents;
       if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {
-        if (intelligenceOwner) throw new Error('Intelligence settings and memory management require the local desktop owner.');
-        if (channel.startsWith('vocsAccount:')) throw new Error('Vocs account sign-in requires the local desktop owner.');
-        if (channel.startsWith('housekeep:')) throw new Error('Housekeep requires the local desktop owner.');
-        if (channel === 'harness:login') throw new Error('Harness sign-in requires the local desktop owner.');
-        if (channel === 'harness:antigravityQuota') throw new Error('Antigravity quota requires the local desktop owner.');
-        if (channel === 'fs:writeText') throw new Error('Saving workspace text requires the local desktop owner.');
-        throw new Error('External control grants require the local desktop owner.');
+        throw new Error(ownerError);
       }
     }
     return registry.invoke(channel, req, 'desktop');
