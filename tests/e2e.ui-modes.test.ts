@@ -8,6 +8,8 @@
  * - nothing is lost on a switch: the open session, its unsent draft and the open side panel stay;
  * - Zen still works: a rail dot opens its session whether the rail is open or closed, and the
  *   composer's controls wait for the pointer while Send never hides;
+ * - a confirmation asked from the rail (archiving a worktree session) opens at its button and holds
+ *   the rail open until it is answered;
  * - the choice survives a restart.
  * Sessions, transcripts and a git checkout are seeded on disk, so no harness or provider key is
  * involved. Review screenshots land in tests/artifacts/ui-modes-*.png.
@@ -397,6 +399,50 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     // Focusing a clipped button must not scroll the rail sideways and leave it showing row ends.
     expect(await win.locator('.sidebar').evaluate((el) => el.scrollLeft)).toBe(0);
     expect(await dotX()).toBe(restingDot);
+  }, 120_000);
+
+  it('asks to archive a worktree session at its button in Zen’s rail, holding the rail open until answered', async ({ onTestFinished }) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-archive-'));
+    onTestFinished(() => fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 }));
+    const { userData, project } = await seed(tmp, 'zen');
+    // The second session works on a branch of its own: archiving it asks before removing the worktree.
+    git(project, 'branch', 'agent/flaky-auth');
+    const file = path.join(userData, 'sessions.json');
+    const sessions = JSON.parse(await fs.readFile(file, 'utf8')) as SessionMeta[];
+    await fs.writeFile(file, JSON.stringify(sessions.map((s) => (s.id === SECOND ? { ...s, worktreeBranch: 'agent/flaky-auth' } : s))));
+    const win = await launch(userData);
+    await expect.poll(() => uiMode(win)).toBe('zen');
+    const railWidth = () => rect(win, '.sidebar').then((r) => r.width);
+    await park(win);
+    await expect.poll(railWidth).toBe(52);
+
+    const row = win.locator(`[data-session-id="${SECOND}"]`);
+    await row.hover({ position: { x: 26, y: 10 } });
+    await expect.poll(railWidth).toBe(280);
+    const archive = row.getByRole('button', { name: 'Archive session', exact: true });
+    await archive.click();
+    const dialog = win.locator('.modal[role="dialog"]');
+    await dialog.getByText('Remove the worktree for "Fix flaky auth refresh test"?').waitFor();
+    // It opens right under the button, not mid-window, and without dimming what it is about.
+    expect(await dialog.evaluate((el) => el.classList.contains('is-anchored'))).toBe(true);
+    const button = await archive.boundingBox();
+    const box = await dialog.boundingBox();
+    expect(Math.abs(box!.y - (button!.y + button!.height + 6))).toBeLessThanOrEqual(1);
+    expect(box!.x).toBeLessThan(button!.x + button!.width);
+    expect(await style(win, '.modal-backdrop', 'background-color')).toBe('rgba(0, 0, 0, 0)');
+    // The pointer leaves the rail for the dialog; the rail stays open beside it, button showing.
+    await park(win);
+    await win.waitForTimeout(700);
+    expect(await railWidth()).toBe(280);
+    expect(await archive.isVisible()).toBe(true);
+    await win.screenshot({ path: path.join(shots, 'ui-modes-zen-archive-confirm.png') });
+
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect.poll(() => dialog.count()).toBe(0);
+    await park(win);
+    await expect.poll(railWidth).toBe(52);
+    // Cancelled: the session is still listed, not archived.
+    expect(await row.count()).toBe(1);
   }, 120_000);
 
   it('reopens in the interface it was closed in', async () => {
