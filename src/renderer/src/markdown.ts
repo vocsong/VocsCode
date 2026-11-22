@@ -1,6 +1,6 @@
 /** Markdown rendering for transcript messages, sanitized before it reaches the DOM. */
 import DOMPurify from 'dompurify';
-import { Marked, type RendererObject, type Tokens } from 'marked';
+import { Marked, Renderer, type RendererObject, type Tokens } from 'marked';
 import { joinRelative, parseFileLink, parseFileRef, type FileRef } from './file-refs';
 import { isWeb } from './api';
 
@@ -45,6 +45,10 @@ function linkFileRef(href: string): FileRef | null {
 
 function buildRenderer(fileLinks: boolean, web: boolean): RendererObject {
   return {
+    table(token) {
+      // Keep Marked's native table (including alignments and inline tokens) inside a scrollport.
+      return `<div class="md-table" role="region" aria-label="Scrollable table" tabindex="0">${Renderer.prototype.table.call(this, token)}</div>\n`;
+    },
     code({ text, lang }) {
       const language = (lang ?? '').split(/\s+/)[0];
       return `<div class="codeblock"><div class="codeblock-bar"><span class="codeblock-lang">${escapeHtml(language || 'text')}</span><button class="codeblock-copy" data-copy type="button" title="Copy">Copy</button></div><pre><code class="lang-${escapeHtml(language)}">${escapeHtml(text)}</code></pre></div>`;
