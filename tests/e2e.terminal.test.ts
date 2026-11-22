@@ -109,6 +109,23 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.waitForSelector('.ns-root', { timeout: 15_000 });
       const seeded = (await win.locator('.ns-root').innerText()).replace(/\\/g, '/');
       expect(seeded, 'the dialog is seeded with the folder of the session that is active').toBe(project.replace(/\\/g, '/'));
+      // The header's folder menu opens on its filter box, at its own width rather than squeezed to
+      // the header button's, lists the folder once with its path, and closes on Escape before the dialog.
+      await win.locator('.ns-root-btn').click();
+      const filter = win.getByRole('textbox', { name: 'Filter folders' });
+      await filter.waitFor({ timeout: 15_000 });
+      expect(await filter.evaluate((el) => el === document.activeElement), 'the folder filter takes focus').toBe(true);
+      const menuWidth = await win.locator('.ns-header-root .dropdown-menu').evaluate((el) => el.getBoundingClientRect().width);
+      const buttonWidth = await win.locator('.ns-root-btn').evaluate((el) => el.getBoundingClientRect().width);
+      expect(menuWidth, 'the folder menu is not clamped to the header button').toBeGreaterThan(Math.max(buttonWidth, 300));
+      const folderRows = win.getByRole('menuitemradio');
+      expect(await folderRows.count(), 'the session folder is listed once').toBe(1);
+      expect((await folderRows.first().locator('.folder-choice-path').innerText()).replace(/\\/g, '/')).toBe(project.replace(/\\/g, '/'));
+      await filter.fill('no-such-folder');
+      await win.getByText(/No folder matches/).waitFor();
+      await win.keyboard.press('Escape');
+      await filter.waitFor({ state: 'detached', timeout: 15_000 });
+      await win.waitForSelector('.modal');
       // This project folder has no repository, so worktree isolation is not on offer: leaving it
       // switchable only produces a session that fails with "Worktrees require a git repository."
       const isolate = win.locator('.toggle', { hasText: 'Isolate in a git worktree' });

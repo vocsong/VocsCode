@@ -7,13 +7,13 @@ import { harnessNeedsSetup, harnessStatus } from '../../../shared/harness-setup'
 import { FAST_MODE_COST_WARNING, fastModeSupport } from '../../../shared/fast-mode';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { canInvoke, invoke } from '../api';
-import { basename } from '../format';
 import { FileAttachmentChips, readAttachments } from '../attachments';
 import { rememberEffort, rememberWithoutEffort } from '../sessionActions';
 import { useStore } from '../store';
-import { Badge, Button, Dropdown, Field, Icon, Kbd, MenuItem, Modal, Spinner, Toggle } from './ui';
+import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
-import { sidebarNavModel } from './Sidebar';
+import { FolderPicker } from './FolderPicker';
+import { folderChoices } from '../folderChoices';
 import { MissionLaunch } from './mission/MissionLaunch';
 
 /** The prefix select's "Custom…" option; never a valid prefix itself (`:` cannot be in a ref). */
@@ -110,9 +110,9 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
     setBase('');
   }, [projectRoot]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The folders the sidebar shows, in its order; the current one is listed even before it has a session.
-  const folderChoices = sidebarNavModel(sessions, settings).map((f) => f.root);
-  if (projectRoot && !folderChoices.includes(projectRoot)) folderChoices.unshift(projectRoot);
+  // Every folder the sidebar knows, once each and most recently worked in first, whichever layout the
+  // sidebar is in; the current one is listed even before it has a session.
+  const folderList = folderChoices(sessions, settings, projectRoot);
   const chooseRoot = (root: string) => useStore.setState({ newSessionRoot: root });
   const browseRoot = async () => {
     try {
@@ -345,30 +345,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         <Icon name="plus" /> New session
       </span>
       <span className="ns-header-root">
-        <Dropdown
-          align="right"
-          width={340}
-          trigger={() => (
-            <button type="button" className="ns-root-btn" title={projectRoot ? `${projectRoot} — change folder` : 'Choose a folder'}>
-              <Icon name="folder" size={13} />
-              <span className="ns-root"><bdi>{projectRoot || 'No folder selected'}</bdi></span>
-              <Icon name="chevron" size={12} />
-            </button>
-          )}
-        >
-          {(closeMenu) => (
-            <>
-              {folderChoices.map((root) => (
-                <MenuItem key={root} checked={root === projectRoot} hint={root} onClick={() => { closeMenu(); chooseRoot(root); }}>
-                  {basename(root)}
-                </MenuItem>
-              ))}
-              {canInvoke('app:pickFolder') && (
-                <MenuItem onClick={() => { closeMenu(); void browseRoot(); }}>Choose another folder…</MenuItem>
-              )}
-            </>
-          )}
-        </Dropdown>
+        <FolderPicker value={projectRoot} choices={folderList} onChoose={chooseRoot} onBrowse={canInvoke('app:pickFolder') ? () => void browseRoot() : undefined} />
       </span>
     </span>
   );
