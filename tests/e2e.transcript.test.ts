@@ -163,8 +163,11 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     // One header per stretch of steps. A turn that worked in two stretches leaves its duration on
     // the turn row; a turn with one stretch shows it on that header.
     expect(await work.count()).toBe(3);
-    expect(await work.nth(0).innerText()).toMatch(/^Worked\s*1 step$/);
-    expect(await work.nth(1).innerText()).toMatch(/^Worked\s*3 steps$/);
+    // What each header says, apart from the time it started (every header carries one).
+    const says = (i: number) => work.nth(i).locator('.work-label, .work-stat').allInnerTexts();
+    expect(await says(0)).toEqual(['Worked', '1 step']);
+    expect(await says(1)).toEqual(['Worked', '3 steps']);
+    expect(await work.locator('.work-time').count()).toBe(3);
     expect(await work.nth(2).innerText()).toContain('Worked for 42.0s');
     expect(await win.locator('.turn-footer').first().innerText()).toContain('3m 17s');
     const originalTimes = await completionTimes(win);

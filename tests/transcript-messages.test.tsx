@@ -72,12 +72,18 @@ function show(items: TranscriptItem[], status: SessionMeta['status'] = 'idle') {
  * the message's row or on the row above it, so a toggle directly before a message reads as part of it.
  */
 function outline(container: HTMLElement): string[] {
+  /** A row's words without its time: every row carries one, and it is not what the row says. */
+  const words = (el: Element) => {
+    const copy = el.cloneNode(true) as Element;
+    for (const stamp of copy.querySelectorAll('.stamp')) stamp.remove();
+    return copy.textContent!.trim();
+  };
   const rows: string[] = [];
   for (const row of container.querySelectorAll('.transcript-row')) {
     if (row.querySelector('.msg-user')) rows.push('user');
     else if (row.querySelector('.turn-footer')) rows.push('turn');
-    else if (row.querySelector('.work-head')) rows.push(`work: ${row.querySelector('.work-head')!.textContent}`);
-    else if (row.querySelector('.info-line')) rows.push(`notice: ${row.querySelector('.info-line')!.textContent!.trim()}`);
+    else if (row.querySelector('.work-head')) rows.push(`work: ${words(row.querySelector('.work-head')!)}`);
+    else if (row.querySelector('.info-line')) rows.push(`notice: ${words(row.querySelector('.info-line')!)}`);
     else if (row.querySelector('.msg-assistant')) {
       const toggle = row.querySelector('.thinking-toggle') ? 'thinking + ' : '';
       const prose = row.querySelector('.md')?.textContent?.trim();
