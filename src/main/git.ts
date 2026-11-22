@@ -1,5 +1,5 @@
 /** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees plus the /pr and /merge GitHub flow. */
-import { promises as fs } from 'node:fs';
+import fsCallback, { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_BRANCH_PREFIX, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
 import { parseGitHubPullRequestUrl } from '../shared/github-pull-request';
@@ -903,6 +903,13 @@ export async function gitBranches(cwd: string): Promise<{ current?: string; bran
   return { current, branches };
 }
 
+/** A directory's real long path for comparison: links resolved, 8.3 short names expanded, case folded on Windows. */
+async function canonicalDir(dir: string): Promise<string> {
+  const resolved = path.resolve(dir);
+  const real = await new Promise<string>((resolve) => fsCallback.realpath.native(resolved, (error, out) => resolve(error ? resolved : out)));
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
+
 export async function gitWorktrees(cwd: string): Promise<{ current: string; worktrees: GitWorktreeInfo[] }> {
   const current = path.resolve(cwd);
   const r = await git(cwd, ['worktree', 'list', '--porcelain']);
@@ -986,6 +993,10 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
   if (timedOut(refs)) {
     return { isRepo: true, branches: [], worktrees: wt.worktrees, error: 'git for-each-ref timed out — the branch list could not be loaded. Refresh to retry.' };
   }
+  // Git prints each worktree's real long path; the session's cwd may be a Windows 8.3 short name
+  // (`RUNNER~1`), another case, or a link to it. Compare real paths, or no branch reads as current.
+  const here = await canonicalDir(wt.current);
+  const currentWorktree = (await Promise.all(wt.worktrees.map(async (w) => (await canonicalDir(w.path)) === here ? w : undefined))).find(Boolean);
   const wtByBranch = new Map(wt.worktrees.filter((w) => w.branch).map((w) => [w.branch!, w.path]));
   const branches: GitBranchOverviewItem[] = new Array(rows.length);
   let next = 0;
@@ -1010,7 +1021,7 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
       const up = parseUpstreamTrack(track ?? '');
       const item: GitBranchOverviewItem = {
         name,
-        current: Boolean(wt.worktrees.find((w) => w.branch === name && path.resolve(w.path) === wt.current)),
+        current: currentWorktree?.branch === name,
         isBase: name === base,
         lastCommitAt: date ? Number(date) * 1000 : undefined,
         lastCommitSubject: subject || undefined,

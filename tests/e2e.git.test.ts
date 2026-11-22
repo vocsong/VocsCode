@@ -97,9 +97,10 @@ const GH_CMD = [
  * `seedRepo` runs after the initial commit so a test can add remotes, branches, and sessions.
  */
 async function seedAndLaunch(
-  { tag, panelWidth, assistantText = 'Hi', uiMode, seedRepo }: {
+  { tag, panelWidth, assistantText = 'Hi', uiMode, seedRepo, windowBounds }: {
     tag: string;
     panelWidth: number;
+    windowBounds?: { x: number; y: number; width: number; height: number };
     assistantText?: string;
     uiMode?: UiModeId;
     seedRepo?: (project: string, git: (...args: string[]) => void) => Pick<SessionMeta, 'title' | 'cwd' | 'worktreeBranch'>[] | void;
@@ -124,7 +125,7 @@ async function seedAndLaunch(
   const additionalSessions = seedRepo?.(project, git) ?? [];
 
   // A dismissed setup banner keeps the panel to its tables.
-  await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { gitSetupSkipped: [project], panelWidth, uiMode }));
+  await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { gitSetupSkipped: [project], panelWidth, uiMode, ...(windowBounds ? { windowBounds } : {}) }));
 
   const sid = 's_git_e2e';
   const session = {
@@ -175,8 +176,14 @@ async function seedAndLaunch(
 }
 
 /** Lands on the PR view of a seeded repo. */
-async function launchGitPanel(panelWidth: number): Promise<{ app: ElectronApplication; win: Page }> {
-  const { app, win } = await seedAndLaunch({ tag: `pr-${panelWidth}`, panelWidth });
+/**
+ * The window GitHub's Windows runners can show: their 1024x768 screen. Beside the sidebar and an
+ * open Git panel the session pane is then about 320px wide, which squeezes the header title.
+ */
+const RUNNER_WINDOW = { x: 0, y: 0, width: 1024, height: 728 };
+
+async function launchGitPanel(panelWidth: number, windowBounds?: typeof RUNNER_WINDOW): Promise<{ app: ElectronApplication; win: Page }> {
+  const { app, win } = await seedAndLaunch({ tag: `pr-${panelWidth}`, panelWidth, windowBounds });
   await fs.mkdir(shots, { recursive: true });
   await win.getByTitle('Pull requests on GitHub (via gh)').click();
   await win.getByRole('button', { name: 'Read pull request #7: Ship the widget' }).waitFor({ timeout: 30_000 });
@@ -318,7 +325,8 @@ describe.runIf(enabled)('git panel PR details', () => {
 
 describe.runIf(enabled)('git panel PR review session', () => {
   it('confirms the review prompt in a dialog, then starts the session on the repo', async () => {
-    const { app, win } = await launchGitPanel(420);
+    // A runner-sized window: the new session's name must stay visible in a squeezed header.
+    const { app, win } = await launchGitPanel(420, RUNNER_WINDOW);
 
     // The ⋯ menu is gone: the row keeps the GitHub link and gains the New session action.
     expect(await win.locator('.pr-row .branch-actions .btn').count()).toBe(2);
@@ -420,7 +428,7 @@ describe.runIf(enabled)('git panel branch state', () => {
 
 describe.runIf(enabled)('git panel issue session', () => {
   it('confirms the fix prompt in a dialog, then starts the session on the repo', async () => {
-    const { app, win } = await launchGitPanel(420);
+    const { app, win } = await launchGitPanel(420, RUNNER_WINDOW);
 
     await win.getByTitle('Issues on GitHub (via gh)').click();
     const issueRow = win.getByRole('button', { name: 'Read issue #12: Widget is wobbly' });
