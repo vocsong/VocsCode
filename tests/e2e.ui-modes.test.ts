@@ -341,21 +341,35 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await row.getByText('Rename from the Zen sidebar', { exact: true }).waitFor();
   }, 60_000);
 
-  it('scrolls a session list longer than the window in Zen’s rail, open or closed, keeping its foot on screen', async () => {
+  it('scrolls Zen’s rail open or closed and matches the transcript’s scrollbar when open', async ({ onTestFinished }) => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-scroll-'));
+    onTestFinished(() => fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 }));
     const { userData } = await seed(tmp, 'zen', 40);
     const win = await launch(userData);
     await expect.poll(() => uiMode(win)).toBe('zen');
     const viewport = win.viewportSize()!;
     const list = win.locator('.sidebar-list');
+    const transcript = win.locator('.pane.active .transcript');
     const last = win.locator('[data-session-id="s_modes_extra_39"]');
     const listBox = () => rect(win, '.sidebar-list');
-    // Closed: the list is bounded by the window, overflows, and the gear at the rail's foot stays on screen.
+    const railBox = () => rect(win, '.sidebar');
+    const clientWidth = () => list.evaluate((el) => el.clientWidth);
+
     await park(win);
-    await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(52);
+    await expect.poll(() => railBox().then((r) => r.width)).toBe(52);
+    await clickDot(win, FIRST);
+    await expect.poll(() => transcript.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+
+    // Closed: the list overflows with the gear still on screen, and the rail clips the scrollbar.
+    await park(win);
+    await expect.poll(() => railBox().then((r) => r.width)).toBe(52);
     const scroll = () => list.evaluate((el) => ({ top: el.scrollTop, height: el.scrollHeight, client: el.clientHeight }));
-    expect((await scroll()).height).toBeGreaterThan((await scroll()).client);
+    const { height, client } = await scroll();
+    expect(height).toBeGreaterThan(client);
     const box = await listBox();
+    const rail = await railBox();
+    const closedClientWidth = await clientWidth();
+    expect(box.x + closedClientWidth).toBeGreaterThan(rail.x + rail.width);
     expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
     const gear = await rect(win, '.sidebar-bottom .sidebar-link');
     expect(gear.y + gear.height).toBeLessThanOrEqual(viewport.height);
@@ -363,8 +377,22 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await win.mouse.move(26, box.y + box.height / 2);
     await win.mouse.wheel(0, 4000);
     await expect.poll(async () => (await scroll()).top).toBeGreaterThan(0);
-    // Open: scrolled to the end, the last session is inside the list's visible box, and it opens.
-    await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(280);
+    await expect.poll(() => railBox().then((r) => r.width)).toBe(280);
+
+    // Non-auto scrollbar settings can bypass the themed pseudo-elements even if their styles match.
+    const scrollbar = (scroller: typeof list) => scroller.evaluate((el) => {
+      const { scrollbarWidth, scrollbarColor } = getComputedStyle(el);
+      return {
+        scrollbarWidth, scrollbarColor,
+        width: getComputedStyle(el, '::-webkit-scrollbar').width,
+        thumb: getComputedStyle(el, '::-webkit-scrollbar-thumb').background,
+        track: getComputedStyle(el, '::-webkit-scrollbar-track').background
+      };
+    });
+    expect(await scrollbar(list)).toEqual(await scrollbar(transcript));
+    expect(await clientWidth()).toBe(closedClientWidth);
+
+    // Scrolled to the end, the last session is inside the list's visible box, and it opens.
     await expect.poll(async () => {
       const [row, l] = [await rect(win, '[data-session-id="s_modes_extra_39"]'), await listBox()];
       return row.y >= l.y && row.y + row.height <= l.y + l.height;
