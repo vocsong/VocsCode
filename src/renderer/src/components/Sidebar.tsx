@@ -722,7 +722,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
           ) : (
             <div className="session-title">
               {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
-              <SessionTitle session={s} />
+              <SessionTitle session={s} showProject={false} />
             </div>
           )}
           <div className="row-actions" onClick={(e) => e.stopPropagation()}>
