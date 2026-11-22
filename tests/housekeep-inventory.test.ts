@@ -95,15 +95,50 @@ describe('read-only Housekeep inventory', () => {
     await fs.rename(stale, path.join(scratch, 'moved-away'));
     const report = await scanHousekeepInventory([root, linkedRoot], [
       session('Open through alias', path.join(liveAlias, 'subdir')),
+      session('Same branch recorded elsewhere', root, 'review/external'),
       session('Archived checkout', archived, 'custom/archived', true, linkedRoot)
     ]);
     expect(report).toMatchObject({ repositories: 1, warnings: [], limited: false });
     expect(report.rows.map(({ location, kind }) => [location, kind])).toEqual([
       [archived, 'archived-worktree'], [stale, 'stale-registration'], [independent, 'unlinked-worktree'], [linkedRemnant, 'unregistered-folder']
     ]);
-    expect(report.rows[0].sessions).toEqual([{ title: 'Archived checkout', archived: true }]);
+    expect(report.rows[0]).toMatchObject({ diskState: 'unknown', sessions: [{ title: 'Archived checkout', archived: true }] });
+    expect(report.rows[1]).toMatchObject({ diskState: 'missing', gitMarksStale: true });
+    expect(report.rows[2]).toMatchObject({
+      diskState: 'present', sessions: [], branchSessions: [{ title: 'Same branch recorded elsewhere', archived: false }]
+    });
     expect(git('worktree', 'list', '--porcelain')).toContain('prunable');
     await expect(fs.stat(path.join(scratch, 'moved-away'))).resolves.toBeDefined();
+  });
+
+  it('reports Git’s stale flag separately when the registered folder still exists', async () => {
+    const stale = managed('has remaining bytes');
+    await fs.mkdir(managed(), { recursive: true });
+    git('worktree', 'add', '-b', 'vocscode/stale', stale);
+    await fs.rename(path.join(stale, '.git'), path.join(scratch, 'retained-backlink'));
+    const payload = path.join(stale, 'notes.txt');
+    await fs.writeFile(payload, 'Retain this data.');
+    const before = git('worktree', 'list', '--porcelain', '-z');
+    expect(before).toContain('\0prunable ');
+
+    const report = await scanHousekeepInventory([root], []);
+    expect(report.rows).toEqual([expect.objectContaining({ location: stale, kind: 'stale-registration', diskState: 'present', gitMarksStale: true })]);
+    expect(git('worktree', 'list', '--porcelain', '-z')).toBe(before);
+    await expect(fs.readFile(payload, 'utf8')).resolves.toBe('Retain this data.');
+  });
+
+  it('does not claim that a checkout has no session link if path matching is incomplete', async () => {
+    const checkout = managed('known');
+    const unreadable = path.join(scratch, 'unreadable recorded location');
+    await fs.mkdir(managed(), { recursive: true });
+    git('worktree', 'add', '-b', 'vocscode/known', checkout);
+    const realpath = fs.realpath.bind(fs);
+    vi.spyOn(fs, 'realpath').mockImplementation((location, opts) => location === unreadable
+      ? Promise.reject(Object.assign(new Error('Unreadable fixture path'), { code: 'EACCES' }))
+      : realpath(location, opts));
+    const report = await scanHousekeepInventory([root], [session('Unable to match', unreadable)]);
+    expect(report.warnings).toContainEqual(expect.stringContaining('Some session paths could not be resolved'));
+    expect(report.rows).toEqual([expect.objectContaining({ location: checkout, diskState: 'present', sessions: [], sessionLinksIncomplete: true })]);
   });
 
   it('does not descend through a linked worktree container or report its target as stranded', async () => {
