@@ -1,3 +1,5 @@
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -74,6 +76,27 @@ describe('gitBranchesOverview', () => {
     runCapture.mockReset();
     replies.clear();
     which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : null));
+  });
+
+  it('marks the current branch when the session reaches its worktree through a link or short path', async () => {
+    // Git prints the worktree's real long path; GitHub's Windows runners hand the app an 8.3 short
+    // temp path (`RUNNER~1`), and a user may open a repo through a junction. Both must still match.
+    const tmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-git-current-')));
+    const real = path.join(tmp, 'repo');
+    const link = path.join(tmp, 'link');
+    await fs.mkdir(real);
+    await fs.symlink(real, link, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: real.replace(/\\/g, '/') });
+      gitReply(['worktree', 'list', '--porcelain'], { code: 0, stdout: `worktree ${real.replace(/\\/g, '/')}\nHEAD abc\nbranch refs/heads/master\n` });
+      gitReply(REFS_ARGS, { code: 0, stdout: 'master\t1700000000\tinit\t\t\t' + oid(1) + '\nfeature\t1700000001\twork\t\t\t' + oid(2) + '\n' });
+      gitReply(['rev-list', '--left-right', '--count', 'master...feature'], { code: 0, stdout: '0\t1\n' });
+
+      const overview = await gitBranchesOverview(link);
+      expect(overview.branches.map((b) => [b.name, b.current])).toEqual([['master', true], ['feature', false]]);
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
   });
 
   it('reports not-a-repo', async () => {

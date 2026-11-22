@@ -403,7 +403,9 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
       defaultHarness: 'native', defaultModelByHarness: { native: { provider: providerId, model: chatModel } },
       providers: [provider], utilityModel: { provider: providerId, model: utilityModel },
-      agent: { enabled: false }, knowledge: { prime: false, autoDistill: false }, mcpDisabledBuiltins: MCP_BUILTIN_IDS
+      agent: { enabled: false }, knowledge: { prime: false, autoDistill: false }, mcpDisabledBuiltins: MCP_BUILTIN_IDS,
+      // The 1024x768 screen of GitHub's Windows runners: the header title must stay visible when squeezed.
+      windowBounds: { x: 0, y: 0, width: 1024, height: 728 }
     }));
     const win = await launch(userData);
     const row = win.getByTestId('session-row');
