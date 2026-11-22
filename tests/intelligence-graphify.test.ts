@@ -1,6 +1,4 @@
-/** Graphify graph provider: an opt-in, local-only derived index. It is built only on request, in
- * AST-only mode with no shell and no LLM backend; health travels with every answer; and queries read
- * the produced graph.json defensively, never anything outside the project's own cache folder. */
+/** Graphify graph provider: local AST snapshot builds, revision-scoped cache reads and failure recovery. */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -91,7 +89,69 @@ describe('GraphifyProvider health and indexing', () => {
     expect(fs.existsSync(cacheDir(scope))).toBe(false);
   });
 
-  // Optional real-binary pilot. Core CI stays offline and runs the deterministic parser fixtures.
+  it('automatically indexes one committed revision per checkout and preserves its prior cache on failure', async () => {
+    const scope = project();
+    const other = { ...scope, cwd: path.join(scope.cwd, 'linked-worktree') };
+    const cacheRoot = path.join(tempDir(), 'private');
+    let head = REVISION;
+    const update = 'ab'.repeat(20);
+    const extract = vi.fn((call: RunCall) => {
+      if (call.args.includes('--version')) return { ...ok, stdout: `graphify ${TESTED_GRAPHIFY_VERSION}` };
+      expect(call.args).toEqual(['-I', '-S', 'launch.py', 'extract', call.opts.cwd, '--code-only', '--exclude', '.vocs-code', '--out', expect.any(String)]);
+      expect(call.opts.cwd).not.toBe(scope.cwd);
+      const graph = JSON.parse(FIXTURE_TEXT);
+      graph.nodes[0].source_file = path.join(call.opts.cwd, 'src', 'auth', 'login.ts');
+      writeExtractOutput(call.args, head === update ? 'corrupt' : JSON.stringify(graph));
+      return ok;
+    });
+    const snapshot = vi.fn(async (_checkout: string, _revision: string, dir: string) => fs.writeFileSync(path.join(dir, 'sample.ts'), 'export function handleLogin() {}'));
+    const { provider } = harness({ cacheRoot, requireVersion: TESTED_GRAPHIFY_VERSION, commandArgs: ['-I', '-S', 'launch.py'], headRevision: async () => head, snapshot }, extract);
+    const { signal } = new AbortController();
+    expect(await provider.query(scope, 'handlelogin')).toEqual([]);
+    expect(extract).not.toHaveBeenCalled();
+    await provider.refresh(scope, signal);
+    await provider.refresh(scope, signal);
+    expect(snapshot.mock.calls.map(([cwd, commit]) => [cwd, commit])).toEqual([[scope.cwd, REVISION]]);
+    expect(await provider.status(scope, true)).toMatchObject({ indexed: true, revision: REVISION, stale: false });
+    expect(await provider.query(scope, 'handlelogin')).toMatchObject([{ node: { file: 'src/auth/login.ts' } }]);
+    expect(await provider.query(other, 'handlelogin')).toEqual([]);
+    head = update;
+    await provider.refresh(scope, signal);
+    await provider.refresh(scope, signal);
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    expect(await provider.status(scope, true)).toMatchObject({ indexed: true, revision: REVISION, stale: true, error: expect.any(String) });
+    expect(await provider.query(scope, 'handlelogin', { revision: update })).toEqual([]);
+    expect(await provider.status(scope, false)).toMatchObject({ enabled: false, indexed: false });
+    expect(fs.statSync(provider.artifactPath({ ...scope, cwd: scope.cwd })).isFile()).toBe(true);
+  });
+
+  it('discards a completed staging artifact if its desktop job was cancelled', async () => {
+    const scope = project();
+    const cacheRoot = path.join(tempDir(), 'private');
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    let finish!: () => void;
+    const exit = new Promise<void>((resolve) => { finish = resolve; });
+    const { provider } = harness({
+      cacheRoot, requireVersion: TESTED_GRAPHIFY_VERSION, headRevision: async () => REVISION,
+      snapshot: async (_checkout, _revision, dir) => fs.writeFileSync(path.join(dir, 'sample.ts'), 'export const symbol = 1;')
+    }, async (call) => {
+      if (call.args.includes('--version')) return { ...ok, stdout: `graphify ${TESTED_GRAPHIFY_VERSION}` };
+      started();
+      await exit;
+      writeExtractOutput(call.args);
+      return ok;
+    });
+    const job = provider.index(scope);
+    await running;
+    const cancel = provider.cancel();
+    finish();
+    await cancel;
+    expect(await job).toMatchObject({ indexed: false, indexing: false });
+    expect(await provider.query(scope, 'handlelogin')).toEqual([]);
+  });
+
+  // Optional real upstream CLI contract. The packaged path uses the isolated launcher instead.
   if (process.env.VOCS_CODE_GRAPHIFY_TEST_EXE) it('builds and queries the pinned CLI cache, then detects a changed revision', async () => {
     const scope = project('Graphify pilot & fixture');
     const cacheRoot = path.join(tempDir(), 'profile', 'graphs');
@@ -330,7 +390,7 @@ describe('GraphifyProvider health and indexing', () => {
     writeArtifact(scope);
     const headRevision = vi.fn(async (_cwd: string) => REVISION);
     await harness({ headRevision }).provider.status({ projectRoot: scope.projectRoot, cwd }, true);
-    expect(headRevision).toHaveBeenCalledExactlyOnceWith(cwd);
+    expect(headRevision).toHaveBeenCalledExactlyOnceWith(cwd, undefined);
   });
 
   it('clears the cache folder and only the cache folder', async () => {

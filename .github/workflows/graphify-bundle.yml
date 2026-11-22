@@ -1,0 +1,85 @@
+name: Graphify bundle
+
+on:
+  pull_request:
+    branches: [develop, master]
+    paths:
+      - '.github/workflows/graphify-bundle.yml'
+      - 'resources/graphify/**'
+      - 'scripts/graphify-runtime.mjs'
+      - 'scripts/graphify-smoke.mjs'
+      - 'src/main/index.ts'
+      - 'src/main/intelligence/graphify.ts'
+      - 'electron-builder.yml'
+      - 'electron.vite.config.ts'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: graphify-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packaged-smoke:
+    name: Packaged Graphify (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            builder_flags: --linux --x64
+            resources: dist/linux-unpacked/resources
+          - os: macos-15-intel
+            target: darwin-x64
+            builder_flags: --mac --x64
+            resources: dist/mac/Vocs Code.app/Contents/Resources
+          - os: macos-15
+            target: darwin-arm64
+            builder_flags: --mac --arm64
+            resources: dist/mac-arm64/Vocs Code.app/Contents/Resources
+    env:
+      TARGET: ${{ matrix.target }}
+      RESOURCE_DIR: ${{ matrix.resources }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      # The smoke script can do an architecture-only check on a foreign target; disallow that here.
+      - name: Require a native runner and Node runtime
+        run: |
+          node -e '
+            const host = `${process.platform}-${process.arch}`;
+            const runnerArch = process.env.RUNNER_ARCH?.toLowerCase();
+            if (host !== process.env.TARGET || runnerArch !== process.arch) {
+              throw new Error(`Expected native ${process.env.TARGET}, got ${host} on runner arch ${runnerArch}`);
+            }
+          '
+      - run: npm ci --include=dev
+        env:
+          NODE_ENV: development
+      - run: npx electron-vite build
+      - name: Build the unpacked app
+        run: npx electron-builder ${{ matrix.builder_flags }} --dir --config electron-builder.yml --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # Builder skips PR signing by default. Allow the configured ad-hoc identity, with no credentials.
+          CSC_FOR_PULL_REQUEST: ${{ runner.os == 'macOS' && 'true' || 'false' }}
+      - name: Run offline smoke against the packaged worker
+        run: |
+          printf 'Checking %s resources at %s\n' "$TARGET" "$RESOURCE_DIR"
+          test -f "$RESOURCE_DIR/app.asar" || { echo "Missing $RESOURCE_DIR/app.asar" >&2; exit 1; }
+          node scripts/graphify-smoke.mjs --packaged --target "$TARGET"
+      - name: Verify the macOS bundle signature
+        if: runner.os == 'macOS'
+        run: codesign --verify --deep --strict --verbose=2 "${RESOURCE_DIR%/Contents/Resources}"
