@@ -343,7 +343,7 @@ describe('session resume persistence', () => {
 
     await expect(manager.runControlled(meta.id, { text: 'Say hello' }, control)).rejects.toThrow('direct user prompts');
     await expect(manager.goal(meta.id, 'set', { objective: 'Say hello' })).rejects.toThrow('direct user prompts');
-    await expect(manager.setPermissionMode(meta.id, 'full-auto')).rejects.toThrow('Ask and Plan');
+    await expect(manager.setPermissionMode(meta.id, 'yolo' as PermissionMode)).rejects.toThrow('does not support the yolo permission mode');
     expect(control.beforeStart).not.toHaveBeenCalled();
     expect(mocks.adapterCalls).toHaveLength(0);
     expect(await manager.transcript(meta.id)).toEqual([]);
@@ -379,6 +379,20 @@ describe('session resume persistence', () => {
     await manager.send(meta.id, { text: 'After permissions change' });
     expect(mocks.adapterCalls).toHaveLength(1);
     expect(mocks.adapterCalls[0].ctx.permissionMode()).toBe('plan');
+  });
+
+  it.each(['accept-edits', 'auto', 'full-auto'] as const)('saves Antigravity %s and dispatches the next turn under it', async (mode) => {
+    const store = new SessionStore(path.join(tmpRoot, `antigravity-${mode}`));
+    await store.load();
+    const meta = persistedMeta('antigravity', REFS_BY_HARNESS.antigravity);
+    await store.upsert(meta);
+    const manager = new SessionManager(makeManagerDeps(store));
+    mocks.adapterCalls.length = 0;
+
+    expect((await manager.setPermissionMode(meta.id, mode)).config.permissionMode).toBe(mode);
+    await manager.send(meta.id, { text: 'Go' });
+    expect(mocks.adapterCalls).toHaveLength(1);
+    expect(mocks.adapterCalls[0].ctx.permissionMode()).toBe(mode);
   });
 });
 
