@@ -115,9 +115,14 @@ describe('pi approval extension without a UI', () => {
     });
   });
 
-  it('gates an MCP tool in auto mode, where no classification is possible', async () => {
+  it('runs an MCP tool in auto mode without needing the UI', async () => {
     const handler = register('auto');
-    await expect(handler({ toolName: 'mcp__gitnexus__query', input: { query: 'auth' } }, { cwd: process.cwd() })).resolves.toMatchObject({
+    await expect(handler({ toolName: 'mcp__server__write', input: { query: 'auth' } }, { cwd: process.cwd() })).resolves.toBeUndefined();
+  });
+
+  it('fails closed for an MCP tool in accept-edits mode', async () => {
+    const handler = register('accept-edits');
+    await expect(handler({ toolName: 'mcp__server__write', input: {} }, { cwd: process.cwd() })).resolves.toMatchObject({
       block: true,
       reason: expect.stringContaining('approval UI is unavailable')
     });

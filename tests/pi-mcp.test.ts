@@ -330,7 +330,8 @@ describe('Pi ephemeral memory gateway', () => {
       await registerMcpTools(child.pi);
       expect(parent.tools.map((tool) => tool.name).sort()).toEqual(['mcp__other__probe', 'mcp__vocs_memory__probe']);
       expect(child.tools[0]).toBe(parent.tools[0]);
-      expect(await mcpReadOnlyToolNames()).toEqual(new Set(['mcp__vocs_memory__probe']));
+      // The probe marks itself read-only, but trust comes only from the built-in read-only allowlist.
+      expect(await mcpReadOnlyToolNames()).toEqual(new Set());
       const input = { terms: ['test'], scope: 'branch' };
       for (const [name, expected] of [
         ['mcp__vocs_memory__probe', { gateway: url, digest: createHash('sha256').update(token).digest('hex') }],
