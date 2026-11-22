@@ -160,15 +160,22 @@ describe('/housekeep', () => {
     await act(async () => scan.resolve({ repositories: 1, warnings: [], limited: false, rows: [
       { projectRoot, kind: 'unregistered-folder', location, sessions: [] },
       { projectRoot, kind: 'retained-branch', location: 'vocs/archived', sessions: [{ title: 'Closed ticket', archived: true }] },
-      { projectRoot, kind: 'stale-registration', location: `${location}-stale`, branch: 'vocs/stale', locked: true, sessions: [] }
+      { projectRoot, kind: 'stale-registration', location: `${location}-stale`, branch: 'vocs/stale', locked: true, diskState: 'present', gitMarksStale: true,
+        sessions: [], branchSessions: [{ title: 'Different checkout', archived: false }] },
+      { projectRoot, kind: 'unlinked-worktree', location: `${location}-unknown`, diskState: 'unknown', sessions: [], sessionLinksIncomplete: true }
     ] }));
 
-    expect(panel.getByRole('status').textContent).toBe('1 repository scanned. 3 findings returned.');
+    expect(panel.getByRole('status').textContent).toBe('1 repository scanned. 4 findings returned.');
     const findings = within(panel.getByRole('list', { name: 'Inventory findings' }));
     for (const text of ['Unregistered folder', location, 'Retained branch', 'vocs/archived', 'Stale registration', 'Locked', 'vocs/stale']) {
       expect(findings.getByText(text)).toBeTruthy();
     }
     expect(findings.getByText('Linked session: Closed ticket (archived)')).toBeTruthy();
+    expect(findings.getByText('Folder on disk: present')).toBeTruthy();
+    expect(findings.getByText('Git marks this registration as stale.')).toBeTruthy();
+    expect(findings.getByText('Sessions recording this branch at another path: Different checkout (not archived)')).toBeTruthy();
+    expect(findings.getByText('Folder on disk: not verified')).toBeTruthy();
+    expect(findings.getByText('Session links could not be fully checked.')).toBeTruthy();
     expect(panel.queryByRole('checkbox')).toBeNull();
     expect(panel.getAllByRole('button')).toEqual([scanButton]);
     expect(button('Review selected').disabled).toBe(true);
@@ -184,9 +191,11 @@ describe('/housekeep', () => {
       .mockResolvedValueOnce(empty);
     reply({ preview: () => preview([]), inventory: scan });
     render(<HousekeepDialog onClose={vi.fn()} />);
-    const scanButton = await dialog().findByRole('button', { name: 'Scan worktrees and branches' });
+    const scanButton = button('Scan worktrees and branches');
     const panel = within(dialog().getByRole('region', { name: 'Stranded worktrees and branches' }));
 
+    // The panel renders during preview; its scan button is enabled only after preview settles.
+    await waitFor(() => expect(scanButton.disabled).toBe(false));
     fireEvent.click(scanButton);
     expect((await panel.findByRole('alert')).textContent).toBe('Could not scan worktrees and branches. Git unavailable.');
     expect(scan).toHaveBeenCalledTimes(1);
@@ -216,7 +225,9 @@ describe('/housekeep', () => {
     const scan = deferred<HousekeepInventory>();
     reply({ preview: () => preview([row('one', 'Archive candidate')]), inventory: () => scan.promise, apply: () => [] });
     render(<HousekeepDialog onClose={vi.fn()} />);
-    fireEvent.click(await dialog().findByRole('button', { name: 'Scan worktrees and branches' }));
+    const scanButton = button('Scan worktrees and branches');
+    await waitFor(() => expect(scanButton.disabled).toBe(false));
+    fireEvent.click(scanButton);
     await readAndSelect('Archive candidate');
     fireEvent.click(button('Review selected'));
     expect(pickedTitles().map((item) => item.querySelector('strong')?.textContent)).toEqual(['Archive candidate']);
