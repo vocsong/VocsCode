@@ -319,10 +319,23 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await row.getByRole('menuitem', { name: 'Fork into', exact: true }).waitFor();
     await win.keyboard.press('Escape');
     await row.getByRole('button', { name: 'Archive session', exact: true }).click({ trial: true });
-    await row.getByTitle('Click to rename').click();
-    const title = row.getByRole('textbox');
-    await title.fill('Rename from the Zen sidebar');
-    await title.press('Enter');
+
+    // Select the other fixture first so a click on the title itself has to change the active row.
+    await clickDot(win, SECOND);
+    await expect.poll(() => activeRow(win)).toBe(SECOND);
+    await row.hover(railDot);
+    const originalTitle = 'Add rate limiting to the public API';
+    const title = row.getByText(originalTitle, { exact: true });
+    await title.click();
+    await expect.poll(() => activeRow(win)).toBe(FIRST);
+    expect(await row.getByRole('textbox').count()).toBe(0);
+
+    await title.dblclick();
+    const rename = row.getByRole('textbox', { name: 'Rename session', exact: true });
+    await rename.waitFor();
+    expect(await rename.inputValue()).toBe(originalTitle);
+    await rename.fill('Rename from the Zen sidebar');
+    await rename.press('Enter');
     await row.getByText('Rename from the Zen sidebar', { exact: true }).waitFor();
   }, 60_000);
 
