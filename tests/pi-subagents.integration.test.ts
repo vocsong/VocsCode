@@ -5,7 +5,7 @@
  *
  * Opt-in: `VOCS_CODE_PI_INTEGRATION=1`. A selected but missing runtime fails, never skips.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -35,6 +35,7 @@ describe.skipIf(!enabled)('Vocs Code subagents over the real Pi runtime', () => 
     await fs.writeFile(path.join(agentDir, 'settings.json'), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false } }));
   });
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await Promise.all(runners.splice(0).map((runner) => runner.close()));
     if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
@@ -82,6 +83,95 @@ describe.skipIf(!enabled)('Vocs Code subagents over the real Pi runtime', () => 
     expect(parsed.calls).toHaveLength(1);
     expect(parsed.calls[0]!.model).toBe('scripted');
     expect(parsed.totals.turns).toBe(1);
+  });
+
+  // Count requests inside the provider itself, independently of child session events and telemetry.
+  const startRecording = () => {
+    const log = path.join(root, 'provider-calls.jsonl');
+    vi.stubEnv('VOCS_CODE_PI_FIXTURE_CALL_LOG', log);
+    return { runner: start(), readCalls: async () => (await fs.readFile(log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line)) };
+  };
+
+  it('honors an explicit child model and medium effort at the provider boundary without changing the parent', async () => {
+    const { runner, readCalls } = startRecording();
+    await runner.ready();
+    const events = await runner.prompt([call('s1', 'subagent', {
+      description: 'Report child configuration', prompt: 'REPORT_CONFIG', type: 'Explore', model: 'vocs-offline/reasoner', thinkingLevel: 'medium',
+    })]);
+    const ended = events.filter((event) => event.type === 'tool_execution_end');
+    expect(ended).toHaveLength(1);
+    expect(ended[0].isError).toBe(false);
+    expect(text(ended[0])).toContain('CONFIG_OK:reasoner:medium');
+    expect(ended[0].result.details).toMatchObject({ provider: 'vocs-offline', model: 'reasoner', requestedThinkingLevel: 'medium', thinkingLevel: 'medium', status: 'completed', turns: 1 });
+    const state = await runner.request('get_state');
+    expect(state).toMatchObject({ model: { provider: 'vocs-offline', id: 'scripted' }, thinkingLevel: 'off' });
+    const files = await fs.readdir(path.join(agentDir, 'subagents'));
+    expect(files).toHaveLength(1);
+    const run = parseRunFile(await fs.readFile(path.join(agentDir, 'subagents', files[0]!), 'utf8'))!;
+    expect(run.meta).toMatchObject({ model: 'reasoner', requestedThinkingLevel: 'medium', thinkingLevel: 'medium' });
+    expect(run.status).toBe('completed');
+    expect(run.calls).toHaveLength(1);
+    expect(await readCalls()).toEqual([
+      { model: 'scripted', role: 'user' },
+      { model: 'reasoner', role: 'user' },
+      { model: 'scripted', role: 'toolResult' },
+    ]);
+  });
+
+  it.each([
+    { model: 'vocs-offline/scripted', error: /medium.*off.*child not started/s, constructed: true },
+    { model: 'vocs-offline/not-registered', error: /not-registered.*not available/s, constructed: false },
+  ])('rejects $model at medium effort without a child provider request', async ({ model, error, constructed }) => {
+    const { runner, readCalls } = startRecording();
+    await runner.ready();
+    const events = await runner.prompt([call('s1', 'subagent', {
+      description: 'Refuse explicit configuration', prompt: 'REPORT_CONFIG', type: 'Explore', model, thinkingLevel: 'medium',
+    })]);
+    const ended = events.filter((event) => event.type === 'tool_execution_end');
+    expect(ended).toHaveLength(1);
+    expect(ended[0].isError).toBe(true);
+    expect(text(ended[0])).toMatch(error);
+    expect(await readCalls()).toEqual([
+      { model: 'scripted', role: 'user' },
+      { model: 'scripted', role: 'toolResult' },
+    ]);
+    if (constructed) {
+      const files = await fs.readdir(path.join(agentDir, 'subagents'));
+      expect(files).toHaveLength(1);
+      const run = parseRunFile(await fs.readFile(path.join(agentDir, 'subagents', files[0]!), 'utf8'))!;
+      expect(run.status).toBe('error');
+      expect(run.meta).toMatchObject({ requestedThinkingLevel: 'medium', thinkingLevel: 'off' });
+      expect(run.calls).toEqual([]);
+      expect(run.totals.turns).toBe(0);
+      expect(run.items.some((item) => item.kind === 'assistant')).toBe(false);
+    }
+  });
+
+  it('completes exactly five background children on their requested model and independent efforts', async () => {
+    await fs.writeFile(path.join(agentDir, 'subagents.json'), JSON.stringify({ maxConcurrent: 5 }));
+    const runner = start();
+    await runner.ready();
+    const levels = ['medium', 'high', 'medium', 'low', 'medium'];
+    const events = await runner.prompt(levels.map((thinkingLevel, index) => call(`s${index}`, 'subagent', {
+      description: `Worker ${index}`, prompt: 'REPORT_CONFIG', type: 'Explore', background: true, model: 'vocs-offline/reasoner', thinkingLevel,
+    })));
+    const ended = events.filter((event) => event.type === 'tool_execution_end' && String(event.toolCallId).startsWith('s'));
+    expect(ended).toHaveLength(5);
+    expect(ended.every((event) => !event.isError)).toBe(true);
+    const isEnd = (event: PiEvent) => event.type === 'extension_ui_request' && event.message?.startsWith('VCODE_SUBAGENT::') && JSON.parse(event.message.slice('VCODE_SUBAGENT::'.length)).kind === 'end';
+    await runner.waitFor(() => runner.events.filter(isEnd).length === 5, 0);
+    expect(runner.events.filter(isEnd)).toHaveLength(5);
+    const files = await fs.readdir(path.join(agentDir, 'subagents'));
+    expect(files).toHaveLength(5);
+    const runs = await Promise.all(files.map(async (file) => parseRunFile(await fs.readFile(path.join(agentDir, 'subagents', file), 'utf8'))!));
+    for (const [index, level] of levels.entries()) {
+      const run = runs.find((entry) => entry.meta.description === `Worker ${index}`)!;
+      expect(run.status).toBe('completed');
+      expect(run.meta).toMatchObject({ model: 'reasoner', requestedThinkingLevel: level, thinkingLevel: level });
+      expect(run.calls).toHaveLength(1);
+      expect(run.items.find((item) => item.kind === 'assistant')?.text).toBe(`CONFIG_OK:reasoner:${level}`);
+    }
+    expect(await runner.request('get_state')).toMatchObject({ model: { id: 'scripted' }, thinkingLevel: 'off' });
   });
 
   it("runs an agent the project defines in its own .pi/agents", async () => {

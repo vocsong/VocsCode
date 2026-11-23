@@ -199,6 +199,33 @@ describe('run detail', () => {
   });
 });
 
+describe('effort metadata', () => {
+  it.each([
+    { label: 'inherited', requestedThinkingLevel: undefined, thinkingLevel: 'medium', expected: 'effort medium' },
+    { label: 'explicit', requestedThinkingLevel: 'high', thinkingLevel: 'high', expected: 'effort high' },
+    { label: 'clamped', requestedThinkingLevel: 'xhigh', thinkingLevel: 'high', expected: 'effort high (requested xhigh)' },
+    { label: 'unsupported', requestedThinkingLevel: 'high', thinkingLevel: 'off', expected: 'effort off (requested high)' },
+    { label: 'unknown effective', requestedThinkingLevel: 'high', thinkingLevel: undefined, expected: 'effort unknown (requested high)' },
+    { label: 'legacy', requestedThinkingLevel: undefined, thinkingLevel: undefined, expected: undefined }
+  ])('shows $label effort honestly in both the list and detail', async ({ requestedThinkingLevel, thinkingLevel, expected }) => {
+    const effort = { requestedThinkingLevel, thinkingLevel };
+    invoke.mockImplementation((channel: string) => {
+      if (channel === 'subagents:list') return Promise.resolve([summary(effort)]);
+      if (channel === 'subagents:get') return Promise.resolve(run({ meta: { ...run().meta, ...effort } }));
+      return Promise.resolve(null);
+    });
+    await renderTab();
+
+    for (const selector of ['.subagent-row .subagent-meta', '.subagent-detail-stats']) {
+      const text = document.querySelector(selector)!.textContent!;
+      if (expected) expect(text).toContain(expected);
+      else expect(text).not.toContain('effort');
+      if (!requestedThinkingLevel || requestedThinkingLevel === thinkingLevel) expect(text).not.toContain('requested');
+      else expect(text).not.toContain(`effort ${requestedThinkingLevel}`);
+    }
+  });
+});
+
 describe('what each harness can do', () => {
   /** Render a session with one running run, so every affordance that needs a live run would show. */
   async function renderRunning(harness: SessionMeta['config']['harness']): Promise<void> {
@@ -233,6 +260,30 @@ describe('what each harness can do', () => {
 });
 
 describe('live updates', () => {
+  it('refreshes requested-only effort once the child reports its effective level', async () => {
+    let thinkingLevel: string | undefined;
+    invoke.mockImplementation((channel: string) => {
+      const effort = { requestedThinkingLevel: 'high', thinkingLevel };
+      if (channel === 'subagents:list') return Promise.resolve([summary(effort)]);
+      if (channel === 'subagents:get') return Promise.resolve(run({ meta: { ...run().meta, ...effort } }));
+      return Promise.resolve(null);
+    });
+    await renderTab();
+    expect(document.querySelector('.subagent-meta')!.textContent).toContain('effort unknown (requested high)');
+    expect(document.querySelector('.subagent-detail-stats')!.textContent).toContain('effort unknown (requested high)');
+
+    thinkingLevel = 'medium';
+    await act(async () => {
+      for (const listener of listeners.get('push:sessionEvent') ?? []) {
+        listener({ sessionId: 's1', event: { type: 'subagent.run', run: { runId: 'agent_1', status: 'running' } }, ts: 1 });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+    expect(document.querySelector('.subagent-meta')!.textContent).toContain('effort medium (requested high)');
+    expect(document.querySelector('.subagent-detail-stats')!.textContent).toContain('effort medium (requested high)');
+    expect(document.querySelector('.subagents')!.textContent).not.toContain('effort unknown');
+  });
+
   it('refreshes the list when the extension reports a run event for this session', async () => {
     invoke.mockImplementation((channel: string) => {
       if (channel === 'subagents:list') return Promise.resolve([summary()]);
