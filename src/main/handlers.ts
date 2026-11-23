@@ -16,6 +16,7 @@ import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { FILE_PREVIEW_MAX_BYTES, PUSH_CHANNELS, TEXT_EXPORT_MAX_BYTES } from '../shared/ipc';
 import { missionPlanMarkdown } from './mission/context';
 import { missionDeliveryBranch } from './mission/delivery';
+import { missionImageSchema } from './mission/image-schema';
 import type { TargetObservation } from './mission/workspaces';
 import { Vesta } from './agents';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
@@ -174,8 +175,10 @@ const HARNESS_BINARY: Partial<Record<HarnessId, ToolName>> = { claude: 'claude',
 const missionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/, 'Invalid Mission/session identifier');
 const missionKeySchema = z.string().min(1).max(200);
 const missionTextSchema = z.string().min(1).max(100_000).refine((text) => !!text.trim(), 'Text must not be empty');
-const missionImageSchema = z.strictObject({ mimeType: z.string().regex(/^image\/[a-z0-9.+-]+$/i), data: z.string().min(1).max(32_000_000), name: z.string().max(1000).optional() });
-const missionImagesSchema = z.array(missionImageSchema).max(100).optional();
+// Keep the narrower IPC name cap without changing the service's retained-image validation.
+const missionImagesSchema = z.array(missionImageSchema.extend({
+  name: missionImageSchema.shape.name.unwrap().max(1000).optional()
+})).max(100).optional();
 const missionFileSchema = z.strictObject({
   name: z.string().min(1).max(255), mimeType: z.string().min(1).max(200),
   data: z.string().min(1).max(Math.ceil(10 * 1024 * 1024 / 3) * 4 + 4).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'Invalid file encoding')
