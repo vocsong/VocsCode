@@ -5,6 +5,7 @@
  * pull the conversation's comments on open and render them below the description. The PR
  * table keeps the number in its own column at the default panel width and when the panel is wide.
  * A transcript link opens the Git panel in Standard and Zen and shows a merged PR outside the recent list.
+ * The sidebar also finds that merge without opening the Git panel or mistaking an older open PR for it.
  * The row's New session action confirms first in a dialog carrying the review template, editable
  * before the session starts on the repo; the issue row does the same with the fix template. That
  * turn is not asserted, since no provider key is configured.
@@ -93,13 +94,15 @@ const GH_CMD = [
 ].join('\r\n');
 
 /**
- * Seeds a repository and session with the fake gh, launches the app and lands on the Git tab.
+ * Seeds a repository and session with the fake gh, launches the app and normally opens the Git tab.
  * `seedRepo` runs after the initial commit so a test can add remotes, branches, and sessions.
  */
 async function seedAndLaunch(
-  { tag, panelWidth, assistantText = 'Hi', uiMode, seedRepo, windowBounds }: {
+  { tag, panelWidth, assistantText = 'Hi', uiMode, seedRepo, windowBounds, openGit = true, sidebarSession }: {
     tag: string;
     panelWidth: number;
+    openGit?: boolean;
+    sidebarSession?: Pick<SessionMeta, 'status' | 'worktreeBranch'>;
     windowBounds?: { x: number; y: number; width: number; height: number };
     assistantText?: string;
     uiMode?: UiModeId;
@@ -138,7 +141,8 @@ async function seedAndLaunch(
     status: 'idle',
     harnessRef: {},
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
-    queued: 0
+    queued: 0,
+    ...sidebarSession
   } as SessionMeta;
   const items: TranscriptItem[] = [
     { id: 'u1', kind: 'user', ts: Date.now(), text: 'Hello' },
@@ -170,8 +174,10 @@ async function seedAndLaunch(
   // The suite runs off-screen and inactive so it does not disturb the desktop; assert the window itself.
   await expectQuietWindow(app);
 
-  const gitTab = uiMode === 'zen' ? win.locator('.panel-tab[title="Git"]') : win.locator('.panel-tab', { hasText: 'Git' });
-  await gitTab.click();
+  if (openGit) {
+    const gitTab = uiMode === 'zen' ? win.locator('.panel-tab[title="Git"]') : win.locator('.panel-tab', { hasText: 'Git' });
+    await gitTab.click();
+  }
   return { app, win };
 }
 
@@ -217,6 +223,20 @@ async function launchBranchesPanel(): Promise<{ app: ElectronApplication; win: P
   await win.locator('.branch-row', { hasText: 'feature/ghost' }).waitFor({ timeout: 30_000 });
   return { app, win };
 }
+
+describe.runIf(enabled)('sidebar PR status', () => {
+  it('shows the latest mentioned PR as merged despite an older open branch PR', async () => {
+    const { app, win } = await seedAndLaunch({
+      tag: 'sidebar-pr', panelWidth: 420, openGit: false,
+      sidebarSession: { status: 'pr', worktreeBranch: 'feature/widget' },
+      assistantText: `Started ${LINKED_PR_URL}; also see https://github.com/acme/repo/pull/7. Now merged ${LINKED_PR_URL}.`,
+      seedRepo: (_project, git) => git('checkout', '-qb', 'feature/widget')
+    });
+    const badge = win.getByTestId('session-row').filter({ hasText: 'Git panel' }).locator('.session-status');
+    await badge.getByText('Merged', { exact: true }).waitFor({ timeout: 20_000 });
+    await app.close();
+  });
+});
 
 describe.runIf(enabled)('git panel PR details', () => {
   it.each(['standard', 'zen'] as const)('opens the linked pull request from a transcript with the Git panel closed in %s mode', async (uiMode) => {

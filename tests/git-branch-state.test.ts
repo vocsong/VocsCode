@@ -59,9 +59,9 @@ describe('branchGitState', () => {
     which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : null));
   });
 
-  it('reports not-a-repo as neither PR nor merged', async () => {
+  it('cannot check a missing repository', async () => {
     gitReply(['rev-parse', '--show-toplevel'], { code: 1 });
-    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false });
+    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false, unknown: true });
   });
 
   it('marks a branch whose merge commit landed on a base branch as merged', async () => {
@@ -71,37 +71,20 @@ describe('branchGitState', () => {
     expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: true });
   });
 
-  it('does not mark a fresh branch sitting at the base tip as merged', async () => {
+  it.each(['', 'aaa bbb\n'])('cannot confirm a merge from non-matching ancestry (%j)', async (parents) => {
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
     gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
-    for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 0, stdout: '' });
-    gitReply(['rev-parse', '--verify', '--quiet', 'origin/work'], { code: 1 });
-    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false });
+    for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 0, stdout: parents });
+    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false, unknown: true });
   });
 
-  it('does not mark a branch merely behind a base branch as merged', async () => {
-    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
-    gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
-    for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 0, stdout: 'aaa bbb\n' });
-    gitReply(['rev-parse', '--verify', '--quiet', 'origin/work'], { code: 1 });
-    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false });
-  });
-
-  it('falls back to remote tracking for a pushed branch when gh is missing', async () => {
+  it('does not infer a PR from a pushed branch when gh is missing', async () => {
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
     gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
     for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 0, stdout: '' });
     gitReply(['rev-parse', '--verify', '--quiet', 'origin/work'], { code: 0 });
     gitReply(['rev-list', '--count', 'origin/work..work'], { code: 0, stdout: '0\n' });
-    expect(await branchGitState('/repo', 'work')).toEqual({ pr: true, merged: false });
-  });
-
-  it('treats local-only commits as neither PR nor merged', async () => {
-    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
-    gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
-    for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 1 });
-    gitReply(['rev-parse', '--verify', '--quiet', 'origin/work'], { code: 1 });
-    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false });
+    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false, unknown: true });
   });
 
   it('uses gh when available: an open PR is pr, a merged PR is merged', async () => {
@@ -131,6 +114,53 @@ describe('branchGitState', () => {
       return Promise.resolve({ code: 1, stdout: '', stderr: 'unexpected call' });
     });
     expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: true });
+  });
+
+  const explicitRef = { repo: 'other/repo', number: 7 };
+  const explicitUrl = 'https://github.com/other/repo/pull/7';
+  const sameNumberLocal = { number: 7, state: 'OPEN', headRefName: 'work', url: 'https://github.com/local/repo/pull/7' };
+
+  it.each(['OPEN', 'MERGED', 'CLOSED'])('uses exactly one view for a latest explicit %s PR, not an older or same-number PR', async (state) => {
+    which.mockImplementation((cmd: string) => cmd === 'git' ? GIT : '/usr/bin/gh');
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    runCapture.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === '/usr/bin/gh') {
+        return { code: 0, stdout: JSON.stringify(args[2] === explicitUrl ? { number: 7, state, url: explicitUrl } : [sameNumberLocal]), stderr: '' };
+      }
+      return replies.get(`${cmd} ${JSON.stringify(args)}`) ?? { code: 1, stdout: '', stderr: '' };
+    });
+    expect(await branchGitState('/repo', 'work', { prRefs: [{ repo: 'local/repo', number: 7 }, explicitRef] }))
+      .toEqual({ pr: state === 'OPEN', merged: state === 'MERGED' });
+    expect(runCapture.mock.calls.filter(([cmd]) => cmd === '/usr/bin/gh').map(([, args]) => args))
+      .toEqual([['pr', 'view', explicitUrl, '--json', 'number,state,url']]);
+  });
+
+  it.each([
+    { code: 1, stdout: '', stderr: 'authentication required' },
+    { code: 0, stdout: '{broken', stderr: '' },
+    { code: 0, stdout: JSON.stringify(sameNumberLocal), stderr: '' },
+    { code: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', url: explicitUrl }), stderr: '', truncated: true }
+  ])('reports an unavailable or mismatched exact lookup without falling back: %j', async (reply) => {
+    which.mockImplementation((cmd: string) => cmd === 'git' ? GIT : '/usr/bin/gh');
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    runCapture.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === '/usr/bin/gh') return args[1] === 'view' ? reply : { code: 0, stdout: JSON.stringify([sameNumberLocal]), stderr: '' };
+      return replies.get(`${cmd} ${JSON.stringify(args)}`) ?? { code: 1, stdout: '', stderr: '' };
+    });
+    expect(await branchGitState('/repo', 'work', { prRefs: [explicitRef] })).toEqual({ pr: false, merged: false, unknown: true });
+    expect(runCapture.mock.calls.filter(([cmd]) => cmd === '/usr/bin/gh')).toHaveLength(1);
+  });
+
+  it('distinguishes an unavailable branch lookup from a successful empty list', async () => {
+    which.mockImplementation((cmd: string) => cmd === 'git' ? GIT : '/usr/bin/gh');
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    runCapture.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === '/usr/bin/gh') return { code: 0, stdout: 'null', stderr: '' };
+      return replies.get(`${cmd} ${JSON.stringify(args)}`) ?? { code: 1, stdout: '', stderr: '' };
+    });
+    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false, unknown: true });
+    agentPrReply([]);
+    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false });
   });
 
   /** gh + repo replies for the agent-branch fallback: the PR's head is not the session branch. */
