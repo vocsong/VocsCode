@@ -288,6 +288,18 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - Dictation never hands the renderer a key or a model: the renderer records and encodes a 16 kHz WAV, and main transcribes it with the engine in settings (`dictation:transcribe`, desktop only, not a remote channel). The local engine runs only what it downloaded from the pinned whisper.cpp release (`WHISPER_RELEASE`, `WHISPER_BUILDS`, `LOCAL_MODELS` in `shared/dictation.ts`), and a file gets its final name only after its size and sha256 match; bumping the release means re-pinning every asset's size and digest. Its server holds GPU memory only while in use — the idle timeout, a switch to the cloud engine and quit all stop it.
 - A session's usage counts only the money it spent itself. Turn rows are the itemized ledger and `SessionMeta.usage` is the counter over it; a fork carries the conversation, never the ledger.
 
+## Sidebar PR labels
+
+A worktree session's latest mentioned GitHub PR (including a repeat mention) owns its
+sidebar label. The sidebar checks it with one repo-qualified `gh pr view`; an unavailable
+lookup never substitutes an older PR or wipes the existing label. Sessions without a PR
+link use branch evidence; a push alone is not evidence of a PR. `/merge` still considers
+all session refs, and the Git panel refreshes independently.
+
+A parked PR is checked again after two minutes even if the last check was unchanged or
+unavailable. Only the current refresh for the same session, cwd and worktree branch may
+publish or rearm a check, and busy adapters, pending turns and approvals block publication.
+
 ## Mission ownership
 
 [Mission guide](MISSIONS.md) · [status and support matrix](MISSION-STATUS.md) · [specification](MISSION-SPEC-v0.2.md)
