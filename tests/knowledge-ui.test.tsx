@@ -129,6 +129,28 @@ describe('Project knowledge panel', () => {
     expect(screen.getByTestId('knowledge-detail').textContent).toContain('A harness belongs to exactly one session.');
   });
 
+  it('renders a search excerpt as text and marks only the matched text', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      if (channel === 'knowledge:search') return [summary({ snippet: 'A <b>\u0001literal\u0002</b> &amp; text.' })];
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    const input = screen.getByRole('textbox', { name: 'Search project knowledge' });
+    fireEvent.change(input, { target: { value: 'literal' } });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' });
+    });
+
+    expect(invoke).toHaveBeenCalledWith('knowledge:search', { sessionId: 's1', q: 'literal', limit: 30 });
+    const excerpt = screen.getByTestId('knowledge-page-conventions/harness-lifecycle').querySelector('.knowledge-snippet');
+    expect(excerpt?.textContent).toBe('A <b>literal</b> &amp; text.');
+    expect(Array.from(excerpt!.querySelectorAll('mark'), (mark) => mark.textContent)).toEqual(['literal']);
+    expect(excerpt!.querySelector('b')).toBeNull();
+  });
+
   it('renders the labels and provenance of an open page', async () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'knowledge:view') return view({ pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha', labels: ['pty-lifecycle'], updatedBy: 'agent:distill' })] });

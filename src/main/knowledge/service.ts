@@ -674,15 +674,15 @@ function snippetFor(body: string, terms: string[]): string | undefined {
   const flat = body.replace(/\s+/g, ' ').trim();
   if (!flat) return undefined;
   const lower = flat.toLowerCase();
-  let at = -1;
   for (const term of terms) {
-    at = lower.indexOf(term);
-    if (at >= 0) break;
+    const at = lower.indexOf(term);
+    if (at < 0) continue;
+    const start = Math.max(0, at - 70);
+    const matchEnd = Math.min(flat.length, at + term.length);
+    const end = Math.min(flat.length, Math.max(matchEnd, at + 110));
+    return `${start > 0 ? '…' : ''}${flat.slice(start, at)}\u0001${flat.slice(at, matchEnd)}\u0002${flat.slice(matchEnd, end)}${end < flat.length ? '…' : ''}`;
   }
-  if (at < 0) return flat.slice(0, 160);
-  const start = Math.max(0, at - 70);
-  const end = Math.min(flat.length, at + 110);
-  return `${start > 0 ? '…' : ''}${flat.slice(start, at)}\u0001${flat.slice(at, at + Math.min(terms[0].length, flat.length - at))}\u0002${flat.slice(at + Math.min(terms[0].length, flat.length - at), end)}${end < flat.length ? '…' : ''}`;
+  return flat.slice(0, 160);
 }
 
 /** Published copies drop proposal-only fields and keep the provenance intact. */
