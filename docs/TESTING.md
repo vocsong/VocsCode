@@ -156,6 +156,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Git tab (Branches, Worktrees, PRs and Issues), including `git-panel-cache.ts` | `tests/git-panel-refresh.test.tsx`, `tests/git-panel-pr-dialog.test.tsx`, `tests/git-error-banner.test.tsx`, `tests/git-setup-ui.test.tsx` + `e2e.git` (session switching in Standard and Zen, refresh and GitHub previews) |
 | GitHub PR links in transcripts (`Transcript.tsx`, `git:pullRequest`) | `tests/pr.test.ts`, `tests/git-panel-pr-dialog.test.tsx`, `tests/handler-registry.test.ts` + `e2e.git` (opening the linked PR in Standard and Zen) |
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
+| Copy image from the Files drawer or transcript lightbox | `tests/image-lightbox.test.tsx`, `tests/file-links.test.tsx` + `e2e.files` (real Electron image encoding; intercepts the clipboard write so it leaves the system clipboard alone) |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |
 | Usage panel, `src/renderer/src/session-usage.ts` | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx` + `e2e.usage` |
