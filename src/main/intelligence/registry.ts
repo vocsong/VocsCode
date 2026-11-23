@@ -183,13 +183,13 @@ export class ProjectRegistry {
   }
 
   /** The stable identity of the project at `root`, registering the checkout the first time it is seen. */
-  async resolve(root: string): Promise<ProjectIdentity> {
+  async resolve(root: string, local?: { commonDir: string; signal: AbortSignal }): Promise<ProjectIdentity> {
     const hit = await this.known(root);
     if (hit) return hit;
     const key = normalizeRoot(root);
     let pending = this.resolving.get(key);
     if (!pending) {
-      pending = this.register(root, key).finally(() => this.resolving.delete(key));
+      pending = this.register(root, key, local).finally(() => this.resolving.delete(key));
       this.resolving.set(key, pending);
     }
     return pending;
@@ -204,8 +204,9 @@ export class ProjectRegistry {
     }
   }
 
-  private async register(root: string, key: string): Promise<ProjectIdentity> {
-    const facts = await this.facts(root);
+  private async register(root: string, key: string, local?: { commonDir: string; signal: AbortSignal }): Promise<ProjectIdentity> {
+    // The automatic indexer already verified this local checkout; don't invoke the legacy Git/history probe.
+    const facts = local ? { commonDir: local.commonDir } : await this.facts(root);
     const origin = normalizeRemoteUrl(facts.origin) ?? undefined;
     const commonDir = facts.commonDir && path.isAbsolute(facts.commonDir) ? normalizeRoot(facts.commonDir) : undefined;
     const identity = await this.mutate((draft) => {
@@ -232,7 +233,7 @@ export class ProjectRegistry {
       };
       draft.projects.push(created);
       return created;
-    });
+    }, local?.signal);
     this.deps.log('debug', `intelligence: ${root} is project ${identity.id}${identity.origin ? ` (${identity.origin})` : ''}`);
     return structuredClone(identity);
   }

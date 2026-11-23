@@ -1,22 +1,8 @@
 /**
- * Graphify as an optional graph provider (https://github.com/Graphify-Labs/graphify, Apache-2.0).
- *
- * Nothing here runs unless the user opted a project in and then asked for an index. What comes back
- * is derived evidence, never authority: a graph is a rebuildable picture of the code at one commit,
- * so every answer is served next to the health that says how far to trust it (missing, stale,
- * unreadable) and it ranks below the wiki, the project rules and the working tree.
- *
- * The build is AST-only (`extract --code-only` with every LLM backend switched off). The app
- * never runs install, hook, semantic or cloud commands, which could mutate instructions or send
- * project evidence off this machine.
- *
- * Queries read the produced `graph.json` directly rather than going through Graphify's MCP server or
- * a Python import. That keeps the engine out of the read path — a project that was indexed once
- * stays answerable when the tool is later uninstalled — and leaves one small parser to keep
- * defensive, because the node and link fields vary by release.
- *
- * The desktop keeps the cache in its own profile, keyed by checkout. A project cannot redirect
- * a rebuild to another checkout via links in its working tree.
+ * Graphify (Apache-2.0) supplies derived code evidence. The desktop starts only the bundled
+ * AST extractor on a private committed Git snapshot, then publishes its cache by checkout.
+ * The memory gateway and the UI read that cache directly; no query launches Python, no install,
+ * hooks or cloud commands run, and the wiki remains authoritative.
  */
 import type { ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -33,6 +19,7 @@ export const TESTED_GRAPHIFY_VERSION = '0.9.115';
 export interface GraphScope {
   projectRoot: string;
   cwd: string;
+  projectId?: string;
 }
 
 export interface GraphifyRunResult {
@@ -43,12 +30,16 @@ export interface GraphifyRunResult {
 }
 
 export interface GraphifyDeps {
-  /** Resolved executable, or null when Graphify is not installed. */
+  /** App-owned interpreter in production; standalone executable in CLI contract tests. */
   command: () => string | null;
-  /** Injected in tests. Default: spawn without a shell (`defaultGraphifyRun`). */
-  run?: (command: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }) => Promise<GraphifyRunResult>;
-  /** Current HEAD commit of a checkout, or null. Injected; default returns null. */
-  headRevision?: (cwd: string) => Promise<string | null>;
+  commandArgs?: readonly string[];
+  run?: (command: string, args: string[], opts: GraphifyRunOptions) => Promise<GraphifyRunResult>;
+  /** Current HEAD commit of this exact checkout, or null. */
+  headRevision?: (cwd: string, signal?: AbortSignal) => Promise<string | null>;
+  /** Cheap filesystem-only freshness hint; a build still verifies the exact commit. */
+  revisionStamp?: (cwd: string, signal?: AbortSignal) => Promise<string | null>;
+  /** Production adapter. Materialize only committed code in a caller-owned staging directory. */
+  snapshot?: (cwd: string, revision: string, destination: string, signal: AbortSignal) => Promise<void>;
   /** The owner controls what is being launched. Validate its reviewed release before indexing. */
   requireVersion?: string;
   /** App-private root; each project has its own hashed cache directory. */
@@ -57,6 +48,8 @@ export interface GraphifyDeps {
   /** Index wall-clock limit. Default 10 minutes. */
   timeoutMs?: number;
 }
+
+interface GraphifyRunOptions { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal?: AbortSignal; direct?: boolean }
 
 type MatchEdge = GraphEdge & { otherId: string; otherLabel: string; direction: 'out' | 'in' };
 
@@ -82,6 +75,8 @@ const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 /** JSON.parse holds the whole file as one string; past this the load would stall the main process. */
 const MAX_ARTIFACT_BYTES = 256 * 1024 * 1024;
+const MAX_DESKTOP_ARTIFACT_BYTES = 24 * 1024 * 1024;
+const MAX_REFRESH_TRACKED = 64;
 const MAX_NODES = 400_000;
 /** Parsed graphs are large; a handful of projects is all one app session realistically queries. */
 const MAX_CACHED_GRAPHS = 4;
@@ -141,17 +136,21 @@ function tailBuffer(): { push: (data: unknown) => void; text: () => string } {
  * (a percent sign, a newline) instead of altering it, and that refusal lands here as a failed run.
  * Never rejects.
  */
-export function defaultGraphifyRun(command: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<GraphifyRunResult> {
+export function defaultGraphifyRun(command: string, args: string[], opts: GraphifyRunOptions): Promise<GraphifyRunResult> {
   return new Promise((resolve) => {
+    if (opts.signal?.aborted) return resolve({ code: null, stdout: '', stderr: '' });
     const stdout = tailBuffer();
     const stderr = tailBuffer();
     let settled = false;
     let timedOut = false;
+    let stoppedBecause: string | undefined;
     let timer: NodeJS.Timeout | undefined;
+    const abort = (): void => stop('Graphify indexing was cancelled.');
     const settle = (code: number | null, note?: string): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', abort);
       if (note) stderr.push(note);
       // A killed run's exit code describes the kill, not the build.
       resolve({ code: timedOut ? null : code, stdout: stdout.text(), stderr: stderr.text(), ...(timedOut ? { timedOut: true } : {}) });
@@ -165,12 +164,26 @@ export function defaultGraphifyRun(command: string, args: string[], opts: { cwd:
     }
     child.stdout?.on('data', (data) => stdout.push(data));
     child.stderr?.on('data', (data) => stderr.push(data));
-    child.on('error', (error) => settle(null, errorMessage(error)));
-    child.on('close', (code) => settle(code));
+    child.on('error', (error) => { if (!stoppedBecause) settle(null, errorMessage(error)); });
+    child.on('close', (code) => {
+      if (!stoppedBecause || opts.direct) settle(stoppedBecause ? null : code, stoppedBecause);
+    });
     timer = setTimeout(() => {
       timedOut = true;
-      const note = `\ntimed out after ${opts.timeoutMs} ms`;
-      // On Windows this waits for `taskkill /T /F`, which is what reaches a shim's grandchild.
+      stop(`\ntimed out after ${opts.timeoutMs} ms`);
+    }, opts.timeoutMs);
+    opts.signal?.addEventListener('abort', abort, { once: true });
+    if (opts.signal?.aborted) abort();
+    function stop(note: string): void {
+      if (stoppedBecause || settled) return;
+      stoppedBecause = note;
+      clearTimeout(timer);
+      if (opts.direct) {
+        // The bundled single-core worker has no subprocesses. Keep the stage until close.
+        child.kill('SIGKILL');
+        return;
+      }
+      // Standalone contract tests may use a Windows shim with a grandchild.
       void killTree(child)
         .catch(() => undefined)
         .then(() => {
@@ -188,7 +201,7 @@ export function defaultGraphifyRun(command: string, args: string[], opts: { cwd:
           // Grandchildren can hold the pipes open after the kill; settle rather than wait on `close`.
           settle(null, note);
         });
-    }, opts.timeoutMs);
+    }
   });
 }
 
@@ -377,7 +390,8 @@ export class GraphifyProvider {
   readonly id = 'graphify';
 
   /** One build per project root; a second request joins the first instead of racing it on disk. */
-  private readonly jobs = new Map<string, Promise<GraphIndexStatus>>();
+  private readonly jobs = new Map<string, { controller: AbortController; done: Promise<GraphIndexStatus> }>();
+  private readonly attempts = new Map<string, string>();
   /** Why the last build of a project failed, kept until one succeeds or the cache is cleared. */
   private readonly failures = new Map<string, string>();
   /** Artifact path → what it parsed to at one mtime and size; insertion order is recency. */
@@ -386,17 +400,19 @@ export class GraphifyProvider {
 
   constructor(private readonly deps: GraphifyDeps) {}
 
-  /** Where this project's artifact lives: `<projectRoot>/.vocs-code/graphify/graphify-out/graph.json`. */
+  /** The desktop uses an app-private cache; CLI contract fixtures use the upstream layout. */
   artifactPath(scope: GraphScope): string {
-    return path.join(this.cacheDir(scope), 'graphify-out', 'graph.json');
+    const dir = this.cacheDir(scope);
+    return this.deps.snapshot ? path.join(dir, 'graph.json') : path.join(dir, 'graphify-out', 'graph.json');
   }
 
-  /** Health for the UI and for every query result. Never throws. `enabled` is the user's opt-in. */
+  /** Health for the UI and for every query result. Never throws. */
   async status(scope: GraphScope, enabled: boolean): Promise<GraphIndexStatus> {
     const status: GraphIndexStatus = { provider: this.id, enabled, installed: false, indexed: false, indexing: false };
     try {
-      const key = rootKey(scope.projectRoot);
+      const key = this.key(scope);
       status.installed = this.command() !== null;
+      if (this.deps.snapshot && !enabled) return status;
       status.indexing = this.jobs.has(key);
       const artifact = await this.load(scope);
       const graph = artifact?.graph;
@@ -408,7 +424,7 @@ export class GraphifyProvider {
         if (graph.version) status.version = graph.version;
         if (graph.revision) {
           status.revision = graph.revision;
-          const head = await this.head(scope.cwd);
+          const head = await this.head(scope.cwd, undefined, true);
           // Without both commits there is nothing to compare, and "unknown" must not read as stale.
           if (head) status.stale = !sameRevision(head, graph.revision);
         }
@@ -424,24 +440,26 @@ export class GraphifyProvider {
   }
 
   /**
-   * Builds or refreshes the index. A call made while one is running for the same project root gets
-   * that run's promise. Never throws; a failure lands in `status.error`, and `indexed` still says
-   * whether an earlier artifact is there to answer from.
+   * Builds or refreshes one checkout. A concurrent caller joins the same run; a failed build
+   * leaves the prior cache intact. Only the desktop owner can request a manual refresh.
    */
-  index(scope: GraphScope): Promise<GraphIndexStatus> {
-    const key = rootKey(scope.projectRoot);
+  index(scope: GraphScope, opts: { revision?: string; signal?: AbortSignal } = {}): Promise<GraphIndexStatus> {
+    const key = this.key(scope);
     const running = this.jobs.get(key);
-    if (running) return running;
+    if (running) return running.done;
+    const controller = new AbortController();
+    const signal = opts.signal ? AbortSignal.any([controller.signal, opts.signal]) : controller.signal;
     const job = (async (): Promise<GraphIndexStatus> => {
       let error: string | undefined;
       try {
-        error = await this.build(scope);
+        error = await this.build(scope, signal, opts.revision);
       } catch (thrown) {
-        error = `Graphify could not be started: ${outputTail(errorMessage(thrown))}`;
+        if (!signal.aborted) error = `Graphify could not be started: ${outputTail(errorMessage(thrown))}`;
       } finally {
         this.jobs.delete(key);
       }
-      // "Not installed" is a state the next status() re-derives; remembering it would outlive the install.
+      if (signal.aborted) return this.status(scope, false);
+      // A missing worker is a state the next status derives; it isn't a permanent build failure.
       if (error && error !== NOT_INSTALLED) {
         this.failures.set(key, error);
         this.deps.log('warn', `graphify index failed in ${scope.cwd}: ${error}`);
@@ -449,12 +467,35 @@ export class GraphifyProvider {
         this.failures.delete(key);
         this.deps.log('info', `graphify index updated in ${scope.cwd}`);
       }
-      // Asking for an index is itself the opt-in.
       const status = await this.status(scope, true);
       return error && !status.error ? { ...status, error } : status;
     })();
-    this.jobs.set(key, job);
+    this.jobs.set(key, { controller, done: job });
     return job;
+  }
+
+  /** Only the desktop scheduler calls this, never a read or a tool invocation. */
+  async refresh(scope: GraphScope, signal: AbortSignal, revision?: string): Promise<void> {
+    if (!this.deps.snapshot || signal.aborted || !this.command()) return;
+    const key = this.key(scope);
+    revision ??= await this.head(scope.cwd, signal, true) ?? undefined;
+    if (!revision || signal.aborted || this.attempts.get(key) === revision) return;
+    const saved = (await this.load(scope))?.graph;
+    if (signal.aborted) return;
+    if (!saved?.revision || !sameRevision(revision, saved.revision) || saved.version !== this.deps.requireVersion) {
+      await this.index(scope, { revision, signal });
+    }
+    if (!signal.aborted) {
+      this.attempts.delete(key);
+      this.attempts.set(key, revision);
+      while (this.attempts.size > MAX_REFRESH_TRACKED) this.attempts.delete(this.attempts.keys().next().value!);
+    }
+  }
+
+  async cancel(): Promise<void> {
+    const jobs = [...this.jobs.values()];
+    for (const { controller } of jobs) controller.abort();
+    await Promise.allSettled(jobs.map(({ done }) => done));
   }
 
   indexing(projectRoot: string): boolean {
@@ -465,11 +506,11 @@ export class GraphifyProvider {
    * Lexical match over label, id and source file. Every term must hit somewhere in the node, so a
    * longer query narrows instead of widening. Returns [] when there is no usable artifact.
    */
-  async query(scope: GraphScope, query: string, opts: { limit?: number } = {}): Promise<GraphMatch[]> {
+  async query(scope: GraphScope, query: string, opts: { limit?: number; revision?: string } = {}): Promise<GraphMatch[]> {
     try {
       const terms = queryTerms(query);
       if (!terms.length) return [];
-      const graph = await this.graph(scope);
+      const graph = await this.graph(scope, opts.revision);
       if (!graph) return [];
       const hits: Array<{ entry: IndexedNode; score: number; fields: number }> = [];
       for (const entry of graph.nodes) {
@@ -515,9 +556,9 @@ export class GraphifyProvider {
   }
 
   /** Node by exact id, else by a label exactly one node carries (case-insensitive); null otherwise. */
-  async neighbors(scope: GraphScope, node: string, opts: { limit?: number } = {}): Promise<GraphNeighborhood | null> {
+  async neighbors(scope: GraphScope, node: string, opts: { limit?: number; revision?: string } = {}): Promise<GraphNeighborhood | null> {
     try {
-      const graph = await this.graph(scope);
+      const graph = await this.graph(scope, opts.revision);
       const entry = graph ? resolveNode(graph, node) : null;
       if (!graph || !entry) return null;
       return { node: { ...entry.node }, edges: edgesOf(graph, entry, clampInt(opts.limit, DEFAULT_NEIGHBOR_LIMIT, MAX_NEIGHBOR_LIMIT)) };
@@ -532,9 +573,9 @@ export class GraphifyProvider {
    * question, and a caller and its callee are related whichever way the call points. Each edge keeps
    * its own `from`/`to`, so the direction is still readable in the answer.
    */
-  async trace(scope: GraphScope, from: string, to: string, opts: { maxDepth?: number } = {}): Promise<GraphPath | null> {
+  async trace(scope: GraphScope, from: string, to: string, opts: { maxDepth?: number; revision?: string } = {}): Promise<GraphPath | null> {
     try {
-      const graph = await this.graph(scope);
+      const graph = await this.graph(scope, opts.revision);
       if (!graph) return null;
       const start = resolveNode(graph, from);
       const end = resolveNode(graph, to);
@@ -584,7 +625,7 @@ export class GraphifyProvider {
    */
   async clear(scope: GraphScope): Promise<boolean> {
     try {
-      const key = rootKey(scope.projectRoot);
+      const key = this.key(scope);
       if (this.jobs.has(key)) {
         this.deps.log('info', `graphify cache not cleared for ${scope.projectRoot}: an index is running`);
         return false;
@@ -604,9 +645,13 @@ export class GraphifyProvider {
     }
   }
 
+  private key(scope: GraphScope): string {
+    return this.deps.snapshot ? `${scope.projectId ?? ''}\0${rootKey(scope.projectRoot)}\0${rootKey(scope.cwd)}` : rootKey(scope.projectRoot);
+  }
+
   private cacheDir(scope: GraphScope): string {
     return this.deps.cacheRoot
-      ? path.resolve(this.deps.cacheRoot, createHash('sha256').update(rootKey(scope.projectRoot)).digest('hex'))
+      ? path.resolve(this.deps.cacheRoot, createHash('sha256').update(this.key(scope)).digest('hex'))
       : path.resolve(scope.projectRoot, GRAPHIFY_CACHE_DIR);
   }
 
@@ -619,19 +664,26 @@ export class GraphifyProvider {
     }
   }
 
-  private async head(cwd: string): Promise<string | null> {
+  private async head(cwd: string, signal?: AbortSignal, stampOnly = false): Promise<string | null> {
     try {
-      return (await this.deps.headRevision?.(cwd)) || null;
+      const probe = stampOnly && this.deps.revisionStamp ? this.deps.revisionStamp : this.deps.headRevision;
+      return (await probe?.(cwd, signal)) || null;
     } catch (error) {
-      this.deps.log('debug', `graphify could not read HEAD in ${cwd}: ${errorMessage(error)}`);
+      if (!signal?.aborted) this.deps.log('debug', `graphify could not read HEAD in ${cwd}: ${errorMessage(error)}`);
       return null;
     }
   }
 
   /** Returns why the build failed, or undefined when it produced an artifact. */
-  private async build(scope: GraphScope): Promise<string | undefined> {
+  private async build(scope: GraphScope, signal: AbortSignal, revision?: string): Promise<string | undefined> {
+    signal.throwIfAborted();
     const command = this.command();
     if (!command) return NOT_INSTALLED;
+    const snapshot = this.deps.snapshot;
+    if (snapshot) {
+      revision ??= await this.head(scope.cwd, signal) ?? undefined;
+      if (!revision || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(revision)) return 'Graphify needs a Git checkout with a commit.';
+    }
     // Absolute paths cannot be mistaken for a flag by the CLI's argument parser.
     const cwd = path.resolve(scope.cwd);
     const out = this.cacheDir(scope);
@@ -640,27 +692,89 @@ export class GraphifyProvider {
     const timeoutMs = this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const run = this.deps.run ?? defaultGraphifyRun;
     const env = graphifyEnv(process.env);
+    const invoke = (args: string[], directory: string, budget = timeoutMs): Promise<GraphifyRunResult> => {
+      signal.throwIfAborted();
+      return run(command, [...(this.deps.commandArgs ?? []), ...args], { cwd: directory, env, timeoutMs: budget, signal, ...(snapshot ? { direct: true } : {}) });
+    };
     if (this.deps.requireVersion) {
-      // Run the version probe away from the checkout, before allowing the process to read it.
-      const version = await run(command, ['--version'], { cwd: path.dirname(process.execPath), env, timeoutMs: 10_000 });
+      const version = await invoke(['--version'], path.dirname(command), 10_000);
       if (version.code !== 0 || version.stdout.trim() !== `graphify ${this.deps.requireVersion}`) {
-        return `Unsupported Graphify release. Install graphifyy==${this.deps.requireVersion} and retry.`;
+        return snapshot ? 'The bundled Graphify worker did not match the app version.' : `Unsupported Graphify release. Install graphifyy==${this.deps.requireVersion} and retry.`;
       }
     }
-    await fs.mkdir(out, { recursive: true });
+    signal.throwIfAborted();
+    await fs.mkdir(out, { recursive: true, mode: 0o700 });
     this.deps.log('debug', `graphify index started in ${cwd}`);
+    if (snapshot && revision) {
+      const exactRevision = revision;
+      return this.buildSnapshot(out, exactRevision, signal, (directory) => snapshot(cwd, exactRevision, directory, signal), async (input, output) => {
+        const result = await invoke(['extract', input, '--code-only', '--exclude', '.vocs-code', '--out', output], input);
+        return this.buildError(result, timeoutMs);
+      });
+    }
     // `--code-only` plus no backend is the whole privacy guarantee: no flag here may enable an LLM,
     // and `extract` is the only subcommand, because `install` and `hook install` edit instruction files.
     // `.vocs-code/` holds this app's worktrees, wiki and this very cache: indexing it would graph
     // other branches' copies of the code and the index's own output.
-    const result = await run(command, ['extract', cwd, '--code-only', '--exclude', '.vocs-code', '--out', out], { cwd, env, timeoutMs });
-    // Same-millisecond rewrites of an equal-sized file would otherwise be served from memory.
+    const result = await invoke(['extract', cwd, '--code-only', '--exclude', '.vocs-code', '--out', out], cwd);
     this.forget(scope);
+    return this.buildError(result, timeoutMs) ?? ((await this.locate(scope)) ? undefined : NO_ARTIFACT);
+  }
+
+  /** A private staging area never becomes a readable cache. Promote one validated artifact. */
+  private async buildSnapshot(
+    out: string, revision: string, signal: AbortSignal,
+    prepare: (directory: string) => Promise<void>,
+    extract: (input: string, output: string) => Promise<string | undefined>
+  ): Promise<string | undefined> {
+    const staging = await fs.mkdtemp(path.join(await fs.realpath(out), 'build-'));
+    try {
+      const input = path.join(staging, 'code');
+      await fs.mkdir(input, { mode: 0o700 });
+      signal.throwIfAborted();
+      await prepare(input);
+      if (!(await fs.readdir(input)).length) return 'This commit has no eligible code files to index.';
+      const output = path.join(staging, 'output');
+      const error = await extract(input, output);
+      if (error) return error;
+      signal.throwIfAborted();
+      const folder = path.join(output, 'graphify-out');
+      const artifact = (await lstatOrNull(folder))?.isDirectory() ? path.join(folder, 'graph.json') : path.join(output, 'graph.json');
+      const stat = await lstatOrNull(artifact);
+      if (!(await lstatOrNull(output))?.isDirectory() || !stat?.isFile()) return NO_ARTIFACT;
+      if (stat.size > MAX_DESKTOP_ARTIFACT_BYTES) return 'Graphify exceeded the 24 MiB desktop index limit.';
+      const graph: unknown = JSON.parse(await fs.readFile(artifact, 'utf8'));
+      if (!isRecord(graph) || !isRecord(graph.graph) || !Array.isArray(graph.nodes) || graph.graph.graphify_version !== this.deps.requireVersion) return UNREADABLE;
+      graph.built_at_commit = revision;
+      // Cite repo-relative files, never the temporary snapshot path or paths outside it.
+      for (const items of [graph.nodes, graph.links, graph.edges]) if (Array.isArray(items)) {
+        for (const item of items) if (isRecord(item) && typeof item.source_file === 'string') {
+          const file = (path.isAbsolute(item.source_file) ? path.relative(input, item.source_file) : item.source_file).replaceAll('\\', '/');
+          const relative = path.posix.normalize(file);
+          if (!relative || relative === '.' || relative === '..' || relative.startsWith('../') || relative.startsWith('/') || /^[a-z]:/i.test(relative)) delete item.source_file;
+          else item.source_file = relative;
+        }
+      }
+      const next = path.join(staging, 'validated.json');
+      const body = JSON.stringify(graph);
+      if (Buffer.byteLength(body) > MAX_DESKTOP_ARTIFACT_BYTES) return 'Graphify exceeded the 24 MiB desktop index limit.';
+      await fs.writeFile(next, body, { mode: 0o600, flag: 'wx' });
+      signal.throwIfAborted();
+      const committed = path.join(out, 'graph.json');
+      await fs.rename(next, committed);
+      this.cache.delete(committed);
+      return undefined;
+    } finally {
+      await fs.rm(staging, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
+  }
+
+  private buildError(result: GraphifyRunResult, timeoutMs: number): string | undefined {
     const tail = outputTail(result.stderr || result.stdout || '');
     if (result.timedOut) return `Graphify indexing timed out after ${Math.round(timeoutMs / 1000)} s.`;
     if (result.code === null) return `Graphify could not be started${tail ? `: ${tail}` : '.'}`;
     if (result.code !== 0) return `Graphify exited with code ${result.code}${tail ? `: ${tail}` : '.'}`;
-    return (await this.locate(scope)) ? undefined : NO_ARTIFACT;
+    return undefined;
   }
 
   private forget(scope: GraphScope): void {
@@ -677,7 +791,7 @@ export class GraphifyProvider {
   private async locate(scope: GraphScope): Promise<{ file: string; mtimeMs: number; size: number } | null> {
     const dir = this.cacheDir(scope);
     if (!(await lstatOrNull(path.dirname(dir)))?.isDirectory() || !(await lstatOrNull(dir))?.isDirectory()) return null;
-    for (const folder of [path.join(dir, 'graphify-out'), dir]) {
+    for (const folder of this.deps.snapshot ? [dir] : [path.join(dir, 'graphify-out'), dir]) {
       const file = path.join(folder, 'graph.json');
       const [folderStat, fileStat] = await Promise.all([lstatOrNull(folder), lstatOrNull(file)]);
       if (folderStat?.isDirectory() && fileStat?.isFile()) return { file, mtimeMs: fileStat.mtimeMs, size: fileStat.size };
@@ -685,8 +799,9 @@ export class GraphifyProvider {
     return null;
   }
 
-  private async graph(scope: GraphScope): Promise<ParsedGraph | null> {
-    return (await this.load(scope))?.graph ?? null;
+  private async graph(scope: GraphScope, revision?: string): Promise<ParsedGraph | null> {
+    const graph = (await this.load(scope))?.graph;
+    return graph && (!revision || (graph.revision && sameRevision(graph.revision, revision))) ? graph : null;
   }
 
   /** Null when there is no artifact; otherwise the parsed graph or the reason it is unusable. */
@@ -713,8 +828,8 @@ export class GraphifyProvider {
   private async read(found: { file: string; mtimeMs: number; size: number }, stamp: string): Promise<Artifact> {
     const base = { file: found.file, mtimeMs: found.mtimeMs };
     let artifact: Artifact;
-    if (found.size > MAX_ARTIFACT_BYTES) {
-      artifact = { ...base, error: TOO_LARGE };
+    if (found.size > (this.deps.snapshot ? MAX_DESKTOP_ARTIFACT_BYTES : MAX_ARTIFACT_BYTES)) {
+      artifact = { ...base, error: this.deps.snapshot ? 'Graphify exceeded the 24 MiB desktop index limit.' : TOO_LARGE };
     } else {
       let raw: string;
       try {
