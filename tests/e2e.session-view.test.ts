@@ -8,7 +8,8 @@
  * from a Projects | Recent switch at the top of the sidebar, with the Archived filter and the New
  * session icon beside it (Standard and Zen).
  * Layout cases use seeded sessions and transcripts. The title refresh case runs native chat against
- * a scripted loopback provider. No provider keys; screenshots land in tests/artifacts/session-view-*.png.
+ * a scripted loopback provider, as does Keep computer awake (with a stub power blocker).
+ * No provider keys; screenshots land in tests/artifacts/session-view-*.png.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
@@ -18,6 +19,7 @@ import { once } from 'node:events';
 import { promises as fs } from 'node:fs';
 import { createServer, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from 'playwright-core';
 import { MCP_BUILTIN_IDS, type ProviderConfig, type SessionMeta, type TranscriptItem } from '../src/shared/types';
@@ -101,7 +103,9 @@ async function expectMenuLeft(menu: Locator, target: Locator): Promise<void> {
   expect(popup!.y + popup!.height, 'popup opens above the trigger').toBeLessThanOrEqual(edge!.y + 1);
 }
 
-async function launch(userData: string): Promise<Page> {
+const desktopEntry = path.join(root, 'out', 'main', 'index.js');
+
+async function launch(userData: string, entry = desktopEntry): Promise<Page> {
   const home = path.join(userData, 'home');
   const env = isolatedEnv(userData, {
     HOME: home, USERPROFILE: home,
@@ -113,7 +117,7 @@ async function launch(userData: string): Promise<Page> {
   app = await electron.launch({
     executablePath: require('electron') as string,
     // No real credentials: keep the isolated fixture off the macOS login Keychain.
-    args: [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`, ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])],
+    args: [entry, `--user-data-dir=${userData}`, ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])],
     env,
     timeout: 60_000
   });
@@ -489,6 +493,141 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     expect(requests.map(({ body }) => body.model)).toHaveLength(5);
   }, 90_000);
 
+  it('keeps the host awake only for opted-in work and resets on quit/relaunch (stub power API)', async ({ onTestFinished }) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-keep-awake-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    const entry = path.join(tmp, 'main.mjs');
+    const trace = path.join(tmp, 'power.jsonl');
+    const requests: ServerResponse[] = [];
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        if (req.method !== 'POST' || req.url !== '/v1/chat/completions') return res.writeHead(404).end();
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Working"},"finish_reason":null}]}\n\n');
+        requests.push(res);
+      });
+    });
+    onTestFinished(async () => {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Keep-awake fixture did not bind a TCP address');
+
+    // Replace both methods before importing the real app: even a startup regression cannot reach
+    // the workstation's power API. The trace survives app.quit() and records actual main calls.
+    await fs.writeFile(entry, `
+import { powerSaveBlocker } from 'electron';
+import { appendFileSync } from 'node:fs';
+let id = 0;
+const append = (...entry) => appendFileSync(${JSON.stringify(trace)}, JSON.stringify(entry) + '\\n');
+const start = (type) => { append('start', ++id, type); return id; };
+const stop = (blockerId) => append('stop', blockerId);
+powerSaveBlocker.start = start;
+powerSaveBlocker.stop = stop;
+if (powerSaveBlocker.start !== start || powerSaveBlocker.stop !== stop) throw Error('Power blocker was not stubbed');
+await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
+`);
+    await fs.writeFile(trace, '');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    const model = { provider: 'awake-fixture', model: 'fixture-chat' };
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      providers: [{ id: model.provider, kind: 'lmstudio', name: 'Power fixture', enabled: true, hasApiKey: false,
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, models: [{ provider: model.provider, id: model.model, displayName: 'Fixture' }] }],
+      agent: { enabled: false }, knowledge: { prime: false, autoDistill: false }, mcpDisabledBuiltins: MCP_BUILTIN_IDS
+    }));
+    const session: SessionMeta = {
+      id: 's_keep_awake', title: 'Power fixture', createdAt: T, updatedAt: T, cwd: project, status: 'idle', harnessRef: {},
+      config: { harness: 'native', projectRoot: project, permissionMode: 'ask', model, useWorktree: false }, usage: usage()
+    };
+    const index = path.join(userData, 'sessions.json');
+    await fs.writeFile(index, JSON.stringify([session]));
+    const calls = async (): Promise<(['start', number, string] | ['stop', number])[]> =>
+      (await fs.readFile(trace, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+    const held = async () => {
+      const live = new Set<number>();
+      for (const [action, id, type] of await calls()) {
+        if (action === 'start') {
+          expect(type).toBe('prevent-app-suspension');
+          expect(live.size).toBe(0);
+          live.add(id);
+        } else expect(live.delete(id)).toBe(true);
+      }
+      return [...live];
+    };
+    const open = async (relaunch = false) => {
+      const win = await launch(userData, entry);
+      // Zen starts with the sidebar collapsed, and restores the already-open session by itself.
+      if (!relaunch) await win.locator('[data-session-id="s_keep_awake"]').click();
+      const toggle = win.locator('.run-controls').getByRole('switch', { name: 'Keep computer awake' });
+      await toggle.waitFor();
+      await expect.poll(() => toggle.isEnabled()).toBe(true);
+      expect(await win.locator('.header').getByRole('switch', { name: 'Keep computer awake' }).count()).toBe(0);
+      return { win, toggle };
+    };
+    let { win, toggle } = await open();
+    const choice = () => toggle.getAttribute('aria-checked');
+    const status = () => win.evaluate(async id => (await window.harness.invoke('sessions:get', { id }))?.status, session.id);
+    const send = async (text: string, count: number) => {
+      await win.getByPlaceholder(/^(Message the agent|Ask anything)/).fill(text);
+      await win.getByRole('button', { name: 'Send', exact: true }).click();
+      await expect.poll(() => requests.length, { timeout: 10_000 }).toBe(count);
+      await expect.poll(status).toBe('running');
+    };
+    const finish = async (count: number) => {
+      requests[count - 1]!.end('data: {"choices":[{"index":0,"delta":{"content":" done."},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+      await expect.poll(status).toBe('idle');
+      await expect.poll(held).toEqual([]);
+    };
+
+    expect(await choice()).toBe('false');
+    await toggle.click();
+    await expect.poll(choice).toBe('true');
+    expect(await calls()).toEqual([]);
+    await send('First turn', 1);
+    await expect.poll(async () => (await held()).length).toBe(1);
+    await finish(1);
+    expect(await choice()).toBe('true');
+
+    await send('Second turn', 2);
+    await expect.poll(async () => (await held()).length).toBe(1);
+    await toggle.click();
+    await expect.poll(choice).toBe('false');
+    await expect.poll(held).toEqual([]);
+    expect(await status()).toBe('running');
+    await finish(2);
+
+    await toggle.click();
+    await expect.poll(choice).toBe('true');
+    await send('Quit while working', 3);
+    const [quitId] = await held();
+    expect(quitId).toBeDefined();
+    const beforeQuit = await calls();
+    await app!.close();
+    app = null;
+    expect(await calls()).toEqual([...beforeQuit, ['stop', quitId]]);
+    expect(JSON.parse(await fs.readFile(index, 'utf8'))[0]).not.toHaveProperty('keepAwake');
+
+    // Exercise the same switch in Zen on process relaunch.
+    const settingsFile = path.join(userData, 'settings.json');
+    const saved = JSON.parse(await fs.readFile(settingsFile, 'utf8'));
+    await fs.writeFile(settingsFile, JSON.stringify({ ...saved, uiMode: 'zen' }));
+    ({ win, toggle } = await open(true));
+    expect(await win.locator('html').getAttribute('data-ui')).toBe('zen');
+    expect(await choice()).toBe('false');
+    const beforeUnarmedTurn = await calls();
+    await send('After restart', 4);
+    await finish(4);
+    expect(await calls()).toEqual(beforeUnarmedTurn);
+  }, 90_000);
+
   it('carries changes, run controls, plan, search, Vesta and New session where the redesign puts them, and fits a narrow pane', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-session-view-'));
     const userData = path.join(tmp, 'userData');
@@ -813,6 +952,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
         await usageItem.waitFor({ state: 'hidden' });
         // The active meter remains a direct way to close Usage even in a narrow busy composer.
         await expect.poll(() => meter.isVisible()).toBe(true);
+        expect(await footer.getByRole('switch', { name: 'Keep computer awake' }).isVisible()).toBe(true);
         await expect.poll(() => footer.evaluate((el) => el.scrollWidth - el.clientWidth), { message: `${theme} composer at ${width}px with Usage open` }).toBeLessThanOrEqual(1);
         await win.locator('.panel-top').getByRole('button', { name: 'Changes', exact: true }).click();
       }

@@ -4,10 +4,11 @@
  * Permissions stay visible; the context ring toggles Usage. Secondary details live in menus.
  */
 import React from 'react';
+import type { KeepAwakeBridge } from '../../../shared/keep-awake';
 import type { ModelInfo, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { modelName, modelRefName, parseTypedModel } from '../../../shared/model-names';
-import { invoke } from '../api';
+import { invoke, invokeErrorMessage } from '../api';
 import { fmtCost, fmtTokens } from '../format';
 import { setSessionEffort } from '../sessionActions';
 import { effortOptions, permissionOptions } from '../session-controls';
@@ -104,7 +105,45 @@ export function SessionControls({ session }: { session: SessionMeta }) {
           )}
         </Dropdown>
       )}
+      {!session.mission && !session.archived && window.keepAwake && (
+        <KeepAwakeSwitch key={session.id} id={session.id} bridge={window.keepAwake} />
+      )}
     </div>
+  );
+}
+
+function KeepAwakeSwitch({ id, bridge }: { id: string; bridge: KeepAwakeBridge }) {
+  const toast = useStore((s) => s.toast);
+  const [enabled, setEnabled] = React.useState<boolean | null>(null);
+  const [pending, setPending] = React.useState(false);
+  React.useEffect(() => {
+    let current = true;
+    void bridge.preference({ id }).then((choice) => {
+      if (current) setEnabled(choice);
+    }).catch((error) => {
+      if (current) toast(`Could not read Keep computer awake: ${invokeErrorMessage(error)}`, 'error');
+    });
+    return () => { current = false; };
+  }, [bridge, id, toast]);
+
+  const toggle = async () => {
+    if (pending || enabled === null) return;
+    setPending(true);
+    try {
+      setEnabled(await bridge.preference({ id, enabled: !enabled }));
+    } catch (error) {
+      toast(`Could not change Keep computer awake: ${invokeErrorMessage(error)}`, 'error');
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <button type="button" className="pill run-keep-awake" role="switch" aria-label="Keep computer awake"
+      aria-checked={enabled === true} disabled={pending || enabled === null} onClick={() => void toggle()}
+      title="Keep computer awake: prevent idle sleep while this session is working. Resets when the app quits.">
+      <Icon name="coffee" size={15} />
+    </button>
   );
 }
 

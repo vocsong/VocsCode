@@ -1,6 +1,9 @@
 /** Binds the transport-agnostic handler registry (handlers.ts) to Electron's ipcMain and pushes events to the renderer window. */
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
+import { z } from 'zod';
 import { isIntelligenceOwnerRequest } from '../shared/intelligence';
+import { KEEP_AWAKE_CHANNEL } from '../shared/keep-awake';
+import type { KeepAwake } from './keep-awake';
 import { createHandlerRegistry, type DesktopBridge, type HandlerDeps, type HandlerRegistry, type MissionHandlerService } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
@@ -24,6 +27,7 @@ export interface IpcDeps {
   settings: SettingsStore;
   secrets: SecretStore;
   sessions: SessionManager;
+  keepAwake?: KeepAwake;
   missions?: MissionHandlerService;
   withWorkspaceWrite?: HandlerDeps['withWorkspaceWrite'];
   terminals: TerminalManager;
@@ -179,5 +183,20 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     }
     return registry.invoke(channel, req, 'desktop');
   });
+  const keepAwake = deps.keepAwake;
+  if (keepAwake) {
+    const request = z.strictObject({ id: z.string().regex(/^[A-Za-z0-9_-]+$/), enabled: z.boolean().optional() });
+    // Deliberately not registered in the transport shared with local web and paired devices.
+    ipcMain.handle(KEEP_AWAKE_CHANNEL, (event, req: unknown) => {
+      const contents = deps.getWindow()?.webContents;
+      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {
+        throw new Error('Keep computer awake requires the local desktop owner.');
+      }
+      const { id, enabled } = request.parse(req);
+      const session = deps.sessions.get(id);
+      if (!session || session.mission || session.archived) throw new Error('Keep awake requires an ordinary, unarchived session.');
+      return enabled === undefined ? keepAwake.enabled(id) : keepAwake.set(id, enabled, deps.sessions.list({ refreshGit: false }));
+    });
+  }
   return registry;
 }
