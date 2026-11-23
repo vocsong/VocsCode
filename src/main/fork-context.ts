@@ -16,7 +16,7 @@ const MAX_TOTAL_CHARS = 24_000;
  * plain text and prefixed to the next user message. Recent items win when the source is longer than
  * the budget, because they matter most for continuing the work.
  */
-export function renderForkContext(items: TranscriptItem[], from: HarnessId, to: HarnessId): string {
+export function renderForkContext(items: TranscriptItem[], from: HarnessId, to: HarnessId, mode: 'fork' | 'switch' = 'fork'): string {
   const blocks = items.map(renderItem).filter((b): b is string => !!b);
   let total = 0;
   const kept: string[] = [];
@@ -26,19 +26,26 @@ export function renderForkContext(items: TranscriptItem[], from: HarnessId, to: 
     kept.unshift(block);
     total += block.length;
   }
-  const header = from === to
+  const header = mode === 'switch'
     ? [
-        '# Handoff from a previous session',
-        '',
-        'This session was forked from an earlier one in the same project. The conversation below is what happened before the fork; treat it as your prior context and continue from it. The user\'s next message follows the transcript.',
-        ''
-      ]
-    : [
         `# Handoff from ${HARNESS_BY_ID[from].name} to ${HARNESS_BY_ID[to].name}`,
         '',
-        "This session was forked into a different harness in the same project. The conversation below is what happened before the fork; treat it as your prior context and continue from it. The user's next message follows the transcript.",
+        "This session switched harnesses in place in the same workspace. The conversation below is what happened before the switch; treat it as your prior context, inspect any existing workspace changes as needed, and continue from it. The user's next message follows the transcript.",
         ''
-      ];
+      ]
+    : from === to
+      ? [
+          '# Handoff from a previous session',
+          '',
+          'This session was forked from an earlier one in the same project. The conversation below is what happened before the fork; treat it as your prior context and continue from it. The user\'s next message follows the transcript.',
+          ''
+        ]
+      : [
+          `# Handoff from ${HARNESS_BY_ID[from].name} to ${HARNESS_BY_ID[to].name}`,
+          '',
+          "This session was forked into a different harness in the same project. The conversation below is what happened before the fork; treat it as your prior context and continue from it. The user's next message follows the transcript.",
+          ''
+        ];
   if (kept.length < blocks.length) header.push(`(${blocks.length - kept.length} earlier item(s) omitted for length.)`, '');
   return [...header, ...kept, '--- End of previous conversation ---'].join('\n');
 }
