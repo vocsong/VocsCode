@@ -434,6 +434,20 @@ describe('knowledge search and digest', () => {
     expect(digest).not.toContain('harness/old.md');
   });
 
+  it.each([
+    ['harness pty', 'A Controller handles a \u0001PTY\u0002 with <b>literal</b> labels.'],
+    ['harness controller', 'A \u0001Controller\u0002 handles a PTY with <b>literal</b> labels.'],
+    ['harness session', 'A Controller handles a PTY with <b>literal</b> labels.']
+  ])('returns the right search excerpt for "%s"', async (query, snippet) => {
+    const projectRoot = tmpDir('vocs-kb-snippet-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    const meta = pageMeta(); // "harness" and "session" match metadata, not the body.
+    await svc.store.write(scope, meta, 'A Controller handles a PTY with <b>literal</b> labels.');
+
+    expect(await svc.search(scope, query)).toEqual([expect.objectContaining({ id: meta.id, snippet })]);
+  });
+
   it('publishes accepted pages into the tracked docs/wiki path', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
