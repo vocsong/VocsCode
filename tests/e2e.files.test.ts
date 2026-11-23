@@ -227,7 +227,9 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     const toolsBody = 'export const sessionCheckoutTools = true;\n';
     await fs.writeFile(path.join(checkout, 'src', 'app', 'api', 'mcp', 'tools.ts'), toolsBody);
     await fs.writeFile(path.join(project, 'tools.ts'), 'PROJECT_ROOT_TOOLS_MUST_NOT_OPEN');
-    await fs.writeFile(path.join(project, 'SideGuard-Q-2026-10.zip'), 'PROJECT_ROOT_ONLY_MUST_NOT_OPEN');
+    const missingZip = 'SideGuard-Q-2026-10.zip';
+    const lookupPath = path.join(checkout, missingZip);
+    await fs.writeFile(path.join(project, missingZip), 'PROJECT_ROOT_ONLY_MUST_NOT_OPEN');
     const exactBody = 'export const exactRootFile = true;\n';
     await fs.writeFile(path.join(checkout, 'exact.ts'), exactBody);
     await fs.writeFile(path.join(checkout, 'src', 'exact.ts'), 'NESTED_EXACT_MUST_NOT_OPEN');
@@ -241,7 +243,8 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     // A 1x1 PNG beside it: the panel must draw it, not dump its bytes as text.
     await fs.writeFile(path.join(checkout, 'src', 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
     // A zip's local file header: binary, so the panel must say so rather than decode it.
-    await fs.writeFile(path.join(checkout, 'src', 'bundle.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]));
+    const zipHeader = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]);
+    await fs.writeFile(path.join(checkout, 'src', 'bundle.zip'), zipHeader);
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { theme: 'system' }));
 
     const sid = 's_file_e2e';
@@ -267,8 +270,8 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
       ...history,
       { id: 'u1', kind: 'user', ts: Date.now(), text: 'Where is the greeting?' },
       { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'It lives in `src/hello.ts:300`, right at the top.' },
-      // The missing name exists only in config.projectRoot, never in the session checkout.
-      { id: 'a2', kind: 'assistant', ts: Date.now(), text: 'Import `SideGuard-Q-2026-10.zip`; the local copy is `src/bundle.zip`.' },
+      // The missing name starts out in config.projectRoot only, not in the session checkout.
+      { id: 'a2', kind: 'assistant', ts: Date.now(), text: `Import \`${missingZip}\`; the local copy is \`src/bundle.zip\`.` },
       { id: 'a3', kind: 'assistant', ts: Date.now(), text: 'Inspect `tools.ts`, `api/mcp/tools.ts`, `exact.ts`, and `duplicate.ts`.' },
       // Codex writes absolute links as URL paths (`/G:/…:12` on Windows); a mailto: link cannot open here.
       { id: 'a4', kind: 'assistant', ts: Date.now(), text: `See [the greeting](<${absoluteLink}>), or [write to support](mailto:help@example.com).` }
@@ -294,9 +297,7 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await win.waitForSelector('.brand', { timeout: 60_000 });
 
     const ref = win.locator('[data-item-id="a1"]').getByRole('link', { name: 'src/hello.ts:300', exact: true });
-    await ref.click({ timeout: 30_000 });
-
-    // The preview overlays the transcript without becoming a session split or taking its active slot.
+    const missingLink = win.locator('[data-item-id="a2"]').getByRole('link', { name: missingZip, exact: true });
     const filePane = win.getByTestId('file-pane');
     const editor = filePane.locator('.cm-editor').getByRole('textbox', { name: 'File contents', exact: true });
     const previewPath = filePane.locator('.file-preview-path');
@@ -324,6 +325,30 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
       }, undefined, { timeout: 1_000 }), { timeout: 10_000 }).toBe(true);
       await expectPath('src/hello.ts');
     };
+    const alert = filePane.getByRole('alert');
+    const retry = filePane.getByRole('button', { name: 'Retry', exact: true });
+    const copyPath = filePane.getByRole('button', { name: 'Copy path', exact: true });
+    const errorToasts = win.locator('.toast-error');
+    const expectMissing = async () => {
+      await alert.first().waitFor({ state: 'visible', timeout: 10_000 });
+      expect(await alert.count()).toBe(1);
+      const text = await alert.innerText();
+      expect(text).toContain(`${missingZip} was not found in ${checkout}`);
+      expect(text).not.toContain(project);
+      expect(await retry.isEnabled()).toBe(true);
+      expect(text).not.toMatch(/ENOENT|realpath|Error invoking remote method/);
+      expect(await copyPath.isVisible()).toBe(true);
+      expect(await errorToasts.count()).toBe(0);
+    };
+
+    // A failed first open keeps the drawer visible even without a prior file to show.
+    await missingLink.click({ timeout: 30_000 });
+    await expectMissing();
+    expect(await editor.count()).toBe(0);
+    await closePreview();
+
+    // The preview overlays the transcript without becoming a session split or taking its active slot.
+    await ref.click({ timeout: 30_000 });
     await expectHelloLine(300);
     expect(await win.getByTestId('session-panes').getByTestId('file-pane').count()).toBe(0);
     expect(await win.locator('[data-testid="session-pane"].active').count()).toBe(1);
@@ -358,25 +383,51 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     expect(darkColors[0]).not.toBe(darkColors[1]);
     await win.emulateMedia({ colorScheme: null });
 
-    // Use the keyboard to follow the covered link without closing the current preview. A missing
-    // name must keep that preview and report the folder searched without IPC or realpath noise.
-    await win.getByRole('link', { name: 'SideGuard-Q-2026-10.zip', exact: true }).press('Enter');
-    const notFound = win.locator('.toast-error', { hasText: 'SideGuard-Q-2026-10.zip was not found in' });
-    await notFound.waitFor({ timeout: 10_000 });
-    expect(await notFound.innerText()).not.toMatch(/ENOENT|realpath/);
-    expect(await notFound.innerText()).toContain(checkout);
-    expect(await notFound.innerText()).not.toContain(project);
-    expect(await win.locator('.toast', { hasText: 'Error invoking remote method' }).count()).toBe(0);
-    await expectHelloLine(300);
+    // Use the keyboard to follow the covered link. Repeated misses keep the same editor and line
+    // in view, with one inline alert and no error toasts.
+    const originalEditor = await editor.elementHandle({ timeout: 10_000 });
+    const expectMissingWithEditor = async () => {
+      await expectMissing();
+      await expectHelloLine(300);
+      expect(await originalEditor.evaluate((el) => el.isConnected)).toBe(true);
+    };
+    await missingLink.press('Enter');
+    await expectMissingWithEditor();
+    await missingLink.press('Enter');
+    await expectMissingWithEditor();
+    await retry.click();
+    await expectMissingWithEditor();
+    await originalEditor.dispose();
+
+    // Read the clipboard write without modifying the system clipboard.
+    const copiedPaths = await win.evaluateHandle(() => {
+      const writes: string[] = [];
+      navigator.clipboard.writeText = async (text) => { writes.push(text); };
+      return writes;
+    });
+    await copyPath.click();
+    await expect.poll(() => copiedPaths.evaluate((writes) => writes), { timeout: 10_000 }).toEqual([lookupPath]);
+    await copiedPaths.dispose();
+    await win.screenshot({ path: path.join(shots, 'files-04-missing.png') });
+
+    const expectBinaryFile = async (relativePath: string) => {
+      await filePane.getByText('Binary file, no text preview.', { exact: true }).waitFor({ timeout: 10_000 });
+      await expectPath(relativePath);
+      expect(await editor.count()).toBe(0);
+      expect(await filePane.getByRole('button', { name: 'Save', exact: true }).count()).toBe(0);
+    };
+    // Retry now opens the checkout zip, not the text file with the same name in the project root.
+    await fs.writeFile(lookupPath, zipHeader);
+    await retry.click();
+    await expectBinaryFile(missingZip);
+    await alert.waitFor({ state: 'detached', timeout: 10_000 });
+    expect(await errorToasts.count()).toBe(0);
     await closePreview();
 
-    // The zip that is there opens as a binary file, with no editor or Save action.
+    // An existing zip still opens directly as a binary file.
     await win.getByRole('link', { name: 'src/bundle.zip', exact: true }).click();
-    await filePane.getByText('Binary file, no text preview.', { exact: true }).waitFor({ timeout: 10_000 });
-    expect(await previewPath.innerText()).toBe('src/bundle.zip');
-    expect(await editor.count()).toBe(0);
-    expect(await filePane.getByRole('button', { name: 'Save', exact: true }).count()).toBe(0);
-    await win.screenshot({ path: path.join(shots, 'files-04-missing-and-binary.png') });
+    await expectBinaryFile('src/bundle.zip');
+    await win.screenshot({ path: path.join(shots, 'files-04-binary.png') });
     await closePreview();
 
     // Short mentions resolve against the session checkout, not the configured project root.

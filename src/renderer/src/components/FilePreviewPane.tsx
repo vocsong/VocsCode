@@ -87,6 +87,8 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
   const [matches, setMatches] = useState<{ reference: string; paths: string[]; line?: number } | null>(null);
   const [resolving, setResolving] = useState(false);
   const [reading, setReading] = useState(false);
+  const [failure, setFailure] = useState<{ message: string; path: string; retry: () => void; missing?: boolean } | null>(null);
+  const [copyStatus, setCopyStatus] = useState('');
   const mdBody = useRef<HTMLDivElement>(null);
   const shown = useRef<Preview | null>(null);
   shown.current = preview;
@@ -101,15 +103,16 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
   const scope = session.mission ? { missionWorkspaceId: target.missionWorkspaceId } : {};
   const current = (seq: number) => mounted.current && readSeq.current === seq && useStore.getState().layout.filePreview === target;
   const close = () => useStore.getState().closeFilePreview();
-  const fail = (message: string) => {
-    toast(message, 'error');
-    if (!shown.current) close();
+  const fail = (message: string, path: string, retry: () => void, missing = false) => {
+    setCopyStatus('');
+    setFailure({ message, path, retry, missing });
   };
 
   const keyFor = (path: string) => JSON.stringify([scopeKey, path]);
   const openFile = async (rel: string, line: number | undefined, seq: number, discard = false) => {
     const path = rel.replace(/\\/g, '/');
     const key = keyFor(path);
+    setFailure(null);
     setReading(true);
     try {
       // Reopening a drawer mid-save must read the bytes after the write, not the stale baseline.
@@ -129,18 +132,15 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
       setMdView(false);
       setScrollLine(line && line > 0 ? { line } : null);
     } catch (err) {
-      if (current(seq)) fail(invokeErrorMessage(err));
+      if (current(seq)) fail(invokeErrorMessage(err), path, () => void openFile(rel, line, ++readSeq.current, discard));
     } finally {
       if (current(seq)) setReading(false);
     }
   };
 
-  /** StrictMode replays mount effects; one request must not start two lookups. */
-  const handled = useRef<FilePreviewTarget | null>(null);
-  useEffect(() => {
-    if (handled.current === target) return;
-    handled.current = target;
+  const lookup = () => {
     const seq = ++readSeq.current;
+    setFailure(null);
     setMatches(null);
     setReading(false);
     if (target.exact || !canInvoke('fs:resolve')) {
@@ -155,14 +155,22 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
         setResolving(false);
         if (result.status === 'resolved') void openFile(result.path, target.line, seq);
         else if (result.status === 'ambiguous') setMatches({ reference: target.path, paths: result.paths, line: target.line });
-        else if (result.status === 'missing') fail(`${target.path} was not found in ${root}`);
-        else fail(`Could not finish searching for ${target.path}. Use its full workspace-relative path.`);
+        else if (result.status === 'missing') fail(`${target.path} was not found in ${root}`, target.path, lookup, true);
+        else fail(`Could not finish searching for ${target.path}. Use its full workspace-relative path.`, target.path, lookup);
       })
       .catch((err) => {
         if (!current(seq)) return;
         setResolving(false);
-        fail(invokeErrorMessage(err));
+        fail(invokeErrorMessage(err), target.path, lookup);
       });
+  };
+
+  /** StrictMode replays mount effects; one request must not start two lookups. */
+  const handled = useRef<FilePreviewTarget | null>(null);
+  useEffect(() => {
+    if (handled.current === target) return;
+    handled.current = target;
+    lookup();
   }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cancel = () => {
@@ -277,9 +285,29 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
             </button>
           ))}
         </section>
-      ) : !preview ? (
+      ) : !preview && !failure ? (
         <div className="pad row gap8" role="status"><Spinner /> Opening {target.path}…</div>
       ) : null}
+      {failure && (
+        <div className="callout warn file-preview-error">
+          <div role="alert">{failure.message}</div>
+          {failure.missing && <div className="muted small">If this file was generated in another folder, use its full absolute path.</div>}
+          <div className="row gap8 file-preview-error-actions">
+            <Button size="sm" icon="refresh" onClick={failure.retry}>Retry</Button>
+            <Button size="sm" icon="copy" onClick={async () => {
+              const seq = readSeq.current;
+              const path = `${root.replace(/[\\/]+$/, '')}/${failure.path}`;
+              try {
+                await navigator.clipboard.writeText(/^[A-Za-z]:/.test(root) ? path.replace(/\//g, '\\') : path);
+                if (current(seq)) setCopyStatus('Path copied');
+              } catch {
+                if (current(seq)) setCopyStatus('Could not copy the path');
+              }
+            }}>Copy path</Button>
+            {copyStatus && <span className="muted small" role="status">{copyStatus}</span>}
+          </div>
+        </div>
+      )}
       {/* Keep the previous editor's viewport and history through failed or cancelled lookups. */}
       {preview && (
         <div className="file-preview">
