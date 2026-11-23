@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer features {
 /* Settings has its own responsive, theme-aware layout; no styles escape this workspace. */
 .settings.settings {
   display: block;
@@ -285,3 +287,4 @@
 .ui-mini-column { flex: 0 0 54%; margin: 0 auto; padding-top: 14px; }
 .ui-mini-column b { height: 4px; margin-bottom: 7px; }
 .ui-mini-pill { position: absolute; left: 50%; bottom: 9px; width: 50%; height: 13px; transform: translateX(-50%); border-radius: 999px; background: var(--bg-elev); box-shadow: 0 0 0 1px var(--border), 0 4px 12px -4px rgb(0 0 0 / 0.4); }
+}

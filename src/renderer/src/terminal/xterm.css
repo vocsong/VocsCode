@@ -1,0 +1,3 @@
+@layer tokens, reset, base, components, features, themes, modes;
+/* Keep vendor xterm styles in the reset layer so panel.css terminal overrides win cleanly. */
+@import '@xterm/xterm/css/xterm.css' layer(reset);

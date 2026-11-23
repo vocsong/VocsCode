@@ -1,12 +1,13 @@
 /** Renderer entry point: mounts the React tree. */
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+// Base stylesheet first so @layer ordering precedes every component-local feature sheet.
+import './styles.css';
 import { App } from './App';
 import { ErrorBoundary } from './ErrorBoundary';
 import { startDiagnostics } from './diag';
 import { installThemeStyles } from './theme';
-import './styles.css';
-// The minimalist Zen interface, keyed on <html data-ui>; after styles.css so it wins ties.
+// The minimalist Zen interface, keyed on <html data-ui> in @layer modes.
 import './ui-zen.css';
 
 // Before the first render, so a non-default theme never paints with the fallback palette.

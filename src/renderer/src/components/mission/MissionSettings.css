@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer features {
 .mission-settings { max-width: 880px; }
 .mission-settings .mission-form { border: 0; margin: 0; padding: 0; min-width: 0; }
 .mission-settings .mission-card { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 12px 0; }
@@ -19,3 +21,4 @@
 .mission-settings p { overflow-wrap: anywhere; }
 .mission-settings [role="alert"] { color: var(--red); }
 .mission-settings .mission-actions { padding: 16px 0; }
+}

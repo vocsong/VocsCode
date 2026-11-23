@@ -1,0 +1,456 @@
+/* Layout */
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.app {
+  --file-drawer-left: var(--sidebar);
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--sidebar) minmax(0, 1fr) var(--panel);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.app.no-sidebar {
+  --file-drawer-left: 0px;
+  grid-template-columns: minmax(0, 1fr) var(--panel);
+}
+.app.no-panel {
+  grid-template-columns: var(--sidebar) minmax(0, 1fr);
+}
+.app.no-sidebar.no-panel {
+  grid-template-columns: minmax(0, 1fr);
+}
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+/* Split view: the conversation workspace as one pane (the app as it always was) or several. */
+.panes {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.panes-horizontal {
+  flex-direction: row;
+}
+.panes-vertical {
+  flex-direction: column;
+}
+.pane {
+  --conversation-width: 1120px;
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Transcript width (Settings → Appearance → Text & fonts): moves the column and the prose line length
+   together. Normal is the defaults above; the numbers mirror TRANSCRIPT_WIDTHS in shared/typography.ts. */
+:root[data-width='narrow'] {
+  --reading: 640px;
+}
+:root[data-width='narrow'] .pane {
+  --conversation-width: 820px;
+}
+:root[data-width='wide'] {
+  --reading: 980px;
+}
+:root[data-width='wide'] .pane {
+  --conversation-width: 1480px;
+}
+.panes-horizontal.split > .pane {
+  min-width: 360px;
+}
+.panes-vertical.split > .pane {
+  min-height: 200px;
+}
+/* Keep a thin outline and a soft inner glow while selected, without shifting content or catching clicks. */
+.panes.split:not(.narrow) > .pane.active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  box-shadow: inset 0 0 9px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .panes.split:not(.narrow) > .pane.active::after {
+    animation: pane-focus-pulse 650ms ease-out;
+  }
+}
+@keyframes pane-focus-pulse {
+  from {
+    box-shadow: inset 0 0 26px color-mix(in srgb, var(--accent) 80%, transparent);
+  }
+}
+.panes.split > .pane:not(.active) > .header .header-name {
+  color: var(--fg-muted);
+}
+/* Too narrow for every pane: only the active one shows; the rest stay mounted. */
+.panes.narrow > .pane:not(.active),
+.panes.narrow > .pane-divider {
+  display: none;
+}
+.panes.narrow > .pane {
+  min-width: 0;
+  min-height: 0;
+}
+.pane-divider {
+  position: relative;
+  flex: 0 0 1px;
+  background: var(--border);
+  z-index: 5;
+}
+.pane-divider::after {
+  content: '';
+  position: absolute;
+  border-radius: 3px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.panes-horizontal > .pane-divider {
+  cursor: col-resize;
+}
+.panes-horizontal > .pane-divider::after {
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 7px;
+}
+.panes-vertical > .pane-divider {
+  cursor: row-resize;
+}
+.panes-vertical > .pane-divider::after {
+  left: 0;
+  right: 0;
+  top: -3px;
+  height: 7px;
+}
+.pane-divider:hover::after,
+.pane-divider:focus-visible::after,
+.pane-divider.dragging::after {
+  background: var(--accent);
+}
+/* Where a dragged session will land: the whole pane, or the half a new pane will take. */
+.pane-drop {
+  position: absolute;
+  pointer-events: none;
+  z-index: 30;
+  background: var(--accent-soft);
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  inset: 4px;
+}
+.pane-drop-left {
+  right: 50%;
+}
+.pane-drop-right {
+  left: 50%;
+}
+.pane-drop-top {
+  bottom: 50%;
+}
+.pane-drop-bottom {
+  top: 50%;
+}
+.pane-drop-files {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+}
+.pane-drop-files span {
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+.pane-picker {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  overflow-y: auto;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  margin: 10px;
+}
+.pane-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.pane-picker-title {
+  font-weight: 600;
+}
+.pane-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pane-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: none;
+  color: var(--fg);
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  min-width: 0;
+}
+.pane-picker-item:hover,
+.pane-picker-item:focus-visible {
+  background: var(--bg-hover);
+}
+.pane-picker-name {
+  flex: 1;
+}
+.pane-picker-branch {
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.boot {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--fg-muted);
+}
+.boot-error {
+  flex-direction: column;
+  padding: 24px;
+  text-align: center;
+}
+.boot-error-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 560px;
+  color: var(--fg);
+}
+.boot-error-copy .icon {
+  color: var(--red);
+}
+.boot-error-detail {
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Title bar (frameless window chrome) */
+.titlebar {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  flex: 0 0 var(--titlebar);
+  height: var(--titlebar);
+  padding-left: 6px;
+  background: var(--bg-elev);
+  /* The separator is an outer shadow, not a border: on Windows/Linux the OS paints its caption
+     buttons over a rect exactly --titlebar tall, so a border-bottom (the bar's last pixel row, with
+     box-sizing: border-box) is covered and the line stops short of the window's right edge. One
+     pixel below the bar is outside that rect, so the hairline runs the full width. */
+  box-shadow: 0 1px 0 var(--border);
+  user-select: none;
+  /* The whole bar drags the window; interactive children opt out below. */
+  -webkit-app-region: drag;
+}
+/* macOS draws its traffic lights inside the bar, so the controls start after them. */
+.titlebar-mac {
+  padding-left: 78px;
+}
+/* Web build: the browser owns window chrome; the bar is a plain app header. */
+.titlebar-web {
+  -webkit-app-region: no-drag;
+}
+.titlebar-lead {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+.titlebar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.titlebar-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.titlebar-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.titlebar-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0 12px;
+}
+/* Names where you are and opens the command palette: the bar's dead middle becomes a way to move. */
+.titlebar-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: min(460px, 100%);
+  min-width: 0;
+  height: 24px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: border-color 0.12s, color 0.12s;
+}
+.titlebar-search:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+.titlebar-search-text {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.titlebar-search-text.session-label {
+  justify-content: safe center;
+}
+.titlebar-search .kbd {
+  font-size: 10px;
+  color: var(--fg-faint);
+  border-bottom-width: 1px;
+}
+.titlebar-trail {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  -webkit-app-region: no-drag;
+}
+/* Vesta's home when minimized: a quiet chip; filled while its panel is open, pulsing while it works. */
+.titlebar-vesta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.titlebar-vesta > .icon {
+  color: var(--accent);
+}
+.titlebar-vesta:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+.titlebar-vesta.open {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  color: var(--accent);
+}
+.titlebar-vesta.busy {
+  animation: status-fade 1.2s ease-in-out infinite;
+}
+/* Keeps clear of the native caption buttons on Windows/Linux; collapses to 0 without an overlay. */
+.titlebar-tail {
+  flex: 0 0 calc(100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px));
+}
+
+/* Menu bar */
+.menubar {
+  display: flex;
+  align-items: center;
+  margin-left: 6px;
+}
+.menubar-item {
+  position: relative;
+}
+.menubar-btn {
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  padding: 4px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.menubar-btn:hover,
+.menubar-btn.open {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.menubar-panel {
+  top: calc(100% + 2px);
+  -webkit-app-region: no-drag;
+}
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+/* Zen's one-button menu (TitleBar.tsx): icon tabs over the chosen menu. */
+.menubar-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px 2px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.menubar-tab {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.menubar-tab:hover,
+.menubar-tab.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.menubar-tab.active {
+  color: var(--accent);
+}

@@ -11,7 +11,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
-import '@xterm/xterm/css/xterm.css';
+import './xterm.css';
 import { DEFAULT_TERMINAL_SETTINGS, type ShellKind, type TerminalInfo, type TerminalSettings } from '../../../shared/terminal';
 import { ansiFromTokens, parseHex, withAlpha, type AnsiPalette } from '../../../shared/ansi';
 import { invoke, isMac, on, platform } from '../api';

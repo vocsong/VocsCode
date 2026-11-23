@@ -1,0 +1,1526 @@
+/* Right panel */
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-elev);
+  min-width: 0;
+  min-height: 0;
+}
+
+.panel-preview-only > .panel {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: var(--panel);
+  z-index: 34;
+}
+
+/* The panel's two halves: workspace views on top, live session services below. The split fraction
+   lives on --panel-split so a drag updates one custom property instead of re-rendering. */
+.panel-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.panel-section.panel-top {
+  flex: 0 0 calc(var(--panel-split, 0.62) * 100%);
+}
+.panel-section.panel-bottom {
+  flex: 1 1 0;
+  border-top: 1px solid var(--border);
+}
+
+/* Pane resize handles: a wide hit area straddling the pane's edge, with a hairline that lights up. */
+.resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 20;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.resizer-sidebar {
+  right: -3px;
+}
+.resizer-panel {
+  left: -3px;
+}
+.resizer-split {
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 7px;
+  margin: -3px 0;
+  cursor: row-resize;
+}
+.resizer-split::after {
+  top: 2px;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 3px;
+}
+body.resizing-row {
+  cursor: row-resize;
+  user-select: none;
+}
+
+/* Subagents tab: a run list over one run's transcript and per-call table. */
+.subagents {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.subagents .panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--fg-muted);
+}
+.subagent-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.subagent-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  /* Tiles, not full-width rows: several runs fit on a line and the panel stays scannable. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(120px, 22%, 200px), 1fr));
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  align-content: start;
+}
+.subagent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: inherit;
+}
+.subagent-row:hover {
+  background: var(--bg-hover);
+}
+.subagent-row.active {
+  background: var(--bg-active);
+}
+.subagent-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.subagent-agent {
+  font-weight: 600;
+}
+.subagent-desc {
+  font-size: 12px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-meta {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-row {
+  min-width: 0;
+  overflow: hidden;
+}
+.subagent-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  min-height: 0;
+}
+.subagent-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.subagent-detail-stats {
+  font-size: 11px;
+}
+.subagent-steer {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.subagent-steer input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.subagent-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.subagent-item {
+  font-size: 12px;
+}
+.subagent-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+.subagent-tool-output {
+  margin: 2px 0 0;
+  padding: 4px 6px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+.subagent-text {
+  white-space: pre-wrap;
+}
+.subagent-calls {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.subagent-calls th,
+.subagent-calls td {
+  text-align: left;
+  padding: 3px 5px;
+  border-top: 1px solid var(--border);
+}
+.subagent-calls th.num,
+.subagent-calls td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 3px;
+  border-radius: 3px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.resizer:hover::after,
+.resizer:focus-visible::after,
+.resizer.dragging::after {
+  background: var(--accent);
+}
+/* While dragging, keep the resize cursor and stop the pointer from selecting text it passes over. */
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+.panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-height: 40px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+/* Tabs read as an underlined strip: the selected one carries an accent rule on the strip's edge. */
+.panel-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: stretch;
+  border: none;
+  background: none;
+  padding: 0 8px;
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.panel-tab:hover {
+  color: var(--fg);
+}
+.panel-tab.active {
+  color: var(--fg);
+  font-weight: 500;
+}
+.panel-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+}
+.panel-tab.active > .icon {
+  color: var(--accent);
+}
+.panel-bottom > .panel-tabs {
+  background: var(--bg-sunken);
+}
+/* Nothing in the lower half has been opened yet: it is only its tab strip, the top gets the height. */
+.panel-bottom-idle > .panel-top {
+  flex: 1 1 auto;
+}
+.panel-bottom-idle > .panel-bottom {
+  flex: 0 0 auto;
+}
+.panel-bottom-idle > .panel-bottom > .panel-body {
+  display: none;
+}
+.panel-bottom-idle > .panel-bottom > .panel-tabs {
+  border-bottom: none;
+}
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.changes {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.changes-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.file-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 34%;
+  overflow: auto;
+  border-bottom: 1px solid var(--border);
+}
+.files .file-list {
+  max-height: none;
+  border: none;
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: none;
+  padding: 5px 10px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.file-row:hover {
+  background: var(--bg-hover);
+}
+.file-row.active {
+  background: var(--accent-soft);
+}
+.file-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-weight: 700;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  background: color-mix(in srgb, currentColor 13%, transparent);
+}
+.st-M {
+  color: var(--amber);
+}
+.st-A,
+.st-\? {
+  color: var(--green);
+}
+.st-D {
+  color: var(--red);
+}
+.file-status.all {
+  color: var(--accent);
+}
+.changes-diff {
+  flex: 1;
+  overflow: auto;
+  padding: 8px;
+}
+.commit-box {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* Guided git setup (Changes/Git tabs): init, first commit, GitHub remote, push. */
+.git-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 14px 20px;
+  max-width: 520px;
+}
+.git-setup-banner {
+  max-width: none;
+  margin: 8px 10px 4px;
+  padding: 10px 12px;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.git-setup-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.git-setup-head > .icon {
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.git-setup-title {
+  font-weight: 600;
+}
+.setup-step {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.setup-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.setup-step-n {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.setup-step.active .setup-step-n {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.setup-step.done .setup-step-n {
+  border-color: var(--green);
+  color: var(--green);
+  background: var(--green-soft);
+}
+.setup-step.pending .setup-step-head {
+  color: var(--fg-muted);
+}
+.setup-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 28px;
+}
+.setup-note {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.setup-note code,
+.setup-cmd code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.setup-cmd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.setup-cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 5px 8px;
+}
+.setup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.setup-row > input {
+  flex: 1;
+  min-width: 150px;
+  width: auto;
+}
+.setup-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.setup-vis {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.setup-vis button {
+  border: none;
+  background: none;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg-muted);
+}
+.setup-vis button:hover {
+  background: var(--bg-hover);
+}
+.setup-vis button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.setup-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+.setup-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setup-how {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Branches tab */
+.branches {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  container-type: inline-size;
+}
+.branches-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.seg {
+  display: inline-flex;
+  gap: 2px;
+}
+.seg button {
+  border: none;
+  background: none;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.seg button:hover {
+  color: var(--fg);
+}
+.seg button.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.branches-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.branches-search {
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  color: var(--fg-muted);
+}
+.branches-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  color: var(--fg);
+  font-size: 12px;
+}
+.branches-filters {
+  display: flex;
+  gap: 2px;
+}
+.branches-filters button {
+  border: none;
+  background: none;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.branches-filters button:hover {
+  color: var(--fg);
+}
+.branches-filters button.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.branches-filters .count {
+  margin-left: 4px;
+  font-size: 10px;
+  background: var(--bg-active);
+  border-radius: 8px;
+  padding: 0 5px;
+}
+.branches-table {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.branches-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 60px 72px minmax(100px, 112px) 108px;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-elev);
+  z-index: 1;
+}
+.branches-cols .num {
+  text-align: right;
+}
+.branch-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 60px 72px minmax(100px, 112px) 108px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.pr-cols,
+.pr-row {
+  grid-template-columns: 48px minmax(0, 1fr) 72px 60px minmax(100px, 112px) 60px;
+}
+/* Issues table: dedicated #number column, tight author + actions, no updated/status columns. */
+.issue-cols,
+.issue-row {
+  grid-template-columns: 48px minmax(0, 1fr) 60px 56px;
+}
+.issue-title {
+  font-size: 12px;
+}
+.issue-row,
+.pr-row {
+  cursor: pointer;
+}
+.issue-open,
+.pr-open {
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.issue-open:focus-visible,
+.pr-open:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.issue-dialog-meta,
+.pr-dialog-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--fg-muted);
+  font-size: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.issue-dialog-body,
+.pr-dialog-body {
+  padding-top: 8px;
+}
+.issue-dialog-empty,
+.pr-dialog-empty {
+  margin: 20px 0 4px;
+}
+.git-comments {
+  margin-top: 20px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.git-comments-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.git-comments-note {
+  margin: 0 0 8px;
+}
+.git-comment {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.git-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+}
+.git-comment-body {
+  padding: 8px 10px;
+  margin: 0;
+}
+/* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
+.branch-row > :nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-author {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+.pr-title .pr-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pr-title .pr-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-title .pr-refs {
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-pulled {
+  color: var(--fg-muted);
+  font-size: 11px;
+  margin-left: 4px;
+}
+.branch-row:hover {
+  background: var(--bg-hover);
+}
+.branch-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.branch-name .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-wt {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+/* The badge keeps its shape; trailing text (synced / arrows) shrinks with an ellipsis. */
+.branch-status .badge {
+  flex-shrink: 0;
+}
+.branch-status .small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+}
+/* Icon-only buttons shrink here so up to four actions fit one line without wrapping. */
+.branch-actions .btn-sm {
+  padding: 3px 4px;
+}
+/* Secondary inline actions (open worktree / PR / delete) grouped so the compact
+   layout can collapse them into the ⋯ menu. */
+.branch-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Narrow panel: keep the table layout and its column header, just drop the
+   Updated, Behind/Ahead and Status columns so the name keeps the width. */
+@container (max-width: 619.9px) {
+  .branches-cols:not(.issue-cols):not(.pr-cols),
+  .branch-row:not(.issue-row):not(.pr-row) {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .branches-cols:not(.issue-cols):not(.pr-cols) > :nth-child(2),
+  .branches-cols:not(.issue-cols):not(.pr-cols) > :nth-child(3),
+  .branches-cols:not(.issue-cols):not(.pr-cols) > :nth-child(4),
+  .branch-row:not(.issue-row):not(.pr-row) > :nth-child(2),
+  .branch-row:not(.issue-row):not(.pr-row) > :nth-child(3),
+  .branch-row:not(.issue-row):not(.pr-row) > :nth-child(4) {
+    display: none;
+  }
+  /* One line of actions even when the name column is squeezed. */
+  .branch-actions {
+    flex-wrap: nowrap;
+  }
+  /* Issues and PRs keep their full header table at every width; the fixed columns just give
+     back some width (a flexible # column here would misalign rows against each other). */
+  .issue-cols,
+  .issue-row {
+    grid-template-columns: 40px minmax(0, 1fr) 52px 52px;
+    gap: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  /* PRs drop author and updated next, keeping # / title / status / actions. */
+  .pr-cols,
+  .pr-row:not(.issue-row) {
+    grid-template-columns: 40px minmax(0, 1fr) minmax(100px, 112px) 52px;
+    gap: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .pr-cols > :nth-child(3),
+  .pr-cols > :nth-child(4),
+  .pr-row:not(.issue-row) > :nth-child(3),
+  .pr-row:not(.issue-row) > :nth-child(4) {
+    display: none;
+  }
+}
+/* Ultra-narrow: same header table, tighter still. */
+@container (max-width: 399.9px) {
+  .issue-cols,
+  .issue-row {
+    grid-template-columns: 36px minmax(0, 1fr) 44px 44px;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  /* PRs drop status too, leaving # / title / actions. */
+  .pr-cols,
+  .pr-row:not(.issue-row) {
+    grid-template-columns: 36px minmax(0, 1fr) 48px;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  .pr-cols > :nth-child(5),
+  .pr-row:not(.issue-row) > :nth-child(5) {
+    display: none;
+  }
+}
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.behind {
+  color: var(--red);
+}
+.ahead {
+  color: var(--green);
+}
+.crumbs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.crumbs button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--accent);
+  padding: 0 2px;
+}
+/* Out of the grid flow: the editor opens over the conversation, attached to the Files panel.
+   On small windows it can overlap the panel to keep a usable editor width. */
+.file-pane {
+  --file-panel-edge: var(--panel);
+  --file-drawer-right: min(var(--file-panel-edge), max(0px, calc(100% - var(--file-drawer-left) - 280px)));
+  position: absolute;
+  inset: 0 var(--file-drawer-right) 0 auto;
+  width: min(720px, calc(100% - var(--file-drawer-right) - var(--file-drawer-left)));
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius) 0 0 var(--radius);
+  box-shadow: -16px 0 40px -20px rgb(0 0 0 / 0.6);
+  overflow: hidden;
+}
+.file-preview {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.file-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  min-width: 0;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.file-preview-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-preview-session {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.file-match-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.file-match-list-with-preview {
+  flex: 0 1 auto;
+  max-height: 55%;
+  border-bottom: 1px solid var(--border);
+}
+.file-preview-error {
+  margin: 8px;
+  overflow-wrap: anywhere;
+}
+.file-preview-error-actions {
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.file-preview-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 10px;
+  min-height: 26px;
+  border-top: 1px solid var(--border);
+}
+.file-preview .file-md {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+/* Image preview: fit the picture to the panel without upscaling, on a checkerboard so
+   transparent regions read as transparent rather than as the panel background. */
+.file-preview .file-image {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+.file-preview .file-image img {
+  max-width: 100%;
+  height: auto;
+  background: repeating-conic-gradient(var(--border) 0% 25%, transparent 0% 50%) 50% / 16px 16px;
+}
+.file-preview .file-binary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+}
+/* Usage page: a session dashboard inside a narrow column. The chart primitives are the analytics
+   ones, so only the panel-scale overrides and the panel-only marks (turn columns, error log) live
+   here. Status hues stay reserved for status; mixes use the categorical --chart-N slots. */
+.usage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px 12px 14px;
+  min-width: 0;
+}
+.usage-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.usage-hero-main {
+  min-width: 0;
+}
+.usage-hero-label {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+.usage-hero-value {
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+.usage-hero-sub {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+}
+.usage-hero-note {
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 5px;
+  opacity: 0.85;
+}
+.usage-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  gap: 6px;
+}
+.ukpi {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  padding: 6px 8px 7px;
+  min-width: 0;
+}
+.ukpi-value {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ukpi-label {
+  font-size: 10.5px;
+  color: var(--fg-muted);
+}
+.ukpi-sub {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ukpi-bad .ukpi-value {
+  color: var(--red);
+}
+.ukpi-live .ukpi-value {
+  color: var(--accent);
+}
+.usage-meters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px 16px;
+}
+.usage-block,
+.usage-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.usage h5 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.usage-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usage-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.usage-switch-note,
+.usage-note {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+/* The analytics bar list assumes a full-width card; in the panel the label column has to give. */
+.usage .hbar {
+  grid-template-columns: minmax(78px, 1.2fr) minmax(40px, 1fr) auto 36px;
+  gap: 8px;
+}
+.usage .chart-empty {
+  padding: 10px 0;
+}
+.usage .stackbar-legend {
+  gap: 2px 10px;
+}
+
+/* Turn activity: one column per turn, height by the selected metric, status by the reserved hues.
+   The value lands in the readout above rather than a floating tooltip, which will not fit here. */
+.uturn-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  min-height: 16px;
+}
+.uturn-readout-main {
+  font-weight: 600;
+}
+.uturn-readout-sub {
+  color: var(--fg-muted);
+}
+.uturns {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 84px;
+  padding: 0 1px;
+  border-bottom: 1px solid var(--border);
+}
+.uturn {
+  flex: 1 1 0;
+  /* Capped so a three-turn session draws three bars rather than three slabs. */
+  max-width: 20px;
+  min-width: 3px;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: default;
+}
+.uturn-fill {
+  display: block;
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  background: var(--accent);
+}
+.uturn.st-interrupted .uturn-fill {
+  background: var(--amber);
+}
+.uturn.st-failed .uturn-fill {
+  background: var(--red);
+}
+.uturn.focused .uturn-fill {
+  outline: 2px solid var(--bg-elev);
+  outline-offset: -1px;
+  filter: brightness(1.15);
+}
+.uturn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.uturn-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.uturn-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.uturn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+.uturn-dot.st-interrupted {
+  background: var(--amber);
+}
+.uturn-dot.st-failed {
+  background: var(--red);
+}
+.uturn-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.uturn-row {
+  display: grid;
+  grid-template-columns: 7px 28px repeat(3, minmax(0, 1fr)) minmax(0, 1.3fr);
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.uturn-row-name {
+  color: var(--fg-muted);
+}
+.uturn-row-val,
+.uturn-row-rate {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Failure counters and the error log */
+.uerr-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 6px;
+}
+.uerr-count {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 7px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.uerr-count.hot {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+}
+.uerr-count-value {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.uerr-count.hot .uerr-count-value {
+  color: var(--red);
+}
+.uerr-count-label {
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.uerr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.uerr {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 2px 6px;
+  border-left: 2px solid var(--red);
+  background: var(--red-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 5px 8px;
+}
+.uerr-icon {
+  color: var(--red);
+  grid-row: span 2;
+  margin-top: 2px;
+}
+.uerr-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.uerr-label {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.uerr-time {
+  margin-left: auto;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.uerr-detail {
+  font-size: 11px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Terminal panel: tab strip, find/rename bars and the xterm mount. xterm paints its own screen
+   from the theme (see terminal/host.ts); the chrome around it uses the panel tokens. */
+.term {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.term-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.term-tabs::-webkit-scrollbar {
+  display: none;
+}
+.term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  padding: 4px 6px 4px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.term-tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.term-tab.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.term-tab.exited .term-tab-title {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.term-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.term-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  opacity: 0;
+}
+.term-tab:hover .term-tab-close,
+.term-tab.active .term-tab-close {
+  opacity: 0.7;
+}
+.term-tab-close:hover {
+  background: var(--bg-active);
+  opacity: 1;
+}
+.term-new {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.term-new .term-new-more {
+  margin-left: -6px;
+  padding-left: 2px;
+  padding-right: 2px;
+}
+/* The directory the active shell reports (OSC 7 / 9;9), else where it started. */
+.term-cwd {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-faint);
+  font-size: 11px;
+  padding: 0 4px;
+  flex-shrink: 1;
+}
+.term-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sunken);
+}
+.term-view {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 0 4px 8px;
+}
+.term-view .term-xterm,
+.term-view .xterm {
+  height: 100%;
+}
+/* xterm.css paints the viewport black; the sub-row remainder under the last line must match the theme. */
+.term-view .xterm .xterm-viewport {
+  background-color: var(--bg-sunken) !important;
+}
+.term-exit-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 12px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.term-find,
+.term-rename {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  flex-shrink: 0;
+}
+.term-find input,
+.term-rename input {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.term-find input.no-hit {
+  border-color: var(--red);
+}
+.term-find-opt {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.term-find-opt.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}

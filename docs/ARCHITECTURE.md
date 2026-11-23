@@ -44,14 +44,17 @@ src/main
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
+    settings/     modular Settings sections (appearance, general, sessions, terminal, providers, harnesses, shortcuts, remote, about)
     SessionTitle.tsx  shared desktop and web session label with a harness pill and project | session name
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
     mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
+  styles.css      @layer entry importing modular stylesheets under styles/ (tokens, reset, layout, primitives, sidebar, conversation, panel, dialogs, views, themes/)
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
   ui-mode.ts      the interface mode (Standard or Zen) as React reads it; theme.ts applies it as <html data-ui>
-  ui-zen.css      the Zen layout: CSS over the standard component tree, so a switch never remounts anything (docs/INTERFACE-MODES.md)
-  store.ts        session state; api.ts wraps the preload bridge
+  ui-zen.css      the Zen layout in @layer modes: CSS over the standard component tree, so a switch never remounts anything (docs/INTERFACE-MODES.md)
+  store.ts        session/layout/host Zustand store composed from slices under store/; api.ts wraps the preload bridge
+  settings-nav.ts deep-link navigation into Settings sections without circular imports with SettingsView
   panes.ts        the split view's session pane model and the separate, transient file drawer target; components/SessionPanes.tsx renders the split
   file-open.ts    where a session's files are read from (Mission workspaces) and how outside paths are only revealed; components/FilePreviewPane.tsx previews
 src/web           the browser shell at code.vocs.io/app (plain Vite build into relay/public/app)
