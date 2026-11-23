@@ -1,20 +1,22 @@
 /**
  * End-to-end flow for Layer 2 project knowledge: a wiki seeded on disk is ingested and rendered in
  * the right panel's Knowledge tab without any accept step, labels and provenance are shown, a claim
- * is rejected (tombstoned) from its row, and an open page's anchors and relation graph render. The
- * sessions and wiki are seeded on disk, and Graphify indexes a real Git checkout locally, so no
- * harness or provider key is involved. Requires `npm run build`; gated by VOCS_CODE_E2E_UI=1.
+ * is rejected (tombstoned) from its row, and an open page's anchors and relation graph render.
+ * Graphify indexes a real Git checkout locally; passive reflection drives the native harness
+ * against a keyless loopback fixture. Requires `npm run build`; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, promises as fs } from 'node:fs';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { serializeKnowledgeDocument, type KnowledgePageMeta } from '../src/shared/knowledge';
-import type { SessionMeta, TranscriptItem } from '../src/shared/types';
-import { isolatedEnv, seedSettings } from './e2e-ui';
+import { MCP_BUILTIN_IDS, type SessionMeta, type TranscriptItem } from '../src/shared/types';
+import { isolatedEnv, openNewSession, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -387,6 +389,162 @@ describe.runIf(enabled)('project knowledge panel', () => {
       await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
     }
   }, 180_000);
+
+  it('captures a cited local lesson on ordinary turn completion and stops capturing when reflection is off', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-local-reflection-e2e-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'retry-project');
+    const title = 'Retry investigation';
+    const model = 'fixture-chat';
+    const lesson = 'Retain the quasar retry fence until its persisted acknowledgment has been read.';
+    const detail = 'The second worker tried to replay a completed write while the acknowledgment was still being read.';
+    const turns = [
+      { prompt: 'Explain the replay observed in the delayed-acknowledgment test.', reply: `${detail}\n\nLesson learned: ${lesson}` },
+      { prompt: 'Explain what happened in the delayed lease renewal test.', reply: 'The renewal timer fired after the worker had already released the lease.\n\nLesson learned: Cancel the topaz renewal timer before relinquishing its lease.' }
+    ] as const;
+    const requests: string[] = [];
+    // Same OpenAI-compatible SSE shape as the native title E2E, but only ordinary chat is allowed.
+    const server = createServer((req, res) => {
+      if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
+        requests.push(`${req.method} ${req.url}`);
+        res.writeHead(404).end();
+        return;
+      }
+      let json = '';
+      req.setEncoding('utf8').on('data', (chunk: string) => { json += chunk; });
+      req.on('end', () => {
+        try {
+          const body = JSON.parse(json) as { model: string; stream?: boolean; messages: { role: string; content: string }[] };
+          const message = body.messages.at(-1);
+          const turn = turns.find(({ prompt }) => message?.role === 'user' && message.content === prompt);
+          if (body.model === model && body.stream === true && turn) {
+            requests.push(turn.prompt);
+            const chunk = (delta: Record<string, string>, finish_reason: 'stop' | null) =>
+              `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.end(chunk({ role: 'assistant', content: turn.reply }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n');
+            return;
+          }
+          requests.push(`Unexpected completion: ${body.model} (stream=${body.stream})`);
+        } catch {
+          requests.push('Malformed completion');
+        }
+        res.writeHead(400).end();
+      });
+    });
+    const wait = { timeout: 15_000 };
+    try {
+      const listening = once(server, 'listening');
+      server.listen(0, '127.0.0.1');
+      await listening;
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Reflection fixture did not bind a TCP address');
+      await Promise.all([userData, project].map((dir) => fs.mkdir(dir, { recursive: true })));
+      // Leave intelligence, knowledge and the utility model unset. Override the built-in keyless
+      // provider too, so even a mistaken background fallback reaches only the loopback server.
+      await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+        defaultHarness: 'native', defaultPermissionMode: 'ask', defaultModelByHarness: { native: { provider: 'ollama', model } },
+        providers: [{ id: 'ollama', kind: 'ollama', enabled: true, baseUrl: `http://127.0.0.1:${address.port}/v1`,
+          models: [{ id: model, provider: 'ollama', displayName: 'Fixture chat' }] }],
+        agent: { enabled: false }, mcpDisabledBuiltins: MCP_BUILTIN_IDS, notifications: false
+      }));
+
+      let win = await launchApp(userData);
+      await openNewSession(win);
+      // Name the session before the first send so opening-prompt naming cannot make a request.
+      await win.getByRole('button', { name: 'Advanced', exact: true }).click(wait);
+      await win.getByPlaceholder('Auto from first prompt').fill(title, wait);
+      await win.getByRole('button', { name: /^Start session/ }).click(wait);
+      const sessionId = await win.getByTestId('session-row').filter({ hasText: title }).getAttribute('data-session-id', wait);
+      if (!sessionId) throw new Error('New session has no session id');
+      const tab = async (view: 'sources' | 'memory' | 'evidence') => { await win.getByTestId(`knowledge-view-${view}`).click(wait); };
+      const reflection = () => win.getByTestId('setting-reflection');
+      const readView = () => win.evaluate((id) => window.harness.invoke('intelligence:view', { sessionId: id }), sessionId);
+      const sendTurn = async (index: 0 | 1) => {
+        // The idle Composer sends as the user with mode 'now', not a queued or Plan turn.
+        await win.getByPlaceholder(/^(Message the agent|Ask anything)/).fill(turns[index].prompt, wait);
+        await win.getByRole('button', { name: 'Send', exact: true }).click(wait);
+        await expect.poll(() => win.evaluate(async (id) => {
+          const meta = await window.harness.invoke('sessions:get', { id });
+          const items = await window.harness.invoke('sessions:transcript', { id });
+          return {
+            status: meta?.status, permission: meta?.config.permissionMode, queued: meta?.queued,
+            users: items.flatMap((item) => item.kind === 'user' ? [{ text: item.text, mode: item.queuedAs, owner: item.userInput?.sessionId }] : []),
+            replies: items.flatMap((item) => item.kind === 'assistant' && !item.streaming ? [item.text] : []),
+            turns: items.flatMap((item) => item.kind === 'turn' ? [item.status] : [])
+          };
+        }, sessionId), wait).toEqual({
+          status: 'idle', permission: 'ask', queued: 0,
+          users: turns.slice(0, index + 1).map(({ prompt }) => ({ text: prompt, mode: 'now', owner: sessionId })),
+          replies: turns.slice(0, index + 1).map(({ reply }) => reply),
+          turns: Array(index + 1).fill('completed')
+        });
+      };
+
+      await openKnowledge(win, title);
+      await tab('sources');
+      expect(await reflection().inputValue(wait)).toBe('local');
+      expect(await reflection().locator('option:checked').textContent(wait)).toMatch(/local after completed turns/i);
+      await tab('memory');
+      await win.getByTestId('memory-add').waitFor(wait);
+      expect(await win.getByTestId('memory-row').count()).toBe(0);
+
+      // Leave Memory open: the candidate must appear without Reflect, reload or a tab revisit.
+      await sendTurn(0);
+      const answerId = await win.evaluate(async (id) => {
+        const items = await window.harness.invoke('sessions:transcript', { id });
+        return items.findLast((item) => item.kind === 'assistant')?.id;
+      }, sessionId);
+      expect(answerId).toBeDefined();
+      const ref = `${sessionId}#${answerId}`;
+      const memoryRow = () => win.getByTestId('memory-row').filter({ hasText: lesson });
+      const expectCandidate = async () => {
+        const row = memoryRow();
+        expect(await row.getByTestId('memory-state').innerText(wait)).toBe('candidate');
+        expect(await row.getByRole('list', { name: 'Sources', exact: true }).innerText(wait)).toContain(`transcript: ${ref}`);
+      };
+      await expectCandidate();
+      const { records, personal, shared, promotions } = await readView();
+      expect(records).toEqual([expect.objectContaining({
+        state: 'candidate', scope: 'project', sessionId, text: lesson,
+        sources: [expect.objectContaining({ type: 'transcript', ref })]
+      })]);
+      expect({ personal, shared, promotions }).toEqual({ personal: [], shared: [], promotions: [] });
+      const recordIds = () => readView().then((view) => view.records.map(({ id }) => id));
+      const learnedId = records[0]!.id;
+
+      await tab('evidence');
+      const evidence = win.getByTestId('evidence-view');
+      expect(await evidence.getByTestId('evidence-scope').inputValue(wait)).toBe('project');
+      await evidence.getByTestId('evidence-query').fill('quasar retry fence', wait);
+      await evidence.getByTestId('evidence-search').click(wait);
+      const result = evidence.getByTestId('evidence-row').filter({ hasText: 'quasar retry fence', has: win.getByText('memory', { exact: true }) });
+      await result.getByText('candidate', { exact: true }).waitFor(wait);
+      await result.getByText('history', { exact: true }).waitFor(wait);
+
+      await tab('sources');
+      await reflection().selectOption('off', wait);
+      await expect.poll(async () => (await readView()).settings.reflection, wait).toBe('off');
+      await sendTurn(1);
+      expect(await recordIds()).toEqual([learnedId]);
+
+      await app!.close();
+      app = null;
+      win = await launchApp(userData);
+      await openKnowledge(win, title);
+      await tab('sources');
+      expect(await reflection().inputValue(wait)).toBe('off');
+      await tab('memory');
+      await expectCandidate();
+      expect(await recordIds()).toEqual([learnedId]);
+      expect(requests).toEqual(turns.map(({ prompt }) => prompt));
+    } finally {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+    }
+  }, 120_000);
 
   it('shares only an explicitly promoted lesson and keeps forgotten records gone after restart', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-intelligence-e2e-'));
