@@ -124,6 +124,36 @@ describe('Mission user IPC', () => {
     expect(r.missions.create).not.toHaveBeenCalled();
   });
 
+  it('rejects images outside the Mission raster, encoded-length and name bounds before dispatch', async () => {
+    const r = await rig();
+    const stat = vi.spyOn(fs, 'stat').mockRejectedValue(new Error('Unexpected project probe'));
+    const valid = { mimeType: 'image/png', data: 'ZHVtbXk=', name: 'context.png' };
+    for (const image of [
+      { ...valid, mimeType: 'image/tiff' },
+      { ...valid, data: 'not base64' },
+      { ...valid, data: 'AAAA'.repeat(6 * 1024 * 1024 + 1) },
+      { ...valid, name: '' },
+      { ...valid, name: '  ' },
+      { ...valid, name: 'context\0.png' },
+      { ...valid, name: 'x'.repeat(1001) }
+    ]) {
+      const images = [image];
+      await expect(r.registry.invoke('missions:create', {
+        idempotencyKey: 'launch', projectRoot: r.root, objective: 'Inspect', mode: 'interactive_plan', permissionMode: 'ask', images
+      })).rejects.toMatchObject({ name: 'ZodError' });
+      await expect(r.registry.invoke('missions:command', { ...command('source', '/mission Inspect'), images })).rejects.toMatchObject({ name: 'ZodError' });
+      await expect(r.registry.invoke('missions:control', {
+        missionId: 'mission', idempotencyKey: 'steer', expectedRevision: r.record().revision, control: { action: 'steer', text: 'Inspect', images }
+      })).rejects.toMatchObject({ name: 'ZodError' });
+      await expect(r.registry.invoke('sessions:send', { id: 'lead', input: { text: 'Inspect', images } })).rejects.toMatchObject({ name: 'ZodError' });
+    }
+    expect(stat).not.toHaveBeenCalled();
+    expect(r.missions.create).not.toHaveBeenCalled();
+    expect(r.missions.control).not.toHaveBeenCalled();
+    expect(r.missions.sendUser).not.toHaveBeenCalled();
+    expect(r.sessions.send).not.toHaveBeenCalled();
+  });
+
   it('admits bounded files only as Mission context and never as a control or forged path', async () => {
     const r = await rig();
     const files = [{ name: 'notes.txt', mimeType: 'text/plain', data: Buffer.from('Mission context').toString('base64') }];
@@ -149,7 +179,9 @@ describe('Mission user IPC', () => {
   });
 
   it('forwards command launch images with the actual source and submitted command, including an explicit sibling', async () => {
-    const r = await rig(), images = [{ mimeType: 'image/png', data: 'aW1hZ2U=', name: 'current.png' }];
+    const r = await rig(), images = [
+      { mimeType: 'image/png', data: 'aW1hZ2U=', name: 'current.png' }, { mimeType: 'image/jpeg', data: 'ZHVtbXk=' }
+    ];
     for (const [id, text] of [['source', '  /mission plan Inspect this design  '], ['lead', '/mission start -- inspect a sibling design']]) {
       await r.registry.invoke('missions:command', { ...command(id, text, `image-${id}`), images });
       expect(r.missions.create).toHaveBeenLastCalledWith(expect.objectContaining({ originSessionId: id, submittedCommand: text, images, idempotencyKey: `image-${id}` }));
