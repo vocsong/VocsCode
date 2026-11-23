@@ -65,6 +65,8 @@ const MAX_TEXT = 8_000;
 const MAX_SOURCES = 24;
 const MAX_AUDIT_ROWS = 4_000;
 const MAX_LIST = 500;
+const MAX_LOCAL_TURNS_PER_SESSION = 12;
+export const LOCAL_LEARNING_ORIGIN = 'agent:local-learning';
 
 /** Everything a caller may see, decided before any row is read. */
 export interface MemoryVisibility {
@@ -79,6 +81,8 @@ export interface MemoryVisibility {
   collectionProjects?: Record<string, string[]>;
   /** Personal records are served only when the user turned that on. */
   personal: boolean;
+  /** Tool callers cannot read passive excerpts until the owner verifies them. */
+  hideUnreviewedLocal?: boolean;
 }
 
 export interface MemoryFilter {
@@ -261,6 +265,12 @@ export class MemoryStore {
           key TEXT PRIMARY KEY,
           at TEXT NOT NULL
         );
+        -- A content-free source receipt survives Forget; replays and edits can't recreate the turn's note.
+        CREATE TABLE IF NOT EXISTS local_turns (
+          sessionId TEXT NOT NULL,
+          inputId TEXT NOT NULL,
+          PRIMARY KEY(sessionId, inputId)
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS audit (
           id INTEGER PRIMARY KEY,
           at TEXT NOT NULL,
@@ -322,7 +332,8 @@ export class MemoryStore {
       if (v.collectionProjects) args.push(JSON.stringify(v.collectionProjects));
     }
     if (v.personal) parts.push(`(${c}scope = 'personal')`);
-    return { sql: `(${parts.join(' OR ')})`, args };
+    const review = v.hideUnreviewedLocal ? ` AND (${c}origin <> '${LOCAL_LEARNING_ORIGIN}' OR ${c}state = 'verified')` : '';
+    return { sql: `(${parts.join(' OR ')})${review}`, args };
   }
 
   private filterSql(filter: MemoryFilter, alias = ''): { sql: string; args: Array<string | number> } {
@@ -456,6 +467,26 @@ export class MemoryStore {
     }
   }
 
+  /** Store at most one local observation per user input, even after restart or Forget. */
+  captureLocalTurn(projectId: string, sessionId: string, inputId: string, input: {
+    kind: 'lesson' | 'episode'; title: string; text: string; branch?: string; sources: EvidenceSource[];
+  }): MemoryRecord | null {
+    return this.transaction(() => {
+      const db = this.open();
+      const inserted = db.prepare(`INSERT OR IGNORE INTO local_turns(sessionId, inputId)
+        SELECT ?, ? WHERE (SELECT COUNT(*) FROM local_turns WHERE sessionId = ?) < ?`)
+        .run(sessionId, inputId, sessionId, MAX_LOCAL_TURNS_PER_SESSION);
+      if (!inserted.changes) return null;
+      return this.create(projectId, {
+        ...input, type: 'episodic', scope: 'project', state: input.kind === 'lesson' ? 'candidate' : 'captured', sessionId
+      }, LOCAL_LEARNING_ORIGIN);
+    });
+  }
+
+  dropLocalTurnReceipts(sessionId: string): void {
+    this.open().prepare('DELETE FROM local_turns WHERE sessionId = ?').run(sessionId);
+  }
+
   /**
    * Stores a record. Returns null when the same text was forgotten or rejected before: a tombstone
    * refuses the capture rather than letting a job refile it every session. The same statement in
@@ -484,7 +515,7 @@ export class MemoryStore {
     const kind: MemoryKind = input.kind && (MEMORY_KINDS as readonly string[]).includes(input.kind) ? input.kind : 'note';
     const stamp = new Date(this.now()).toISOString();
     const sources = cleanSources(input.sources);
-    const twin = this.findTwin(projectId, scope, text, { ...input, kind });
+    const twin = this.findTwin(projectId, scope, text, { ...input, kind }, origin === LOCAL_LEARNING_ORIGIN);
     if (twin) {
       // Repeating a claim cannot change its authority or mutate human-reviewed evidence.
       if (origin.startsWith('agent:') && (twin.origin === 'human' || twin.verification?.method === 'human-review')) return twin;
@@ -526,18 +557,21 @@ export class MemoryStore {
     return record;
   }
 
-  private findTwin(projectId: string | null, scope: MemoryScope, text: string, input: MemoryRecordInput): MemoryRecord | null {
+  private findTwin(projectId: string | null, scope: MemoryScope, text: string, input: MemoryRecordInput, local: boolean): MemoryRecord | null {
     const key = normalizedText(text);
     const branch = scope === 'branch' ? input.branch ?? null : null;
-    const session = scope === 'session' || input.kind === 'episode' ? input.sessionId ?? null : null;
+    // Keep passive provenance isolated even when another user or agent happens to record the same text.
+    const session = scope === 'session' || input.kind === 'episode' || local ? input.sessionId ?? null : null;
     const collection = scope === 'collection' ? input.collectionId ?? null : null;
     const rows = this.open()
       .prepare(`SELECT * FROM records
                 WHERE scope = ? AND projectId IS ? AND type = ? AND kind = ? AND state NOT IN ('revoked', 'rejected', 'superseded', 'expired')
                   AND (expiresAt IS NULL OR expiresAt > ?)
-                  AND (? IS NULL OR branch = ?) AND (? IS NULL OR sessionId = ?) AND (? IS NULL OR collectionId = ?)
+                  AND (? IS NULL OR branch = ?) AND (? IS NULL OR collectionId = ?)
+                  ${session ? 'AND sessionId = ?' : ''}
+                  AND origin ${local ? '=' : '<>'} '${LOCAL_LEARNING_ORIGIN}'
                 ORDER BY updatedAt DESC LIMIT 400`)
-      .all(scope, projectId, input.type, input.kind ?? 'note', new Date(this.now()).toISOString(), branch, branch, session, session, collection, collection) as unknown as Row[];
+      .all(scope, projectId, input.type, input.kind ?? 'note', new Date(this.now()).toISOString(), branch, branch, collection, collection, ...(session ? [session] : [])) as unknown as Row[];
     for (const row of rows) {
       if (normalizedText(row.text) !== key) continue;
       const record = this.toRecord(row);

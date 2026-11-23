@@ -662,13 +662,13 @@ export function isIntelligenceOwnerRequest(channel: string, req: unknown): boole
   return channel.startsWith('intelligence:') || (channel === 'settings:update' && !!req && typeof req === 'object' && 'intelligence' in req);
 }
 
-export type ReflectionMode = 'off' | 'manual' | 'auto';
+export type ReflectionMode = 'off' | 'local' | 'manual' | 'auto';
 
 /** App-wide intelligence switches (Settings → Project knowledge). Every default is the safe one. */
 export interface IntelligenceSettings {
   /** Route the memory MCP tools through the app-owned gateway (one parser, one write path). */
   gateway: boolean;
-  /** Session-end reflection: never, only when asked, or after each finished session. */
+  /** Local turn learning, explicit reflection, opted-in model reflection on archive/merge, or off. */
   reflection: ReflectionMode;
   /** Federated search across the collections a project belongs to. */
   collections: boolean;
@@ -686,7 +686,7 @@ export interface GraphifySettings {
 
 export const DEFAULT_INTELLIGENCE_SETTINGS: IntelligenceSettings = {
   gateway: true,
-  reflection: 'manual',
+  reflection: 'local',
   collections: true,
   personalMemory: false,
   graphify: { enabled: true, excludedProjects: [] }
@@ -697,7 +697,7 @@ export function resolveIntelligenceSettings(stored: Partial<IntelligenceSettings
   const graphify = stored?.graphify;
   return {
     gateway: typeof stored?.gateway === 'boolean' ? stored.gateway : DEFAULT_INTELLIGENCE_SETTINGS.gateway,
-    reflection: reflection === 'off' || reflection === 'manual' || reflection === 'auto' ? reflection : DEFAULT_INTELLIGENCE_SETTINGS.reflection,
+    reflection: reflection === 'off' || reflection === 'local' || reflection === 'manual' || reflection === 'auto' ? reflection : DEFAULT_INTELLIGENCE_SETTINGS.reflection,
     collections: typeof stored?.collections === 'boolean' ? stored.collections : DEFAULT_INTELLIGENCE_SETTINGS.collections,
     personalMemory: typeof stored?.personalMemory === 'boolean' ? stored.personalMemory : DEFAULT_INTELLIGENCE_SETTINGS.personalMemory,
     graphify: {

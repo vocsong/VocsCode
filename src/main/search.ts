@@ -32,6 +32,7 @@ export interface SearchStore {
   get(id: string): SessionMeta | undefined;
   readTranscript(id: string): Promise<TranscriptItem[]>;
   sessionDir(id: string): string;
+  transcriptWritePending(id: string): boolean;
 }
 
 export interface SearchIndexDeps {
@@ -81,10 +82,20 @@ export function ftsQuery(q: string): string | null {
   return out.length ? out.join(' ') : null;
 }
 
+type TranscriptCoverage = {
+  validated: boolean;
+  version: number;
+  loading?: boolean;
+  /** Latest appends received while the disk snapshot is in flight. */
+  replay?: Map<string, TranscriptItem>;
+};
+
 export class SearchIndex {
   private db: InstanceType<typeof import('node:sqlite').DatabaseSync> | null = null;
   /** Queued item upserts per session, drained on a debounce. */
   private pending = new Map<string, Map<string, TranscriptItem>>();
+  /** Rewrites and removals invalidate the identity held by in-flight reads and stats. */
+  private coverage = new Map<string, TranscriptCoverage>();
   /** Sessions whose transcript changed wholesale (rewrite/clear); re-synced from disk. */
   private resync = new Set<string>();
   private flushTimer: NodeJS.Timeout | null = null;
@@ -176,13 +187,23 @@ export class SearchIndex {
 
   /** Queues one transcript item (last write wins per item id); drained on a debounce. */
   indexItem(sessionId: string, item: TranscriptItem): void {
-    if (!this.db || !itemText(item)) return;
+    if (!this.db) return;
+    let coverage = this.coverage.get(sessionId);
+    if (!coverage) {
+      // Existing transcripts are registered before startup backfill yields. A new session has
+      // no older items to validate; imports and forks explicitly enter via resyncSession.
+      coverage = { validated: !this.resync.has(sessionId), version: 0 };
+      this.coverage.set(sessionId, coverage);
+    }
+    coverage.version++;
+    if (!itemText(item)) return;
     let byId = this.pending.get(sessionId);
     if (!byId) {
       byId = new Map();
       this.pending.set(sessionId, byId);
     }
     byId.set(item.id, item);
+    coverage.replay?.set(item.id, item);
     this.scheduleFlush();
   }
 
@@ -190,6 +211,8 @@ export class SearchIndex {
   resyncSession(sessionId: string): void {
     if (!this.db) return;
     this.pending.delete(sessionId);
+    this.coverage.delete(sessionId);
+    this.stmt('DELETE FROM files WHERE sessionId = ?').run(sessionId);
     this.resync.add(sessionId);
     this.scheduleFlush();
   }
@@ -198,6 +221,7 @@ export class SearchIndex {
   dropSession(sessionId: string): void {
     if (!this.db) return;
     this.pending.delete(sessionId);
+    this.coverage.delete(sessionId);
     this.resync.delete(sessionId);
     this.db.prepare('DELETE FROM items WHERE sessionId = ?').run(sessionId);
     this.db.prepare('DELETE FROM session_meta WHERE sessionId = ?').run(sessionId);
@@ -362,27 +386,18 @@ export class SearchIndex {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    for (const id of this.resync) {
-      this.pending.delete(id);
-      void this.syncSessionFromDisk(id);
-    }
+    for (const id of this.resync) void this.syncSessionFromDisk(id);
     this.resync.clear();
-    if (this.pending.size === 0) return;
-    const upsert = this.stmt(
-      `INSERT INTO items(sessionId, itemId, kind, ts, text) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(sessionId, itemId) DO UPDATE SET kind = excluded.kind, ts = excluded.ts, text = excluded.text`
-    );
     const db = this.db;
     for (const [sessionId, byId] of this.pending) {
+      const coverage = this.coverage.get(sessionId);
       try {
         db.exec('BEGIN');
-        for (const item of byId.values()) {
-          const t = itemText(item);
-          if (t) upsert.run(sessionId, item.id, t.kind, item.ts, t.text.slice(0, MAX_ITEM_TEXT));
-        }
+        this.upsertItems(sessionId, byId.values());
         db.exec('COMMIT');
-        this.recordCoverage(sessionId);
+        if (coverage?.validated) this.recordCoverage(sessionId, coverage);
       } catch (e) {
+        if (coverage) coverage.validated = false;
         try {
           db.exec('ROLLBACK');
         } catch {
@@ -394,46 +409,72 @@ export class SearchIndex {
     this.pending.clear();
   }
 
-  /** Re-reads one transcript from disk and replaces everything indexed for the session. */
+  private upsertItems(sessionId: string, items: Iterable<TranscriptItem>): void {
+    const upsert = this.stmt(
+      `INSERT INTO items(sessionId, itemId, kind, ts, text) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(sessionId, itemId) DO UPDATE SET kind = excluded.kind, ts = excluded.ts, text = excluded.text`
+    );
+    for (const item of items) {
+      const t = itemText(item);
+      if (t) upsert.run(sessionId, item.id, t.kind, item.ts, t.text.slice(0, MAX_ITEM_TEXT));
+    }
+  }
+
+  /** Validates an existing stamp or reindexes the transcript from disk. */
   private async syncSessionFromDisk(sessionId: string): Promise<void> {
-    if (!this.db) return;
+    const db = this.db;
+    if (!db) return;
+    const coverage = this.coverage.get(sessionId) ?? { validated: false, version: 0 };
+    if (coverage.loading || coverage.validated) return;
+    coverage.loading = true;
+    this.coverage.set(sessionId, coverage);
     try {
       const file = path.join(this.deps.store.sessionDir(sessionId), 'transcript.jsonl');
       const st = await fsStat(file);
+      if (!st || this.db !== db || this.coverage.get(sessionId) !== coverage) return;
       const covered = this.stmt('SELECT mtime, size FROM files WHERE sessionId = ?').get(sessionId) as { mtime: number; size: number } | undefined;
-      if (!st) {
-        if (covered) this.dropSession(sessionId);
+      if (covered && covered.mtime === st.mtimeMs && covered.size === st.size) {
+        coverage.validated = true;
         return;
       }
-      if (covered && covered.mtime === st.mtimeMs && covered.size === st.size) return;
+      const version = coverage.version;
+      const replay = coverage.replay = new Map<string, TranscriptItem>();
       const items = await this.deps.store.readTranscript(sessionId);
-      const db = this.db;
+      if (this.db !== db || this.coverage.get(sessionId) !== coverage) return;
       db.exec('BEGIN');
       try {
         db.prepare('DELETE FROM items WHERE sessionId = ?').run(sessionId);
-        const insert = this.stmt('INSERT INTO items(sessionId, itemId, kind, ts, text) VALUES (?, ?, ?, ?, ?)');
-        for (const item of items) {
-          const t = itemText(item);
-          if (t) insert.run(sessionId, item.id, t.kind, item.ts, t.text.slice(0, MAX_ITEM_TEXT));
-        }
+        this.upsertItems(sessionId, items);
+        // Restore later appends, including those already flushed while the read was in flight.
+        if (replay.size) this.upsertItems(sessionId, replay.values());
+        // Only the pre-read stat is known to be covered. Leave it stale if the file grew.
+        this.stmt('INSERT OR REPLACE INTO files(sessionId, mtime, size) VALUES (?, ?, ?)').run(sessionId, st.mtimeMs, st.size);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
         throw e;
       }
-      this.stmt('INSERT OR REPLACE INTO files(sessionId, mtime, size) VALUES (?, ?, ?)').run(sessionId, st.mtimeMs, st.size);
+      this.pending.delete(sessionId);
+      coverage.validated = coverage.version === version;
     } catch (e) {
       this.deps.log('warn', `search resync failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      delete coverage.replay;
+      delete coverage.loading;
     }
   }
 
-  /** Remembers a transcript file's stat so boot backfill can skip unchanged sessions. */
-  private recordCoverage(sessionId: string): void {
+  /** Remembers a transcript stat only for a validated, still-current append batch. */
+  private recordCoverage(sessionId: string, coverage: TranscriptCoverage): void {
+    if (this.deps.store.transcriptWritePending(sessionId)) return;
+    const db = this.db;
+    const version = coverage.version;
     void (async () => {
       try {
         const file = path.join(this.deps.store.sessionDir(sessionId), 'transcript.jsonl');
         const st = await fsStat(file);
-        if (st && this.db) {
+        if (st && this.db === db && this.coverage.get(sessionId) === coverage && coverage.validated && coverage.version === version
+          && !this.deps.store.transcriptWritePending(sessionId)) {
           this.stmt('INSERT OR REPLACE INTO files(sessionId, mtime, size) VALUES (?, ?, ?)').run(sessionId, st.mtimeMs, st.size);
         }
       } catch {
@@ -444,21 +485,18 @@ export class SearchIndex {
 
   /** Boot-time: index sessions missing or stale in the coverage table; drop deleted ones. */
   private async backfill(): Promise<void> {
-    if (!this.db) return;
+    const db = this.db;
+    if (!db) return;
     try {
-      const sessions = this.deps.store.list();
-      const alive = new Set(sessions.map((s) => s.id));
-      const known = (this.db.prepare('SELECT DISTINCT sessionId FROM files').all() as { sessionId: string }[]).map((r) => r.sessionId);
-      for (const id of known) {
-        if (!alive.has(id)) this.dropSession(id);
+      const alive = new Set(this.deps.store.list().map((s) => s.id));
+      for (const id of alive) this.coverage.set(id, { validated: false, version: 0 });
+      const known = db.prepare('SELECT sessionId FROM files').all() as { sessionId: string }[];
+      for (const { sessionId } of known) {
+        if (!alive.has(sessionId)) this.dropSession(sessionId);
       }
-      for (const s of sessions) {
-        const file = path.join(this.deps.store.sessionDir(s.id), 'transcript.jsonl');
-        const st = await fsStat(file);
-        if (!st) continue;
-        const covered = this.db.prepare('SELECT mtime, size FROM files WHERE sessionId = ?').get(s.id) as { mtime: number; size: number } | undefined;
-        if (covered && covered.mtime === st.mtimeMs && covered.size === st.size) continue;
-        await this.syncSessionFromDisk(s.id);
+      for (const id of alive) {
+        if (this.db !== db) return;
+        if (this.deps.store.get(id) && !this.resync.has(id)) await this.syncSessionFromDisk(id);
       }
     } catch (e) {
       this.deps.log('warn', `search backfill failed: ${e instanceof Error ? e.message : String(e)}`);

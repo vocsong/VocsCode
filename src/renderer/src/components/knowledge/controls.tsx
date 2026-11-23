@@ -2,7 +2,8 @@ import React, { useId, useState } from 'react';
 import type { IntelligenceView } from '../../../../shared/intelligence';
 import { Button, Spinner } from '../ui';
 
-export const REFLECTION_PRIVACY_NOTICE = 'Reflection can send excerpts from the session transcript to your configured background model provider to extract candidate lessons.';
+export const LOCAL_REFLECTION_NOTE = 'After completed turns, Local can save a short lesson or outcome on this device. Only you can see these notes in Memory and Evidence until you verify them. Capture makes no model calls.';
+export const REFLECTION_PRIVACY_NOTICE = 'Clicking Reflect on this session can send excerpts from the session transcript to your configured background model provider to extract candidate lessons.';
 
 export function shortDate(at: string) {
   const date = new Date(at);

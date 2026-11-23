@@ -5,8 +5,8 @@
  */
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
-import type { AppSettings } from '../../shared/types';
-import { backgroundHeaders, selectBackgroundModel } from '../agents/model';
+import type { AppSettings, ModelRef } from '../../shared/types';
+import { backgroundHeaders, selectBackgroundModel, usableProviders, type BackgroundModel } from '../agents/model';
 import { assertProviderEndpoint, resolveProviderApiKey } from '../models/providers';
 import { credentialFetch } from '../../shared/endpoint-policy';
 import { isAnthropicProvider } from '../harness/native/drivers';
@@ -18,6 +18,8 @@ export interface KnowledgeCompletionRequest {
   prompt: string;
   maxTokens?: number;
   timeoutMs?: number;
+  /** Dispatch only while this exact provider/model is still the usable, explicitly selected utility. */
+  onlyUtilityModel?: ModelRef;
 }
 
 export interface KnowledgeCompleter {
@@ -43,30 +45,70 @@ interface OpenAiMessage {
   reasoning_content?: string | null;
 }
 
+/** Automatic jobs require an explicit utility, not the generic background model fallback. */
+export function selectKnowledgeUtilityModel(settings: AppSettings, expected = settings.utilityModel): BackgroundModel | null {
+  const selected = settings.utilityModel;
+  if (!expected?.provider || !expected.model.trim() || selected?.provider !== expected.provider || selected.model !== expected.model) return null;
+  const provider = usableProviders(settings.providers).find((p) => p.id === expected.provider);
+  // Cursor is a harness, not a completion endpoint; other compatible providers need a URL so the
+  // SDK cannot silently send to its own default provider instead.
+  if (!provider || provider.kind === 'cursor' || (!provider.baseUrl && provider.kind !== 'openai' && provider.kind !== 'anthropic')) return null;
+  try {
+    assertProviderEndpoint(provider);
+  } catch {
+    return null;
+  }
+  return { provider, model: expected.model };
+}
+
 export function createKnowledgeCompleter(deps: {
   settings: () => AppSettings;
   getSecret: (providerId: string) => Promise<string | undefined>;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }): KnowledgeCompleter {
-  const picked = () => selectBackgroundModel(deps.settings().providers, deps.settings().utilityModel);
   return {
     label(): string | null {
-      const choice = picked();
+      const { providers, utilityModel } = deps.settings();
+      const choice = selectBackgroundModel(providers, utilityModel);
       return choice ? `${choice.provider.id}/${choice.model}` : null;
     },
     async complete(req: KnowledgeCompletionRequest): Promise<string | null> {
-      const choice = picked();
+      const onlyUtilityModel = req.onlyUtilityModel && { ...req.onlyUtilityModel };
+      const settings = deps.settings();
+      const choice = onlyUtilityModel
+        ? selectKnowledgeUtilityModel(settings, onlyUtilityModel)
+        : selectBackgroundModel(settings.providers, settings.utilityModel);
       if (!choice) {
         deps.log('debug', 'knowledge: no usable provider for a background completion');
         return null;
       }
       const { provider, model } = choice;
+      const { kind, baseUrl, envKey, hasApiKey } = provider;
+      let revoked = false;
+      const stillAllowed = (): boolean => {
+        if (!onlyUtilityModel) return true;
+        if (revoked) return false;
+        const current = selectKnowledgeUtilityModel(deps.settings(), onlyUtilityModel)?.provider;
+        if (current && current.kind === kind && current.baseUrl === baseUrl && current.envKey === envKey && current.hasApiKey === hasApiKey) return true;
+        revoked = true;
+        deps.log('debug', 'knowledge: the selected utility model changed or is no longer usable');
+        return false;
+      };
+      // Check at the network boundary too: SDK preparation and SDK-managed retries may yield.
+      const fetch = credentialFetch(onlyUtilityModel ? async (input, init) => {
+        if (!stillAllowed()) throw new Error('The selected utility model is no longer available.');
+        return globalThis.fetch(input, init);
+      } : undefined);
       let apiKey: string | undefined;
       try {
         assertProviderEndpoint(provider);
         apiKey = await resolveProviderApiKey(provider, deps.getSecret);
       } catch (e) {
         deps.log('warn', `knowledge: background completion failed: ${errorMessage(e)}`);
+        return null;
+      }
+      if (onlyUtilityModel && !apiKey && kind !== 'ollama' && kind !== 'lmstudio') {
+        deps.log('debug', 'knowledge: credentials for the selected utility model are unavailable');
         return null;
       }
       const timeout = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -78,8 +120,9 @@ export function createKnowledgeCompleter(deps: {
       // user why nothing appeared.
       let system = req.system;
       for (let attempt = 1; attempt <= 2; attempt++) {
+        if (!stillAllowed()) return null;
         deps.log('debug', `knowledge: asking ${provider.id}/${model} (attempt ${attempt}, max ${budget})`);
-        const outcome = await attemptOnce({ provider, model, apiKey, system, prompt: req.prompt, budget, timeout, headers });
+        const outcome = await attemptOnce({ provider, model, apiKey, system, prompt: req.prompt, budget, timeout, headers, fetch });
         if (outcome.text && outcome.text.trim()) return outcome.text;
         deps.log(
           'warn',
@@ -116,11 +159,12 @@ async function attemptOnce(opts: {
   budget: number;
   timeout: number;
   headers: Record<string, string> | undefined;
+  fetch: typeof fetch;
 }): Promise<AttemptResult> {
-  const { provider, model, apiKey, system, prompt, budget, timeout, headers } = opts;
+  const { provider, model, apiKey, system, prompt, budget, timeout, headers, fetch } = opts;
   try {
     if (isAnthropicProvider(provider)) {
-      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers, fetch: credentialFetch() });
+      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers, fetch });
       const msg = await client.messages.create(
         { model, max_tokens: budget, system, messages: [{ role: 'user', content: prompt }] },
         { signal: AbortSignal.timeout(timeout) }
@@ -132,7 +176,7 @@ async function attemptOnce(opts: {
       const thinking = msg.content.filter((b) => b.type !== 'text').length;
       return { text, finishReason: msg.stop_reason ?? undefined, ...(text.trim() ? {} : { note: thinking ? `${thinking} non-text block(s) only` : 'empty content' }) };
     }
-    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers, fetch: credentialFetch() });
+    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers, fetch });
     const body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = isReasoningModel(model)
       ? { model, max_completion_tokens: budget, reasoning_effort: 'low', messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }
       : { model, max_tokens: budget, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] };

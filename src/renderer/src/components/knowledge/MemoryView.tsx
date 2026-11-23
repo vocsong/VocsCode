@@ -1,12 +1,12 @@
-import React, { useId, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   canTransition, isRecallableState, isServableState,
   type MemoryExportBundle, type MemoryRecord, type MemoryState, type MemoryVerification
 } from '../../../../shared/intelligence';
-import { invoke } from '../../api';
+import { invoke, isWeb, on } from '../../api';
 import { Badge, Button } from '../ui';
-import { ConfirmAction, PromoteControl, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
-import { readIntelligence, type IntelligenceSectionProps } from './useIntelligence';
+import { ConfirmAction, LOCAL_REFLECTION_NOTE, PromoteControl, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
+import { readIntelligence, useScopeGuard, type IntelligenceController, type IntelligenceSectionProps } from './useIntelligence';
 
 const FILTERS = [['all', 'All'], ['servable', 'Servable'], ['unverified', 'Unverified'], ['history', 'History']] as const;
 type Filter = (typeof FILTERS)[number][0];
@@ -147,6 +147,30 @@ function downloadMemory(bundle: MemoryExportBundle) {
   }
 }
 
+/** Coalesce durable-write notifications within this Memory visit, even during the initial read. */
+export function MemoryRefresh({ sessionId, busy, run }: Pick<IntelligenceSectionProps, 'sessionId' | 'busy'> & Pick<IntelligenceController, 'run'>) {
+  const [changed, setChanged] = useState(false);
+  const capture = useScopeGuard();
+  useLayoutEffect(() => {
+    if (isWeb || !window.harness?.on) return;
+    return on('push:projectMemoryChanged', (event) => {
+      if (event.sessionId === sessionId && document.visibilityState !== 'hidden') setChanged(true);
+    });
+  }, [sessionId]);
+  useEffect(() => {
+    if (!changed || busy) return;
+    if (document.visibilityState === 'hidden') { setChanged(false); return; }
+    const current = capture();
+    void run('load', async () => {
+      setChanged(false);
+      // Keep the current view and action results if this background read fails.
+      const next = await readIntelligence(sessionId).catch(() => undefined);
+      if (current() && document.visibilityState !== 'hidden') return next;
+    });
+  }, [busy, capture, changed, run, sessionId]);
+  return null;
+}
+
 /** A ledger of current guidance, reviewable candidates and history, with explicit scope changes. */
 export function MemoryView(props: IntelligenceSectionProps) {
   const { view, sessionId, busy, run } = props;
@@ -188,6 +212,7 @@ export function MemoryView(props: IntelligenceSectionProps) {
 
   return (
     <div className="intelligence-view">
+      {view.settings.reflection === 'local' && <p className="muted small">{LOCAL_REFLECTION_NOTE}</p>}
       <p id={reflectionNote} className="intelligence-warning small">{REFLECTION_PRIVACY_NOTICE}</p>
       <div className="intelligence-actions">
         <Button size="sm" data-testid="memory-reflect" aria-describedby={reflectionNote} disabled={busy || reflectionOff} title={reflectionOff ? 'Session reflection is off in Sources.' : undefined} onClick={() => void run(async (current) => {
@@ -226,7 +251,7 @@ export function MemoryView(props: IntelligenceSectionProps) {
       </section>}
       <section className="intelligence-fields">
         <h3>This project</h3>
-        {list(view.records, 'project', 'No project memories yet — add a lesson or reflect on this session.')}
+        {list(view.records, 'project', 'No project memories yet.')}
       </section>
       <section className="intelligence-fields">
         <h3>Personal</h3>

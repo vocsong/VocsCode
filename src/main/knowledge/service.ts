@@ -10,7 +10,7 @@
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { AppSettings } from '../../shared/types';
+import type { AppSettings, ModelRef } from '../../shared/types';
 import {
   KNOWLEDGE_PUBLISH_DIR,
   authorityOf,
@@ -36,6 +36,7 @@ import {
   type KnowledgeView
 } from '../../shared/knowledge';
 import { errorMessage } from '../util/async';
+import { selectKnowledgeUtilityModel, type KnowledgeCompleter } from './llm';
 import { KnowledgeProtectedError, KnowledgeStore, writeFileAtomic, type StoredPage } from './store';
 import { bootstrapKnowledge, distillKnowledge, type KnowledgeJobResult, type KnowledgeSynthDeps } from './synth';
 import type { AnchorResolver } from './anchors';
@@ -84,8 +85,8 @@ export class KnowledgeService {
   readonly store: KnowledgeStore;
   private readonly deps: KnowledgeServiceDeps;
   private readonly jobs = new Map<string, Promise<KnowledgeJobResult>>();
-  /** Projects whose one passive bootstrap attempt has already been made this app run. */
-  private readonly seedAttempts = new Set<string>();
+  /** Reserve each project's passive seed until the background job takes over. */
+  private readonly scheduledSeeds = new Set<string>();
   /** Last job outcome per project; the panel shows it so a failure cannot vanish into a toast. */
   private readonly lastJobs = new Map<string, KnowledgeJobState>();
   private protectedSink: ((change: KnowledgeProtectedChange) => Promise<void>) | null = null;
@@ -257,9 +258,11 @@ export class KnowledgeService {
     return out.sort((a, b) => b.score - a.score).slice(0, Math.min(opts.limit ?? 12, 40));
   }
 
-  /** The bounded, always-on block a new session is primed with; null when there is nothing to say. */
-  async digest(scope: KnowledgeScope): Promise<string | null> {
+  /** The bounded priming block; optionally schedule a seed from the same snapshot if it is empty. */
+  async digest(scope: KnowledgeScope, opts: { seedIfEmpty?: boolean } = {}): Promise<string | null> {
+    const utility = opts.seedIfEmpty && this.canSeed(scope) ? this.automaticModel() : undefined;
     const pages = await this.store.load(scope);
+    if (utility && !pages.length) this.scheduleSeed(scope, utility);
     const summaries = pages.filter((p) => p.meta.status === 'current' || p.meta.status === 'uncertain').map((p) => this.summarize(p));
     if (!summaries.length) return null;
     return renderKnowledgeDigest(summaries, { projectName: path.basename(scope.projectRoot), wikiDir: this.store.repoDir(scope) });
@@ -460,28 +463,34 @@ export class KnowledgeService {
     } catch (e) {
       this.deps.log('warn', `knowledge: could not record episode: ${errorMessage(e)}`);
     }
-    if (this.settings().autoDistill && this.deps.synth?.completer) {
-      void this.generate(scope, 'distill').catch((e) => this.deps.log('warn', `knowledge: auto-distill failed: ${errorMessage(e)}`));
+    this.scheduleDistillation(scope, 'distill');
+  }
+
+  /** Passive seed from project docs, attempted at most once per project per app run. */
+  async ensureSeeded(scope: KnowledgeScope): Promise<void> {
+    if (!this.canSeed(scope)) return;
+    const utility = this.automaticModel();
+    if (!utility) return;
+    try {
+      if (!(await this.store.load(scope)).length) this.scheduleSeed(scope, utility);
+    } catch {
+      // Seeding is opportunistic; a failed read must not fail the view.
     }
   }
 
-  /**
-   * Passive seed: the first time a project with no pages is opened, draft the wiki from its own
-   * docs. Attempted once per project per app run; a project with too little documentation simply
-   * gets no wiki until it has some.
-   */
-  async ensureSeeded(scope: KnowledgeScope): Promise<void> {
-    if (!this.deps.synth?.completer) return;
-    if (this.seedAttempts.has(scope.projectRoot) || this.jobs.has(scope.projectRoot) || this.lastJobs.has(scope.projectRoot)) return;
-    let pages = 0;
-    try {
-      pages = (await this.store.load(scope)).length;
-    } catch {
-      return;
-    }
-    if (pages) return;
-    this.seedAttempts.add(scope.projectRoot);
-    void this.generate(scope, 'bootstrap').catch((e) => this.deps.log('debug', `knowledge: passive seed skipped: ${errorMessage(e)}`));
+  private canSeed(scope: KnowledgeScope): boolean {
+    return !this.scheduledSeeds.has(scope.projectRoot) && !this.lastJobs.has(scope.projectRoot);
+  }
+
+  private scheduleSeed(scope: KnowledgeScope, utility: ModelRef): void {
+    // Reads from multiple sessions can finish together; only the first may schedule the job.
+    if (!this.canSeed(scope)) return;
+    this.scheduledSeeds.add(scope.projectRoot);
+    setImmediate(() => {
+      this.scheduledSeeds.delete(scope.projectRoot);
+      if (this.lastJobs.has(scope.projectRoot) || !selectKnowledgeUtilityModel(this.deps.settings(), utility)) return;
+      this.runAutomaticJob(scope, 'bootstrap', utility);
+    });
   }
 
   /** The relation graph for this project, rebuilt from the markdown and cached best-effort. */
@@ -512,9 +521,23 @@ export class KnowledgeService {
     } catch (e) {
       this.deps.log('warn', `knowledge: could not record PR episode: ${errorMessage(e)}`);
     }
-    if (this.settings().autoDistill && this.deps.synth?.completer) {
-      void this.generate(scope, 'reflect').catch((e) => this.deps.log('warn', `knowledge: PR reflection failed: ${errorMessage(e)}`));
-    }
+    this.scheduleDistillation(scope, 'reflect');
+  }
+
+  private automaticModel(): ModelRef | undefined {
+    if (!this.deps.synth?.completer) return;
+    const choice = selectKnowledgeUtilityModel(this.deps.settings());
+    return choice ? { provider: choice.provider.id, model: choice.model } : undefined;
+  }
+
+  private scheduleDistillation(scope: KnowledgeScope, mode: 'distill' | 'reflect'): void {
+    if (!this.settings().autoDistill) return;
+    const utility = this.automaticModel();
+    if (utility) this.runAutomaticJob(scope, mode, utility);
+  }
+
+  private runAutomaticJob(scope: KnowledgeScope, mode: KnowledgeJobState['mode'], utility: ModelRef): void {
+    void this.runJob(scope, mode, utility).catch((e) => this.deps.log('warn', `knowledge: automatic ${mode} failed: ${errorMessage(e)}`));
   }
 
   /** Accepts any candidate left over from the old review queue, so nothing ever waits for a human. */
@@ -553,11 +576,28 @@ export class KnowledgeService {
     }
   }
 
+  /** Deliberate generation retains the generic background model selection. */
+  generate(scope: KnowledgeScope, mode: KnowledgeJobState['mode']): Promise<KnowledgeJobResult> {
+    return this.runJob(scope, mode);
+  }
+
   /** One job per project; the panel polls status and sees `generating`. */
-  async generate(scope: KnowledgeScope, mode: 'bootstrap' | 'distill' | 'reflect'): Promise<KnowledgeJobResult> {
-    if (!this.deps.synth?.completer) return { ok: false, error: 'No background model is configured (Settings → General → Utility model).' };
+  private async runJob(scope: KnowledgeScope, mode: KnowledgeJobState['mode'], onlyUtilityModel?: ModelRef): Promise<KnowledgeJobResult> {
+    const base = this.deps.synth?.completer;
+    if (!base) return { ok: false, error: 'No background model is configured (Settings → General → Utility model).' };
     const running = this.jobs.get(scope.projectRoot);
     if (running) return running;
+    const completer: KnowledgeCompleter = onlyUtilityModel ? {
+      label: () => `${onlyUtilityModel.provider}/${onlyUtilityModel.model}`,
+      complete: async (req) => {
+        const reply = await base.complete({ ...req, onlyUtilityModel });
+        // If the selection was revoked, stop a bootstrap before it records unsent docs as scanned.
+        if (mode === 'bootstrap' && reply === null && !selectKnowledgeUtilityModel(this.deps.settings(), onlyUtilityModel)) {
+          throw new Error('The selected utility model is no longer available.');
+        }
+        return reply;
+      }
+    } : base;
     const deps: KnowledgeSynthDeps = {
       store: this.store,
       log: this.deps.log,
@@ -566,9 +606,10 @@ export class KnowledgeService {
       // Distillation writes through the service so its dedupe, evidence and rejection rules apply.
       // Tests may inject their own `propose` through deps.synth below.
       propose: (input, origin, sessionId) => this.propose(scope, input, origin, sessionId),
-      ...this.deps.synth
+      ...this.deps.synth,
+      completer
     };
-    const model = this.deps.synth.completer.label() ?? undefined;
+    const model = completer.label() ?? undefined;
     this.setJob(scope, { mode, state: 'running', at: new Date().toISOString(), ...(model ? { model } : {}) });
     const job = (mode === 'bootstrap' ? bootstrapKnowledge(scope, deps) : distillKnowledge(scope, deps, { mode: mode === 'reflect' ? 'reflect' : 'distill' }))
       .catch((e): KnowledgeJobResult => ({ ok: false, error: errorMessage(e) }))

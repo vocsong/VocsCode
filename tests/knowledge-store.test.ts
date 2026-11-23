@@ -3,11 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { createKnowledgeCompleter } from '../src/main/knowledge/llm';
 import { KnowledgeStore } from '../src/main/knowledge/store';
 import { KnowledgeService } from '../src/main/knowledge/service';
-import type { AppSettings } from '../src/shared/types';
-import { claimKey, type KnowledgePageMeta, type KnowledgeScope } from '../src/shared/knowledge';
+import { defaultSettings } from '../src/main/settings';
+import type { AppSettings, ModelRef } from '../src/shared/types';
+import { claimKey, type KnowledgeEpisode, type KnowledgePageMeta, type KnowledgeScope } from '../src/shared/knowledge';
 import { withKnowledgeWriteLock } from '../resources/mcp/knowledge-write.mjs';
 
 const dirs: string[] = [];
@@ -639,5 +641,122 @@ describe('knowledge search and digest', () => {
     const after = await svc.view(scope);
     expect(after.proposals).toHaveLength(0);
     expect(after.pages.some((p) => p.id === 'gotcha/pty-guard' && p.status === 'current')).toBe(true);
+  });
+});
+
+describe('automatic wiki jobs', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const utility = { provider: 'selected', model: 'utility' };
+  const commit: KnowledgeEpisode = { kind: 'commit', sessionId: 's1', at: '2026-09-15T10:00:00.000Z', summary: 'Add a guard' };
+  const pr: KnowledgeEpisode = { ...commit, kind: 'pr', summary: 'PR into develop', detail: 'Diff:\n+ guard the reconnect' };
+  const entry = {
+    title: 'Standing decision',
+    claim: 'The main process owns state.',
+    body: 'The renderer keeps no durable state of its own; every update crosses the typed bridge so ownership stays in the main process.'
+  };
+
+  function fixture(utilityModel?: ModelRef) {
+    const projectRoot = tmpDir('vocs-kb-automatic-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const settings: AppSettings = {
+      ...defaultSettings(),
+      utilityModel,
+      providers: ['fallback', 'selected'].map((id) => ({
+        id, kind: 'openai-compatible', name: id, enabled: true, hasApiKey: true, baseUrl: `https://${id}.example/v1`,
+        models: [{ id: 'default', displayName: 'Default model', provider: id }]
+      }))
+    };
+    const reply = JSON.stringify({ pages: [entry], proposals: [entry] });
+    const network = vi.fn<typeof fetch>(async () => Response.json({ choices: [{ message: { content: reply }, finish_reason: 'stop' }] }));
+    vi.stubGlobal('fetch', network);
+    const log = () => undefined;
+    const transcript = vi.fn(async () => ['user: Fix the guard']);
+    const completer = createKnowledgeCompleter({ settings: () => settings, getSecret: async () => 'fixture-key', log });
+    const complete = vi.spyOn(completer, 'complete');
+    const svc = new KnowledgeService({ settings: () => settings, log, transcript, synth: { completer } });
+    return { scope, settings, svc, network, complete, transcript };
+  }
+
+  async function writeDocs(scope: KnowledgeScope): Promise<void> {
+    await fs.writeFile(path.join(scope.cwd, 'README.md'), `# Demo\n\n${entry.body.repeat(4)}\n`, 'utf8');
+  }
+
+  it('uses one page snapshot per digest and schedules only one passive seed off path', async () => {
+    const { scope, svc, network, complete } = fixture(utility);
+    await writeDocs(scope);
+    const scan = vi.spyOn(svc.store, 'readScan');
+    expect(await svc.digest(scope)).toBeNull();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(scan).not.toHaveBeenCalled();
+
+    // Release three overlapping reads in the same turn while the on-disk wiki is empty.
+    const load = vi.spyOn(svc.store, 'load').mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const digest = () => svc.digest(scope, { seedIfEmpty: true });
+    expect(await Promise.all([digest(), digest(), digest()])).toEqual([null, null, null]);
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(scan).not.toHaveBeenCalled();
+
+    await vi.waitFor(async () => expect((await svc.status(scope)).job).toMatchObject({ mode: 'bootstrap', state: 'done', model: 'selected/utility' }));
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ onlyUtilityModel: utility }));
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(await digest()).toContain('concept/standing-decision.md');
+  });
+
+  it.each(['not selected', 'disabled'])('keeps wiki jobs local when the utility is %s, but permits deliberate Generate', async (reason) => {
+    const { scope, settings, svc, network, complete, transcript } = fixture(reason === 'disabled' ? utility : undefined);
+    if (reason === 'disabled') settings.providers[1].enabled = false;
+    await writeDocs(scope);
+    await svc.digest(scope, { seedIfEmpty: true });
+    await svc.view(scope);
+    expect(await svc.store.hasWiki(scope)).toBe(false);
+
+    expect((await svc.createWiki(scope)).pages).toEqual([]);
+    await svc.recordEpisode(scope, commit);
+    await svc.reflectPr(scope, pr);
+    expect((await svc.store.readEpisodes(scope)).map((episode) => episode.kind).sort()).toEqual(['commit', 'pr']);
+    expect((await svc.status(scope)).job).toBeUndefined();
+    expect(transcript).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+    expect(network).not.toHaveBeenCalled();
+
+    await expect(svc.generate(scope, 'bootstrap')).resolves.toMatchObject({ ok: true });
+    expect(network).toHaveBeenCalledTimes(1);
+    const [url, init] = network.mock.calls[0];
+    expect(String(url)).toBe('https://fallback.example/v1/chat/completions');
+    expect(JSON.parse(String(init?.body)).model).toBe('default');
+  });
+
+  it.each(['distill', 'reflect'] as const)('runs automatic %s on the explicit provider and exact model', async (mode) => {
+    const { scope, svc, network, complete } = fixture(utility);
+    await svc.store.write(scope, pageMeta(), 'body');
+    if (mode === 'distill') await svc.recordEpisode(scope, commit);
+    else await svc.reflectPr(scope, pr);
+
+    await vi.waitFor(async () => expect((await svc.status(scope)).job).toMatchObject({ mode, state: 'done', model: 'selected/utility' }));
+    expect(complete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ onlyUtilityModel: utility }));
+    expect(network).toHaveBeenCalledTimes(1);
+    const [url, init] = network.mock.calls[0];
+    expect(String(url)).toBe('https://selected.example/v1/chat/completions');
+    expect(JSON.parse(String(init?.body)).model).toBe(utility.model);
+    expect((await svc.store.read(scope, 'concept/standing-decision'))?.meta).toMatchObject({ status: 'current', updatedBy: `agent:${mode}` });
+  });
+
+  it('does not let a revoked seed mark unsent docs scanned for a later deliberate Generate', async () => {
+    const { scope, settings, svc, network } = fixture(utility);
+    await writeDocs(scope);
+    const readScan = svc.store.readScan.bind(svc.store);
+    vi.spyOn(svc.store, 'readScan').mockImplementationOnce(async (scope) => {
+      settings.utilityModel = undefined;
+      return readScan(scope);
+    });
+    await svc.digest(scope, { seedIfEmpty: true });
+    await vi.waitFor(async () => expect((await svc.status(scope)).job?.state).toBe('failed'));
+    expect(network).not.toHaveBeenCalled();
+    expect(await svc.store.hasWiki(scope)).toBe(false);
+
+    await expect(svc.generate(scope, 'bootstrap')).resolves.toMatchObject({ ok: true });
+    expect(network).toHaveBeenCalledTimes(1);
   });
 });

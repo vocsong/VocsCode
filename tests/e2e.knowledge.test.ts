@@ -220,7 +220,7 @@ describe.runIf(enabled)('project knowledge panel', () => {
     await fs.rm(tmp, { recursive: true, force: true });
   });
 
-  it('starts an empty wiki for a project whose docs cannot bootstrap one', async () => {
+  it('starts an empty wiki on request without passively scanning when no utility is selected', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-knowledge-empty-${Date.now()}`);
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -235,14 +235,9 @@ describe.runIf(enabled)('project knowledge panel', () => {
     const win = await launchApp(userData);
     await openKnowledge(win);
 
-    // Passive seeding can finish before first paint. Remove its completed output and reattach
-    // the renderer to the same host (whose once-per-project seed attempt has already run).
-    await expect.poll(async () => fs.stat(path.join(wiki, '_scan.json')).then(() => true, () => false), { timeout: 20_000 }).toBe(true);
-    await fs.rm(wiki, { recursive: true, force: true });
-    await win.reload();
-    await openKnowledge(win);
     const empty = win.getByText('No project wiki yet');
     await empty.waitFor({ timeout: 10_000 });
+    await expect(fs.stat(wiki)).rejects.toMatchObject({ code: 'ENOENT' });
     await win.getByTestId('knowledge-create').click();
     // The panel stops calling this project wiki-less, and the directory agents write into is there.
     await empty.waitFor({ state: 'detached', timeout: 10_000 });

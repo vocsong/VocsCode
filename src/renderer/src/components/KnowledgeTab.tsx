@@ -9,7 +9,7 @@ import { HighlightedSnippet } from './HighlightedSnippet';
 import { Badge, Button, EmptyState, Icon, Spinner, Toggle } from './ui';
 import { CollectionsView } from './knowledge/CollectionsView';
 import { EvidenceView } from './knowledge/EvidenceView';
-import { MemoryView } from './knowledge/MemoryView';
+import { MemoryRefresh, MemoryView } from './knowledge/MemoryView';
 import { SourcesView } from './knowledge/SourcesView';
 import { InlineError, PromoteControl } from './knowledge/controls';
 import { errorMessage, useIntelligence, useScopeGuard, type IntelligenceController, type KnowledgeSection } from './knowledge/useIntelligence';
@@ -80,6 +80,7 @@ function KnowledgeSession({ session, active, id }: { session: SessionMeta; activ
       <div key={section} role="tabpanel" id={`${id}-${section}-panel`} aria-labelledby={`${id}-${section}-tab`} hidden={!selected} tabIndex={0}>
         {section === 'knowledge' ? <WikiView session={session} active={selected} intelligence={intelligence} /> : selected && View && (
           <div className="intelligence-panel" data-testid={view ? `${section}-view` : undefined}>
+            {section === 'memory' && <MemoryRefresh sessionId={session.id} busy={busy} run={run} />}
             <InlineError>{errors[section]}</InlineError>
             {errors.load && <div className="intelligence-inline">
               <InlineError>{errors.load}</InlineError>

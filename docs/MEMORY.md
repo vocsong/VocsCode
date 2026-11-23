@@ -237,15 +237,15 @@ The wiki is easy to generate; keeping it true is the product. The rules:
   keep one page and merge evidence; explicit updates preserve creation time and merge provenance.
 - **The panel is for browsing, not approving.** It searches and reads pages, corrects them, rejects
   or deletes, and publishes to `docs/wiki/`. Rejecting tombstones the claim; accepting is not a step.
-- **Bootstrap is passive, recursive and incremental.** `Generate from docs` walks *every* markdown
+- **Bootstrap is recursive and incremental.** With an explicitly selected, usable utility model, priming an empty wiki can schedule a seed without waiting for the model. Deliberate `Generate from docs` walks *every* markdown
   file in the repository — skipping `node_modules/`, `.git/`, `dist/`, `build/`, `vendor/`,
   `.vocs-code/`, `.gitnexus/`, `CHANGELOG` and `LICENSE` — maps each batch through the utility model,
   then synthesises the batches into pages. It is incremental: `_scan.json` keeps each file's mtime
   and size, and only files that changed since the last scan are re-read.
 - **Distillation runs at git boundaries.** Commits, PR opens and merges append an episode; with
-  `autoDistill` on (default) the newest episode plus its transcript slice is distilled into pages,
-  which are ingested by the same automatic path.
-- **Every PR reflects over the existing wiki.** A PR's commits and a bounded diff are read against
+  `autoDistill` on (default) and an explicitly selected, usable utility model, the newest episode plus
+  its transcript slice is distilled into pages, which are ingested by the same automatic path.
+- **PR reflection uses the same automatic model requirement.** A PR's commits and a bounded diff are read against
   the pages that already exist; the job updates the pages the diff touches and adds the ones it is
   missing, then ingests them. Reflection is what keeps the wiki current with code the recursive docs
   scan never saw.
@@ -324,8 +324,10 @@ paths. The wiki itself costs nothing until an agent asks a question.
 ## Evolution
 
 - **L3 recall and capture.** `session_history_search` reads the app's existing transcript index
-  (`search.db`, project-scoped, redacted). Optional session reflection records bounded episodes and
-  candidate lessons in the separate memory ledger, not in the wiki.
+  (`search.db`, project-scoped, redacted). Local learning observes newly completed ordinary turns and
+  keeps short cited work outcomes and lesson candidates in the separate project memory ledger, never
+  in the wiki or digest. Model-assisted session reflection remains separate. See [Local Knowledge
+  and Memory](INTELLIGENCE.md#what-works-in-the-background) for defaults and controls.
 - **Consolidation.** Repetition detection is in (`_evidence.json`); the next steps are a periodic
   lint (unresolved anchors, changed sources, contradictions) and a merge flow that folds a duplicate
   auto-ingested page into an existing one instead of keeping a near-duplicate.

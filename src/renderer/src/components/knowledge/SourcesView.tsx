@@ -2,7 +2,7 @@ import React, { useId, useLayoutEffect, useRef, useState } from 'react';
 import { resolveIntelligenceSettings, type GraphIndexStatus, type IntelligenceSettings, type ReflectionMode } from '../../../../shared/intelligence';
 import { invoke } from '../../api';
 import { Badge, Button, Spinner } from '../ui';
-import { InlineError, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
+import { InlineError, LOCAL_REFLECTION_NOTE, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
 import { readIntelligence, useScopeGuard, type IntelligenceSectionProps } from './useIntelligence';
 
 const GRAPH_POLL_MS = 3_000;
@@ -79,6 +79,7 @@ function SourceSwitch({ label, testId, checked, disabled, onChange }: {
 /** Separates app-wide switches from this checkout's derived graph status. */
 export function SourcesView({ sessionId, view, busy, run }: IntelligenceSectionProps) {
   const { project, gateway } = view;
+  const localNote = useId();
   const reflectionNote = useId();
   const settings = resolveIntelligenceSettings(view.settings);
   const { enabled, excludedProjects } = settings.graphify;
@@ -111,14 +112,16 @@ export function SourcesView({ sessionId, view, busy, run }: IntelligenceSectionP
         <p className="muted small">Applies to sessions started after the change. With the gateway off, agents keep the six original wiki tools.</p>
       </section>
       <section className="intelligence-card">
-        <p id={reflectionNote} className="intelligence-warning small">{REFLECTION_PRIVACY_NOTICE} In automatic mode this can happen when a session is archived or merged.</p>
         <label className="intelligence-field">Session reflection
-          <select data-testid="setting-reflection" aria-describedby={reflectionNote} value={settings.reflection} disabled={busy} onChange={(e) => void patch({ reflection: e.target.value as ReflectionMode })}>
+          <select data-testid="setting-reflection" aria-describedby={`${localNote} ${reflectionNote}`} value={settings.reflection} disabled={busy} onChange={(e) => void patch({ reflection: e.target.value as ReflectionMode })}>
             <option value="off">Off</option>
-            <option value="manual">Only when asked</option>
-            <option value="auto">When a session is archived or merged</option>
+            <option value="local">Local after completed turns (default)</option>
+            <option value="manual">Manual (Reflect button only)</option>
+            <option value="auto">Model-assisted on archive or merge</option>
           </select>
         </label>
+        <p id={localNote} className="muted small">{LOCAL_REFLECTION_NOTE}</p>
+        <p id={reflectionNote} className="intelligence-warning small">{REFLECTION_PRIVACY_NOTICE} Model-assisted automatic reflection can also do this when a session is archived or merged.</p>
         <SourceSwitch label="Collections search" testId="setting-collections" checked={settings.collections} disabled={busy} onChange={(collections) => void patch({ collections })} />
         <SourceSwitch label="Personal memory" testId="setting-personal" checked={settings.personalMemory} disabled={busy} onChange={(personalMemory) => void patch({ personalMemory })} />
       </section>

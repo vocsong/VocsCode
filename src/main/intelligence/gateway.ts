@@ -250,7 +250,7 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
   signal?.throwIfAborted();
   const { intelligence, knowledge } = deps;
   const scope = { projectRoot: session.projectRoot, cwd: session.cwd, ...(session.branch ? { branch: session.branch } : {}) };
-  const context = { ...session, signal };
+  const context = { ...session, signal, hideUnreviewedLocal: true };
 
   switch (name) {
     case 'knowledge_search': {
