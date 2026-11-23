@@ -8,7 +8,7 @@ import type { AppSettings } from '../../../shared/types';
 import { invoke, on } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Spinner } from './ui';
-import { openSettings } from './SettingsView';
+import { openSettings } from '../settings-nav';
 import { SettingsGroup } from './SettingsPrimitives';
 
 /** ISO-639-1 codes offered as hints; the engines understand many more, which auto-detect still finds. */

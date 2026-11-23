@@ -1,0 +1,186 @@
+/* ---------------------------------------------------------------------------
+ * Nebula — the animated palette.
+ *
+ * Its colors are data like every other palette (src/shared/themes.ts); what lives here is the
+ * motion and glow only this palette opts into, in both its light and dark variants. App surfaces
+ * turn slightly translucent so the drifting aurora painted behind the window shows through them.
+ * The light variant keeps the motion but turns the aurora, grid and glows down so they never
+ * compete with text on a bright ground. All of it stops under prefers-reduced-motion.
+ * ------------------------------------------------------------------------- */
+:root[data-palette='nebula'] body {
+  background: var(--bg-sunken);
+}
+/* Layer 1 — the aurora: three blurred blobs on a fixed plane behind #root, drifting and breathing. */
+:root[data-palette='nebula'] body::before {
+  content: '';
+  position: fixed;
+  inset: -30%;
+  pointer-events: none;
+  background:
+    radial-gradient(closest-side, color-mix(in srgb, var(--accent) 55%, transparent), transparent) 18% 24% / 46% 44% no-repeat,
+    radial-gradient(closest-side, color-mix(in srgb, var(--red) 50%, transparent), transparent) 78% 70% / 44% 42% no-repeat,
+    radial-gradient(closest-side, color-mix(in srgb, var(--purple) 48%, transparent), transparent) 62% 12% / 38% 40% no-repeat;
+  filter: blur(70px) saturate(140%);
+  opacity: 0.42;
+  animation: nebula-drift 30s ease-in-out infinite alternate;
+}
+:root[data-palette='nebula'][data-scheme='light'] body::before {
+  opacity: 0.2;
+  filter: blur(80px) saturate(120%);
+}
+/* Layer 2 — a faint holographic grid sliding diagonally, still behind every app surface. */
+:root[data-palette='nebula'] #root::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--border-strong) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--border-strong) 55%, transparent) 1px, transparent 1px);
+  background-size: 46px 46px;
+  opacity: 0.24;
+  animation: nebula-grid 22s linear infinite;
+}
+:root[data-palette='nebula'][data-scheme='light'] #root::before {
+  opacity: 0.16;
+}
+@keyframes nebula-drift {
+  0% {
+    transform: translate3d(-3%, -2%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(2%, 3%, 0) scale(1.12);
+  }
+  100% {
+    transform: translate3d(4%, -3%, 0) scale(1.04);
+  }
+}
+@keyframes nebula-grid {
+  to {
+    background-position: 46px 46px, 46px 46px;
+  }
+}
+/* Frosted chrome, so the aurora reads through the app instead of behind it. */
+:root[data-palette='nebula'] .titlebar,
+:root[data-palette='nebula'] .header,
+:root[data-palette='nebula'] .composer,
+:root[data-palette='nebula'] .panel {
+  background: color-mix(in srgb, var(--bg-elev) 80%, transparent);
+  backdrop-filter: blur(14px) saturate(130%);
+}
+:root[data-palette='nebula'] .main {
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+:root[data-palette='nebula'] .sidebar {
+  background: color-mix(in srgb, var(--bg-sunken) 72%, transparent);
+  backdrop-filter: blur(12px);
+}
+/* A light bar sweeping along the title bar's edge. */
+:root[data-palette='nebula'] .titlebar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--accent), var(--purple), var(--red), transparent);
+  background-size: 55% 100%;
+  background-repeat: no-repeat;
+  animation: nebula-scan 7s linear infinite;
+}
+@keyframes nebula-scan {
+  0% {
+    background-position: -60% 0;
+  }
+  100% {
+    background-position: 160% 0;
+  }
+}
+/* The wordmark cycles through the palette; the mark beside it pulses. */
+:root[data-palette='nebula'] .brand span {
+  background: linear-gradient(100deg, var(--accent), var(--purple) 30%, var(--red) 50%, var(--accent) 80%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: nebula-sweep 9s linear infinite;
+}
+:root[data-palette='nebula'] .brand > svg {
+  color: var(--accent);
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 70%, transparent));
+  animation: nebula-breathe 3.4s ease-in-out infinite;
+}
+@keyframes nebula-sweep {
+  to {
+    background-position: 300% 0;
+  }
+}
+@keyframes nebula-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(0.92);
+  }
+}
+/* Primary buttons: a moving gradient with a soft outer glow. */
+:root[data-palette='nebula'] .btn-primary {
+  background: linear-gradient(100deg, var(--accent), var(--purple) 40%, var(--red) 62%, var(--accent));
+  background-size: 260% 100%;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), 0 0 18px color-mix(in srgb, var(--accent) 32%, transparent);
+  animation: nebula-sweep 7s linear infinite;
+}
+:root[data-palette='nebula'] .btn-primary:hover {
+  background: linear-gradient(100deg, var(--accent), var(--purple) 40%, var(--red) 62%, var(--accent));
+  background-size: 260% 100%;
+  filter: brightness(1.12) saturate(115%);
+}
+/* The selected session sits in its own pool of light. */
+:root[data-palette='nebula'] .session-row.active {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent), inset 3px 0 0 var(--accent),
+    0 0 16px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+/* Status lights actually glow. */
+:root[data-palette='nebula'] .status-running,
+:root[data-palette='nebula'] .status-starting {
+  box-shadow: 0 0 9px color-mix(in srgb, var(--blue) 85%, transparent);
+}
+:root[data-palette='nebula'] .status-awaiting {
+  box-shadow: 0 0 9px color-mix(in srgb, var(--amber) 85%, transparent);
+}
+:root[data-palette='nebula'] .status-error {
+  box-shadow: 0 0 9px color-mix(in srgb, var(--red) 85%, transparent);
+}
+:root[data-palette='nebula'] .dot-live {
+  box-shadow: 0 0 9px color-mix(in srgb, var(--green) 85%, transparent);
+}
+:root[data-palette='nebula'] .chip.active,
+:root[data-palette='nebula'] .pill.open,
+:root[data-palette='nebula'] .theme-card.active {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), 0 0 14px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+:root[data-palette='nebula'] input:focus,
+:root[data-palette='nebula'] select:focus,
+:root[data-palette='nebula'] textarea:focus,
+:root[data-palette='nebula'] .composer-box:focus-within {
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+:root[data-palette='nebula'] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--accent), var(--purple));
+  background-clip: padding-box;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root[data-palette='nebula'] body::before,
+  :root[data-palette='nebula'] #root::before,
+  :root[data-palette='nebula'] .titlebar::after,
+  :root[data-palette='nebula'] .brand span,
+  :root[data-palette='nebula'] .brand > svg,
+  :root[data-palette='nebula'] .btn-primary {
+    animation: none;
+  }
+}

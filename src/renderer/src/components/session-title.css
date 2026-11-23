@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer features {
 .session-label {
   display: inline-flex;
   align-items: center;
@@ -85,4 +87,5 @@
 :is(.harness-pill, .session-row)[data-harness='native'] {
   --harness-ink: #344054;
   --harness-fill: #e3e8f0;
+}
 }

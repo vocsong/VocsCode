@@ -1,0 +1,885 @@
+/* New session dialog */
+.ns-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.ns-toolbar > .mission-kind {
+  margin-bottom: 0;
+}
+.ns-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 12px 16px;
+  align-items: start;
+}
+.ns-span2 {
+  grid-column: 1 / -1;
+}
+.ns-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.ns-header-root {
+  min-width: 0;
+  max-width: 46%;
+  font-weight: 400;
+}
+/* Only the trigger is held to the header's share; the menu below it sizes itself. */
+.ns-header-root > .dropdown,
+.ns-header-root > .dropdown > div:not(.dropdown-menu) {
+  min-width: 0;
+  max-width: 100%;
+}
+/* The header's folder is a menu button: the sidebar's folders, then the native picker. */
+.ns-root-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.ns-root-btn:hover,
+.ns-root-btn[aria-expanded='true'] {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--fg);
+}
+.ns-root-btn > svg {
+  flex-shrink: 0;
+}
+/* The folder menu: filter box on top, the list scrolling between it and the pinned "Choose another
+   folder…". The menu box itself does not scroll, so neither end ever scrolls out of reach. */
+.ns-header-root .dropdown-menu {
+  width: min(440px, calc(100vw - 32px));
+  max-height: none;
+  overflow: hidden;
+  padding: 0;
+}
+.folder-picker {
+  display: flex;
+  flex-direction: column;
+  max-height: min(520px, 64vh);
+}
+.folder-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-faint);
+  flex: none;
+}
+.folder-picker-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+  color: var(--fg);
+  font-size: 13px;
+  outline: none;
+  box-shadow: none;
+}
+.folder-picker-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+.folder-picker-footer {
+  flex: none;
+  padding: 4px;
+  border-top: 1px solid var(--border);
+}
+.folder-picker-footer .menu-item {
+  color: var(--fg-muted);
+}
+.folder-picker-footer .menu-item:hover,
+.folder-picker-footer .menu-item:focus-visible {
+  color: var(--fg);
+}
+.folder-choice {
+  gap: 10px;
+  padding: 6px 8px;
+  color: var(--fg);
+}
+.folder-choice > .icon {
+  flex: none;
+  color: var(--fg-faint);
+}
+.folder-choice.active > .icon,
+.folder-choice-check {
+  color: var(--accent);
+}
+.folder-choice.enter-target,
+.folder-choice:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+.folder-choice-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.3;
+}
+.folder-choice-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-choice.active .folder-choice-name {
+  color: var(--accent);
+}
+/* The full path, trimmed from the start like the header's (the leaf end is the part that differs). */
+.folder-choice-path {
+  font-size: 11px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.folder-choice-path > bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.folder-choice-meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+.folder-choice-check {
+  flex: none;
+  display: flex;
+  width: 14px;
+}
+.ns-attachments {
+  max-width: none;
+  margin: 0 0 6px;
+}
+.ns-prompt-box {
+  position: relative;
+}
+.ns-prompt-box textarea {
+  width: 100%;
+}
+.ns-attach {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+}
+.ns-root {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Trim long paths from the start (keep the leaf folder visible): the box is RTL so the ellipsis
+     lands on the left, and the path inside is an LTR isolate so it still reads left to right. */
+  direction: rtl;
+  text-align: left;
+}
+.ns-root > bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.ns-col {
+  min-width: 0;
+}
+/* Keep the picker and its options in source order, with the latter spanning both columns. */
+.ns-col-model {
+  display: contents;
+}
+.ns-col-model > .ns-col {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+}
+.ns-model-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-bottom: 4px;
+}
+.ns-col-model .model-picker {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.ns-col-model .mp-search {
+  position: static;
+}
+/* The harness sets the row height, not the number of models in the catalog. */
+.ns-col-model .mp-list {
+  contain: size;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+}
+.ns-model-notice {
+  margin: 0 0 4px;
+}
+.ns-col-model .menu-empty {
+  overflow-wrap: anywhere;
+}
+.ns-run-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.2fr);
+  gap: 8px 12px;
+  /* Each column keeps its own height, so a long Fast mode hint cannot push the others' hints down. */
+  align-items: start;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.ns-run-options .field,
+.ns-fast-mode .toggle {
+  margin: 0;
+}
+/* Same shape as the two selects beside it: heading, then a control row of the selects' height. */
+.ns-fast-mode-control {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+}
+/* Workspace row: worktree isolation spans both columns below a divider; turning it on opens the
+   branch panel (prefix chip joined to the name, the base branch, and a preview of what is created). */
+.ns-workspace {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.ns-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ns-toggle-title {
+  font-weight: 600;
+}
+.ns-worktree {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+.ns-worktree-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 12px;
+  align-items: end;
+}
+.ns-worktree .field {
+  margin: 0;
+}
+.ns-branch-input {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.ns-branch-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.ns-branch-input select,
+.ns-branch-input input {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ns-branch-input select:focus,
+.ns-branch-input input:focus {
+  box-shadow: none;
+}
+.ns-branch-input .ns-branch-prefix {
+  flex: 0 0 auto;
+  width: auto;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+}
+.ns-branch-input .ns-branch-custom {
+  flex: 0 0 auto;
+  padding-right: 0;
+}
+.ns-branch-sep {
+  align-self: center;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ns-branch-input .ns-branch-name {
+  flex: 1;
+}
+.ns-worktree-hint {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ns-worktree-hint .row {
+  flex-wrap: wrap;
+}
+.ns-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ns-summary code {
+  color: var(--accent);
+}
+/* minmax(0, …) and the wrapping header keep a long status badge inside its card; a plain 1fr
+   column grows to the badge's nowrap width and pushes the cards into the model column. */
+.harness-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+.harness-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  min-height: 32px;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.harness-card:hover {
+  background: var(--bg-hover);
+}
+.harness-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.harness-card-name,
+.harness-card .badge {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.harness-card-name {
+  font-weight: 600;
+  font-size: 12.5px;
+}
+/* The status line keeps its height while availability is still being checked (a spinner). */
+.harness-card-status {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 15px;
+}
+.harness-card .badge {
+  padding: 0;
+  background: transparent;
+  font-size: 11px;
+}
+.advanced {
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+}
+
+/* Settings */
+.settings {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+.settings-nav {
+  border-right: 1px solid var(--border);
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-sunken);
+  min-height: 0;
+  overflow-y: auto;
+}
+.settings-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 15px;
+  padding: 4px 8px 12px;
+}
+.settings-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: none;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg-muted);
+}
+.settings-link.active,
+.settings-link:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.settings-body {
+  overflow: auto;
+  min-height: 0;
+  padding: 24px 32px;
+}
+.settings-section {
+  max-width: 860px;
+}
+/* P4 audit feed: bounded so a long history cannot push the remote controls off screen. */
+.remote-audit {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  margin: 8px 0;
+}
+.provider-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  margin: 10px 0;
+}
+.provider-card.disabled {
+  opacity: 0.7;
+}
+.provider-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+}
+.provider-head .toggle {
+  margin: 0;
+}
+.provider-name {
+  font-weight: 600;
+}
+.provider-body {
+  padding: 0 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.harness-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.harness-row {
+  display: flex;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  background: var(--bg-elev);
+}
+.harness-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.harness-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
+.doctor {
+  border-collapse: collapse;
+  width: 100%;
+}
+.doctor td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Palette */
+.palette {
+  width: 620px;
+  max-width: 92vw;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.palette-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.palette-input input {
+  border: none;
+  background: none;
+  box-shadow: none;
+  font-size: 15px;
+}
+.palette-list {
+  max-height: 50vh;
+  overflow: auto;
+  padding: 6px;
+}
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: none;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.palette-item.active {
+  background: var(--bg-active);
+}
+/* Quick-session picker: optional first-prompt area between the header and the folder list. */
+.qs-prompt {
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.qs-prompt textarea {
+  width: 100%;
+  resize: none;
+  font-size: 13px;
+  padding: 8px 30px 8px 10px;
+}
+.qs-picked {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Deep search modal (Ctrl+Shift+F): two-line rows with a highlighted snippet. */
+.search-palette {
+  width: 720px;
+}
+.search-item {
+  align-items: flex-start;
+}
+.search-item .icon {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.search-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.search-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  min-width: 0;
+}
+.search-meta {
+  font-weight: 400;
+  color: var(--fg-muted);
+  font-size: 11.5px;
+  min-width: 0;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-snippet {
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-snippet mark {
+  background: rgba(255, 200, 0, 0.35);
+  color: inherit;
+  border-radius: 2px;
+}
+.search-archived {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+}
+.search-archived input {
+  width: auto;
+  margin: 0;
+}
+.search-hint {
+  padding: 6px 10px 4px;
+}
+/* Flash highlight on the transcript item a deep-search match jumped to. */
+.search-jump-hl {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+  transition: outline-color 1.2s ease 0.8s;
+}
+/* Quick-session picker: keep the full path from pushing the row wide. */
+.palette-item .qs-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46%;
+}
+
+/* Empty & toasts */
+.main-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.empty {
+  text-align: center;
+  max-width: 520px;
+  padding: 30px;
+  color: var(--fg-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+}
+.empty-icon {
+  color: var(--accent);
+}
+.empty-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--fg);
+}
+/* Welcome (no session open): a start, the sessions to resume, the keys worth knowing. */
+.main-empty {
+  overflow-y: auto;
+  padding: 32px 24px;
+}
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: min(560px, 100%);
+  margin: auto;
+  text-align: center;
+}
+.welcome-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 15px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  box-shadow: 0 8px 24px -10px var(--accent);
+}
+.welcome-title {
+  margin: 4px 0 0;
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+.welcome-sub {
+  margin: 0;
+  max-width: 480px;
+  color: var(--fg-muted);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.welcome-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.welcome-actions .btn {
+  padding: 8px 16px;
+  border-radius: 9px;
+}
+.welcome-keys {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 18px;
+  width: 100%;
+  margin-top: 12px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  text-align: left;
+}
+.welcome-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.welcome-key .kbd {
+  flex-shrink: 0;
+  border-bottom-width: 1px;
+  color: var(--fg-muted);
+}
+.toasts {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+  max-width: 420px;
+}
+.toast {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  word-break: break-word;
+}
+.toast-error {
+  border-left-color: var(--red);
+}
+.toast-success {
+  border-left-color: var(--green);
+}
+
+/* Theme picker (Settings → General): one swatch card per theme, grouped by family. */
+.theme-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 2px;
+}
+.theme-family {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  margin-bottom: 6px;
+}
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+  gap: 8px;
+}
+.theme-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, border-color 0.12s;
+}
+.theme-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+/* A miniature of the theme: sunken ground, a raised bar, an accent dot. */
+.theme-swatch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 24px;
+  border: 1px solid;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.theme-swatch-bar {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: 9px;
+  border-radius: 2px;
+}
+.theme-swatch-dot {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.theme-card-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.theme-card-name svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}

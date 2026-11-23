@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer features {
 .file-source-editor {
   display: flex;
   flex: 1;
@@ -119,4 +121,5 @@
 
 .file-source-editor .tok-emphasis {
   font-style: italic;
+}
 }

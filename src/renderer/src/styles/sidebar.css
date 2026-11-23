@@ -1,0 +1,830 @@
+/* Sidebar */
+.sidebar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--border);
+  min-width: 0;
+  min-height: 0;
+}
+/* The drawer's dismiss layer only exists below the breakpoint; the element is always in the DOM
+   while the sidebar is open, so it has to stay out of the .app grid at every other width — as a
+   visible child it takes the first column and pushes the sidebar and main into the wrong cells. */
+.sidebar-backdrop {
+  display: none;
+}
+.sidebar-top {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 10px 8px 14px;
+}
+.sidebar-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  /* The status badges keep a badge's width; the wordmark gives up room first (see .brand > span). */
+  min-width: 0;
+}
+.brand > .icon {
+  color: var(--accent);
+}
+.brand > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Every status count sits on the title's row next to the wordmark, never on a row of its own.
+   `min-content` basis (the width of the widest badge) means the cluster never claims room the
+   wordmark needs — it only grows into slack, so the badges sit side by side once the sidebar is
+   wide enough and stack in a column when it is not. A deficit is the wordmark's to absorb. */
+.sidebar-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 min-content;
+  margin-left: 10px;
+}
+/* The badges are one button that opens the activity tray; they keep the cluster's wrapping. */
+.sidebar-status-trigger {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px;
+  margin: -2px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.sidebar-status-trigger:hover,
+.sidebar-status-trigger[aria-expanded='true'] {
+  background: var(--bg-hover);
+}
+/* The tray hangs from the header row, as wide as the sidebar (or wider, over the main view). */
+.activity-tray {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 8px;
+  z-index: 60;
+  width: max(calc(100% - 16px), 300px);
+  max-height: 70vh;
+  overflow: auto;
+  padding: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.activity-section + .activity-section {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.activity-section-label {
+  padding: 4px 8px 2px;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.activity-row:hover,
+.activity-row:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+.activity-row-title {
+  flex: 1;
+  font-weight: 500;
+}
+.activity-row-time {
+  color: var(--fg-muted);
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+.activity-empty {
+  padding: 10px 8px;
+  color: var(--fg-muted);
+}
+
+/* The primary action and the app's other places, above the session list. */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+.sidebar-views {
+  display: flex;
+  gap: 2px;
+}
+.sidebar-views .sidebar-link {
+  flex: 1 1 0;
+  padding: 5px 6px;
+  font-size: 12.5px;
+}
+/* "Sessions" heading over the list; its Archived toggle swaps the list for archived rows. */
+.sidebar-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 10px 2px 14px;
+  border-top: 1px solid var(--border);
+}
+.sidebar-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+/* Projects | Recent, then Archived: what the session list shows, above the list and apart from the
+   nav links. The layout is one segmented choice; Archived is a separate on/off filter beside it. */
+.sidebar-viewswitch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+.sidebar-viewswitch-icon {
+  display: none;
+}
+.sidebar-viewswitch .segmented {
+  display: flex;
+  flex: 1;
+}
+.sidebar-viewswitch .segmented {
+  min-width: 0;
+}
+.sidebar-viewswitch .segment {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+}
+/* A narrow sidebar shortens the labels instead of pushing Archived out of the row. */
+.sidebar-viewswitch .segment-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* An on/off button drawn like one segment of .segmented, so it lines up with the switch beside it. */
+.segmented-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.segmented-toggle:hover {
+  color: var(--fg);
+}
+.segmented-toggle.active {
+  background: var(--bg-active);
+  color: var(--fg);
+  font-weight: 600;
+}
+.segmented-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* Archived and New session are icon buttons, so the layout switch keeps room for its labels. */
+.sidebar-viewswitch .segmented-toggle {
+  padding: 4px 8px;
+}
+/* New session closes the row, the accent marking it as the row's one action. */
+.sidebar-viewswitch .sidebar-new {
+  color: var(--accent);
+}
+.sidebar-viewswitch .sidebar-new:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  color: var(--accent);
+}
+.sidebar-list {
+  flex: 1;
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+.sidebar-empty {
+  color: var(--fg-muted);
+  padding: 20px 8px;
+  text-align: center;
+}
+.project-group {
+  margin-bottom: 8px;
+}
+/* The folder block's position is manual: dragging the header reorders the whole block. */
+.project-group.dragging {
+  opacity: 0.45;
+}
+.project-group.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.project-group.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.project-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px 4px;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+  font-weight: 600;
+  cursor: grab;
+}
+.project-header:active {
+  cursor: grabbing;
+}
+/* The header is a drag handle; its text must not start a text-selection drag instead. */
+.project-header * {
+  user-select: none;
+}
+.project-fold-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+.project-fold-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.project-unseen {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.project-count {
+  flex-shrink: 0;
+  color: var(--fg-faint);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.project-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+.project-icon-btn:hover {
+  background: var(--bg-hover);
+}
+.project-title {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-weight: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-title:hover {
+  color: var(--fg);
+}
+/* A custom color reads quieter than the default hue on the dark sidebar; a hairline
+   dark shadow restores edge contrast without looking like a glow. */
+.project-title.colored {
+  text-shadow: 0 1px 1px rgb(0 0 0 / 0.45);
+}
+.project-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 45%;
+  color: var(--fg-muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.project-branch svg {
+  flex-shrink: 0;
+}
+.project-branch > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-style-picker {
+  padding: 6px;
+  width: 228px;
+}
+.picker-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-faint);
+  margin: 2px 4px 6px;
+}
+.picker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.picker-opt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0;
+}
+.picker-opt:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.picker-opt.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.picker-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.picker-swatch.active {
+  border-color: var(--fg);
+}
+.project-new-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+.project-new-btn:hover,
+.project-new-btn:focus-visible {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px 6px 2px;
+  border-radius: 8px;
+  cursor: pointer;
+  position: relative;
+}
+.session-row:hover {
+  background: var(--bg-hover);
+}
+.session-row.active {
+  background: var(--bg-elev);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-sm);
+}
+/* On screen in a split pane that is not the active one. */
+.session-row.in-pane {
+  box-shadow: inset 2px 0 0 var(--border-strong);
+}
+.session-status {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 4px;
+  align-self: center;
+}
+/* Idle is the resting state: it says nothing until the row is pointed at, where it stays the way
+   to pick a custom label. */
+.sidebar .session-row:not(:hover):not(:focus-within) .session-status.status-idle {
+  display: none;
+}
+.session-status.status-idle {
+  color: var(--fg-faint);
+  background: var(--bg-hover);
+}
+.session-status.status-running,
+.session-status.status-starting {
+  color: var(--blue);
+  background: var(--blue-soft);
+  animation: status-fade 1.2s ease-in-out infinite;
+}
+/* Archiving reuses the Working blink but in amber so it reads as its own transient state. */
+.session-status.status-archiving {
+  color: var(--amber);
+  background: var(--amber-soft);
+  animation: status-fade 1.2s ease-in-out infinite;
+}
+.session-status.status-awaiting {
+  color: var(--red);
+  background: var(--red-soft);
+  animation: status-fade 0.8s ease-in-out infinite;
+}
+.session-status.status-pr {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+.session-status.status-merged {
+  color: var(--green);
+  background: var(--green-soft);
+}
+.session-status.status-error {
+  color: var(--red);
+  background: var(--red-soft);
+}
+.session-status.status-stopped {
+  color: var(--fg-faint);
+  background: var(--bg-hover);
+  opacity: 0.7;
+}
+.session-status.status-custom {
+  color: var(--red);
+  background: var(--red-soft);
+}
+.session-row .session-status {
+  cursor: pointer;
+}
+.status-label-add {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+}
+.status-label-add input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+}
+@keyframes status-fade {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+/* Leading pin gutter: the pin sits before the title so a pinned row reads at a glance and
+   the toggle stays in one place, rather than travelling with the hover-only action cluster. */
+.session-pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  align-self: flex-start;
+  width: 20px;
+  margin-top: -2px;
+}
+.session-pin .row-act-btn {
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.1s ease, visibility 0.1s ease;
+}
+/* Selection is not pinning: only hover or keyboard focus reveals the toggle, and a pinned row is
+   the only one that shows a pin without either. */
+.session-row:hover .session-pin .row-act-btn,
+.session-pin .row-act-btn:focus-visible,
+.session-pin .row-act-btn.is-pinned {
+  visibility: visible;
+  opacity: 1;
+}
+/* Hovering a pinned row swaps its state pin for the unpin action it offers. */
+.session-pin .row-act-btn .pin-off {
+  display: none;
+}
+.session-row:hover .session-pin .row-act-btn.is-pinned .pin-on,
+.session-pin .row-act-btn.is-pinned:focus-visible .pin-on {
+  display: none;
+}
+.session-row:hover .session-pin .row-act-btn.is-pinned .pin-off,
+.session-pin .row-act-btn.is-pinned:focus-visible .pin-off {
+  display: inline-flex;
+}
+.session-main {
+  flex: 1;
+  min-width: 0;
+}
+.session-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* Status pill and last-updated time close the meta line. */
+.session-side {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.session-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--fg-faint);
+  line-height: 1;
+  white-space: nowrap;
+}
+.session-title {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-weight: 500;
+  line-height: 1.35;
+}
+.session-row.active .session-title,
+.session-row.unseen .session-title {
+  font-weight: 600;
+}
+/* A turn finished here while nobody was looking; cleared once the session is viewed. */
+.session-unseen-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.session-row:hover .session-label-name {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--fg-muted);
+}
+/* Not overflow-clipped: the status-label menu drops out of this line. The model and worktree
+   names give up their width first instead. */
+.session-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  margin-top: 3px;
+  min-height: 16px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.session-model {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 110px;
+}
+.session-queued {
+  color: var(--blue);
+  font-weight: 600;
+}
+.session-worktree {
+  color: var(--accent);
+  flex-shrink: 1;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+/* Recent view: the project a row belongs to, since no folder header sits above it. */
+.session-folder {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  color: var(--fg-muted);
+}
+.session-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 110px;
+}
+.session-worktree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+.session-rename {
+  flex: 1;
+  padding: 2px 6px;
+}
+.row-menu-btn {
+  border: none;
+  background: none;
+  color: var(--fg);
+  padding: 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 1;
+  flex-shrink: 0;
+}
+.row-menu-btn .icon {
+  stroke-width: 2.8;
+}
+.session-row:hover .row-menu-btn,
+.row-menu-btn:focus-visible {
+  color: var(--fg);
+}
+.row-menu-btn:hover {
+  background: var(--bg-active);
+}
+/* The hover actions share the title's line. They fit in the row's vertical padding. */
+.row-actions {
+  display: none;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 1px;
+  margin-block: -5px;
+  padding: 1px;
+  border-radius: 7px;
+  background: var(--bg-elev);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-sm);
+}
+.session-row:hover .row-actions,
+.row-actions:focus-within,
+.row-actions:has([data-dialog-anchor]) {
+  display: flex;
+}
+/* The row a confirmation is about stays marked while the dialog takes the pointer's hover away. */
+.session-row:is([data-dialog-anchor], :has([data-dialog-anchor])):not(.active) {
+  background: var(--bg-hover);
+}
+/* Anchor the fork menu to the row edge so labels beside the toolbar leave room for the menu. */
+.row-actions > .dropdown {
+  position: static;
+}
+.row-actions > .dropdown > .dropdown-menu {
+  top: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+.row-act-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.row-act-btn .icon {
+  stroke-width: 2;
+}
+.row-act-btn:hover {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.row-act-btn.is-pinned {
+  color: var(--accent);
+}
+.row-act-btn.danger:hover {
+  background: var(--red-soft);
+  color: var(--red);
+}
+/* Pinned-section drag reorder indicators. */
+.session-row.dragging {
+  opacity: 0.45;
+}
+.session-row.drag-above::before,
+.session-row.drag-below::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.session-row.drag-above::before {
+  top: -1px;
+}
+.session-row.drag-below::after {
+  bottom: -1px;
+}
+.sidebar-bottom {
+  border-top: 1px solid var(--border);
+  padding: 6px 10px 8px;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.sidebar-bottom .sidebar-link {
+  flex: 0 1 auto;
+  justify-content: flex-start;
+  padding: 6px 8px;
+}
+.sidebar-bottom .update-pill {
+  max-width: 100%;
+  padding: 3px 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-bottom .update-pill:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.sidebar-bottom .update-pill:disabled {
+  border-color: var(--border);
+  background: none;
+  color: var(--fg-muted);
+  cursor: default;
+}
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  border: none;
+  background: none;
+  padding: 7px 6px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--fg-muted);
+  text-align: center;
+}
+.sidebar-link:hover,
+.sidebar-link.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
