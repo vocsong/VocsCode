@@ -1442,6 +1442,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       filters: [{ name: 'Markdown', extensions: ['md'] }]
     });
     if (res.canceled || !res.filePath) return { path: null };
+    if (!path.isAbsolute(res.filePath)) throw new Error('Export did not return an absolute destination.');
+    await assertOrdinaryWorkspace(res.filePath);
     await fs.writeFile(res.filePath, md, 'utf8');
     deps.log('info', `[${id}] transcript exported to ${res.filePath}`);
     return { path: res.filePath };

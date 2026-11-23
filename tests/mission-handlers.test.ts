@@ -87,7 +87,7 @@ async function rig() {
     interrupt: vi.fn(), stop: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(), setArchived: vi.fn(async () => source),
     editAndResend: vi.fn(), setModel: vi.fn(), setEffort: vi.fn(), setPermissionMode: vi.fn(), compact: vi.fn(),
     clearTranscript: vi.fn(), fork: vi.fn(), moveTo: vi.fn(), goal: vi.fn(), subagentCommand: vi.fn(),
-    respondApproval: vi.fn()
+    respondApproval: vi.fn(), exportMarkdown: vi.fn(async (_id: string) => '# Fixture transcript\n')
   };
   const terminals = {
     list: vi.fn(() => [] as Array<{ id: string; sessionId: string; cwd: string }>), closeForSession: vi.fn(async (_id: string) => undefined),
@@ -223,28 +223,45 @@ describe('Mission user IPC', () => {
     expect(r.missions.control).not.toHaveBeenCalled(); expect(r.sessions.send).not.toHaveBeenCalled();
   });
 
-  it('refuses export saves into retained owned workspaces, filesystem aliases and unresolved session ownership', async () => {
+  it('exports a Mission transcript only after the chooser returns an ordinary absolute destination', async () => {
+    const r = await rig();
+    const write = vi.spyOn(fs, 'writeFile').mockResolvedValue(undefined);
+    const file = path.join(r.root, 'chosen.md');
+    const exportTranscript = () => r.registry.invoke('sessions:export', { id: r.lead.id });
+    r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: true, filePath: file });
+    expect(await exportTranscript()).toEqual({ path: null });
+    expect(r.desktop.showSaveDialog).toHaveBeenCalledExactlyOnceWith({ defaultPath: path.join(r.dir, 'lead.md'), filters: [{ name: 'Markdown', extensions: ['md'] }] });
+    r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: false });
+    expect(await exportTranscript()).toEqual({ path: null });
+    r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: 'fixture.md' });
+    await expect(exportTranscript()).rejects.toThrow(/absolute destination/);
+    expect(write).not.toHaveBeenCalled();
+    r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: file });
+    expect(await exportTranscript()).toEqual({ path: file });
+    expect(r.sessions.exportMarkdown).toHaveBeenLastCalledWith(r.lead.id);
+    expect(write).toHaveBeenCalledExactlyOnceWith(file, '# Fixture transcript\n', 'utf8');
+  });
+
+  it.each(['app:fileSaveAs', 'sessions:export'] as const)('%s refuses writes into retained workspaces, aliases and unresolved ownership', async (channel) => {
     const r = await rig();
     const alias = path.join(r.dir, 'worker-alias');
     await fs.symlink(r.workerPath, alias, process.platform === 'win32' ? 'junction' : 'dir');
-    const request = { content: '# Read-only export', suggestedName: 'plan.md' };
+    const request = channel === 'sessions:export' ? { id: r.source.id } : { content: '# Read-only export', suggestedName: 'plan.md' };
     r.patch({ status: 'recovering', blockers: [{ id: 'uncertain', kind: 'unknown', message: 'Writer ownership unresolved' }] });
-    for (const dir of [r.leadPath, r.workerPath, r.integrationPath, r.verificationPath, alias]) {
-      const file = path.join(dir, 'plan.md');
-      await fs.writeFile(file, 'Retained work');
-      r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: file });
-      await expect(r.registry.invoke('app:fileSaveAs', request)).rejects.toThrow(/Mission/);
-      expect(await fs.readFile(file, 'utf8')).toBe('Retained work');
-      const absent = path.join(dir, 'new-plan.md');
-      r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: absent });
-      await expect(r.registry.invoke('app:fileSaveAs', request)).rejects.toThrow(/Mission/);
-      await expect(fs.stat(absent)).rejects.toMatchObject({ code: 'ENOENT' });
+    const roots = [r.leadPath, r.workerPath, r.integrationPath, r.verificationPath];
+    await Promise.all(roots.map((root) => fs.writeFile(path.join(root, 'fixture.md'), 'Retained work')));
+    const write = vi.spyOn(fs, 'writeFile').mockResolvedValue(undefined);
+    for (const dir of [...roots, alias]) {
+      for (const name of ['fixture.md', 'new-fixture.md']) {
+        r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: path.join(dir, name) });
+        await expect(r.registry.invoke(channel, request)).rejects.toThrow(/Mission owns/);
+      }
     }
     r.missions.list.mockReturnValue([]); // The independent session fence survives a missing/corrupt journal.
     r.worker.worktreeBranch = 'mission/worker';
-    r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: path.join(alias, 'plan.md') });
-    await expect(r.registry.invoke('app:fileSaveAs', request)).rejects.toThrow(/Mission/);
-    expect(await fs.readFile(path.join(r.workerPath, 'plan.md'), 'utf8')).toBe('Retained work');
+    r.desktop.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: path.join(alias, 'new-fixture.md') });
+    await expect(r.registry.invoke(channel, request)).rejects.toThrow(/Mission owns/);
+    expect(write).not.toHaveBeenCalled();
   });
 
   it('launches from the actual source without changing its model, permissions, cwd, or running turn', async () => {
