@@ -877,6 +877,14 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       await expect.poll(() => modelPill.locator('.pill-text').innerText()).toBe(`${model.provider}/${displayName}`);
       expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
+      const electric = modelPill.locator('svg.fast-mode-electric');
+      const animatedArcs = () => electric.evaluate((el) => el.getAnimations({ subtree: true }).length);
+      await win.emulateMedia({ reducedMotion: 'no-preference' });
+      await expect.poll(animatedArcs).toBeGreaterThan(0);
+      await win.emulateMedia({ reducedMotion: 'reduce' });
+      await expect.poll(animatedArcs).toBe(0);
+      expect(await electric.isVisible()).toBe(true);
+      await win.emulateMedia({ reducedMotion: 'no-preference' });
       const permission = footer.getByRole('button', { name: 'Permission mode: Full', exact: true });
       await permission.waitFor();
 
@@ -1052,6 +1060,10 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       await fs.writeFile(path.join(userData, 'sessions', s.id, 'transcript.jsonl'), JSON.stringify({ id: 'u1', kind: 'user', ts: T, text: s.title }) + '\n');
     }
     const rowIds = (win: Page) => win.locator('.sidebar-list [data-testid="session-row"]').evaluateAll((els) => els.map((el) => el.getAttribute('data-session-id')));
+    const projectsBetweenPillAndTitle = (win: Page) => win.locator('.sidebar-list [data-testid="session-row"]').evaluateAll((rows) => rows.map((row) => {
+      const [pill, project, title] = ['.harness-pill', '[data-testid="session-folder"]', '.session-label-name'].map((sel) => row.querySelector(sel)?.getBoundingClientRect());
+      return !!(pill && project && title && project.width > 0 && pill.right <= project.left && project.right <= title.left && Math.abs(pill.top + pill.height / 2 - (project.top + project.height / 2)) < 1);
+    }));
 
     let win = await launch(userData);
     await win.setViewportSize({ width: 1280, height: 800 });
@@ -1063,7 +1075,7 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     expect(await win.locator('.sidebar-list .project-header').count()).toBe(0);
     expect(await win.locator('.sidebar-list .session-label-project, .sidebar-list .session-label-separator').count()).toBe(0);
     expect(await win.locator('.sidebar-list [data-testid="session-folder"]').allTextContents()).toEqual(['beta', 'alpha', 'beta', 'alpha']);
-    await expectSessionLabel(win.locator('[data-session-id="s_recent_b_new"]'), { harness: 'native', pill: 'Native', name: 'Beta newest' });
+    await expect.poll(() => projectsBetweenPillAndTitle(win)).toEqual([true, true, true, true]);
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'session-view-07-sidebar-recent.png') });
     await expect.poll(async () => (JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')) as { sidebarView?: string }).sidebarView).toBe('recent');
@@ -1093,7 +1105,7 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     }).toBe(true);
     // The rail opens on hover after a short delay; shoot it open so the review image shows the switch.
     await expect.poll(async () => (await win.locator('.sidebar').boundingBox())!.width, { timeout: 5_000 }).toBeGreaterThan(200);
-    await win.waitForTimeout(400);
+    await expect.poll(() => projectsBetweenPillAndTitle(win)).toEqual([true, true, true, true]);
     await win.screenshot({ path: path.join(shots, 'session-view-08-sidebar-recent-zen.png') });
 
     // Archived filters the same list from that row, and a second press returns to live sessions.
