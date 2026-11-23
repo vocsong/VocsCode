@@ -109,7 +109,9 @@ Exact contained paths there still open. Scans are bounded to 50,000 entries and 
 100 matches; incomplete or unreadable scans ask for a full path instead of guessing.
 Absolute paths outside the session are never remapped into it. Mission resolution and reads
 use the same selected workspace; no sibling checkout or project-root fallback is allowed.
-Transports without `fs:resolve` retain exact-path opening.
+Transports without `fs:resolve` retain exact-path opening. Lookup and read failures stay in a
+single inline drawer notice with Retry and Copy path. An existing preview keeps its content and
+editor position when the next request fails within the same workspace.
 
 ## Transcript pull request links
 
