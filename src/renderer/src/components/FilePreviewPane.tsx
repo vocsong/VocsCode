@@ -9,6 +9,7 @@ import { fileManagerName, fileScope } from '../file-open';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import type { FilePreviewTarget } from '../panes';
 import { useStore } from '../store';
+import { showImageContextMenu } from './image-context-menu';
 import { SessionTitle } from './SessionTitle';
 import { Button, Icon, Spinner } from './ui';
 
@@ -284,7 +285,7 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
         <div className="file-preview">
           {preview.image !== undefined ? (
             <div className="file-image">
-              {imageSrc ? <img src={imageSrc} alt={preview.path} /> : (
+              {imageSrc ? <img src={imageSrc} alt={preview.path} onContextMenu={showImageContextMenu} /> : (
                 <span className="muted small">
                   {image?.tooLarge ? `Image is ${(image.size / 1_000_000).toFixed(1)} MB, too large to preview.` : 'This image could not be previewed.'}
                 </span>

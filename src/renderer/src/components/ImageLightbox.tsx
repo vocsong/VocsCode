@@ -1,6 +1,8 @@
 // Fullscreen image viewer: clicking a transcript image opens it at full size.
 // Esc / backdrop click closes; ArrowLeft / ArrowRight move between images of one message.
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { closeContextMenu } from './ContextMenu';
+import { showImageContextMenu } from './image-context-menu';
 import { Icon } from './ui';
 
 export interface LightboxImage {
@@ -42,6 +44,7 @@ export const ImageLightbox = memo(function ImageLightbox({
   }, []);
 
   const step = useCallback((delta: number) => {
+    closeContextMenu();
     setCurrent((i) => navigateLightbox(i, count, delta));
   }, [count]);
 
@@ -106,6 +109,7 @@ export const ImageLightbox = memo(function ImageLightbox({
         src={image.src}
         alt={image.name ?? 'attachment'}
         onClick={(e) => e.stopPropagation()}
+        onContextMenu={showImageContextMenu}
         draggable={false}
       />
       {count > 1 && (
