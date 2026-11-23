@@ -9,6 +9,7 @@ import { pickSessionModels } from '../src/renderer/src/models';
 import { DANGEROUS as PI_DANGEROUS_COMMAND_PATTERNS } from '../resources/pi/vocs-code-approvals';
 import { useStore } from '../src/renderer/src/store';
 import type { AppSettings, HarnessId, ModelInfo, SessionMeta } from '../src/shared/types';
+import { readCssBundle } from './support/read-styles';
 
 describe('dangerous command detection', () => {
   const dangerous: string[] = [
@@ -222,7 +223,7 @@ describe('diff parser hunk counting', () => {
 
 describe('title bar separator', () => {
   const read = (f: string): string => fs.readFileSync(path.join(process.cwd(), f), 'utf8');
-  const styles = read('src/renderer/src/styles.css');
+  const styles = readCssBundle();
 
   it('keeps --titlebar in step with TITLEBAR_HEIGHT', () => {
     const css = /--titlebar:\s*(\d+)px/.exec(styles)?.[1];
@@ -245,7 +246,7 @@ describe('title bar separator', () => {
 describe('sidebar session pin visibility', () => {
   // jsdom never applies styles.css, so the rule that decides when the pin toggle appears is only
   // reachable as text. Its selector list is the production boundary for "selection is not pinning".
-  const styles = fs.readFileSync(path.join(process.cwd(), 'src', 'renderer', 'src', 'styles.css'), 'utf8');
+  const styles = readCssBundle();
   const reveal = styles.match(/\.session-row:hover \.session-pin \.row-act-btn,[\s\S]*?\{/)?.[0] ?? '';
 
   it('reveals the pin on hover and keyboard focus, never because the row is selected', () => {
@@ -261,7 +262,7 @@ describe('sidebar header row', () => {
   // the wrapping that keeps them on one readable row at the default width, and the truncation that
   // keeps the row from overflowing at 200px — is only reachable as text. Placement in the DOM is
   // covered by tests/sidebar-status-badges.test.tsx.
-  const styles = fs.readFileSync(path.join(process.cwd(), 'src', 'renderer', 'src', 'styles.css'), 'utf8');
+  const styles = readCssBundle();
   const rule = (selector: string): string => {
     const start = styles.indexOf(`\n${selector} {`);
     // Comments stripped: these rules explain themselves in prose, which would match below.

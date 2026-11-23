@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer modes {
 /*
  * Zen interface (Settings → Appearance → Interface; shared/ui-modes.ts).
  *
@@ -1106,4 +1108,5 @@
   :root[data-ui='zen'] .session-pin::before {
     animation: none;
   }
+}
 }

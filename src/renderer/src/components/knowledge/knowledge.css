@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer features {
 .knowledge-workspace {
   min-width: 0;
 }
@@ -167,4 +169,5 @@
 .intelligence-warning {
   color: var(--amber);
   background: var(--amber-soft);
+}
 }
