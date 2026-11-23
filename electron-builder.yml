@@ -17,8 +17,14 @@ extraResources:
     to: mission
   - from: resources/processes
     to: processes
+  - from: resources/control
+    to: control
   - from: resources/icons
     to: icons
+# Stage per builder target, then move to Resources before signing/archiving.
+# Keeping this out of static extraResources prevents reuse of a stale dev tree.
+beforePack: ./scripts/graphify-runtime.mjs
+afterPack: ./scripts/graphify-runtime.mjs
 asarUnpack:
   - node_modules/@anthropic-ai/**
   - node_modules/@openai/**
@@ -68,6 +74,8 @@ mac:
     NSMicrophoneUsageDescription: Vocs Code records your voice only while you dictate into the composer.
 linux:
   icon: resources/icons/vocs-code.png
-  target: [AppImage]
+  target:
+    - target: AppImage
+      arch: [x64]
   category: Development
   artifactName: Vocs-Code-${version}-linux-${arch}.${ext}

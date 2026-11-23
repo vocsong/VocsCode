@@ -31,6 +31,7 @@ jobs:
       # The native search regressions exercise both real ripgrep and the JS fallback.
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm run typecheck
+      - run: node --test scripts/graphify-runtime.test.mjs
       # The develop gate uses a reviewed small set; the broad offline suite runs before release.
       - name: Focused develop regression suite
         if: >-
@@ -81,12 +82,14 @@ jobs:
       - run: npm ci --include=dev
         env:
           NODE_ENV: development
+      - run: node scripts/graphify-runtime.mjs prepare
       - run: npm run build
       # Fails if a suite reports skipped: a green-but-dark run must not pass.
       - run: npm run test:e2e:ci
         env:
           VOCS_CODE_TEST_REPORT: ${{ runner.temp }}/e2e-report.json
           VOCS_CODE_E2E_WEB_PREBUILT: '1'
+          VOCS_CODE_GRAPHIFY_E2E: '1'
       - run: node scripts/test-metrics.mjs "${{ runner.temp }}/e2e-report.json" e2e tests/artifacts/e2e-metrics.json
         if: always()
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -120,6 +123,8 @@ jobs:
       - run: npm run dist:dir -- --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify bundled Graphify in the unpacked app
+        run: node scripts/graphify-smoke.mjs --packaged
       - name: Launch packaged app and verify IPC and shutdown
         timeout-minutes: 5
         run: node scripts/e2e-guard.mjs tests/e2e.packaged.test.ts
@@ -133,8 +138,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # The Ubuntu gate cannot execute Windows Job Objects, ConPTY or deep-path cases. Prove those
-  # selected offline boundaries on the primary platform without needing a provider or installed Pi.
+  # The Ubuntu gate cannot execute Windows Job Objects, ConPTY, named-pipe ACLs or deep-path cases.
+  # Prove those offline boundaries without needing a provider or installed Pi.
   windows-offline:
     name: Windows ownership and recovery (offline)
     # Keep the expensive real-Job/real-Git suite on release-to-master and manual runs;
@@ -161,7 +166,7 @@ jobs:
       - name: Execute Windows-only boundaries
         shell: bash
         run: |
-          files=(tests/mission-check-job.test.ts tests/mission-check-startup.test.ts tests/mission-terminal-windows.test.ts tests/mission-receipt-recovery.test.ts tests/mission-restart-recovery.test.ts tests/mission-pi-recovery.test.ts tests/mission-pi-process.test.ts tests/mission-git-boundary.test.ts tests/new-session-dialog.test.tsx tests/mcp-client.test.ts)
+          files=(tests/mission-check-job.test.ts tests/mission-check-startup.test.ts tests/mission-terminal-windows.test.ts tests/mission-receipt-recovery.test.ts tests/mission-restart-recovery.test.ts tests/mission-pi-recovery.test.ts tests/mission-pi-process.test.ts tests/mission-git-boundary.test.ts tests/new-session-dialog.test.tsx tests/mcp-client.test.ts tests/local-control-windows.test.ts)
           npx vitest run "${files[@]}" --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/windows-offline-report.json"
           node scripts/test-report-check.mjs "$RUNNER_TEMP/windows-offline-report.json" "${files[@]}"
       - run: node scripts/test-metrics.mjs "${{ runner.temp }}/windows-offline-report.json" windows-offline tests/artifacts/windows-offline-metrics.json

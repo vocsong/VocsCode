@@ -1,6 +1,9 @@
 /** Binds the transport-agnostic handler registry (handlers.ts) to Electron's ipcMain and pushes events to the renderer window. */
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
+import { z } from 'zod';
 import { isIntelligenceOwnerRequest } from '../shared/intelligence';
+import { KEEP_AWAKE_CHANNEL } from '../shared/keep-awake';
+import type { KeepAwake } from './keep-awake';
 import { createHandlerRegistry, type DesktopBridge, type HandlerDeps, type HandlerRegistry, type MissionHandlerService } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
@@ -24,6 +27,7 @@ export interface IpcDeps {
   settings: SettingsStore;
   secrets: SecretStore;
   sessions: SessionManager;
+  keepAwake?: KeepAwake;
   missions?: MissionHandlerService;
   withWorkspaceWrite?: HandlerDeps['withWorkspaceWrite'];
   terminals: TerminalManager;
@@ -42,6 +46,9 @@ export interface IpcDeps {
   /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
   remote?: RemoteHost;
   control?: HandlerDeps['control'];
+  localControl?: HandlerDeps['localControl'];
+  /** Exact renderer document allowed to administer the local preview (fragment ignored). */
+  localControlDocument?: string;
   /** Where the desktop window is looking, mirrored to paired browsers; wired in index.ts. */
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -143,6 +150,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     appInstructions: deps.appInstructions,
     remote: deps.remote,
     control: deps.control,
+    localControl: deps.localControl,
     desktopFocus: deps.desktopFocus,
     remoteMirror: deps.remoteMirror,
     updater: deps.updater,
@@ -156,7 +164,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
     const intelligenceOwner = isIntelligenceOwnerRequest(channel, req);
-    if (intelligenceOwner || channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'harness:antigravityQuota' || channel === 'fs:writeText') {
+    if (intelligenceOwner || channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'harness:antigravityQuota' || channel === 'fs:writeText' || channel === 'desktop:setFocus') {
       const contents = deps.getWindow()?.webContents;
       if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {
         if (intelligenceOwner) throw new Error('Intelligence settings and memory management require the local desktop owner.');
@@ -165,10 +173,30 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
         if (channel === 'harness:login') throw new Error('Harness sign-in requires the local desktop owner.');
         if (channel === 'harness:antigravityQuota') throw new Error('Antigravity quota requires the local desktop owner.');
         if (channel === 'fs:writeText') throw new Error('Saving workspace text requires the local desktop owner.');
+        if (channel === 'desktop:setFocus') throw new Error('Updating desktop focus requires the local desktop owner.');
         throw new Error('External control grants require the local desktop owner.');
       }
+      const frame = event.senderFrame;
+      if (channel.startsWith('control:local:') && (!deps.localControlDocument || !frame || frame.detached ||
+        frame.url.split('#', 1)[0] !== deps.localControlDocument ||
+        channel === 'control:local:enable' && contents.isLoadingMainFrame())) throw new Error('Local discovery requires the trusted desktop page.');
     }
     return registry.invoke(channel, req, 'desktop');
   });
+  const keepAwake = deps.keepAwake;
+  if (keepAwake) {
+    const request = z.strictObject({ id: z.string().regex(/^[A-Za-z0-9_-]+$/), enabled: z.boolean().optional() });
+    // Deliberately not registered in the transport shared with local web and paired devices.
+    ipcMain.handle(KEEP_AWAKE_CHANNEL, (event, req: unknown) => {
+      const contents = deps.getWindow()?.webContents;
+      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {
+        throw new Error('Keep computer awake requires the local desktop owner.');
+      }
+      const { id, enabled } = request.parse(req);
+      const session = deps.sessions.get(id);
+      if (!session || session.mission || session.archived) throw new Error('Keep awake requires an ordinary, unarchived session.');
+      return enabled === undefined ? keepAwake.enabled(id) : keepAwake.set(id, enabled, deps.sessions.list({ refreshGit: false }));
+    });
+  }
   return registry;
 }

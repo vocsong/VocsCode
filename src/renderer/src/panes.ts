@@ -194,6 +194,17 @@ export function dropOnPane(layout: PaneLayout, paneId: string, sessionId: string
   return pruneFilePreview({ ...layout, panes, activePaneId: target.id });
 }
 
+/** Opens a sidebar pick on the right, regardless of focus, without showing any session twice. */
+export function openSessionOnRight(layout: PaneLayout, sessionId: string): PaneLayout {
+  if (layout.panes.length === 1) {
+    const only = layout.panes[0]!;
+    return only.sessionId ? splitPane(layout, only.id, 'horizontal', sessionId) : openSession(layout, sessionId);
+  }
+  // A stacked split has no right pane: turn it side by side, keeping pane order and shares.
+  const row = layout.orientation === 'horizontal' ? layout : { ...layout, orientation: 'horizontal' as const };
+  return dropOnPane(row, row.panes[row.panes.length - 1]!.id, sessionId);
+}
+
 /** Sets the pane shares, normalised and clamped so no pane collapses to nothing. */
 export function resizePanes(layout: PaneLayout, sizes: number[]): PaneLayout {
   if (sizes.length !== layout.panes.length || sizes.some((s) => !Number.isFinite(s) || s <= 0)) return layout;

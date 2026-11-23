@@ -239,8 +239,8 @@ describe('context packet', () => {
 });
 
 describe('settings', () => {
-  it('defaults to the safe value for every switch', () => {
-    expect(DEFAULT_INTELLIGENCE_SETTINGS).toEqual({ gateway: true, reflection: 'manual', collections: true, personalMemory: false, graphify: { enabled: false, projects: [] } });
+  it('enables the bundled graph by default without enabling personal memory or automatic reflection', () => {
+    expect(DEFAULT_INTELLIGENCE_SETTINGS).toEqual({ gateway: true, reflection: 'manual', collections: true, personalMemory: false, graphify: { enabled: true, excludedProjects: [] } });
     expect(resolveIntelligenceSettings(undefined)).toEqual(DEFAULT_INTELLIGENCE_SETTINGS);
   });
 
@@ -250,13 +250,15 @@ describe('settings', () => {
       reflection: 'always',
       collections: 0,
       personalMemory: 'true',
-      graphify: { enabled: 'true', projects: [7, '', null], command: '  ' }
+      graphify: { enabled: 'true', excludedProjects: [7, '', null], command: '  ' }
     } as never);
-    expect(resolved).toEqual(DEFAULT_INTELLIGENCE_SETTINGS);
-    expect(resolveIntelligenceSettings({ reflection: 'auto', personalMemory: true, graphify: { enabled: true, projects: ['prj_a', 'prj_a'], command: ' C:/tools/graphify.exe ' } } as never)).toMatchObject({
-      reflection: 'auto',
-      personalMemory: true,
-      graphify: { enabled: true, projects: ['prj_a'], command: 'C:/tools/graphify.exe' }
-    });
+    expect(resolved).toEqual({ ...DEFAULT_INTELLIGENCE_SETTINGS, graphify: { enabled: false, excludedProjects: [] } });
+  });
+
+  it('honors a saved opt-out and never migrates a pilot executable or allowlist', () => {
+    expect(resolveIntelligenceSettings({ graphify: { enabled: false, projects: ['prj_a'], command: 'C:/tools/graphify.exe' } } as never).graphify)
+      .toEqual({ enabled: false, excludedProjects: [] });
+    expect(resolveIntelligenceSettings({ graphify: { enabled: true, excludedProjects: ['prj_b', 'prj_a', 'prj_b'] } }).graphify)
+      .toEqual({ enabled: true, excludedProjects: ['prj_a', 'prj_b'] });
   });
 });

@@ -678,12 +678,10 @@ export interface IntelligenceSettings {
 }
 
 export interface GraphifySettings {
-  /** Master switch; off by default, and nothing is ever indexed without an explicit request. */
+  /** Index opened Git checkouts locally using the bundled code parser. */
   enabled: boolean;
-  /** Stable ids of the projects opted in. */
-  projects: string[];
-  /** Override for the executable; otherwise `graphify` is looked up on PATH. */
-  command?: string;
+  /** Stable ids explicitly excluded from indexing and graph retrieval. */
+  excludedProjects: string[];
 }
 
 export const DEFAULT_INTELLIGENCE_SETTINGS: IntelligenceSettings = {
@@ -691,22 +689,23 @@ export const DEFAULT_INTELLIGENCE_SETTINGS: IntelligenceSettings = {
   reflection: 'manual',
   collections: true,
   personalMemory: false,
-  graphify: { enabled: false, projects: [] }
+  graphify: { enabled: true, excludedProjects: [] }
 };
 
 export function resolveIntelligenceSettings(stored: Partial<IntelligenceSettings> | undefined | null): IntelligenceSettings {
   const reflection = stored?.reflection;
   const graphify = stored?.graphify;
-  const command = typeof graphify?.command === 'string' && graphify.command.trim() ? graphify.command.trim() : undefined;
   return {
     gateway: typeof stored?.gateway === 'boolean' ? stored.gateway : DEFAULT_INTELLIGENCE_SETTINGS.gateway,
     reflection: reflection === 'off' || reflection === 'manual' || reflection === 'auto' ? reflection : DEFAULT_INTELLIGENCE_SETTINGS.reflection,
     collections: typeof stored?.collections === 'boolean' ? stored.collections : DEFAULT_INTELLIGENCE_SETTINGS.collections,
     personalMemory: typeof stored?.personalMemory === 'boolean' ? stored.personalMemory : DEFAULT_INTELLIGENCE_SETTINGS.personalMemory,
     graphify: {
-      enabled: graphify?.enabled === true,
-      projects: Array.isArray(graphify?.projects) ? [...new Set(graphify.projects.filter((p): p is string => typeof p === 'string' && !!p))] : [],
-      ...(command ? { command } : {})
+      // Keep a saved off switch (including from the pilot); never use a saved executable override.
+      enabled: graphify === undefined ? DEFAULT_INTELLIGENCE_SETTINGS.graphify.enabled : graphify?.enabled === true,
+      excludedProjects: Array.isArray(graphify?.excludedProjects)
+        ? [...new Set(graphify.excludedProjects.filter((p): p is string => typeof p === 'string' && !!p))].sort()
+        : []
     }
   };
 }

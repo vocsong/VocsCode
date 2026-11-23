@@ -16,6 +16,7 @@ import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { FILE_PREVIEW_MAX_BYTES, PUSH_CHANNELS, TEXT_EXPORT_MAX_BYTES } from '../shared/ipc';
 import { missionPlanMarkdown } from './mission/context';
 import { missionDeliveryBranch } from './mission/delivery';
+import { missionImageSchema } from './mission/image-schema';
 import type { TargetObservation } from './mission/workspaces';
 import { Vesta } from './agents';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
@@ -134,6 +135,7 @@ export interface HandlerDeps {
   remote?: RemoteHost;
   /** Local owner configuration, never exposed through browser/agent invocation origins. */
   control?: import('./control/service').ControlService;
+  localControl?: Pick<import('./control/local').LocalControl, 'ownerState' | 'enable' | 'disable'>;
   /** Which session the desktop window is on, mirrored to paired browsers; absent in tests. */
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -173,8 +175,10 @@ const HARNESS_BINARY: Partial<Record<HarnessId, ToolName>> = { claude: 'claude',
 const missionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/, 'Invalid Mission/session identifier');
 const missionKeySchema = z.string().min(1).max(200);
 const missionTextSchema = z.string().min(1).max(100_000).refine((text) => !!text.trim(), 'Text must not be empty');
-const missionImageSchema = z.strictObject({ mimeType: z.string().regex(/^image\/[a-z0-9.+-]+$/i), data: z.string().min(1).max(32_000_000), name: z.string().max(1000).optional() });
-const missionImagesSchema = z.array(missionImageSchema).max(100).optional();
+// Keep the narrower IPC name cap without changing the service's retained-image validation.
+const missionImagesSchema = z.array(missionImageSchema.extend({
+  name: missionImageSchema.shape.name.unwrap().max(1000).optional()
+})).max(100).optional();
 const missionFileSchema = z.strictObject({
   name: z.string().min(1).max(255), mimeType: z.string().min(1).max(200),
   data: z.string().min(1).max(Math.ceil(10 * 1024 * 1024 / 3) * 4 + 4).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'Invalid file encoding')
@@ -322,6 +326,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     handle('control:grant', (input) => control.grant(controlGrantInputSchema.parse(input)));
     handle('control:revoke', (input) => control.revoke(z.strictObject({ grantId: z.string().uuid() }).parse(input).grantId));
   }
+  if (deps.localControl) {
+    const local = deps.localControl;
+    handle('control:local:get', () => local.ownerState());
+    handle('control:local:enable', (input) => local.enable(input));
+    handle('control:local:disable', () => local.disable());
+  }
 
   async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' | 'desktop' = 'user'): Promise<unknown> {
     if (channel.startsWith('vocsAccount:') && actor !== 'desktop') throw new Error('Vocs account sign-in requires the local desktop owner.');
@@ -409,7 +419,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     // aliases. Session ownership is a second, independent fence; planning's original source is
     // not a managed worktree and deliberately has no worktreeBranch marker.
     const real = await realResource(target);
-    for (const session of sessions.list().filter((s) => s.mission && s.worktreeBranch)) {
+    for (const session of sessions.list({ refreshGit: false }).filter((s) => s.mission && s.worktreeBranch)) {
       const root = await realResource(session.cwd);
       if (containsPath(root, real) || includeDescendants && containsPath(real, root)) denyMissionControl();
     }

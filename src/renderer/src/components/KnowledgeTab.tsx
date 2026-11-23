@@ -5,6 +5,7 @@ import type { SessionMeta } from '../../../shared/types';
 import { canInvoke, invoke } from '../api';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
+import { HighlightedSnippet } from './HighlightedSnippet';
 import { Badge, Button, EmptyState, Icon, Spinner, Toggle } from './ui';
 import { CollectionsView } from './knowledge/CollectionsView';
 import { EvidenceView } from './knowledge/EvidenceView';
@@ -71,13 +72,6 @@ function KnowledgeSession({ session, active, id }: { session: SessionMeta; activ
     // An app-wide settings push can arrive after switching away from the session that wrote it.
     if (JSON.stringify(resolveIntelligenceSettings(settings)) !== JSON.stringify(view.settings)) void refresh();
   }, [active, view, busy, settings, refresh]);
-
-  const graphIndexing = view?.graph.indexing;
-  useEffect(() => {
-    if (active !== 'sources' || !graphIndexing) return;
-    const timer = setInterval(() => void refresh(), 3_000);
-    return () => clearInterval(timer);
-  }, [active, graphIndexing, refresh]);
 
   return SECTIONS.map(([section]) => {
     const selected = section === active;
@@ -537,7 +531,7 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
               <span className="knowledge-row-main">
                 <span className="knowledge-title">{page.title}</span>
                 {page.claim && <span className="muted small knowledge-claim">{page.claim}</span>}
-                {page.snippet && <span className="muted small knowledge-snippet" dangerouslySetInnerHTML={{ __html: page.snippet.replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>') }} />}
+                {page.snippet && <span className="muted small knowledge-snippet"><HighlightedSnippet text={page.snippet} /></span>}
                 <LabelChips labels={page.labels ?? []} testId={`knowledge-labels-${page.id}`} />
               </span>
               {page.updatedBy && <span className="muted small knowledge-by" title={`Last written by ${page.updatedBy}`}>{page.updatedBy}</span>}

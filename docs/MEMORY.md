@@ -2,7 +2,7 @@
 
 Vocs Code carries four kinds of memory. This document defines the second one, what it may and may
 not contain, and how the four stay out of each other's way. For the desktop memory ledger,
-scoped evidence, collections and the optional Graphify index, see [Local Knowledge and Memory](INTELLIGENCE.md).
+scoped evidence, collections and the built-in Graphify index, see [Local Knowledge and Memory](INTELLIGENCE.md).
 
 | Layer | Question | Owner | Lifetime |
 | --- | --- | --- | --- |

@@ -7,7 +7,7 @@ Open a session, then **Knowledge** in the right panel (Standard or Zen). The **K
 | **Memory** | Record a lesson, procedure or declared preference; review candidates; reflect on a session; promote, revoke or forget a record; export and import project memory. |
 | **Collections** | See the current project identity and choose which known local projects may share knowledge. Membership starts with promoted records only. Enabling wiki sharing exposes current project wiki claims, not branch pages, source bodies or other sessions' transcripts. |
 | **Evidence** | Search this project, or explicitly look across its collections. Compile a bounded packet with citations, history, missing providers, stale evidence and known conflicts. |
-| **Sources** | Manage the tool gateway, collection search, personal recall, reflection and the optional Graphify index. |
+| **Sources** | Manage the tool gateway, collection search, personal recall, reflection and the built-in Graphify index. |
 
 ## What to trust
 
@@ -28,8 +28,12 @@ Supported harnesses get the `vocs-memory` built-in. With the gateway enabled, th
 
 Stopping a runtime revokes its capability; expiry requires a fresh runtime. A refused or unavailable gateway never downgrades a live client to a disk reader. Explicitly disable the gateway in **Sources**, then restart the session, to use the standalone six-tool implementation for a project that has a wiki. This rollback does not remove or modify the new ledger. Built-in switches in the MCP panel still control injection.
 
-## Optional Graphify pilot
+## Built-in Graphify
 
-Graphify is off until the owner turns it on globally and for the project. The reviewed CLI release is `graphifyy==0.9.115` (e.g. `uv tool install graphifyy==0.9.115`); the app never installs it or upgrades it automatically. Select **Build / refresh index**. The app runs only the version check and local AST extraction, with no model keys, excluding `.vocs-code` and respecting the scanner's ignore rules. The generated cache stays in the desktop profile, separate from the wiki. Use **Clear cache** without losing authoritative data. An unavailable provider or a stale indexed revision is reported; Wiki, Memory and History still work.
+Desktop installers include a private, pinned Graphify (`graphifyy==0.9.115`) and Python runtime. Users do not install Python, install a separate MCP server, or download the worker at first use. Vocs Code uses only local AST extraction. Both **Evidence** and the built-in `vocs-memory` tools (`intelligence_search`, `intelligence_trace`, `context_compile`) read the same app-owned cache; neither launches Python on a query.
 
-This pilot does not enable semantic/cloud enrichment, OpenBrain import, embeddings or cross-device/organization sharing. GitNexus remains a separate specialist tool; the Evidence view does not run GitNexus impact or call-graph queries on the agent's behalf. See the [proposal](UNIFIED-KNOWLEDGE-MEMORY-PROPOSAL.md) for the longer-term design and [testing](TESTING.md) for verification.
+Graphify defaults on. Opening a supported local Git checkout in an ordinary desktop session queues a background index. Vocs Code checks that open checkout for new commits; it does not crawl all registered projects. The input is bounded, committed source code, not untracked files, unsaved edits, transcripts, `.vocs-code`, submodules or linked files. No provider keys, model calls, Git hooks or repository writes are needed. Graph citations refer to the indexed commit, not to dirty changes on disk, and remain derived evidence, not reviewed guidance.
+
+Under **Sources**, disable Graphify globally or for one project; existing saved global off choices remain off. Disabling it stops automatic indexing and graph retrieval. **Refresh index** retries a build, and **Clear cache** only removes the derived cache (a later refresh can rebuild it). A missing worker or stale revision is visible without disabling Wiki, Memory or History.
+
+Built-in indexing does not enable semantic/cloud enrichment, OpenBrain import, embeddings or cross-device/organization sharing. GitNexus remains a separate specialist tool; the Evidence view does not run GitNexus impact or call-graph queries on the agent's behalf. See the [proposal](UNIFIED-KNOWLEDGE-MEMORY-PROPOSAL.md) for the longer-term design and [testing](TESTING.md) for verification.

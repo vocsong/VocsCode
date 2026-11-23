@@ -20,6 +20,7 @@ import { isMissionQuestionOperation, missionBlockerFamily } from '../../shared/m
 import type { FileAttachment, ImageAttachment, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UserInput } from '../../shared/types';
 import type { SessionManager } from '../session-manager';
 import { captureMissionSource, missionKickoff, missionLeadPolicy, missionWorkerBrief, missionWorkerPolicy } from './context';
+import { missionImageSchema as userImageSchema } from './image-schema';
 import { assertMissionMutation, assertMissionRecord, implementationBlockers, MissionAdmissionError, missionCheckCommandIssue, missionCompletionReport, readyTasks, reduceMission, type MissionActor, type MissionMutation } from './state';
 import { MissionStoreError, type MissionStore } from './store';
 import type { CapacityLease, MissionScheduler } from './scheduler';
@@ -100,8 +101,6 @@ const createSchema = z.strictObject({
   permissionMode: z.enum(['ask', 'accept-edits', 'plan', 'auto', 'full-auto']), submittedCommand: text.optional(),
   images: z.array(z.unknown()).max(100).optional(), files: z.array(z.unknown()).max(10).optional(),
 });
-const userImageSchema = z.strictObject({ mimeType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']),
-  data: z.string().min(1).max(24 * 1024 * 1024).regex(/^[A-Za-z0-9+/]+={0,2}$/), name: z.string().min(1).max(100_000).refine((value) => !!value.trim() && !value.includes('\0')).optional() });
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_FILES_BYTES = 30 * 1024 * 1024;
 const userFileSchema = z.strictObject({

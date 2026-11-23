@@ -68,6 +68,8 @@ jobs:
       - run: npx electron-vite build
       # Keep publish config: the locked builder writes updater YAML with publishing disabled.
       - run: npx electron-builder ${{ matrix.target }} --config electron-builder.yml --publish never
+      - name: Verify bundled Graphify in the built app
+        run: node scripts/graphify-smoke.mjs --packaged
       - run: node scripts/release-artifacts.mjs stage ${{ matrix.platform }}
       # Sign the exact validated bundle bytes with GitHub OIDC, not a publisher certificate.
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0

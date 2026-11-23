@@ -7,7 +7,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProcessTracker, type ProcessTrackerOptions } from '../src/main/process-tracker';
 import type { ProcessSource, RawProcess } from '../src/main/process-snapshot';
 import type { ProcessSummary, TrackedProcess } from '../src/shared/processes';
@@ -417,6 +417,39 @@ describe('process tracker', () => {
     };
     const list = await tracker().list();
     expect(list).toMatchObject({ processes: [], error: 'The Windows process reader did not start.' });
+  });
+
+  it('does not take a startup snapshot after closing the reader', async () => {
+    vi.useFakeTimers();
+    const snapshot = vi.spyOn(source, 'snapshot');
+    try {
+      const t = tracker({ registryFile: undefined });
+      t.start();
+      await t.close();
+      expect(source.closed).toBe(true);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally {
+      snapshot.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('still samples once at startup and once more before closing an active reader', async () => {
+    vi.useFakeTimers();
+    const snapshot = vi.spyOn(source, 'snapshot');
+    try {
+      const t = tracker({ registryFile: undefined });
+      t.start();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(snapshot).toHaveBeenCalledTimes(1);
+      await t.close();
+      expect(snapshot).toHaveBeenCalledTimes(2);
+      expect(source.closed).toBe(true);
+    } finally {
+      snapshot.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('saves on close only after it has sampled, and closes its reader', async () => {

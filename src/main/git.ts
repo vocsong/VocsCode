@@ -1,5 +1,5 @@
 /** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees plus the /pr and /merge GitHub flow. */
-import { promises as fs } from 'node:fs';
+import fsCallback, { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_BRANCH_PREFIX, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
 import { parseGitHubPullRequestUrl } from '../shared/github-pull-request';
@@ -144,6 +144,8 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
 export interface BranchGitState {
   pr: boolean;
   merged: boolean;
+  /** An unavailable lookup is not evidence that an existing PR went away. */
+  unknown?: true;
 }
 
 const BASE_BRANCHES = ['develop', 'master', 'main'];
@@ -180,10 +182,11 @@ export interface SessionPrQuery {
 }
 
 const PR_FIELDS = 'number,state,headRefName,baseRefName,url,title';
+const isPrState = (state: unknown) => state === 'OPEN' || state === 'CLOSED' || state === 'MERGED';
 
-async function listPrs(opts: { cwd: string; repo?: string }): Promise<PrInfo[]> {
+async function listPrs(opts: { cwd: string; repo?: string }): Promise<PrInfo[] | undefined> {
   const gh = which('gh');
-  if (!gh) return [];
+  if (!gh) return undefined;
   const args = ['pr', 'list', '--state', 'all', '--limit', '50', '--json', PR_FIELDS];
   if (opts.repo) args.push('-R', opts.repo);
   const r = await runCapture(gh, args, {
@@ -191,11 +194,12 @@ async function listPrs(opts: { cwd: string; repo?: string }): Promise<PrInfo[]> 
     timeoutMs: 15_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
   });
-  if (r.code !== 0 || r.truncated) return [];
+  if (r.code !== 0 || r.truncated || timedOut(r)) return undefined;
   try {
-    return JSON.parse(r.stdout) as PrInfo[];
+    const prs = JSON.parse(r.stdout);
+    return Array.isArray(prs) ? prs : undefined;
   } catch {
-    return [];
+    return undefined;
   }
 }
 
@@ -233,7 +237,7 @@ export async function repoSlug(root: string): Promise<string | undefined> {
 export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Promise<{ refs: PrInfo[]; direct: PrInfo[]; fallback: PrInfo[] }> {
   const localSlug = await repoSlug(root);
   const prRefs = q.prRefs ?? [];
-  const prs = await listPrs({ cwd: root });
+  const prs = await listPrs({ cwd: root }) ?? [];
   const refs: PrInfo[] = [];
   for (const r of prRefs) {
     // A ref aimed at this repo resolves from the local list; same numbers in other repos
@@ -247,18 +251,23 @@ export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Prom
   const localNumbers = new Set(prs.map((p) => p.number));
   for (const r of prRefs) {
     if (!r.repo || r.repo === localSlug || localNumbers.has(r.number)) continue;
-    let found = (await listPrs({ cwd: root, repo: r.repo })).find((p) => p.number === r.number);
+    let found = (await listPrs({ cwd: root, repo: r.repo }))?.find((p) => p.number === r.number);
     if (!found) {
       for (const extra of q.extraRoots ?? []) {
-        found = (await listPrs({ cwd: extra })).find((p) => p.number === r.number);
+        found = (await listPrs({ cwd: extra }))?.find((p) => p.number === r.number);
         if (found) break;
       }
     }
     if (found && !refs.some((p) => p.number === found!.number)) refs.push(found);
   }
+  return { refs, ...await matchBranchPrs(root, prs, q) };
+}
+
+/** Keep the same branch attribution rules for both the sidebar and /merge. */
+async function matchBranchPrs(root: string, prs: PrInfo[], q: SessionPrQuery): Promise<{ direct: PrInfo[]; fallback: PrInfo[] }> {
   const known = new Set(q.branches?.filter(Boolean).filter((b) => !BASE_BRANCHES.includes(b)) ?? []);
   const direct = prs.filter((p) => p.headRefName !== undefined && known.has(p.headRefName));
-  if (!prs.length) return { refs, direct, fallback: [] };
+  if (!prs.length) return { direct, fallback: [] };
   const exclude = new Set([...(q.excludeBranches ?? []), ...BASE_BRANCHES]);
   const branches = await localBranches(root);
   const fallback: PrInfo[] = [];
@@ -273,29 +282,41 @@ export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Prom
     }
     fallback.push(p);
   }
-  return { refs, direct, fallback };
+  return { direct, fallback };
 }
 
-/**
- * Classifies a session branch: open PR ('pr') or already merged into a base branch
- * ('merged'). Uses `gh` when available (also catches squash merges); otherwise falls
- * back to merge-commit ancestry, and to remote tracking (a fully pushed branch means
- * the PR was opened in this workflow).
- */
+const unknownBranchGitState = (): BranchGitState => ({ pr: false, merged: false, unknown: true });
+
+/** One exact, repo-qualified lookup for the sidebar; never resolve a transcript PR by number alone. */
+async function explicitPrState(cwd: string, ref: PrRef): Promise<BranchGitState> {
+  const target = ref.repo && parseGitHubPullRequestUrl(`https://github.com/${ref.repo}/pull/${ref.number}`);
+  if (!target || !ghBin()) return unknownBranchGitState();
+  const r = await gh(cwd, ['pr', 'view', target.url, '--json', 'number,state,url'], 15_000);
+  if (r.code !== 0 || r.truncated || timedOut(r)) return unknownBranchGitState();
+  try {
+    const pr = JSON.parse(r.stdout) as PrInfo | null;
+    const resolved = typeof pr?.url === 'string' ? parseGitHubPullRequestUrl(pr.url) : undefined;
+    if (pr?.number === target.number && resolved?.url.toLowerCase() === target.url.toLowerCase() && isPrState(pr.state)) {
+      return { pr: pr.state === 'OPEN', merged: pr.state === 'MERGED' };
+    }
+  } catch { /* Unavailable is not evidence for an older PR. */ }
+  return unknownBranchGitState();
+}
+
+/** Classifies the latest named PR or, with no explicit ref, the session's branch. */
 export async function branchGitState(cwd: string, branch: string, q: SessionPrQuery = {}): Promise<BranchGitState> {
+  const latestRef = q.prRefs?.at(-1);
+  if (latestRef) return explicitPrState(cwd, latestRef);
+
   const root = await gitRoot(cwd);
-  if (!root) return { pr: false, merged: false };
-  const state: BranchGitState = { pr: false, merged: false };
-  if (which('gh')) {
+  if (!root) return unknownBranchGitState();
+  const prs = await listPrs({ cwd: root });
+  const validPrs = prs?.every((pr) => pr && isPrState(pr.state) && typeof pr.headRefName === 'string') ?? false;
+  if (prs?.length && validPrs) {
     // The agent may have checked its own branch out inside the worktree, so the
     // worktree's current HEAD joins the stored branch as a direct match.
     const head = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
-    const { refs, direct, fallback } = await findSessionPrs(root, { ...q, branches: [branch, head, ...(q.branches ?? [])] });
-    // PRs the session itself referenced win; a mention with no open PR falls through.
-    if (refs.length) {
-      if (refs.some((p) => p.state === 'OPEN')) return { pr: true, merged: false };
-      if (refs.every((p) => p.state === 'MERGED')) return { pr: false, merged: true };
-    }
+    const { direct, fallback } = await matchBranchPrs(root, prs, { ...q, branches: [branch, head, ...(q.branches ?? [])] });
     if (direct.some((p) => p.state === 'MERGED')) return { pr: false, merged: true };
     if (direct.some((p) => p.state === 'OPEN')) return { pr: true, merged: false };
     // The repo-wide fallback only flips the label when it is unambiguous.
@@ -318,15 +339,8 @@ export async function branchGitState(cwd: string, branch: string, q: SessionPrQu
       }
     }
   }
-  if (!which('gh')) {
-    // Without gh, a fully pushed branch stands in for "PR created".
-    const remote = await git(root, ['rev-parse', '--verify', '--quiet', `origin/${branch}`]);
-    if (remote.code === 0) {
-      const ahead = await git(root, ['rev-list', '--count', `origin/${branch}..${branch}`]);
-      if (ahead.code === 0 && ahead.stdout.trim() === '0') state.pr = true;
-    }
-  }
-  return state;
+  // A pushed branch without a successful GitHub lookup cannot establish PR state.
+  return validPrs ? { pr: false, merged: false } : unknownBranchGitState();
 }
 
 export async function gitDiff(cwd: string, file?: string, staged = false): Promise<{ diff: string; error?: string }> {
@@ -903,6 +917,13 @@ export async function gitBranches(cwd: string): Promise<{ current?: string; bran
   return { current, branches };
 }
 
+/** A directory's real long path for comparison: links resolved, 8.3 short names expanded, case folded on Windows. */
+async function canonicalDir(dir: string): Promise<string> {
+  const resolved = path.resolve(dir);
+  const real = await new Promise<string>((resolve) => fsCallback.realpath.native(resolved, (error, out) => resolve(error ? resolved : out)));
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
+
 export async function gitWorktrees(cwd: string): Promise<{ current: string; worktrees: GitWorktreeInfo[] }> {
   const current = path.resolve(cwd);
   const r = await git(cwd, ['worktree', 'list', '--porcelain']);
@@ -949,6 +970,26 @@ export function parseUpstreamTrack(track: string): { ahead?: number; behind?: nu
   };
 }
 
+async function readBranchOverviewRefs(root: string) {
+  const refs = await git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)%09%(objectname)']);
+  const rows = refs.stdout.split('\n').filter(Boolean).map((line) => line.split('\t'));
+  const base = pickBase(rows.map(([name]) => name).filter(Boolean));
+  const baseCommit = rows.find(([name]) => name === base)?.at(-1)?.trim();
+  const counts = new Map<string, { ahead: number; behind: number }>();
+  if (refs.code === 0 && !refs.truncated && !timedOut(refs) && rows.length > 1 && baseCommit && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(baseCommit)) {
+    // Git can walk all tips in one process. Join by object ID (not ref name) so a branch
+    // advanced between the two reads cannot lend its new counts to the older snapshot.
+    const batch = await git(root, ['for-each-ref', 'refs/heads', `--format=%(objectname)%09%(ahead-behind:${baseCommit})`]);
+    if (batch.code === 0 && !batch.truncated && !timedOut(batch)) {
+      for (const line of batch.stdout.split('\n')) {
+        const match = line.trimEnd().match(/^(\S+)\t(\d+) (\d+)$/);
+        if (match) counts.set(match[1], { ahead: Number(match[2]), behind: Number(match[3]) });
+      }
+    }
+  }
+  return { refs, rows, base, counts };
+}
+
 /**
  * GitHub-style branch overview for the Branches panel: age, ahead/behind vs base, merged state, worktree binding.
  * The list is the repo's LOCAL branches (`refs/heads`), which a server-side delete never removes — a branch
@@ -958,29 +999,31 @@ export function parseUpstreamTrack(track: string): { ahead?: number; behind?: nu
 export async function gitBranchesOverview(cwd: string): Promise<GitBranchOverview> {
   const root = await gitRoot(cwd);
   if (!root) return { isRepo: false, branches: [], worktrees: [] };
-  const [wt, refs, pr] = await Promise.all([
+  const [wt, { refs, rows, base, counts: batchCounts }, pr] = await Promise.all([
     gitWorktrees(cwd),
-    git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)']),
+    readBranchOverviewRefs(root),
     gitPrMap(cwd)
   ]);
   if (timedOut(refs)) {
     return { isRepo: true, branches: [], worktrees: wt.worktrees, error: 'git for-each-ref timed out — the branch list could not be loaded. Refresh to retry.' };
   }
-  const names = refs.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
-  const base = pickBase(names);
+  // Git prints each worktree's real long path; the session's cwd may be a Windows 8.3 short name
+  // (`RUNNER~1`), another case, or a link to it. Compare real paths, or no branch reads as current.
+  const here = await canonicalDir(wt.current);
+  const currentWorktree = (await Promise.all(wt.worktrees.map(async (w) => (await canonicalDir(w.path)) === here ? w : undefined))).find(Boolean);
   const wtByBranch = new Map(wt.worktrees.filter((w) => w.branch).map((w) => [w.branch!, w.path]));
-  const lines = refs.stdout.split('\n').filter(Boolean);
-  const branches: GitBranchOverviewItem[] = new Array(lines.length);
+  const branches: GitBranchOverviewItem[] = new Array(rows.length);
   let next = 0;
-  // A repo can have hundreds of local refs; keep their child processes bounded.
-  await Promise.all(Array.from({ length: Math.min(4, lines.length) }, async () => {
-    while (next < lines.length) {
+  // Older Git or unobserved tips fall back to individual, bounded probes.
+  await Promise.all(Array.from({ length: Math.min(4, rows.length) }, async () => {
+    while (next < rows.length) {
       const index = next++;
-      const [name, date, subject, upstream, track] = lines[index].split('\t');
+      const row = rows[index];
+      const [name, date, subject, upstream, track] = row;
       const counts =
         name === base
           ? undefined
-          : await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
+          : batchCounts.get(row.at(-1)!.trim()) ?? await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
               if (r.code !== 0 || r.truncated || timedOut(r)) return undefined;
               const m = r.stdout.trim().match(/^(\d+)\s+(\d+)$/);
               return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : undefined;
@@ -992,7 +1035,7 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
       const up = parseUpstreamTrack(track ?? '');
       const item: GitBranchOverviewItem = {
         name,
-        current: Boolean(wt.worktrees.find((w) => w.branch === name && path.resolve(w.path) === wt.current)),
+        current: currentWorktree?.branch === name,
         isBase: name === base,
         lastCommitAt: date ? Number(date) * 1000 : undefined,
         lastCommitSubject: subject || undefined,

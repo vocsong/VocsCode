@@ -2,17 +2,18 @@
  * End-to-end flow for Layer 2 project knowledge: a wiki seeded on disk is ingested and rendered in
  * the right panel's Knowledge tab without any accept step, labels and provenance are shown, a claim
  * is rejected (tombstoned) from its row, and an open page's anchors and relation graph render. The
- * session and wiki are seeded on disk so no harness and no provider key is involved. Requires
- * `npm run build`; gated by VOCS_CODE_E2E_UI=1.
+ * sessions and wiki are seeded on disk, and Graphify indexes a real Git checkout locally, so no
+ * harness or provider key is involved. Requires `npm run build`; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
-import { promises as fs } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { serializeKnowledgeDocument, type KnowledgePageMeta } from '../src/shared/knowledge';
-import type { SessionMeta } from '../src/shared/types';
+import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import { isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -104,7 +105,11 @@ describe.runIf(enabled)('project knowledge panel', () => {
     await fs.mkdir(path.join(wiki, 'gotchas'), { recursive: true });
     await fs.mkdir(userData, { recursive: true });
     // An auto-ingested page: current with no human review step, and an anchor to check.
-    await fs.writeFile(path.join(wiki, 'conventions', 'harness-lifecycle.md'), serializeKnowledgeDocument(pageMeta({ anchors: [{ file: 'src/main/session-manager.ts', symbol: 'buildContext' }] }), 'The main process owns harness lifetime.'));
+    const lifecycleBody = 'The main process owns harness lifetime. A <b>literal</b> PTY example.';
+    await fs.writeFile(
+      path.join(wiki, 'conventions', 'harness-lifecycle.md'),
+      serializeKnowledgeDocument(pageMeta({ anchors: [{ file: 'src/main/session-manager.ts', symbol: 'buildContext' }] }), lifecycleBody)
+    );
     // A second current page that relates to the first, so the graph has an edge to render.
     await fs.writeFile(
       path.join(wiki, 'gotchas', 'duplicate-pty.md'),
@@ -161,6 +166,16 @@ describe.runIf(enabled)('project knowledge panel', () => {
     expect(await ledger.innerText()).toContain('1 rejected claim');
     await ledger.locator('summary').click();
     expect(await ledger.innerText()).toContain('The stale flag is set by the CLI.');
+
+    // "session" matches metadata; only "pty" matches this page's body.
+    const search = win.getByRole('textbox', { name: 'Search project knowledge' });
+    await search.fill('session pty');
+    await search.press('Enter');
+    const excerpt = lifecycle.locator('.knowledge-snippet');
+    await excerpt.waitFor({ timeout: 10_000 });
+    expect(await excerpt.locator('mark').allTextContents()).toEqual(['PTY']);
+    expect(await excerpt.textContent()).toBe(lifecycleBody);
+    expect(await excerpt.locator('b').count()).toBe(0);
 
     // An anchor is checked against GitNexus live; this sandbox has no index, so the panel says so
     // instead of failing or pretending the pointer is good.
@@ -236,6 +251,143 @@ describe.runIf(enabled)('project knowledge panel', () => {
     await fs.rm(tmp, { recursive: true, force: true });
   });
 
+  it('automatically indexes committed code with bundled Graphify and keeps wiki and history available', async () => {
+    // Only an unstaged dev build may take the unavailable path. A packaged build, an explicit
+    // opt-in, or even a partially staged payload with the launcher must pass the real index check.
+    const expectBundle = !!process.env.HARNESS_E2E_EXE || process.env.VOCS_CODE_GRAPHIFY_E2E === '1'
+      || existsSync(path.join(root, 'resources', 'graphify-runtime', `${process.platform}-${process.arch}`, 'launch.py'));
+    const wait = { timeout: 10_000 };
+    const graphWait = { timeout: 60_000 };
+    // Graphify requires a physical checkout; e.g. the macOS temp path can traverse /var.
+    const tmp = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'vocs-graphify-e2e-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'rotor-project');
+    const trackedFile = 'src/rotor.py';
+    const untrackedFile = 'src/regulator.py';
+    const symbol = 'amberPendulumFixture';
+    const dirtySymbol = 'hiddenFlywheelFixture';
+    const untrackedSymbol = 'slateRegulatorFixture';
+    const python = (name: string) => `def ${name}():\n    return 42\n`;
+    const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
+    gitEnv.GIT_CONFIG_NOSYSTEM = '1';
+    gitEnv.GIT_CONFIG_GLOBAL = path.join(tmp, 'gitconfig');
+    const git = (...args: string[]) => execFileSync('git', args, {
+      cwd: project, env: gitEnv, encoding: 'utf8', windowsHide: true, timeout: 10_000
+    }).trim();
+    const session = sessionFor(project, 's_graphify_e2e', 'Rotor calibration session');
+    const wikiTitle = 'Rotor calibration notes';
+    const transcript: TranscriptItem = { id: 'u1', kind: 'user', ts: Date.now(), text: `We checked ${symbol} on the test bench.` };
+    try {
+      const wiki = path.join(project, '.vocs-code', 'wiki', 'conventions');
+      await Promise.all([userData, path.dirname(path.join(project, trackedFile)), wiki].map((dir) => fs.mkdir(dir, { recursive: true })));
+      git('init', '--quiet', '--template=');
+      git('config', 'user.name', 'Graphify E2E fixture');
+      git('config', 'user.email', 'e2e@example.com');
+      await fs.writeFile(path.join(project, trackedFile), python(symbol));
+      git('add', '--', trackedFile);
+      git('commit', '-qm', 'Add rotor fixture');
+      const revision = git('rev-parse', 'HEAD');
+      // The tracked file on disk no longer contains the committed symbol at all.
+      await fs.writeFile(path.join(project, trackedFile), python(dirtySymbol));
+      await fs.writeFile(path.join(project, untrackedFile), python(untrackedSymbol));
+      await fs.writeFile(path.join(wiki, 'rotor.md'), serializeKnowledgeDocument(pageMeta({
+        id: 'conventions/rotor', title: wikiTitle, claim: `Calibrate ${symbol} before measuring.`, keywords: [symbol], labels: ['calibration']
+      }), 'Record the calibration before measuring the rotor.'));
+      // Skip onboarding, but leave intelligence settings and the graph cache entirely unseeded.
+      await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { mcpDisabledBuiltins: ['gitnexus', 'cua-driver'] }));
+      await seedSessions(userData, session);
+      await fs.writeFile(path.join(userData, 'sessions', session.id, 'transcript.jsonl'), JSON.stringify(transcript) + '\n');
+
+      const win = await launchApp(userData);
+      await openKnowledge(win, session.title);
+      const tab = (view: 'sources' | 'evidence') => win.getByTestId(`knowledge-view-${view}`).click(wait);
+      await tab('sources');
+      const status = win.getByTestId('graph-status');
+      const globalSwitch = win.getByTestId('setting-graphify');
+      const projectSwitch = win.getByTestId('setting-graphify-project');
+      const indexButton = win.getByTestId('graph-index');
+      await status.waitFor(wait);
+      expect(await globalSwitch.isChecked()).toBe(true);
+      expect(await projectSwitch.isChecked()).toBe(true);
+      if (expectBundle) {
+        await status.getByText(/^Bundled\b/).waitFor(wait);
+        // No switch changes, Build index click, or Evidence search started the worker.
+        await status.getByText('Indexed', { exact: true }).waitFor(graphWait);
+        await win.getByTestId('sources-view').getByTitle(revision, { exact: true }).waitFor(wait);
+      } else {
+        await status.getByText('Unavailable', { exact: true }).waitFor(wait);
+        await status.getByText('Not indexed', { exact: true }).waitFor(wait);
+        expect(await indexButton.isDisabled()).toBe(true);
+      }
+
+      await tab('evidence');
+      const evidence = win.getByTestId('evidence-view');
+      const search = async (query: string) => {
+        const input = evidence.getByTestId('evidence-query');
+        await input.clear(wait); // Reset the previous response, even when reissuing the same query.
+        await input.fill(query, wait);
+        await evidence.getByTestId('evidence-search').click(wait);
+        await evidence.getByText(/^Detected intent:/).waitFor(wait);
+      };
+      const rowsFrom = (provider: 'graph' | 'wiki' | 'history') => evidence.getByTestId('evidence-row')
+        .filter({ has: win.getByText(provider, { exact: true }) });
+      const graphRows = rowsFrom('graph');
+      const graphSymbol = (name: string) => graphRows.filter({
+        has: win.getByRole('heading', { name: new RegExp(`^${name}(?:\\(\\))?$`) })
+      });
+      const wikiResult = rowsFrom('wiki').filter({ hasText: wikiTitle });
+      const historyResult = rowsFrom('history').filter({ hasText: transcript.text });
+      // The real transcript index backfills asynchronously on a cold profile, especially in the
+      // unavailable branch where there is no wait for the graph to finish first.
+      await expect.poll(async () => {
+        await search(symbol);
+        return historyResult.count();
+      }, wait).toBe(1);
+      expect(await wikiResult.count()).toBe(1);
+      if (!expectBundle) {
+        expect(await graphRows.count()).toBe(0);
+        expect(await evidence.getByTestId('evidence-missing').innerText(wait)).toMatch(/Graphify[^.]*unavailable/i);
+        return;
+      }
+
+      const committedResult = graphSymbol(symbol);
+      await committedResult.getByTitle(revision, { exact: true }).waitFor(wait);
+      // Demand a relative citation, not merely a suffix on an absolute snapshot path.
+      expect(await committedResult.innerText(wait)).toMatch(/(?:^|\s)src\/rotor\.py(?=[:\s]|$)/);
+      for (const uncommitted of [dirtySymbol, untrackedSymbol]) {
+        await search(uncommitted);
+        expect(await graphRows.count(), `${uncommitted} must not be indexed`).toBe(0);
+      }
+
+      // Commit only the untracked file while the same session stays selected. Evidence is read-only;
+      // the desktop's background refresh must publish the next HEAD for this symbol to appear.
+      git('add', '--', untrackedFile);
+      git('commit', '-qm', 'Add regulator fixture');
+      const nextRevision = git('rev-parse', 'HEAD');
+      await expect.poll(async () => {
+        await search(untrackedSymbol);
+        return graphSymbol(untrackedSymbol).getByTitle(nextRevision, { exact: true }).count();
+      }, { ...graphWait, interval: 2_000 }).toBe(1);
+      await search(symbol);
+      await committedResult.getByTitle(nextRevision, { exact: true }).waitFor(wait);
+
+      await tab('sources');
+      await projectSwitch.click(wait);
+      await expect.poll(() => projectSwitch.isChecked(), wait).toBe(false);
+      expect(await indexButton.isDisabled()).toBe(true);
+      expect(await globalSwitch.isChecked()).toBe(true);
+      await tab('evidence');
+      await search(symbol);
+      expect(await graphRows.count()).toBe(0);
+      expect(await wikiResult.count()).toBe(1);
+      expect(await historyResult.count()).toBe(1);
+    } finally {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+    }
+  }, 180_000);
+
   it('shares only an explicitly promoted lesson and keeps forgotten records gone after restart', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-intelligence-e2e-'));
     const userData = path.join(tmp, 'userData');
@@ -257,8 +409,6 @@ describe.runIf(enabled)('project knowledge panel', () => {
       await tab('collections');
       await win.getByTestId('collections-view').getByText('beta-lab', { exact: true }).first().waitFor();
       await openKnowledge(win, 'Alpha lab session');
-      await tab('sources');
-      expect(await win.getByTestId('graph-index').isDisabled()).toBe(true);
       await tab('collections');
       await win.getByTestId('collection-new-name').fill('Shared practices');
       await win.getByTestId('collection-new-create').click();

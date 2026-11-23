@@ -151,11 +151,14 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Transcript link destinations and file mentions, the source editor drawer (`FilePreviewPane.tsx`, `FileSourceEditor.tsx`), Files tab, workspace file resolution and saves | `tests/transcript-link-kinds.test.tsx`, `tests/file-refs.test.ts`, `tests/file-links.test.tsx`, `tests/file-editor-language.test.ts`, `tests/markdown-cache.test.ts`, `tests/workspace-files.test.ts`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.files` (computed link and syntax colors, line jumps, real saves); Mission-scoped file access also needs `tests/mission-handlers.test.ts`, `tests/mission-ui.test.tsx` + `e2e.mission` |
 | Sidebar, New Session dialog, session lifecycle | `e2e.terminal` (no key) + `e2e.electron` (live) |
 | `/housekeep` review, recent-session protection and checked worktree removal | `tests/housekeep*.test.ts(x)`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.session-view` (real temporary Git worktrees and saved settings, no provider) |
+| Keep computer awake (`keep-awake.ts`, desktop owner IPC, composer switch) | `tests/keep-awake.test.ts`, `tests/keep-awake-ui.test.tsx`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + `e2e.session-view` (Windows-capable, loopback streaming, real quit/relaunch; both power API methods stubbed before app startup) |
 | Automatic session titles (`session-title.ts`, `SessionManager.scheduleLlmTitle`) | `tests/session-title-rename.test.ts` + `e2e.session-view` (loopback utility model, turn completion and sidebar/header updates) |
 | Activity tray and "done · not viewed" — the header trigger, `ActivityTray.tsx`, `activity.ts`, the viewing dwell (`useSessionViewing`), `DesktopFocusTracker`'s visible set, `SessionManager.markViewed` / turn-end marking | `tests/activity-tray.test.tsx`, `tests/session-viewing.test.tsx`, `tests/session-unseen.test.ts`, `tests/desktop-focus.test.ts` + `e2e.session-view` (review screenshot `tests/artifacts/session-view-06-activity-tray.png`) |
 | Git tab (Branches, Worktrees, PRs and Issues), including `git-panel-cache.ts` | `tests/git-panel-refresh.test.tsx`, `tests/git-panel-pr-dialog.test.tsx`, `tests/git-error-banner.test.tsx`, `tests/git-setup-ui.test.tsx` + `e2e.git` (session switching in Standard and Zen, refresh and GitHub previews) |
+| Sidebar PR labels (`SessionManager`, `branchGitState`) | `tests/session-pr-refresh.test.ts`, `tests/git-branch-state.test.ts`, `tests/startup-perf.test.ts`, PR refresh block in `tests/unit.test.ts` + `e2e.git` (latest mentioned PR merges, with fake `gh` and the Git panel closed) |
 | GitHub PR links in transcripts (`Transcript.tsx`, `git:pullRequest`) | `tests/pr.test.ts`, `tests/git-panel-pr-dialog.test.tsx`, `tests/handler-registry.test.ts` + `e2e.git` (opening the linked PR in Standard and Zen) |
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
+| Copy image from the Files drawer or transcript lightbox | `tests/image-lightbox.test.tsx`, `tests/file-links.test.tsx` + `e2e.files` (real Electron image encoding; intercepts the clipboard write so it leaves the system clipboard alone) |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |
 | Usage panel, `src/renderer/src/session-usage.ts` | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx` + `e2e.usage` |
@@ -179,10 +182,11 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Project knowledge and intelligence (`src/main/knowledge/**`, `src/main/intelligence/**`, `resources/mcp/vocs-memory.mjs`, Knowledge panel) | `tests/knowledge*.test.ts`, `tests/search.test.ts`, `tests/intelligence-*.test.ts`, `tests/intelligence-ui.test.tsx`, `tests/mcp-memory.test.ts`, `tests/handler-registry.test.ts` + `e2e.knowledge`; keep the real stdio-to-loopback boundary, collection isolation, revoked/forgotten records and the quit/relaunch test. |
 | The app's instruction layer (`src/main/app-instructions.ts`, Settings → Instructions, `harness/system-prompt.ts`, `session-manager.ts` first-message priming) | `tests/app-instructions.test.ts`, `tests/instructions-ui.test.tsx`, `tests/claude-project-instructions.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/fork-context.test.ts`, `tests/handler-registry.test.ts` + `e2e.instructions` |
 | Chat history import (`main/chat-import.ts`, `SessionStore.importSession`, `SessionManager.importChats`, Settings/onboarding → Import chats) | `tests/chat-import*.test.ts(x)`, `tests/handler-registry.test.ts` + `e2e.instructions` (isolated Claude/Codex fixtures, accepted parent chains, unsupported lineage refusal, import/remove races, registration failure → reopen/rescan → explicit repair → restart, stale-repair refusal and native-session deduplication, skip-reason breakdown/reset, source preservation, live folder retention and restart deduplication) |
-| Vocs account broker/settings and kept sign-in (`main/vocs-account.ts`, `shared/vocs-account.ts`, `VocsAccountSettings.tsx`, the `vocs-account:*` ids in `main/secrets.ts`) | `tests/vocs-account.test.ts`, `tests/vocs-account-persistent.test.ts`, `tests/vocs-account-settings.test.tsx`, `tests/handler-registry.test.ts`, the MCP OAuth suites, the `SecretStore` block of `tests/unit.test.ts` + `e2e.vocs-account`, `e2e.layout`; preserve owner-frame IPC, no-secret state, cancellation/retry/expiry/account-switch, vault-before-use rotation, offline-versus-ended refresh outcomes and no automatic tool authorization. The fake issuer in `vocs-account-persistent` follows the identity-service contract; no suite contacts a real issuer. Real PC steps: [ACCOUNT-STAGING-TEST.md](ACCOUNT-STAGING-TEST.md). |
+| Vocs account broker/settings and kept sign-in (`main/vocs-account.ts`, `shared/vocs-account.ts`, `VocsAccountSettings.tsx`, the `vocs-account:*` ids in `main/secrets.ts`) | `tests/vocs-account.test.ts`, `tests/vocs-account-persistent.test.ts`, `tests/vocs-account-settings.test.tsx`, `tests/handler-registry.test.ts`, the MCP OAuth suites, `tests/unit-secrets.test.ts` + `e2e.vocs-account`, `e2e.layout`; preserve owner-frame IPC, no-secret state, cancellation/retry/expiry/account-switch, vault-before-use rotation, offline-versus-ended refresh outcomes and no automatic tool authorization. The fake issuer in `vocs-account-persistent` follows the identity-service contract; no suite contacts a real issuer. Real PC steps: [ACCOUNT-STAGING-TEST.md](ACCOUNT-STAGING-TEST.md). |
 | MCP layer (`src/main/mcp/**`), built-in servers, computer use (`mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`) | `tests/mcp.test.ts`, `tests/mcp-gitnexus.test.ts`, `tests/mcp-client.test.ts`, `tests/mcp-client-http.test.ts`, `tests/mcp-oauth.test.ts`, `tests/mcp-oauth-transport-race.test.ts`, `tests/cua.test.ts`, `tests/cua-preview.test.ts`, `tests/cua-card.test.tsx`, `tests/desktop-tab.test.tsx`, `tests/right-panel-bottom.test.tsx` |
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy, the pairing QR (`shared/qr.ts`, `PairingQr.tsx`) | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/remote-host-lifecycle.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-client.test.ts`, `tests/remote-ui.test.tsx`, `tests/qr.test.ts` |
 | Remote controller MCP (`shared/control.ts`, `main/control/**`, controlled SessionManager turns, `relay/src/control-*.ts`, `ControlSettings.tsx`) | `tests/control-service.test.ts`, `tests/control-turns.test.ts`, `tests/control-relay.test.ts`, `tests/control-relay-workerd.test.ts`, `tests/handler-registry.test.ts`, `tests/remote-ui.test.tsx` + `e2e.remote`; retain the affected lifecycle and relay rows below. The separate landing repository owns its OAuth/consent tests; actual Dots and two-host qualification are a rollout gate, not implied by offline success. |
+| Windows local CLI/stdio discovery (`scripts/vocs-code.mjs`, `main/control/local.ts`, `windows-pipe.*`, `LocalControlSettings.tsx`) | `tests/local-control.test.ts`, `tests/local-control-cli.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + on Windows `tests/local-control-windows.test.ts` (native ACL, restricted-token denial, peer identity, frame limits and owner death) and `e2e.remote` (owner grant, CLI and SDK stdio, exact profile and revocation). See [LOCAL-CONTROL.md](LOCAL-CONTROL.md#verification). |
 | Remote terminal (P3.5): `src/main/remote/terminal-streams.ts`, `TerminalManager.watch/snapshot`, `shared/remote-terminal.ts`, `src/web/terminal/**`, `src/web/sheets/TerminalSheet.tsx` | `tests/remote-terminal-streams.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-terminal.test.ts`, `tests/web-terminal-sheet.test.tsx`, `tests/terminal.test.ts` + `e2e.remote-web` |
 | Relay routing, accounts, auth, tokens or rate limiting (`relay/src/{account,core,routes,edge,rate}.ts`) | `tests/relay-account.test.ts`, `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-e2e.test.ts`, `tests/remote-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
 | Web shell, relay web client and the account-partitioned browser vault (`src/web/**`, `vite.config.web.ts`, `relay/src/web-client.ts`, `relay/public/_headers`) | `tests/web-transport.test.ts`, `tests/web-router.test.ts`, `tests/web-shell.test.tsx`, `tests/web-bundle.test.ts`, `tests/web-client.test.ts`, `tests/browser-socket.test.ts`, `tests/relay-page-layout.test.ts` (reads `_headers`) + `e2e.remote-web` (real browser, CSP and account switching). Also cover desktop flows that use the changed renderer core. |
@@ -209,17 +213,28 @@ runner temp because failure messages could contain sensitive data. The Windows E
 validated prebuilt web bundle instead of building it again. Standalone runs still build it.
 Paid/live tiers remain manual.
 
-## Optional Graphify pilot
+## Bundled Graphify
 
-Run the provider fixture corpus offline as normal. For CLI/artifact upgrades, install the pinned
-`graphifyy==0.9.115` in a disposable environment and run:
+Run `node --test scripts/graphify-runtime.test.mjs` for the artifact locks and builder contract, and
+`npm test -- tests/graph-scheduler.test.ts tests/graphify-snapshot.test.ts tests/intelligence-graphify.test.ts`
+for local scheduling, committed Git inputs and cache behavior. Installer builds stage a private
+Python and pinned wheels for the target from hash-verified build inputs, outside ASAR. There are no
+first-run downloads. To exercise the development app with the actual parser:
 
 ```bash
-VOCS_CODE_GRAPHIFY_TEST_EXE="/absolute/path/to/graphify" npx vitest run tests/intelligence-graphify.test.ts
+node scripts/graphify-runtime.mjs prepare
+npm run build
+VOCS_CODE_GRAPHIFY_E2E=1 node scripts/e2e-guard.mjs tests/e2e.knowledge.test.ts
 ```
 
-The extra test indexes a throwaway Git repo, queries the result, commits a new revision and checks
-that the original index is stale. No provider keys and no production repositories are needed.
+For the packaged Windows flow, run `npm run dist:dir -- --publish never`, then
+`node scripts/graphify-smoke.mjs --packaged` and
+`HARNESS_E2E_EXE="$PWD/dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.knowledge.test.ts`.
+The smoke executes the exact packaged worker without relying on system Python or Graphify. The
+Electron suite asserts default-on indexing, committed paths in Evidence, and project opt-out.
+A dev run without a staged worker checks fallback instead. There are no provider keys or live model calls.
+The path-filtered `graphify-bundle.yml` runs the packaged worker natively on Linux x64 and both Mac
+architectures, and verifies Mac signatures. It does not publish assets or run the full release suite.
 
 ## Coverage rules for high-risk paths
 
