@@ -13,6 +13,8 @@ import { createManagedPiOwnershipIntent, inspectManagedPiOwnership, recordUnlaun
 import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
+import { reportHarnessCommands } from './commands';
+import type { HarnessCommand } from '../../shared/harness-commands';
 import { MISSION_SERVER_ID } from '../../../resources/pi/vocs-code-mission';
 import { PI_FAST_MODE_COMMAND, PI_FAST_MODE_MARKER } from '../../../resources/pi/vocs-code-fast-mode';
 import { parseQuestionPayload, QUESTION_MARKER, QUESTION_RESPONSE_LIMIT, QUESTION_TOOL } from '../../../resources/pi/question-tool';
@@ -178,6 +180,26 @@ function piUsageDelta(previous: PiStreamUsage | null, current: PiStreamUsage): P
 
 function hasPiUsage(usage: PiStreamUsage): boolean {
   return usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0 || usage.reasoning > 0 || usage.cost > 0;
+}
+
+/** Extension commands this app registers in Pi to drive it (fast mode, subagent control); never the user's to type. */
+const PI_APP_COMMAND = /^vocs-(?:code|subagent)-/i;
+const PI_COMMAND_KIND = { extension: 'extension', prompt: 'prompt', skill: 'skill' } as const;
+
+/**
+ * Pi's `get_commands` rows: extension commands, prompt templates and `skill:<name>` skills, each run
+ * by sending `/name args` as a prompt. Pi's built-in TUI commands are not listed — in RPC mode they
+ * are separate requests, which the app's own `/model`, `/compact`, `/rename` and `/export` drive.
+ */
+export function piHarnessCommands(raw: unknown): HarnessCommand[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((c): HarnessCommand[] => {
+    if (!c || typeof c !== 'object') return [];
+    const { name, description, source } = c as { name?: unknown; description?: unknown; source?: unknown };
+    if (typeof name !== 'string' || PI_APP_COMMAND.test(name)) return [];
+    const kind = typeof source === 'string' && source in PI_COMMAND_KIND ? PI_COMMAND_KIND[source as keyof typeof PI_COMMAND_KIND] : 'command';
+    return [{ name, description: typeof description === 'string' ? description : undefined, kind }];
+  });
 }
 
 export class PiAdapter implements HarnessAdapter {
@@ -491,6 +513,7 @@ export class PiAdapter implements HarnessAdapter {
       await this.writeEffortConfig(mission ? undefined : intendedEffort, state.model ? { provider: state.model.provider, model: state.model.id } : meta.config.model);
       if (this.transportError) throw this.transportError;
       if (this.child !== child || this.exited || this.missionStopping || this.ordinaryStopping) throw new Error(mission ? 'Managed Pi startup was canceled.' : 'Pi startup was canceled.');
+      this.refreshCommands();
     } catch (error) {
       const checkFolder = !mission && startupErrno === 'ENOENT' && error === this.transportError;
       await this.dispose();
@@ -670,6 +693,7 @@ export class PiAdapter implements HarnessAdapter {
         this.missionSettling = true;
         const finishing = this.finishTurn();
         this.turnFinishing = finishing;
+        this.refreshCommands();
         void finishing.finally(() => {
           if (this.turnFinishing !== finishing) return;
           this.turnFinishing = null;
@@ -1563,6 +1587,21 @@ export class PiAdapter implements HarnessAdapter {
 
   async compact(): Promise<void> {
     await this.request('compact', {});
+  }
+
+  /**
+   * Publishes Pi's extension commands, prompt templates and skills. Pi has no change event — an
+   * extension can reload its resources mid-session — so this runs at start and after each settled
+   * turn; an unchanged list is not re-sent. A failure only costs the composer its suggestions.
+   */
+  private refreshCommands(): void {
+    if (!this.child || this.ctx.session().mission) return;
+    const child = this.child;
+    void withTimeout(this.request<{ commands?: unknown }>('get_commands'), 20_000, 'pi get_commands')
+      .then((res) => {
+        if (this.child === child && !this.exited) reportHarnessCommands(this.ctx, piHarnessCommands(res?.commands));
+      })
+      .catch((e) => this.ctx.log('debug', `pi get_commands failed: ${errorMessage(e)}`));
   }
 
   async listModels(): Promise<ModelInfo[]> {

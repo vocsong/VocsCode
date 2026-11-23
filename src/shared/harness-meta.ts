@@ -27,6 +27,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       systemPrompt: true,
       // Injected through the bundled vocs-code-mcp extension, which registers each MCP tool with pi.
       mcp: 'inject',
+      slashCommands: 'listed',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -58,6 +59,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       // The claude_code preset with `append`, so Claude Code's own prompt stays underneath.
       systemPrompt: true,
       mcp: 'inject',
+      slashCommands: 'listed',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -87,6 +89,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       // The app-server owns the thread's instructions; priming goes through the first message.
       systemPrompt: false,
       mcp: 'inject',
+      // Codex's skills (`skills/list`); a picked `/name` goes out as `$name` (main/harness/codex-skills.ts).
+      slashCommands: 'listed',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -115,6 +119,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       costReporting: false,
       systemPrompt: false,
       mcp: 'inject',
+      // Skills as for app-server, listed by a one-shot app-server and sent as `$name` text.
+      slashCommands: 'listed',
       permissionModes: ['plan', 'auto', 'full-auto'],
       permissionModeNotes: { auto: 'Closest match: sandboxed by Codex. It cannot ask, so a dangerous command that stays inside the sandbox runs without asking.' },
       modelSource: 'harness'
@@ -144,6 +150,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       costReporting: false,
       systemPrompt: false,
       mcp: 'inherit',
+      // @cursor/sdk exposes no command or skill listing; the text is handed to Cursor unchanged.
+      slashCommands: 'typed',
       permissionModes: ['plan', 'auto', 'full-auto'],
       permissionModeNotes: { auto: 'Closest match: sandboxed by Cursor. It cannot ask, so a dangerous command that stays inside the sandbox runs without asking.' },
       modelSource: 'harness'
@@ -172,6 +180,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       costReporting: false,
       systemPrompt: false,
       mcp: 'inject',
+      slashCommands: 'listed',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'acp-config'
     }
@@ -200,6 +209,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       costReporting: false,
       systemPrompt: false,
       mcp: 'inject',
+      slashCommands: 'listed',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       permissionModeNotes: {
         ask: 'Closest match: Vocs Code only sees the tool calls the agent asks about.',
@@ -233,6 +243,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       // `buildSystemPrompt` takes an `append` string; the loop owns the prompt.
       systemPrompt: true,
       mcp: 'client',
+      slashCommands: 'none',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'providers'
     }

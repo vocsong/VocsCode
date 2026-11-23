@@ -579,6 +579,42 @@ describe('acp adapter', () => {
     expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
   });
 
+  it('publishes the agent’s advertised commands and sends a picked one as /name prompt text', async () => {
+    const h = makeHarness();
+    scriptBasics(h);
+    const prompts: AnyRecord[] = [];
+    h.agent.on('session/prompt', (params) => {
+      prompts.push(params);
+      return { stopReason: 'end_turn' };
+    });
+    await h.adapter.start();
+    h.agent.notify('session/update', {
+      sessionId: 'sess-1',
+      update: {
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [
+          { name: 'web', description: 'Search the web', input: { hint: 'query to search for' } },
+          { name: 'plan', description: 'Draft a plan' }
+        ]
+      }
+    });
+    await vi.waitFor(() => expect(h.meta.harnessCommandList).toBeDefined());
+    expect(h.meta.harnessCommandList).toEqual([
+      { name: 'web', description: 'Search the web', argumentHint: 'query to search for', kind: 'command' },
+      { name: 'plan', description: 'Draft a plan', kind: 'command' }
+    ]);
+    expect(h.meta.harnessCommands).toEqual(['web', 'plan']);
+
+    // The list is replaced, not merged, when the agent re-advertises.
+    h.agent.notify('session/update', { sessionId: 'sess-1', update: { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'web', description: 'Search' }] } });
+    await vi.waitFor(() => expect(h.meta.harnessCommands).toEqual(['web']));
+
+    await h.adapter.send({ text: '/web vocs code' });
+    await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].prompt).toEqual([expect.objectContaining({ type: 'text', text: '/web vocs code' })]);
+  });
+
   it('keeps a quiet Antigravity reply, records a failure, and never replays a queued message', async () => {
     vi.useFakeTimers();
     const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask' });

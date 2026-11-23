@@ -2027,3 +2027,56 @@
 .popover-item:hover {
   background: var(--bg-hover);
 }
+/* The `/` popover: the app's commands, then the harness's own, each under its own heading. */
+.slash-popover {
+  max-height: min(380px, 50vh);
+  overflow-x: hidden;
+}
+.slash-section {
+  position: sticky;
+  top: -4px;
+  z-index: 1;
+  padding: 6px 8px 4px;
+  background: var(--bg-elev);
+  color: var(--fg-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.slash-item {
+  min-width: 0;
+}
+.slash-name {
+  flex: none;
+  white-space: nowrap;
+}
+/* A long hint (`/goal [objective|status|…]`) gives way before the name or the description does. */
+.slash-args {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-kind {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  line-height: 17px;
+}
+.slash-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-note {
+  padding: 6px 8px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
