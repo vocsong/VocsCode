@@ -45,7 +45,11 @@ export const CONTROL_REQUIRED_SCOPE: Record<ControlMethod, ControlScope> = {
 };
 export type ControlErrorCode = 'invalid_request' | 'denied' | 'unavailable' | 'busy' | 'conflict' | 'expired' | 'storage_unavailable' | 'unknown';
 export class ControlError extends Error {
-  constructor(readonly code: ControlErrorCode) { super(code); }
+  readonly code: ControlErrorCode;
+  constructor(code: ControlErrorCode) {
+    super(code);
+    this.code = code;
+  }
 }
 export function controlErrorCode(error: unknown): ControlErrorCode {
   return error instanceof ControlError ? error.code : error instanceof z.ZodError ? 'invalid_request' : 'unknown';

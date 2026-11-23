@@ -134,6 +134,7 @@ export interface HandlerDeps {
   remote?: RemoteHost;
   /** Local owner configuration, never exposed through browser/agent invocation origins. */
   control?: import('./control/service').ControlService;
+  localControl?: Pick<import('./control/local').LocalControl, 'ownerState' | 'enable' | 'disable'>;
   /** Which session the desktop window is on, mirrored to paired browsers; absent in tests. */
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -322,6 +323,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     handle('control:grant', (input) => control.grant(controlGrantInputSchema.parse(input)));
     handle('control:revoke', (input) => control.revoke(z.strictObject({ grantId: z.string().uuid() }).parse(input).grantId));
   }
+  if (deps.localControl) {
+    const local = deps.localControl;
+    handle('control:local:get', () => local.ownerState());
+    handle('control:local:enable', (input) => local.enable(input));
+    handle('control:local:disable', () => local.disable());
+  }
 
   async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' | 'desktop' = 'user'): Promise<unknown> {
     if (channel.startsWith('vocsAccount:') && actor !== 'desktop') throw new Error('Vocs account sign-in requires the local desktop owner.');
@@ -409,7 +416,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     // aliases. Session ownership is a second, independent fence; planning's original source is
     // not a managed worktree and deliberately has no worktreeBranch marker.
     const real = await realResource(target);
-    for (const session of sessions.list().filter((s) => s.mission && s.worktreeBranch)) {
+    for (const session of sessions.list({ refreshGit: false }).filter((s) => s.mission && s.worktreeBranch)) {
       const root = await realResource(session.cwd);
       if (containsPath(root, real) || includeDescendants && containsPath(real, root)) denyMissionControl();
     }
