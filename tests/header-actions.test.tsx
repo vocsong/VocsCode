@@ -90,9 +90,10 @@ describe('header actions', () => {
   it('toggles thinking from the actions group, ahead of the panel toggle in the same row', () => {
     const { container } = setup();
     const actions = container.querySelector('.header-actions') as HTMLElement;
-    // Order in the actions group: hide thinking, fork, archive.
+    // Order in the actions group: hide thinking, switch harness, fork, archive.
     const labels = [...actions.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? '');
     expect(labels[0]).toBe('Hide thinking');
+    expect(labels).toContain('Switch harness');
     expect(labels).toContain('Fork session');
     expect(labels).toContain('Archive session');
     fireEvent.click(actions.querySelector('[aria-label="Hide thinking"]') as HTMLElement);
@@ -340,5 +341,46 @@ describe('composer run controls', () => {
       ['sessions:setEffort', { id: 's_h', effort: 'high' }],
       ['settings:update', { defaultEffort: 'max' }]
     ]);
+  });
+
+  it('switches harness in place from the header button and composer model menu, and clears stale reported models on harness change', async () => {
+    const { container, unmount } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    fireEvent.click(container.querySelector('[aria-label="Switch harness"]') as HTMLElement);
+    const headerItems = [...document.querySelectorAll('.dropdown-menu .menu-item')];
+    expect(headerItems[0]?.textContent).toContain('Switch harness');
+    const ag = headerItems.find((i) => (i.textContent ?? '').includes('Antigravity')) as HTMLElement;
+    invokeMock.mockResolvedValueOnce(session('s_h', { config: { harness: 'antigravity', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] }));
+    fireEvent.click(ag);
+    expect(invokeMock).toHaveBeenCalledWith('sessions:switchHarness', { id: 's_h', harness: 'antigravity' });
+    unmount();
+
+    // Composer model menu also exposes the Harness -> Switch harness drill-in view.
+    const controls = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    fireEvent.click(controls.container.querySelector('[title="Model"]') as HTMLElement);
+    const harnessGroup = within(screen.getByRole('group', { name: 'Harness' }));
+    fireEvent.click(harnessGroup.getByRole('menuitem', { name: /Switch harness/ }));
+    expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy();
+    invokeMock.mockResolvedValueOnce(session('s_h', { config: { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Native/ }));
+    expect(invokeMock).toHaveBeenCalledWith('sessions:switchHarness', { id: 's_h', harness: 'native' });
+
+    // Store invalidates the previous runtime's reported model list when config.harness changes.
+    const before = session('s_h', { config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    const after = session('s_h', { config: { harness: 'antigravity', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    act(() => {
+      useStore.setState({
+        sessions: [before],
+        models: { s_h: [{ id: 'claude-sonnet-4-5', provider: 'anthropic', displayName: 'Sonnet' }] }
+      });
+      useStore.getState().setSessions([after]);
+    });
+    expect(useStore.getState().models.s_h).toBeUndefined();
+  });
+
+  it('disables switching harness while a turn is running', () => {
+    const { container } = setupControls({ status: 'running', config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    const harnessGroup = within(screen.getByRole('group', { name: 'Harness' }));
+    expect((harnessGroup.getByRole('menuitem', { name: /Switch harness/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

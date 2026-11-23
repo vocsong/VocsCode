@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { SessionMeta, TranscriptItem } from '../shared/types';
 import type { Logger } from './log';
-import { appendLine, ensureDir, exists, readJson, readJsonl, rmrf, writeJson, writeText } from './util/fs';
+import { appendLine, ensureDir, exists, readJson, readJsonl, removeWrittenFile, rmrf, writeJson, writeText } from './util/fs';
 import { promises as fs } from 'node:fs';
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -87,6 +87,18 @@ export class SessionStore {
     if (idx >= 0) this.sessions[idx] = meta;
     else this.sessions.unshift(meta);
     await this.flushIndex();
+  }
+
+  /** Publish a staged patch only after the index commits. The caller reserves the affected fields. */
+  async commitSessionPatch(current: SessionMeta, patch: Partial<SessionMeta>): Promise<void> {
+    const run = this.writeQueue.then(async () => {
+      if (this.get(current.id) !== current) throw new Error('Session changed before the update could be saved');
+      const snapshot = this.sessions.map((meta) => meta === current ? { ...meta, ...patch } : meta);
+      await writeJson(this.indexFile, structuredClone(snapshot));
+      Object.assign(current, patch);
+    });
+    this.writeQueue = run.catch(() => undefined);
+    await run;
   }
 
   /** Publish an imported session only after its complete transcript and continuation context exist. */
@@ -295,6 +307,10 @@ export class SessionStore {
 
   async writeNativeHistory(id: string, history: unknown): Promise<void> {
     await writeJson(path.join(this.sessionDir(id), 'native-history.json'), history);
+  }
+
+  async clearNativeHistory(id: string): Promise<void> {
+    await removeWrittenFile(path.join(this.sessionDir(id), 'native-history.json'));
   }
 
   async readBlob(id: string, name: string): Promise<string | null> {

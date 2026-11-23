@@ -1109,4 +1109,83 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     await win.getByTestId('sidebar-folders').click();
     await expect.poll(() => rowIds(win)).toEqual(['s_recent_a_new', 's_recent_a_old', 's_recent_b_new', 's_recent_b_mid']);
   }, 180_000);
+
+  it('switches a worktree session harness in place without creating a second session or worktree, and persists across restart', async ({ onTestFinished }) => {
+    const tmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-switch-e2e-')));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    const wtPath = path.join(project, '.vocs-code', 'worktrees', 'shared-wt');
+    onTestFinished(async () => {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
+    });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(project, 'README.md'), 'Initial.\n');
+    git(project, 'init', '-q', '-b', 'main');
+    git(project, 'config', 'user.name', 'e2e');
+    git(project, 'config', 'user.email', 'e2e@example.invalid');
+    git(project, 'add', '--', 'README.md');
+    git(project, 'commit', '-qm', 'init');
+    await fs.mkdir(path.dirname(wtPath), { recursive: true });
+    git(project, 'worktree', 'add', '-qb', 'vocscode/shared-wt', wtPath);
+    await fs.writeFile(path.join(wtPath, 'uncommitted.txt'), 'keep me in place\n');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const seeded: SessionMeta = {
+      id: 's_switch_e2e',
+      title: 'Continue in same worktree',
+      createdAt: T,
+      updatedAt: T,
+      lastUserMessageAt: T,
+      config: { harness: 'claude', projectRoot: project, permissionMode: 'ask', useWorktree: true },
+      cwd: wtPath,
+      worktreeBranch: 'vocscode/shared-wt',
+      status: 'idle',
+      harnessRef: { claudeSessionId: 'claude_old_1' },
+      usage: usage({ costUsd: 1.25, turns: 1 })
+    };
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([seeded]));
+    const sDir = path.join(userData, 'sessions', seeded.id);
+    await fs.mkdir(sDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sDir, 'transcript.jsonl'),
+      [
+        { id: 'u1', kind: 'user', ts: T, text: 'Started on Claude' },
+        { id: 'a1', kind: 'assistant', ts: T + 1, text: 'Edited uncommitted.txt' }
+      ].map((item) => JSON.stringify(item)).join('\n') + '\n'
+    );
+
+    let win = await launch(userData);
+    await win.setViewportSize({ width: 1280, height: 800 });
+    await win.locator('[data-session-id="s_switch_e2e"]').click();
+    await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'claude', pill: 'Claude', project: 'project', name: 'Continue in same worktree' });
+
+    // Switch harness in place via the composer model menu -> Switch harness -> Native.
+    await win.locator('.pane.active [title="Model"]').click();
+    await win.getByRole('menuitem', { name: /Switch harness/ }).click();
+    await win.getByRole('menuitem', { name: /^Native/ }).click();
+
+    await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'native', pill: 'Native', project: 'project', name: 'Continue in same worktree' });
+    // Still exactly one session row and the exact same worktree directory + uncommitted file.
+    expect(await win.locator('.sidebar-list [data-testid="session-row"]').count()).toBe(1);
+    expect(await fs.readdir(path.join(project, '.vocs-code', 'worktrees'))).toEqual(['shared-wt']);
+    expect(await fs.readFile(path.join(wtPath, 'uncommitted.txt'), 'utf8')).toBe('keep me in place\n');
+    await expect.poll(() => win.locator('.pane.active .transcript').textContent()).toContain('Switched harness from Claude Agent SDK to Native loop in the same workspace.');
+
+    // Cold restart with the same userData proves persistence of the switched harness and handoff blob.
+    await app!.close();
+    app = null;
+    win = await launch(userData);
+    await win.setViewportSize({ width: 1280, height: 800 });
+    await win.locator('[data-session-id="s_switch_e2e"]').click();
+    await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'native', pill: 'Native', project: 'project', name: 'Continue in same worktree' });
+    const persisted = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!.config.harness).toBe('native');
+    expect(persisted[0]!.cwd).toBe(wtPath);
+    expect(persisted[0]!.worktreeBranch).toBe('vocscode/shared-wt');
+    expect(persisted[0]!.pendingForkContext).toBe(true);
+    expect(await fs.readFile(path.join(sDir, 'fork-context.md'), 'utf8')).toContain('Started on Claude');
+  }, 180_000);
 });

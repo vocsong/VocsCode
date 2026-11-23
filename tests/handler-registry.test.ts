@@ -1359,3 +1359,39 @@ describe('harness:models catalog cache', () => {
     expect(discover).toHaveBeenCalledTimes(6);
   });
 });
+
+describe('sessions:switchHarness IPC handler', () => {
+  it('validates ids and harness names, blocks agent-originated Antigravity switches, and dispatches valid requests', async () => {
+    const switchHarness = vi.fn(async (id: string, harness: HarnessId) => ({
+      id,
+      title: 'Test session',
+      createdAt: 1,
+      updatedAt: 2,
+      config: { harness, permissionMode: 'ask' as const, projectRoot: ws },
+      cwd: ws,
+      status: 'idle' as const,
+      harnessRef: {},
+      usage: { ...ZERO_USAGE }
+    }));
+    const { registry, deps } = stubDeps();
+    (deps.sessions as unknown as { switchHarness: typeof switchHarness }).switchHarness = switchHarness;
+
+    await expect(registry.invoke('sessions:switchHarness', { id: '../escape', harness: 'native' })).rejects.toThrow();
+    await expect(registry.invoke('sessions:switchHarness', { id: 's_test', harness: 'not-a-harness' })).rejects.toThrow();
+    await expect(registry.invoke('sessions:switchHarness', { id: 's_missing', harness: 'native' })).rejects.toThrow(/Session not found/);
+    await expect(registry.invoke('sessions:switchHarness', { id: 's_test', harness: 'antigravity', extra: true })).rejects.toThrow();
+    await expect(registry.invoke('sessions:switchHarness', { id: 's_test', harness: 'antigravity' }, 'agent')).rejects.toThrow(/direct user prompts/);
+    expect(switchHarness).not.toHaveBeenCalled();
+
+    const updated = await registry.invoke('sessions:switchHarness', {
+      id: 's_test',
+      harness: 'antigravity',
+      model: { provider: 'antigravity', model: 'gemini-3-pro' }
+    }) as SessionMeta;
+    expect(updated.config.harness).toBe('antigravity');
+    expect(switchHarness).toHaveBeenCalledExactlyOnceWith('s_test', 'antigravity', {
+      model: { provider: 'antigravity', model: 'gemini-3-pro' },
+      acpAgent: undefined
+    });
+  });
+});

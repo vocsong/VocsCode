@@ -210,7 +210,7 @@ const missionInputSchema = z.strictObject({ text: z.string().max(100_000), image
 const MISSION_SESSION_CONTROLS = new Set<string>([
   'sessions:delete', 'sessions:editAndResend', 'sessions:interrupt', 'sessions:stop', 'sessions:setModel',
   'sessions:setEffort', 'sessions:setFastMode', 'sessions:setPermissionMode', 'sessions:compact', 'sessions:clearTranscript',
-  'sessions:fork', 'sessions:moveTo', 'sessions:goal', 'subagents:stop', 'subagents:steer',
+  'sessions:fork', 'sessions:switchHarness', 'sessions:moveTo', 'sessions:goal', 'subagents:stop', 'subagents:steer',
   'agents:save', 'agents:delete', 'agents:track', 'claude-agents:setModel', 'claude-agents:create'
 ]);
 const MISSION_GIT_MUTATIONS = new Set<string>([
@@ -579,6 +579,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (actor === 'agent' && (channel.startsWith('missions:') || channel === 'app:fileSaveAs')) throw new Error('User export and Mission actions cannot originate from an agent tool.');
     const req = input && typeof input === 'object' ? input as Record<string, unknown> : {};
     if (actor === 'agent' && channel === 'sessions:send' && typeof req.id === 'string' && sessions.get(req.id)?.config.harness === 'antigravity') {
+      throw new Error('Antigravity sessions are driven by direct user prompts.');
+    }
+    if (actor === 'agent' && channel === 'sessions:switchHarness' && req.harness === 'antigravity') {
       throw new Error('Antigravity sessions are driven by direct user prompts.');
     }
     if (channel === 'sessions:create') {
@@ -1452,6 +1455,18 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:fork', async ({ id, harness }) => {
     const session = await sessions.fork(id, harness);
     if (session) scheduleGitnexus(session, 'session-start');
+    return session;
+  });
+  handle('sessions:switchHarness', async (input) => {
+    const parsed = z.strictObject({
+      id: z.string().regex(/^[A-Za-z0-9_-]+$/),
+      harness: z.enum(['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'antigravity', 'native']),
+      model: z.strictObject({ provider: z.string().min(1).max(200), model: z.string().min(1).max(400) }).optional(),
+      acpAgent: z.string().min(1).max(120).optional()
+    }).parse(input);
+    sessionFor(parsed.id);
+    const session = await sessions.switchHarness(parsed.id, parsed.harness, { model: parsed.model, acpAgent: parsed.acpAgent });
+    scheduleGitnexus(session, 'session-start');
     return session;
   });
   handle('sessions:moveTo', ({ id, cwd }) => sessions.moveTo(id, cwd));

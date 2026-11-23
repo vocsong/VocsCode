@@ -112,6 +112,18 @@ export async function writeText(file: string, text: string): Promise<void> {
   }
 }
 
+// Queue behind any in-flight atomic write so its rename cannot recreate a cleared file.
+export async function removeWrittenFile(file: string): Promise<void> {
+  const remove = () => fs.rm(file, { force: true });
+  const run = (writeChain.get(file) ?? Promise.resolve()).then(remove, remove);
+  writeChain.set(file, run);
+  try {
+    await run;
+  } finally {
+    if (writeChain.get(file) === run) writeChain.delete(file);
+  }
+}
+
 async function writeTextOnce(file: string, text: string): Promise<void> {
   await ensureDir(path.dirname(file));
   const tmp = `${file}.${process.pid}.${Date.now()}.${(tmpCounter = (tmpCounter + 1) % 1_000_000)}.tmp`;
