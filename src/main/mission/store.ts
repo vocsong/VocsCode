@@ -179,6 +179,7 @@ export class MissionStore<T extends MissionState> {
   private readonly tips = new Map<string, { sequence: number; checksum: string }>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly problems = new Map<string, MissionStoreIssue[]>();
+  private publication = 0;
   private readonly snapshotEvery: number;
   private readonly schemaVersion: number;
   private readonly maxBlobBytes: number;
@@ -193,6 +194,10 @@ export class MissionStore<T extends MissionState> {
       throw new MissionStoreError('INVALID', 'Invalid Mission store options');
     }
   }
+
+  /** Process-local fence for async readers. Changes with visible records, even if snapshotting
+   * subsequently fails and the service does not emit a view update. Not the per-Mission CAS. */
+  get publicationRevision(): number { return this.publication; }
 
   list(): T[] {
     return [...this.entries.values()].flatMap((entry) => entry.state ? [structuredClone(entry.state)] : []);
@@ -423,6 +428,7 @@ export class MissionStore<T extends MissionState> {
     entry.events.push(event);
     entry.keys.set(event.idempotencyKey, event);
     entry.state = next;
+    this.publication++;
     entry.bytes += size;
     this.tips.set(id, { sequence: event.sequence, checksum: event.checksum });
     if (event.sequence % this.snapshotEvery === 0) {
@@ -506,7 +512,9 @@ export class MissionStore<T extends MissionState> {
       const last = entry.events.at(-1);
       if (last) this.tips.set(id, { sequence: last.sequence, checksum: last.checksum });
       this.entries.set(id, entry);
+      if (entry.state) this.publication++;
     } catch (error) {
+      if (this.entries.get(id)?.state) this.publication++;
       this.entries.delete(id); // Never publish a prefix when later ownership-changing events are unknown.
       this.report(id, 'blocked', `Recovery blocked: ${message(error)}`);
       throw error instanceof MissionStoreError ? error : new MissionStoreError('CORRUPT', `Mission recovery failed: ${message(error)}`);

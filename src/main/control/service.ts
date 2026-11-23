@@ -12,8 +12,8 @@ import type { AppSettings, CreateSessionRequest, SessionMeta } from '../../share
 import { confinedWorktreeRoot } from '../git';
 import type { SessionManager } from '../session-manager';
 import { ControlJournal, type ControlJournalState } from './journal';
+import { checkControlWorkspace, controlPathKey as key, controlSessionIdentity as sessionIdentity, freshControlSession, insideControlWorkspace, type ControlResourceGuard } from './workspace';
 
-const key = (value: string): string => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
 const terminal = new Set(['succeeded', 'failed', 'interrupted', 'unknown']);
 const WINDOW_MS = 60 * 60 * 1000;
 const MAX_GRANT_MS = 90 * 24 * 60 * 60 * 1000;
@@ -24,14 +24,6 @@ const MAX_GRANT_MS = 90 * 24 * 60 * 60 * 1000;
 export const CONTROL_OPEN_WINDOWS_PER_CONTROLLER = 32;
 export const CONTROL_WINDOWS_PER_CONTROLLER = 128;
 export const CONTROL_OPERATIONS_PER_CONTROLLER = 1000;
-const inside = (root: string, target: string): boolean => {
-  const relative = path.relative(key(root), key(target));
-  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-};
-/** Everything a session authorization decision read. A desktop move, archive, configuration edit
- * or replacement changes it, so a decision cannot outlive the state it was made against. */
-const sessionIdentity = (session: SessionMeta): string => JSON.stringify([session.id, session.createdAt, session.cwd, session.config.projectRoot,
-  session.config.permissionMode, session.config.harness, !!session.mission, !!session.archived]);
 
 /** App-owned control domain. The authenticated transport supplies identity, not a tool argument. */
 export class ControlService {
@@ -42,7 +34,7 @@ export class ControlService {
     sessions: SessionManager;
     settings: () => AppSettings;
     /** Same Mission session/workspace guards as the desktop, not an IPC invoke tunnel. */
-    guard: (resource: { sessionId?: string; projectRoot?: string }) => Promise<void>;
+    guard: ControlResourceGuard;
     now?: () => number;
   }) {}
   private now(): number { return this.deps.now?.() ?? Date.now(); }
@@ -147,16 +139,7 @@ export class ControlService {
     const session = this.deps.sessions.get(sessionId);
     if (!session || session.mission || session.archived) throw new ControlError('denied');
     const checked = sessionIdentity(session);
-    try {
-      if (key(await fs.realpath(session.config.projectRoot)) !== key(project.canonicalRoot)) throw new Error('wrong project');
-      // A substituted worktree symlink must not make an existing session point elsewhere.
-      const cwd = key(await fs.realpath(session.cwd));
-      if (cwd !== key(session.cwd)) throw new Error('changed workspace');
-      // Desktop moveTo keeps projectRoot. It must not carry a controller grant to another folder.
-      // This slice supports the project and its descendants, including app-managed worktrees.
-      if (!inside(project.canonicalRoot, cwd)) throw new Error('outside project');
-      await this.deps.guard({ sessionId });
-    } catch { throw new ControlError('denied'); }
+    await checkControlWorkspace(session, project.canonicalRoot, this.deps.guard);
     // Synchronously after the last await: the workspace, mode and harness approved above are
     // still the session's. Callers publish through fresh(), which repeats this in their own
     // synchronous block, because resuming after this method returns is another turn of the loop.
@@ -168,9 +151,7 @@ export class ControlService {
 
   /** The session exactly as it was authorized, or denied. Synchronous by design. */
   private fresh(checked: { session: SessionMeta; identity: string }): SessionMeta {
-    const current = this.deps.sessions.get(checked.session.id);
-    if (!current || sessionIdentity(current) !== checked.identity) throw new ControlError('denied');
-    return current;
+    return freshControlSession((id) => this.deps.sessions.get(id), checked);
   }
 
   private summary(session: SessionMeta): unknown {
@@ -352,7 +333,7 @@ export class ControlService {
         await beforeDispatch();
         const session = await this.deps.sessions.createControlled({ config, title: params.title as string | undefined }, operation.id, project.canonicalRoot);
         // Defense in depth only; the destination was authorized before any effect above.
-        if (!inside(project.canonicalRoot, await fs.realpath(session.cwd))) throw new ControlError('denied');
+        if (!insideControlWorkspace(project.canonicalRoot, await fs.realpath(session.cwd))) throw new ControlError('denied');
         await this.update(operation.id, { state: 'succeeded', sessionId: session.id });
       }
     } catch {

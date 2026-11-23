@@ -42,6 +42,9 @@ export interface IpcDeps {
   /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
   remote?: RemoteHost;
   control?: HandlerDeps['control'];
+  localControl?: HandlerDeps['localControl'];
+  /** Exact renderer document allowed to administer the local preview (fragment ignored). */
+  localControlDocument?: string;
   /** Where the desktop window is looking, mirrored to paired browsers; wired in index.ts. */
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -143,6 +146,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     appInstructions: deps.appInstructions,
     remote: deps.remote,
     control: deps.control,
+    localControl: deps.localControl,
     desktopFocus: deps.desktopFocus,
     remoteMirror: deps.remoteMirror,
     updater: deps.updater,
@@ -168,6 +172,10 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
         if (channel === 'desktop:setFocus') throw new Error('Updating desktop focus requires the local desktop owner.');
         throw new Error('External control grants require the local desktop owner.');
       }
+      const frame = event.senderFrame;
+      if (channel.startsWith('control:local:') && (!deps.localControlDocument || !frame || frame.detached ||
+        frame.url.split('#', 1)[0] !== deps.localControlDocument ||
+        channel === 'control:local:enable' && contents.isLoadingMainFrame())) throw new Error('Local discovery requires the trusted desktop page.');
     }
     return registry.invoke(channel, req, 'desktop');
   });

@@ -52,7 +52,10 @@ import { errorMessage } from './util/async';
 import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
 import { ControlJournal } from './control/journal';
+import { LocalControl } from './control/local';
 import { ControlService } from './control/service';
+import { windowsLocalPipe } from './control/windows-pipe';
+import type { ControlResourceGuard } from './control/workspace';
 import { RemoteAudit } from './remote/audit';
 import { RemoteMirror } from './remote/mirror';
 import { relayUrl } from './remote/relay-url';
@@ -60,6 +63,11 @@ import { WebServer } from './web-server';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
+const rendererFile = path.join(here, '../renderer/index.html');
+const rendererEntry = new URL(isDev ? process.env.ELECTRON_RENDERER_URL! : pathToFileURL(rendererFile));
+const rendererDocument = rendererEntry.href.split('#', 1)[0];
+const localControlDocument = !isDev || (rendererEntry.protocol === 'http:' && !rendererEntry.username && !rendererEntry.password &&
+  ['localhost', '127.0.0.1', '[::1]'].includes(rendererEntry.hostname)) ? rendererDocument : undefined;
 const APP_NAME = 'Vocs Code';
 
 // The e2e suites drive real windows. Park them outside every display and never activate them, so a
@@ -515,6 +523,7 @@ async function main(): Promise<void> {
     windowsJobHelper,
     changed: (view) => pushAll(PUSH_CHANNELS.missionsChanged, view.record), log: logTo,
   });
+  const missionStore = missions.store;
   // Recovery restores blocked/paused coordination state; it never launches a model on boot.
   await missions.load();
 
@@ -525,12 +534,17 @@ async function main(): Promise<void> {
   let registryRef: import('./handlers').HandlerRegistry | null = null;
   const controlJournal = new ControlJournal(userData);
   await controlJournal.load().catch(() => log('warn', 'External control journal unavailable; automation is disabled.'));
+  const guardControlResource: ControlResourceGuard = async (resource) => {
+    if (!registryRef?.assertControlResource) throw new Error('Control resource guard is unavailable.');
+    await registryRef.assertControlResource(resource);
+  };
   const control = new ControlService({
-    journal: controlJournal, sessions: sessionsRef, settings: () => settings.get(),
-    guard: async (resource) => {
-      if (!registryRef?.assertControlResource) throw new Error('Control resource guard is unavailable.');
-      await registryRef.assertControlResource(resource);
-    },
+    journal: controlJournal, sessions: sessionsRef, settings: () => settings.get(), guard: guardControlResource,
+  });
+  const localControl = new LocalControl({
+    supported: process.platform === 'win32', userData, roots: () => settings.get().folders,
+    sessions: sessionsRef, guard: guardControlResource, workspaceRevision: () => missionStore.publicationRevision,
+    open: windowsLocalPipe(runtime.resource('control', 'windows-pipe.ps1')),
   });
   remoteHost = new RemoteHost({
     control,
@@ -579,6 +593,8 @@ async function main(): Promise<void> {
     appInstructions,
     remote: remoteHost,
     control,
+    localControl,
+    localControlDocument,
     desktopFocus,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
     updater: updater ?? undefined,
@@ -614,6 +630,7 @@ async function main(): Promise<void> {
 
   let lastGraphSettings = JSON.stringify(graphSettings());
   settings.onChange((s) => {
+    localControl.projectsChanged();
     const nextGraphSettings = JSON.stringify(graphSettings());
     if (nextGraphSettings !== lastGraphSettings) {
       lastGraphSettings = nextGraphSettings;
@@ -649,7 +666,17 @@ async function main(): Promise<void> {
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
-  createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), (contents) => forgetVisibleOnRendererReset(contents, desktopFocus));
+  const watchRenderer = (contents: Electron.WebContents) => {
+    forgetVisibleOnRendererReset(contents, desktopFocus);
+    const cancelEnable = () => localControl.cancelPendingEnable();
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) cancelEnable();
+    });
+    contents.on('render-process-gone', cancelEnable);
+    contents.once('destroyed', cancelEnable);
+  };
+  const openWindow = () => createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), watchRenderer);
+  openWindow();
   // A sign-in kept on this computer renews in the background; Settings shows "restoring" meanwhile.
   void vocsAccount.restore().catch(() => undefined);
 
@@ -663,7 +690,7 @@ async function main(): Promise<void> {
   if (analytics.forkSweepPending) void reconcileForkInheritance(analytics, store, logTo);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), (contents) => forgetVisibleOnRendererReset(contents, desktopFocus));
+    if (BrowserWindow.getAllWindows().length === 0) openWindow();
   });
   app.on('window-all-closed', () => {
     // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
@@ -675,6 +702,7 @@ async function main(): Promise<void> {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
+    localControl.shutdown();
     updater?.stopChecking();
     const t0 = Date.now();
     log('info', `quitting: ${sessions?.list().filter((s) => s.status === 'running' || s.status === 'awaiting' || s.status === 'starting').length ?? 0} live session(s), ${terminals?.list().length ?? 0} terminal tab(s)`);
@@ -1011,11 +1039,11 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
   });
   // The renderer is a single page: any navigation away from it (including relative file links
   // from rendered markdown) would leave the app unusable, so block everything but the page itself.
-  const indexUrl = pathToFileURL(path.join(here, '../renderer/index.html')).href;
+  win.webContents.on('will-redirect', (details) => {
+    if (details.isMainFrame && details.url.split('#', 1)[0] !== rendererDocument) details.preventDefault();
+  });
   win.webContents.on('will-navigate', (e, url) => {
-    const target = url.split('#')[0];
-    const allowed = isDev ? url.startsWith(process.env.ELECTRON_RENDERER_URL as string) : target === indexUrl;
-    if (allowed) return;
+    if (url.split('#', 1)[0] === rendererDocument) return;
     e.preventDefault();
     log('debug', `blocked in-app navigation to ${url.slice(0, 200)}${/^https?:\/\//i.test(url) ? ' (opened externally)' : ''}`);
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
@@ -1047,10 +1075,10 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
   }
 
   if (isDev) {
-    void win.loadURL(process.env.ELECTRON_RENDERER_URL as string);
+    void win.loadURL(rendererEntry.href);
     win.webContents.openDevTools({ mode: 'detach' });
   } else {
-    void win.loadFile(path.join(here, '../renderer/index.html'));
+    void win.loadFile(rendererFile);
   }
 }
 
