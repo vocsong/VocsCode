@@ -3,6 +3,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, FileAttachment, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
 import { formatDoctorReport } from '../../../shared/doctor';
 import { HARNESS_BY_ID, SLASH_COMMANDS, effortOptionsFor } from '../../../shared/harness-meta';
+import { harnessRoutedText, slashEntries, type HarnessCommand, type SlashEntry } from '../../../shared/harness-commands';
+import { harnessCommandNote, useHarnessCommandList } from '../harness-commands';
 import { MAX_HOUSEKEEP_RECENT_DAYS } from '../../../shared/housekeep';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
 import { canInvoke, invoke } from '../api';
@@ -31,6 +33,8 @@ function ownsComposerFocus(sessionId: string): boolean {
 
 /** Where the pane hands files dropped anywhere on it; set only while a writable composer is mounted. */
 export type AttachFilesRef = React.MutableRefObject<((files: File[]) => void) | null>;
+
+const NO_HARNESS_COMMANDS: HarnessCommand[] = [];
 
 /** The idle prompt's hint, shorter in the minimalist Zen interface. */
 const IDLE_PLACEHOLDER = {
@@ -181,7 +185,34 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
     };
   }, [mention?.query, session.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const slashMatches = slash ? SLASH_COMMANDS.filter((c) => c.name.startsWith(slash.query.toLowerCase())) : [];
+  const reportedCommands = useHarnessCommandList(session);
+  const harnessCommands = reportedCommands ?? NO_HARNESS_COMMANDS;
+  const slashMatches: SlashEntry[] = slash
+    ? slashEntries({
+        query: slash.query,
+        app: SLASH_COMMANDS,
+        harness: harnessCommands,
+        // The app's /compact already asks the harness to compact; a second row would do the same.
+        delegated: ['compact'],
+        nativeGoal: session.nativeGoal
+      })
+    : [];
+  const harnessNote = harnessCommandNote(harness, reportedCommands);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  // Arrow keys can walk past the popover's visible rows; keep the highlighted one in view.
+  useEffect(() => {
+    popoverRef.current?.querySelector<HTMLElement>('.popover-item.active')?.scrollIntoView?.({ block: 'nearest' });
+  }, [slash?.index, slash?.query]);
+  const isCompleteCommand = (query: string) => {
+    const q = query.toLowerCase();
+    return SLASH_COMMANDS.some((c) => c.name === q) || harnessCommands.some((c) => c.name.toLowerCase() === q || c.aliases?.some((a) => a.toLowerCase() === q));
+  };
+  /** Puts a picked row in the box: `/name ` (or `//name ` for a shadowed harness command), ready for arguments. */
+  const pickSlash = (entry: SlashEntry) => {
+    setText(`/${entry.insert} `);
+    setSlash(null);
+    ref.current?.focus();
+  };
 
   /** Runs `!` draft in the session's shell: switch to the Terminal tab and type it in. Nothing reaches the harness. */
   const runShell = async (command: string) => {
@@ -254,6 +285,13 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
     }
     if (completed && questions?.pending) { toast('Wait for the read-only answer, or Cancel answer before asking another question.', 'info'); return; }
     if (completed && t.startsWith('!')) { toast('Completed Mission Q&A cannot run shell commands. Start a linked Mission for new implementation.', 'info'); return; }
+    // `//name` is the explicit route to a harness command an app command shadows: one slash comes
+    // off and the rest goes to the harness as an ordinary message (shared/harness-commands.ts).
+    const routed = harnessRoutedText(t, SLASH_COMMANDS.map((c) => c.name));
+    if (routed && session.mission) {
+      toast('Missions keep the app’s commands; the harness’s own commands of the same name are not available here.', 'info');
+      return;
+    }
     // A command the harness owns itself is prompt text, not an app command: `/goal` on a session whose
     // harness has its own goal goes to the harness verbatim (see shared/goal-driver.ts). The rest of
     // the send path is unchanged, so history and draft handling stay correct for free.
@@ -277,7 +315,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
       else toast('Type a command after ! — for example !git status', 'info');
       return;
     }
-    const input = { text: t, images: images.length ? images : undefined, files: files.length ? files : undefined, mode: session.mission ? 'now' as const : busy ? mode : 'now' as const };
+    const input = { text: routed ?? t, images: images.length ? images : undefined, files: files.length ? files : undefined, mode: session.mission ? 'now' as const : busy ? mode : 'now' as const };
     pushHistory(session.id, t);
     clearDraft();
     setImages((current) => current.filter((image) => !images.includes(image)));
@@ -299,9 +337,18 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
     const arg = rest.join(' ').trim();
     const store = useStore.getState();
     switch (cmd) {
-      case 'help':
-        toast(`Commands: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')} · Enter send · Shift+Enter newline · Esc stop · ! shell · Ctrl+K palette`, 'info');
+      case 'help': {
+        // A transcript note, not a toast: with a harness's skills listed it runs to many lines.
+        const own = slashEntries({ query: '', app: SLASH_COMMANDS, harness: harnessCommands, delegated: ['compact'], nativeGoal: session.nativeGoal }).filter((c) => c.source === 'harness');
+        const lines = [
+          `Vocs Code: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')}`,
+          own.length ? `${harness.name}: ${own.map((c) => '/' + c.insert).join(' ')}` : harnessNote ?? '',
+          ...(own.some((c) => c.shadowed) ? [`A doubled slash (//name) runs ${harness.name}'s own command where Vocs Code has one of the same name.`] : []),
+          'Enter send · Shift+Enter newline · Esc stop · ! shell · @ files · Ctrl+K palette'
+        ].filter(Boolean);
+        store.setLocalInfo(session.id, `local-help-${session.id}`, lines.join('\n'));
         return true;
+      }
       case 'doctor': {
         // Runtimes are probed live (each probe can cost a process spawn), so the note shows up right
         // away and is replaced by the report. Renderer-local like the other command notes: it is a
@@ -502,7 +549,17 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
       }
       if (e.key === 'Tab') {
         e.preventDefault();
-        setText('/' + slashMatches[slash.index].name + ' ');
+        pickSlash(slashMatches[slash.index]);
+        return;
+      }
+      // Enter on a partly typed name takes the highlighted row instead of sending `/rev` as a
+      // message; a complete name (`/stop`, `/review`) still runs straight away.
+      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !isCompleteCommand(slash.query)) {
+        e.preventDefault();
+        pickSlash(slashMatches[slash.index]);
+        return;
+      }
+      if (e.key === 'Escape') {
         setSlash(null);
         return;
       }
@@ -541,7 +598,8 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
     const at = before.match(/(?:^|\s)@([\w./\\-]*)$/);
     if (at) setMention({ query: at[1], start: pos - at[1].length - 1, results: mention?.results ?? [], index: 0 });
     else setMention(null);
-    const sl = v.match(/^\/(\w*)$/);
+    // Harness names carry `-`, `:` and `.` (`security-review`, `skill:pdf`, `plugin:deploy`).
+    const sl = v.match(/^\/([\w:.-]*)$/);
     setSlash(sl ? { query: sl[1], index: 0 } : null);
   };
 
@@ -607,12 +665,30 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
         </div>
       )}
       {slash && slashMatches.length > 0 && (
-        <div className="popover">
+        <div className="popover slash-popover" ref={popoverRef} role="listbox" aria-label="Slash commands">
           {slashMatches.map((c, i) => (
-            <button key={c.name} type="button" className={`popover-item ${i === slash.index ? 'active' : ''}`} onMouseDown={(e) => { e.preventDefault(); setText('/' + c.name + ' '); setSlash(null); ref.current?.focus(); }}>
-              <span className="mono">/{c.name}</span> <span className="muted">{c.args}</span> <span className="spacer" /> <span className="muted small">{c.description}</span>
-            </button>
+            <React.Fragment key={`${c.source}:${c.insert}`}>
+              {(i === 0 || slashMatches[i - 1].source !== c.source) && (
+                <div className="slash-section" role="presentation">{c.source === 'app' ? 'Vocs Code' : harness.name}</div>
+              )}
+              <button
+                type="button"
+                role="option"
+                aria-selected={i === slash.index}
+                data-source={c.source}
+                className={`popover-item slash-item ${i === slash.index ? 'active' : ''}`}
+                title={c.shadowed ? `Vocs Code has its own /${c.insert.slice(1)}; //${c.insert.slice(1)} sends this one to ${harness.name}.` : undefined}
+                onMouseDown={(e) => { e.preventDefault(); pickSlash(c); }}
+              >
+                <span className="mono slash-name">/{c.insert}</span>
+                {c.args && <span className="muted slash-args">{c.args}</span>}
+                {c.kind && c.kind !== 'command' && <span className="slash-kind">{c.kind}</span>}
+                <span className="spacer" />
+                <span className="muted small slash-desc">{c.shadowed ? [`${harness.name}'s own`, c.description].filter(Boolean).join(' · ') : c.description}</span>
+              </button>
+            </React.Fragment>
           ))}
+          {harnessNote && !session.mission && <div className="slash-note muted small" role="note">{harnessNote}</div>}
         </div>
       )}
       {images.length > 0 && (

@@ -3,6 +3,7 @@
  * Keep this file free of Node/Electron/DOM imports.
  */
 import type { EffortLevel, FastModeStatus, HarnessId, HarnessRef, ModelInfo, ModelRef, PermissionMode } from './harness-types';
+import type { HarnessCommand } from './harness-commands';
 import type { MissionOwnership } from './mission';
 import type { ApprovalDecision, ApprovalRequest, FileAttachment, ImageAttachment, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem } from './transcript-types';
 import type { UsageTotals } from './usage-types';
@@ -134,6 +135,12 @@ export interface SessionMeta {
    * can be handed to the harness when it has a goal of its own (see shared/goal-driver.ts).
    */
   harnessCommands?: string[];
+  /**
+   * The same commands with what the composer's `/` popover shows for them (description, argument
+   * hint, kind). Unlike `harnessCommands` it survives a restart as the last list the harness gave:
+   * it only offers names, it decides nothing, and the next start replaces it.
+   */
+  harnessCommandList?: HarnessCommand[];
   /** Set while the harness's own goal command answers `/goal` for this session; the app's goal stays out of the way. */
   nativeGoal?: string;
   goal?: GoalState;
