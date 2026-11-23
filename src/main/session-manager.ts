@@ -1156,9 +1156,9 @@ export class SessionManager {
     if (kind === 'steer' && !message?.trim()) return { ok: false, error: 'Message cannot be empty' };
     const active = this.active.get(id);
     if (!active) return { ok: false, error: 'Session is not running' };
-    const text = kind === 'stop' ? `/vocs-subagent-stop ${runId}` : `/vocs-subagent-steer ${runId} ${message!.trim()}`;
+    if (!active.adapter.controlSubagent) return { ok: false, error: `Subagent stop/steer is not available for the ${meta.config.harness} harness` };
     try {
-      await active.adapter.send({ text });
+      await active.adapter.controlSubagent(runId, kind, message?.trim());
       return { ok: true };
     } catch (error) {
       return { ok: false, error: errorMessage(error) };

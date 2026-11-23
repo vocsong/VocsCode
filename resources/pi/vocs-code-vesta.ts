@@ -95,7 +95,8 @@ export default async function vocsCodeVesta(pi: Pi): Promise<void> {
           // Without the UI round trip there is no way to reach the app; fail closed rather than
           // returning a fabricated result to the model.
           if (!ui || typeof ui.select !== 'function') throw new Error('The Vocs Code capability bridge is unavailable; refusing to run this action.');
-          const payload = JSON.stringify({ id: toolCallId, name: tool.name, args: params ?? {} });
+          const nonce = process.env.VOCS_CODE_PI_NONCE;
+          const payload = JSON.stringify({ id: toolCallId, name: tool.name, args: params ?? {}, ...(nonce ? { nonce } : {}) });
           const reply = await ui.select(CALL_MARKER + payload, ['ok']);
           if (typeof reply !== 'string') throw new Error('Vesta was cancelled.');
           let outcome: { ok?: unknown; detail?: unknown };

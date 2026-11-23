@@ -49,7 +49,8 @@ export default function (pi) {
           // tool-result turns keep replying COMPAT_OK.
           // Echo the actual next provider request's tool result so question tests can prove that
           // both the selected answer and context reached the model, not merely the UI transcript.
-          const reply = last?.role === 'toolResult' && last.toolName === 'ask_user' ? `QUESTION_SEEN:${content}` : images ? 'IMAGES_OK' : 'COMPAT_OK';
+          const reply = last?.role === 'user' && content.startsWith('PI_CONTROL_TEST:') ? `STEER_SEEN:${content.slice('PI_CONTROL_TEST:'.length)}`
+            : last?.role === 'toolResult' && last.toolName === 'ask_user' ? `QUESTION_SEEN:${content}` : images ? 'IMAGES_OK' : 'COMPAT_OK';
           message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: reply }];
           message.stopReason = calls.length ? 'toolUse' : 'stop';
           stream.push({ type: 'start', partial: message });

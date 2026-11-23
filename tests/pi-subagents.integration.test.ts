@@ -158,6 +158,30 @@ describe.skipIf(!enabled)('Vocs Code subagents over the real Pi runtime', () => 
     expect(optedRun.items.some((item) => item.kind === 'tool' && item.name === 'mcp__echo__echo' && item.status === 'done')).toBe(false);
   });
 
+  it('acknowledges steering the active child while leaving the parent turn intact', async () => {
+    const runner = start({ mode: 'ask', choice: () => undefined });
+    await runner.ready();
+    const from = runner.events.length;
+    const childPrompt = JSON.stringify({ calls: [call('c1', 'bash', { command: 'echo child-tool' })] });
+    await runner.request('prompt', { message: JSON.stringify({ calls: [call('s1', 'subagent', { description: 'Hold one tool before steering', prompt: childPrompt })] }) });
+    const approval = await runner.waitFor((event) => event.type === 'extension_ui_request' && event.title?.startsWith('VCODE_APPROVAL::'), from);
+    const { runId } = JSON.parse(approval.title.slice('VCODE_APPROVAL::'.length));
+    const marker = 'VCODE_SUBAGENT_CONTROL::';
+    const control = async (target: string, requestId: string) => {
+      await runner.request('prompt', { message: '/vocs-subagent-control ' + JSON.stringify({ version: 1, nonce: 'offline-process', requestId, runId: target, kind: 'steer', message: 'PI_CONTROL_TEST:focus on verification' }) });
+      const event = await runner.waitFor((e) => e.type === 'extension_ui_request' && e.message?.startsWith(marker) && JSON.parse(e.message.slice(marker.length)).requestId === requestId, from, 5_000);
+      return JSON.parse(event.message.slice(marker.length));
+    };
+    expect(await control('missing', 'no-child')).toMatchObject({ ok: false, error: 'Subagent is no longer running.' });
+    expect(await control(runId, 'active-child')).toMatchObject({ nonce: 'offline-process', runId, kind: 'steer', ok: true });
+    runner.send({ type: 'extension_ui_response', id: approval.id, value: 'Deny' });
+    await runner.waitFor((event) => event.type === 'agent_settled', from);
+    const [ended] = runner.events.slice(from).filter((event) => event.type === 'tool_execution_end' && event.toolName === 'subagent');
+    expect(ended.result?.details).toMatchObject({ status: 'completed', runId });
+    expect(text(ended)).toContain('STEER_SEEN:focus on verification');
+    expect(runner.events.slice(from).filter((event) => event.type === 'agent_start')).toHaveLength(1);
+  });
+
   it('gates a child command in ask mode: an approved command runs, a denied one never does', async () => {
     const allowed = start({ mode: 'ask', choice: (payload: PiEvent) => (String(payload.summary).includes('allow-me') ? 'Allow once' : 'Deny') });
     await allowed.ready();
