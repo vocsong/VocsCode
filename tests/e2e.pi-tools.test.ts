@@ -174,6 +174,20 @@ describe.runIf(enabled)('electron e2e: Pi tool compatibility', () => {
         expect(extensions).toContain(path.join(resourceDir, 'pi', 'vocs-code-approvals.ts'));
       }
       expect(rpc[1]![rpc[1]!.indexOf('--session') + 1]).toBe(ref);
+
+      const fork = (await invoke(win, 'sessions:fork', { id }))!;
+      expect(fork.harnessRef.piSessionFile).toBeUndefined();
+      expect(fork.pendingForkContext).toBe(true);
+      await invoke(win, 'sessions:send', { id: fork.id, input: { text: 'Continue in the fork' } });
+      await expect.poll(async () => (await invoke(win, 'sessions:get', { id: fork.id }))?.status, { timeout: 30_000 }).toBe('idle');
+      const forked = (await invoke(win, 'sessions:get', { id: fork.id }))!;
+      expect(forked.pendingForkContext).toBeUndefined();
+      expect(forked.harnessRef.piSessionFile).toBeTruthy();
+      expect(forked.harnessRef.piSessionFile).not.toBe(ref);
+      const history = await fs.readFile(forked.harnessRef.piSessionFile!, 'utf8');
+      expect(history).toContain('Handoff from a previous session');
+      expect(history).toContain('PI_SHELL_OK');
+      expect(history).toContain('Continue in the fork');
     } finally {
       await app?.close();
       await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
