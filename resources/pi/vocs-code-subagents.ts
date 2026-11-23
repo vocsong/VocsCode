@@ -44,6 +44,7 @@ import {
   type AgentType
 } from './subagent-agents';
 import { RunStore, addUsage, emptyCall, emptyTotals, type RunItem, type RunStatus, type RunCall, type RunTotals, type UsageLike } from './subagent-runs';
+import { SUBAGENT_CONTROL_COMMAND, SUBAGENT_CONTROL_MARKER, type SubagentControlKind } from './subagent-control';
 import { mcpReadOnlyToolNames, mcpToolNames, registerMcpTools } from './vocs-code-mcp';
 
 /** Tools that must never exist inside a child, whether ours or the third-party extension's. */
@@ -700,14 +701,45 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     });
   };
 
+  const controlRun = async (runId: string, kind: SubagentControlKind, message?: string) => {
+    const run = runs.get(runId);
+    if (!run || run.status !== 'running' || run.settling || shuttingDown) throw new Error('Subagent is no longer running.');
+    if (kind === 'stop') {
+      run.aborted = true;
+      await run.session?.abort(); // If still starting, the initial prompt will not run.
+    } else {
+      if (run.aborted) throw new Error('Subagent is stopping.');
+      if (!run.session) throw new Error('Subagent is still starting.');
+      if (!message?.trim()) throw new Error('Message cannot be empty.');
+      await run.session.steer(message);
+    }
+  };
+
   pi.registerCommand?.('vocs-subagent-stop', {
     description: 'Stop a Vocs Code subagent run by id',
-    handler: async (args: string) => {
+    handler: async (args) => {
       const runId = args.trim().split(/\s+/)[0] ?? '';
-      const run = runs.get(runId);
-      if (!run || run.status !== 'running') return;
-      run.aborted = true;
-      await run.session?.abort();
+      if (runs.get(runId)?.status === 'running') await controlRun(runId, 'stop');
+    },
+  });
+
+  pi.registerCommand?.(SUBAGENT_CONTROL_COMMAND, {
+    description: 'Apply a Vocs Code desktop subagent control',
+    handler: async (args, ctx) => {
+      let request: Record<string, unknown> | null;
+      try { request = JSON.parse(args); } catch { return; }
+      const nonce = process.env.VOCS_CODE_PI_NONCE;
+      if (!request || !nonce || request.nonce !== nonce || request.version !== 1 || typeof request.requestId !== 'string' ||
+          typeof request.runId !== 'string' || (request.kind !== 'stop' && request.kind !== 'steer')) return;
+      const identity = { version: 1, nonce, requestId: request.requestId, runId: request.runId, kind: request.kind } as const;
+      let outcome: { ok: boolean; error?: string };
+      try {
+        await controlRun(identity.runId, identity.kind, typeof request.message === 'string' ? request.message : undefined);
+        outcome = { ok: true };
+      } catch (error) {
+        outcome = { ok: false, error: error instanceof Error ? error.message : 'The subagent did not accept the control.' };
+      }
+      ctx.ui?.notify(SUBAGENT_CONTROL_MARKER + JSON.stringify({ ...identity, ...outcome }), 'info');
     },
   });
 
@@ -716,7 +748,9 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     modeFile = process.env.VOCS_CODE_MODE_FILE;
     // Readiness is emitted synchronously: the host checks it right after get_state, before any
     // await we start here could resolve. Discovery below only refines the tool description.
-    ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce: process.env.VOCS_CODE_PI_NONCE, capability: 'subagents', ready: true }), 'info');
+    const ready = { version: 1, nonce: process.env.VOCS_CODE_PI_NONCE, ready: true };
+    ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({ ...ready, capability: 'subagents' }), 'info');
+    if (pi.registerCommand) ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({ ...ready, capability: 'subagent-control' }), 'info');
     agentsReady = (async () => {
       mode = await readModeFile(modeFile);
       agents = await discoverAgents({ cwd: ctx.cwd ?? process.cwd(), projectRoot, agentDir, templateDir });

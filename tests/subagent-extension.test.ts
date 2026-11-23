@@ -517,6 +517,30 @@ describe('background runs and lifecycle', () => {
     await vi.waitFor(() => expect(eventsOf(h).some((e) => e.kind === 'end' && e.status === 'stopped')).toBe(true));
   });
 
+  it('acknowledges only a ready child, and does not accept steering while it starts', async () => {
+    const h = harness({ childDriver: neverFinishes });
+    process.env.VOCS_CODE_PI_NONCE = 'test-pi';
+    const admitted = deferred<void>();
+    const createChild = h.deps.createAgentSession;
+    h.deps.createAgentSession = async (opts) => { await admitted.promise; return createChild(opts); };
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const starting = h.tools.get('subagent')!.execute('call_1', { ...subagentCall, background: true }, undefined, undefined, h.parentCtx);
+    await vi.waitFor(() => expect(eventsOf(h).some((event) => event.kind === 'start')).toBe(true));
+    const { runId } = eventsOf(h).find((event) => event.kind === 'start')!;
+    const command = h.commands.get('vocs-subagent-control')!;
+    const args = { version: 1, nonce: 'test-pi', requestId: 'first', runId, kind: 'steer', message: 'focus on tests' };
+    const receipts = () => h.notifies.filter((entry) => entry.startsWith('VCODE_SUBAGENT_CONTROL::')).map((entry) => JSON.parse(entry.slice('VCODE_SUBAGENT_CONTROL::'.length)));
+    await command.handler(JSON.stringify(args), h.parentCtx);
+    expect(receipts()).toEqual([expect.objectContaining({ requestId: 'first', runId, ok: false, error: 'Subagent is still starting.' })]);
+    admitted.resolve();
+    await starting;
+    await command.handler(JSON.stringify({ ...args, requestId: 'retry' }), h.parentCtx);
+    expect(h.children[0]!.steers).toEqual(['focus on tests']);
+    expect(receipts().at(-1)).toMatchObject({ requestId: 'retry', runId, kind: 'steer', ok: true });
+    await h.commands.get('vocs-subagent-stop')!.handler(runId);
+    await vi.waitFor(() => expect(h.children[0]!.disposed).toBe(true));
+  });
+
   it('does not publish child completion or a follow-up before asynchronous disposal settles', async () => {
     const work = deferred<void>(), disposed = deferred<void>();
     const h = harness({ childDriver: () => work.promise });
