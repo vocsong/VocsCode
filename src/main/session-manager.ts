@@ -3200,9 +3200,8 @@ export class SessionManager {
       meta.activeModel = meta.config.model;
       meta.activeEffort = undefined;
     } else {
-      // A provider session id belongs to the directory it ran in, so a fork that moved to its own
-      // worktree cannot resume the source's session. Same-harness forks that stayed in the source
-      // directory keep the provider state.
+      // Claude can fork a provider session only in its original directory. Native can copy
+      // its local history. Other harnesses deliberately start a new provider session.
       if (!own && src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
       if (src.config.harness === 'native') {
         const hist = await this.deps.store.readNativeHistory(id);
@@ -3215,12 +3214,10 @@ export class SessionManager {
     if (meta.knowledgeDigest && !HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
     if (!HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingAppInstructions = true;
     const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision)).map(carriedItem);
-    // A same-harness fork that lost the source directory also lost the provider session it would
-    // have resumed; both it and a fork into another harness start from the conversation as text.
-    const lostResume = !cross && !!own && src.config.harness === 'claude' && !!src.harnessRef.claudeSessionId;
-    // Codex forks start a fresh provider thread; unlike Claude, they cannot inherit a fork-on-resume ref.
-    const lostCodexResume = !cross && (src.config.harness === 'codex' || src.config.harness === 'codex-exec') && !!src.harnessRef.codexThreadId;
-    if (cross || lostResume || lostCodexResume || src.pendingForkContext) {
+    // When a provider session isn't reused, the fork starts with the copied conversation as text,
+    // even if it still uses the same harness. Native disk history and Claude fork-on-resume stay as-is.
+    const lostResume = !cross && !describeResume(meta.harnessRef) && !!describeResume(src.harnessRef);
+    if (cross || lostResume || src.pendingForkContext) {
       // Hand the prior conversation over as plain text: the first message in the fork carries it
       // and then the flag is cleared.
       await this.deps.store.writeBlob(nid, FORK_CONTEXT_FILE, renderForkContext(keep, src.config.harness, target));
