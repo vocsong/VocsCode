@@ -14,10 +14,12 @@ import type { HarnessContext } from '../src/main/harness/types';
 import type { ResolvedServer } from '../src/main/mcp/effective';
 import { emptyUsage } from '../src/main/models/static-models';
 import { defaultSettings } from '../src/main/settings';
+import { vocsMemoryBaseDef } from '../src/main/mcp/memory';
 import { serializeKnowledgeDocument, type KnowledgePageMeta } from '../src/shared/knowledge';
 import type { PermissionMode, SessionEvent, SessionMeta } from '../src/shared/types';
 
 const memoryScript = path.join(process.cwd(), 'resources', 'mcp', 'vocs-memory.mjs');
+const namedToolsScript = path.join(process.cwd(), 'tests', 'fixtures', 'mcp-named-tools-server.mjs');
 
 const mocks = vi.hoisted(() => ({ step: vi.fn<(p: StepParams) => Promise<StepResult>>() }));
 vi.mock('../src/main/harness/native/drivers', () => ({ openaiStep: mocks.step, anthropicStep: mocks.step, isAnthropicProvider: () => false }));
@@ -58,14 +60,35 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
+/** The memory server as the app builds it, provenance included. */
 function memoryServer(): ResolvedServer {
   return {
-    def: { id: 'vocs-memory', transport: 'stdio', command: process.execPath, args: [memoryScript], env: { VOCS_MEMORY_ROOT: wiki } },
+    def: { ...vocsMemoryBaseDef(), command: process.execPath, args: [memoryScript], env: { VOCS_MEMORY_ROOT: wiki } },
     missing: [],
     secretEnvKeys: [],
     secretHeaderKeys: []
   };
 }
+
+/** The same program under a definition the app did not build: a user or repository entry. */
+function unmarkedServer(id: string): ResolvedServer {
+  return { def: { id, transport: 'stdio', command: process.execPath, args: [memoryScript], env: { VOCS_MEMORY_ROOT: wiki } }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] };
+}
+
+/**
+ * A fixture server exposing `tools` under the id of a built-in server. `builtin` is the provenance
+ * the app stamps on definitions it builds; omit it for a user or repository lookalike.
+ */
+function namedServer(id: string, tools: string[], builtin?: string): ResolvedServer {
+  return {
+    def: { id, transport: 'stdio', command: process.execPath, args: [namedToolsScript], env: { FAKE_TOOLS: tools.join(','), FAKE_MARKER_DIR: root }, ...(builtin ? { builtin } : {}) },
+    missing: [],
+    secretEnvKeys: [],
+    secretHeaderKeys: []
+  };
+}
+
+const ran = async (tool: string) => fs.stat(path.join(root, tool)).then(() => true, () => false);
 
 function brokenServer(): ResolvedServer {
   return { def: { id: 'broken', transport: 'stdio', command: path.join(root, 'not-a-real-binary'), args: [] }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] };
@@ -143,6 +166,56 @@ describe('native MCP tool mapping', () => {
     }
   });
 
+  it.each(['vocs-memory', 'vocs_memory', 'Vocs.Memory'])('trusts no read-only hint from a server the app did not build (%s)', async (id) => {
+    const session = await NativeMcpSession.connect([unmarkedServer(id)], { cwd: root, log: () => undefined });
+    try {
+      expect(session.tools.length).toBeGreaterThan(0);
+      expect(session.tools.every((t) => t.mutating)).toBe(true);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it.each([
+    { id: 'gitnexus', readOnly: ['query', 'context', 'impact'], mutating: ['rename', 'cypher'] },
+    { id: 'cua-driver', readOnly: ['get_window_state', 'list_windows'], mutating: ['click', 'type_text'] }
+  ])('trusts the built-in read-only allowlist for $id when its provenance holds', async ({ id, readOnly, mutating }) => {
+    const session = await NativeMcpSession.connect([namedServer(id, [...readOnly, ...mutating], id)], { cwd: root, log: () => undefined });
+    try {
+      const flags = Object.fromEntries(session.tools.map((t) => [t.toolName, t.mutating]));
+      expect(flags).toEqual(Object.fromEntries([...readOnly.map((t) => [t, false]), ...mutating.map((t) => [t, true])]));
+    } finally {
+      await session.close();
+    }
+  });
+
+  it.each([
+    { label: 'no provenance', builtin: undefined },
+    { label: 'provenance of another built-in', builtin: 'vocs-memory' }
+  ])('gives a gitnexus lookalike with $label no read-only trust', async ({ builtin }) => {
+    const session = await NativeMcpSession.connect([namedServer('gitnexus', ['query', 'context', 'rename'], builtin)], { cwd: root, log: () => undefined });
+    try {
+      expect(session.tools).toHaveLength(3);
+      expect(session.tools.every((t) => t.mutating)).toBe(true);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('maps one tool when two servers fold into the same tool names', async () => {
+    const log = vi.fn();
+    const session = await NativeMcpSession.connect([unmarkedServer('notes-a'), unmarkedServer('Notes.A')], { cwd: root, log });
+    try {
+      const names = session.tools.map((t) => t.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toContain(mcpToolName('notes-a', 'knowledge_search'));
+      expect(session.tools.filter((t) => t.name === mcpToolName('notes-a', 'knowledge_search')).map((t) => t.serverId)).toEqual(['notes-a']);
+      expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('collides'));
+    } finally {
+      await session.close();
+    }
+  });
+
   it('keeps the reachable servers when one cannot start', async () => {
     const session = await NativeMcpSession.connect([memoryServer(), brokenServer()], { cwd: root, log: () => undefined });
     try {
@@ -156,8 +229,8 @@ describe('native MCP tool mapping', () => {
 });
 
 describe('native MCP gating', () => {
-  it('runs a trusted read-only tool unprompted and asks before a propose', async () => {
-    const h = harness('auto', async () => [memoryServer()]);
+  it('runs a trusted read-only tool unprompted and asks before a propose in Ask', async () => {
+    const h = harness('ask', async () => [memoryServer()]);
     try {
       const results = await h.run([
         call(SEARCH, { query: 'harness session' }),
@@ -165,7 +238,7 @@ describe('native MCP gating', () => {
       ]);
       expect(results[0].item).toMatchObject({ status: 'done' });
       expect(results[0].item).toMatchObject({ output: expect.stringContaining('conventions/harness-lifecycle') });
-      // Auto mode is not allowed to treat a write-capable server tool as safe.
+      // Ask prompts before a write-capable server tool; the read-only one never prompts.
       expect(h.approval).toHaveBeenCalledTimes(1);
       expect(h.approval.mock.calls[0][0].toolName).toBe(PROPOSE);
       expect(String(h.approval.mock.calls[0][0].description)).toContain('vocs-memory');
@@ -186,6 +259,63 @@ describe('native MCP gating', () => {
       expect(offered).not.toContain(PROPOSE);
       expect(results[0].item).toMatchObject({ status: 'done' });
       expect(h.approval).not.toHaveBeenCalled();
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('runs a write-capable MCP tool in Auto without asking', async () => {
+    const h = harness('auto', async () => [memoryServer()]);
+    try {
+      const results = await h.run([call(PROPOSE, { title: 'Auto guard', claim: 'Auto runs MCP tools.', body: 'Per the tier contract.' })]);
+      expect(h.approval).not.toHaveBeenCalled();
+      expect(results[0].item).toMatchObject({ status: 'done' });
+      expect(await fs.readFile(path.join(wiki, 'concept', 'auto-guard.md'), 'utf8')).toContain('status: current');
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it.each(['ask', 'accept-edits'] as const)('asks before a third-party MCP tool in %s', async (mode) => {
+    const h = harness(mode, async () => [namedServer('notes', ['write_note'])]);
+    try {
+      const results = await h.run([call(mcpToolName('notes', 'write_note'), {})]);
+      expect(h.approval).toHaveBeenCalledTimes(1);
+      expect(h.approval.mock.calls[0][0].toolName).toBe(mcpToolName('notes', 'write_note'));
+      expect(results[0].item).toMatchObject({ status: 'done' });
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('runs a built-in gitnexus read-only tool in Plan and keeps rename hidden and blocked', async () => {
+    const QUERY = mcpToolName('gitnexus', 'query');
+    const RENAME = mcpToolName('gitnexus', 'rename');
+    const h = harness('plan', async () => [namedServer('gitnexus', ['query', 'rename'], 'gitnexus')]);
+    try {
+      const results = await h.run([call(QUERY, {}), call(RENAME, {})]);
+      const offered = (mocks.step.mock.calls[0][0].tools ?? []).map((t) => t.name);
+      expect(offered).toContain(QUERY);
+      expect(offered).not.toContain(RENAME);
+      expect(results[0].item).toMatchObject({ status: 'done', output: 'query:ran' });
+      expect(results[1].item).toMatchObject({ status: 'declined' });
+      expect(h.approval).not.toHaveBeenCalled();
+      expect(await ran('query')).toBe(true);
+      expect(await ran('rename')).toBe(false);
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('gives a gitnexus lookalike without provenance nothing in Plan', async () => {
+    const QUERY = mcpToolName('gitnexus', 'query');
+    const h = harness('plan', async () => [namedServer('gitnexus', ['query'])]);
+    try {
+      const results = await h.run([call(QUERY, {})]);
+      const offered = (mocks.step.mock.calls[0][0].tools ?? []).map((t) => t.name);
+      expect(offered).not.toContain(QUERY);
+      expect(results[0].item).toMatchObject({ status: 'declined' });
+      expect(await ran('query')).toBe(false);
     } finally {
       await h.dispose();
     }

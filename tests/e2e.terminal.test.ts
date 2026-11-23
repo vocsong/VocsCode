@@ -109,6 +109,23 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.waitForSelector('.ns-root', { timeout: 15_000 });
       const seeded = (await win.locator('.ns-root').innerText()).replace(/\\/g, '/');
       expect(seeded, 'the dialog is seeded with the folder of the session that is active').toBe(project.replace(/\\/g, '/'));
+      // The header's folder menu opens on its filter box, at its own width rather than squeezed to
+      // the header button's, lists the folder once with its path, and closes on Escape before the dialog.
+      await win.locator('.ns-root-btn').click();
+      const filter = win.getByRole('textbox', { name: 'Filter folders' });
+      await filter.waitFor({ timeout: 15_000 });
+      expect(await filter.evaluate((el) => el === document.activeElement), 'the folder filter takes focus').toBe(true);
+      const menuWidth = await win.locator('.ns-header-root .dropdown-menu').evaluate((el) => el.getBoundingClientRect().width);
+      const buttonWidth = await win.locator('.ns-root-btn').evaluate((el) => el.getBoundingClientRect().width);
+      expect(menuWidth, 'the folder menu is not clamped to the header button').toBeGreaterThan(Math.max(buttonWidth, 300));
+      const folderRows = win.getByRole('menuitemradio');
+      expect(await folderRows.count(), 'the session folder is listed once').toBe(1);
+      expect((await folderRows.first().locator('.folder-choice-path').innerText()).replace(/\\/g, '/')).toBe(project.replace(/\\/g, '/'));
+      await filter.fill('no-such-folder');
+      await win.getByText(/No folder matches/).waitFor();
+      await win.keyboard.press('Escape');
+      await filter.waitFor({ state: 'detached', timeout: 15_000 });
+      await win.waitForSelector('.modal');
       // This project folder has no repository, so worktree isolation is not on offer: leaving it
       // switchable only produces a session that fails with "Worktrees require a git repository."
       const isolate = win.locator('.toggle', { hasText: 'Isolate in a git worktree' });
@@ -295,7 +312,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       // rather than keeping the archived session's transcript on screen.
       await win.waitForSelector('.main-empty', { timeout: 20_000 });
       expect(await win.locator('.main-empty').innerText()).toContain('Welcome to Vocs Code');
-      await win.click('.sidebar-link:has-text("Archived")');
+      await win.click('[data-testid="sidebar-archived"]');
       const archivedRow = win.locator('[data-testid="session-row"]').first();
       await archivedRow.waitFor({ timeout: 20_000 });
       await archivedRow.hover();
@@ -311,7 +328,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       // archived one had — the marker typed above — is nowhere in it.
       await archivedRow.hover();
       await archivedRow.locator('[aria-label="Restore session"]').click();
-      await win.click('.sidebar-link:has-text("Show active")');
+      await win.click('[data-testid="sidebar-archived"]'); // pressed again: back to active sessions
       const restoredRow = win.locator('[data-testid="session-row"]').first();
       await restoredRow.waitFor({ timeout: 20_000 });
       await restoredRow.click();
@@ -388,18 +405,19 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
       const stored = async (): Promise<SessionMeta[]> => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
       const present = (p: string): Promise<boolean> => fs.stat(p).then(() => true, () => false);
 
-      // A session isolated in a worktree, started from the dialog with no prompt.
+      // A session isolated in a worktree on the feat/ branch prefix, started from the dialog with no prompt.
       await openNewSession(win);
       await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
       const isolate = win.locator('.toggle', { hasText: 'Isolate in a git worktree' });
-      await isolate.locator('.muted', { hasText: 'new branch under' }).waitFor({ timeout: 15_000 });
+      await isolate.locator('.muted', { hasText: 'new branch in' }).waitFor({ timeout: 15_000 });
       await isolate.click();
+      await win.locator('select[aria-label="Branch prefix"]').selectOption('feat');
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
 
       await expect.poll(async () => (await stored()).length, { timeout: 20_000 }).toBe(1);
       const src = (await stored())[0];
-      expect(src.worktreeBranch).toBeTruthy();
+      expect(src.worktreeBranch).toMatch(/^feat\//);
       expect(src.cwd).toContain(path.join('.vocs-code', 'worktrees'));
       expect(await present(src.cwd), 'the source worktree exists on disk').toBe(true);
 
@@ -413,7 +431,8 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
       const fork = (await stored()).find((s) => s.forkedFrom === src.id)!;
       expect(fork.title).toContain('(fork)');
       expect(fork.cwd).not.toBe(src.cwd);
-      expect(fork.worktreeBranch).toBeTruthy();
+      // The fork keeps its source's branch prefix.
+      expect(fork.worktreeBranch).toMatch(/^feat\//);
       expect(fork.worktreeBranch).not.toBe(src.worktreeBranch);
       expect(await present(fork.cwd), 'the fork worktree exists on disk').toBe(true);
 

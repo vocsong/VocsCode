@@ -343,18 +343,7 @@ describe('dialects', () => {
     expect(toAcp([http({ transport: 'sse' })], { http: true })).toEqual([]);
   });
 
-  it('switches an owned name off for a session that does not receive it', () => {
-    const { config, env } = toCodex([], 'inline', { owned: ['gitnexus'] });
-    expect(config).toEqual({ gitnexus: { enabled: false } });
-    expect(env).toEqual({});
-  });
-
-  it('does not clobber a real entry that shares an owned name', () => {
-    const { config } = toCodex([{ def: stdio({ id: 'gitnexus' }), missing: [], secretEnvKeys: [], secretHeaderKeys: [] }], 'env-ref', { owned: ['gitnexus'] });
-    expect(config.gitnexus).toEqual({ command: 'npx', args: ['-y', 'srv'] });
-  });
-
-  it('adds nothing when this app owns no server names', () => {
+  it('produces no MCP entries when there are no servers to inject', () => {
     expect(toCodex([], 'inline').config).toEqual({});
   });
 });
@@ -392,6 +381,7 @@ describe('harness capabilities', () => {
       'codex-exec': 'inject',
       cursor: 'inherit',
       pi: 'inject',
+      antigravity: 'inject',
       acp: 'inject',
       native: 'client'
     });

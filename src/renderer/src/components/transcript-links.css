@@ -1,0 +1,51 @@
+/* The active palette's color-scheme selects the light/dark pair (including System and custom
+   themes). These are transcript-only colors, independent of the interface mode and editor. */
+.transcript {
+  --transcript-link-external: light-dark(#1754a1, #85bafa);
+  --transcript-link-pr: light-dark(#7333a8, #d6a1ff);
+  --transcript-link-file: light-dark(#006449, #68deac);
+  --transcript-link-folder: light-dark(#825300, #edbd61);
+  --transcript-link-image-file: light-dark(#a12463, #ff9ec9);
+  --transcript-link-image-preview: light-dark(#006578, #6fdaee);
+  --transcript-link-explorer: light-dark(#9b3b18, #ffad83);
+}
+
+.transcript .md [data-link-kind='external'] { --transcript-link-color: var(--transcript-link-external); }
+.transcript .md [data-link-kind='pr'] { --transcript-link-color: var(--transcript-link-pr); }
+.transcript .md [data-link-kind='file'] { --transcript-link-color: var(--transcript-link-file); }
+.transcript .md [data-link-kind='folder'] { --transcript-link-color: var(--transcript-link-folder); }
+.transcript .md [data-link-kind='image-file'] { --transcript-link-color: var(--transcript-link-image-file); }
+.transcript .md [data-link-kind='image-preview'] { --transcript-link-color: var(--transcript-link-image-preview); }
+.transcript .md [data-link-kind='explorer'] { --transcript-link-color: var(--transcript-link-explorer); }
+
+/* Beat the generic .file-ref hover/focus colors; do not substitute a theme accent in Zen. */
+.transcript .msg-assistant .md :is(a, code)[data-link-kind] {
+  color: var(--transcript-link-color);
+  cursor: pointer;
+  border-bottom: none;
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+.transcript .msg-assistant .md a[data-link-kind] code {
+  color: inherit;
+}
+.transcript .msg-assistant .md :is(a, code)[data-link-kind]:hover {
+  text-decoration-thickness: 2px;
+}
+.transcript .msg-assistant .md :is(a, code, button)[data-link-kind]:focus-visible {
+  outline: 2px solid var(--transcript-link-color);
+  outline-offset: 2px;
+}
+.transcript .msg-assistant .md button[data-link-kind='image-preview'] {
+  color: var(--transcript-link-color);
+  outline: 1px solid currentColor;
+  outline-offset: 2px;
+}
+.transcript .msg-assistant .md button[data-link-kind='image-preview']:is(:hover, :focus-visible) {
+  outline-width: 2px;
+}
+.transcript .msg-assistant .md .file-ref:not([data-link-kind]) {
+  color: inherit;
+  cursor: text;
+  border-bottom: none;
+}

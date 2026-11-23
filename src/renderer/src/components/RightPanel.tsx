@@ -2,18 +2,20 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, SessionMeta } from '../../../shared/types';
 import { nativeGoalCommands } from '../../../shared/goal-driver';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
-import { invoke } from '../api';
+import { invoke, invokeErrorMessage } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
+import { GitPanelCache } from '../git-panel-cache';
 import { workspaceRelativePath } from '../file-refs';
 import { clamp, relTime } from '../format';
-import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore, type FileReveal, type PanelBottomTab, type PanelTab } from '../store';
+import { useMinimalUi } from '../ui-mode';
 import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
 import { GitSetup } from './GitSetup';
 import { McpTab } from './McpTab';
 import { DesktopTab } from './DesktopTab';
 import { KnowledgeTab } from './KnowledgeTab';
+import { ProcessesTab } from './ProcessesTab';
 import { Resizer, SplitResizer } from './Resizer';
 import { SessionUsage } from './SessionUsage';
 import { SubagentsTab } from './SubagentsTab';
@@ -39,21 +41,28 @@ const BOTTOM_TABS: { id: PanelBottomTab; label: string; icon: string }[] = [
   { id: 'mcp', label: 'MCP', icon: 'server' },
   { id: 'desktop', label: 'Desktop', icon: 'cpu' },
   { id: 'subagents', label: 'Subagents', icon: 'fork' },
-  { id: 'knowledge', label: 'Knowledge', icon: 'book' }
+  { id: 'knowledge', label: 'Knowledge', icon: 'book' },
+  { id: 'processes', label: 'Processes', icon: 'activity' }
 ];
 
-export function RightPanel({ session }: { session: SessionMeta }) {
+export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; gitPanelCache?: GitPanelCache }) {
+  const cache = useMemo(() => gitPanelCache ?? new GitPanelCache(), [gitPanelCache]);
   const { record: mission } = useMission(session);
   const [workspace, setWorkspace] = useState({ sessionId: session.id, id: '' });
   const reveal = useStore((s) => s.fileReveal);
+  const preview = useStore((s) => s.layout.filePreview);
   const leadWorkspace = mission?.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission?.workspaces.find((w) => w.role === 'lead');
   const workspaceId = reveal?.sessionId === session.id && leadWorkspace ? leadWorkspace.id : workspace.sessionId === session.id ? workspace.id : '';
   useEffect(() => {
-    if (mission && reveal?.sessionId === session.id) {
-      const lead = mission.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission.workspaces.find((w) => w.role === 'lead');
-      if (lead) setWorkspace({ sessionId: session.id, id: lead.id });
+    if (mission && preview?.sessionId === session.id) {
+      setWorkspace({ sessionId: session.id, id: preview.missionWorkspaceId ?? '' });
     }
-  }, [reveal, mission?.id, session.id]);
+  }, [preview, mission?.id, session.id]);
+  useEffect(() => {
+    if (leadWorkspace && reveal?.sessionId === session.id) {
+      setWorkspace({ sessionId: session.id, id: leadWorkspace.id });
+    }
+  }, [reveal, leadWorkspace?.id, session.id]);
   const selectedWorkspace = mission?.workspaces.find((w) => w.id === workspaceId) ?? mission?.workspaces.find((w) => w.role === 'integration');
   const fileSession = session.mission ? { ...session, cwd: selectedWorkspace?.path ?? session.cwd } : session;
   const tab = useStore((s) => s.panelTab);
@@ -66,44 +75,133 @@ export function RightPanel({ session }: { session: SessionMeta }) {
   // already-opened tabs lives in the store so leaving the chat view (which unmounts this panel) and
   // coming back does not blank the half's still-selected tab.
   const opened = useStore((s) => s.panelBottomOpened);
+  // Left-behind processes are flagged on the tab itself: the point is that they cannot go unnoticed.
+  const orphanedProcesses = useStore((s) => s.processSummary?.orphaned ?? 0);
+  // Until one of its tabs is opened the lower half is only its tab strip, so the workspace view
+  // above gets the whole height instead of sitting over an empty pane.
+  const bottomIdle = opened.length === 0;
+  // Zen draws the tabs as icons alone; the name moves to a tooltip.
+  const minimal = useMinimalUi();
+  // Zen: one rail of icons on the window's right edge and a drawer that shows one view at a time —
+  // the half asked for last. The drawer slides out on hover or focus, on a peek (something asked for
+  // the panel), or stays out while pinned.
+  const focus = useStore((s) => (s.panelFocus === 'bottom' && s.panelBottomOpened.includes(s.panelBottomTab) ? 'bottom' : 'top'));
+  const peek = useStore((s) => s.panelPeek);
+  const previewOpen = !!preview;
+  const pinned = useStore((s) => s.pins.right);
+  const togglePin = useStore((s) => s.togglePin);
+  const changesVersion = useStore((s) => s.changesVersion);
+  const { data: summary } = useGitSummary(session.id, changesVersion);
+  const changed = summary?.isRepo ? (summary.files ?? []).length : 0;
+  const ref = useRef<HTMLElement>(null);
+  // A peek ends when a press lands outside the panel (or the pointer leaves it, below) — except on a
+  // control that opens and closes the panel itself (`data-panel-trigger`), which decides on its click.
+  useEffect(() => {
+    if (!peek) return;
+    const end = (e: PointerEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest('[data-panel-trigger]') || (target && ref.current?.contains(target))) return;
+      useStore.getState().endPanelPeek();
+    };
+    document.addEventListener('pointerdown', end, true);
+    return () => document.removeEventListener('pointerdown', end, true);
+  }, [peek]);
+  const topLabel = (id: PanelTab, label: string) => (session.mission && id === 'goal' ? 'Mission' : session.mission && id === 'changes' ? 'Mission result' : label);
+  const selectTop = (id: PanelTab) => {
+    if (session.mission && id === 'changes') setWorkspace({ sessionId: session.id, id: '' });
+    setTab(id);
+  };
+  const bottomTabs = BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents');
+  const processCount = orphanedProcesses > 0 && (
+    <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} running on ${orphanedProcesses === 1 ? 'its' : 'their'} own: nothing in Vocs Code will stop ${orphanedProcesses === 1 ? 'it' : 'them'}`}>
+      {orphanedProcesses}
+    </span>
+  );
+  const currentTop = TABS.find((t) => t.id === tab);
+  const currentLabel = focus === 'bottom' ? BOTTOM_TABS.find((t) => t.id === bottomTab)?.label : currentTop && topLabel(currentTop.id, currentTop.label);
   return (
-    <aside className="panel">
-      <div className="panel-section panel-top">
-        <div className="panel-tabs">
-          {TABS.map((t) => (
-            <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => { if (session.mission && t.id === 'changes') setWorkspace({ sessionId: session.id, id: '' }); setTab(t.id); }}>
-              <Icon name={t.icon} size={13} /> {session.mission && t.id === 'goal' ? 'Mission' : session.mission && t.id === 'changes' ? 'Mission result' : t.label}
-              {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
-            </button>
-          ))}
-          <span className="spacer" />
-          <Button variant="ghost" size="sm" icon="x" onClick={() => togglePanel(false)} aria-label="Close panel" />
+    <aside
+      ref={ref}
+      className={`panel ${bottomIdle ? 'panel-bottom-idle' : ''}`}
+      data-focus={minimal ? focus : undefined}
+      data-peek={minimal && peek ? '' : undefined}
+      data-pinned={minimal && pinned ? '' : undefined}
+      data-file-preview={previewOpen ? '' : undefined}
+      onPointerLeave={peek ? () => useStore.getState().endPanelPeek() : undefined}
+    >
+      {minimal && (
+        <nav className="panel-rail" aria-label="Side panel">
+          {TABS.map((t) => {
+            const label = topLabel(t.id, t.label);
+            const active = focus === 'top' && tab === t.id;
+            return (
+              <button key={t.id} type="button" className={`panel-tab ${active ? 'active' : ''}`} title={t.id === 'changes' && changed > 0 ? `${label} · ${changed} changed file${changed === 1 ? '' : 's'}` : label} aria-label={label} aria-current={active ? 'true' : undefined} data-testid={`panel-top-${t.id}`} onClick={() => selectTop(t.id)}>
+                <Icon name={t.icon} size={13} />
+                {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
+                {t.id === 'changes' && changed > 0 && <span className="panel-rail-dot" data-testid="panel-changes-dot" />}
+              </button>
+            );
+          })}
+          <span className="panel-rail-rule" aria-hidden />
+          {bottomTabs.map((t) => {
+            const active = focus === 'bottom' && bottomTab === t.id;
+            return (
+              <button key={t.id} type="button" className={`panel-tab ${active ? 'active' : ''}`} title={t.label} aria-label={t.label} aria-current={active ? 'true' : undefined} data-testid={`panel-bottom-${t.id}`} onClick={() => openBottom(t.id)}>
+                <Icon name={t.icon} size={13} />
+                {t.id === 'processes' && processCount}
+              </button>
+            );
+          })}
+        </nav>
+      )}
+      {minimal && (
+        <div className="panel-head">
+          <span className="panel-head-title">{currentLabel}</span>
+          <Button variant={pinned ? 'subtle' : 'ghost'} size="sm" icon={pinned ? 'pinOff' : 'pin'} onClick={() => togglePin('right')} title={pinned ? 'Unpin: fold back to the rail' : 'Pin open'} aria-label={pinned ? 'Unpin side panel' : 'Pin side panel'} aria-pressed={pinned} />
         </div>
+      )}
+      <div className="panel-section panel-top">
+        {!minimal && (
+          <div className="panel-tabs">
+            {TABS.map((t) => (
+              <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => selectTop(t.id)}>
+                <Icon name={t.icon} size={13} /> {topLabel(t.id, t.label)}
+                {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
+              </button>
+            ))}
+            <span className="spacer" />
+            <Button variant="ghost" size="sm" icon="x" onClick={() => togglePanel(false)} aria-label="Close panel" />
+          </div>
+        )}
         <div className="panel-body">
           {session.mission && (tab === 'changes' || tab === 'files') && (mission ? <MissionWorkspacePicker record={mission} value={workspaceId} onChange={(id) => setWorkspace({ sessionId: session.id, id })} /> : <div className="pad muted">Loading Mission workspace state…</div>)}
           {tab === 'changes' && (session.mission ? mission && <MissionChanges record={mission} workspaceId={workspaceId} /> : <ChangesTab session={session} />)}
-          {tab === 'files' && (!session.mission || mission) && <FilesTab key={`${session.id}:${workspaceId}`} session={fileSession} missionWorkspaceId={workspaceId || undefined} />}
-          {tab === 'branches' && (session.mission ? <div className="pad muted">Mission integration and delivery are managed by the principal engineer. Inspect the delivery target and result in Mission; generic Git publish controls are unavailable.</div> : <BranchesTab session={session} />)}
+          {tab === 'files' && (!session.mission || mission) && <FilesTab key={`${session.id}:${workspaceId}:${fileSession.cwd}`} session={fileSession} missionWorkspaceId={workspaceId || undefined} />}
+          {tab === 'branches' && (session.mission ? <div className="pad muted">Mission integration and delivery are managed by the principal engineer. Inspect the delivery target and result in Mission; generic Git publish controls are unavailable.</div> : <BranchesTab session={session} cache={cache} />)}
           {tab === 'goal' && (session.mission ? <MissionPanel session={session} /> : <GoalTab session={session} />)}
           {tab === 'usage' && <>{mission && <div className="pad"><MissionUsage record={mission} /><p className="muted small">The breakdown below is this lead session only, not the Mission total.</p></div>}<UsageTabPanel session={session} /></>}
           {tab === 'terminal' && (session.mission && (session.archived || mission?.archived) ? <div className="pad muted">Archived Mission — terminals are closed. Restore the Mission to use its lead terminal.</div> : <>{session.mission && <div className="mission-ui mission-workspace"><strong>Lead interactive terminal</strong><p className="mono small">{session.cwd}</p><p className="muted small">Actual lead tool cwd. Integration and specialist workspaces have no writable terminal here.</p></div>}<TerminalPanel session={session} /></>)}
         </div>
       </div>
-      <SplitResizer />
+      {!bottomIdle && <SplitResizer />}
       <div className="panel-section panel-bottom">
-        <div className="panel-tabs">
-          {BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents').map((t) => (
-            <button key={t.id} type="button" className={`panel-tab ${bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
-              <Icon name={t.icon} size={13} /> {t.label}
-            </button>
-          ))}
-          <span className="spacer" />
-        </div>
+        {!minimal && (
+          <div className="panel-tabs">
+            {bottomTabs.map((t) => (
+              <button key={t.id} type="button" className={`panel-tab ${!bottomIdle && bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
+                <Icon name={t.icon} size={13} /> {t.label}
+                {t.id === 'processes' && processCount}
+              </button>
+            ))}
+            <span className="spacer" />
+          </div>
+        )}
         <div className="panel-body">
           {bottomTab === 'mcp' && opened.includes('mcp') && <McpTab session={session} />}
           {bottomTab === 'desktop' && opened.includes('desktop') && <DesktopTab session={session} />}
           {bottomTab === 'subagents' && opened.includes('subagents') && (session.mission ? <div className="pad muted">Managed specialists are in the Mission panel. Native subagent controls are unavailable here.</div> : <SubagentsTab session={session} />)}
           {bottomTab === 'knowledge' && opened.includes('knowledge') && <KnowledgeTab session={session} />}
+          {bottomTab === 'processes' && opened.includes('processes') && <ProcessesTab session={session} />}
         </div>
       </div>
       <Resizer target="panel" />
@@ -231,166 +329,87 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   }
 }
 
+/**
+ * The session folder as a browsable list. Files open in the drawer to the left; a transcript
+ * folder link opens the list on that folder.
+ */
 function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missionWorkspaceId?: string }) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
-  const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
-  /** Markdown files open in rendered preview; the toggle flips back to the raw text. */
-  const [mdView, setMdView] = useState(false);
-  const mdBody = useRef<HTMLDivElement | null>(null);
-  const preBody = useRef<HTMLPreElement | null>(null);
   const toast = useStore((s) => s.toast);
   const reveal = useStore((s) => s.fileReveal);
-  /** Line to scroll the raw preview to once the file content is on screen. */
-  const [scrollLine, setScrollLine] = useState<number | null>(null);
-  /** The session this component instance currently belongs to; responses from other sessions are dropped. */
-  const liveId = useRef(session.id);
-  /** Monotonic read id so a slow earlier read cannot overwrite a file opened after it. */
-  const readSeq = useRef(0);
-  /** StrictMode runs mount effects twice; the same reveal must not start two reads. */
+  const previewing = useStore((s) => {
+    const file = s.layout.filePreview;
+    return file?.sessionId === session.id && file.missionWorkspaceId === missionWorkspaceId ? file.path : undefined;
+  });
+  /** Keyed by session and workspace; discard pending work after leaving this Files tab. */
+  const mounted = useRef(true);
+  /** StrictMode runs mount effects twice; the same reveal must not be consumed twice. */
   const consumedReveal = useRef<FileReveal | null>(null);
 
-  const openFile = async (rel: string, line?: number) => {
-    const sid = session.id;
-    const seq = ++readSeq.current;
-    try {
-      const r = await invoke('fs:read', { sessionId: sid, path: rel, maxBytes: 200_000, ...(session.mission ? { missionWorkspaceId } : {}) });
-      if (liveId.current !== sid || readSeq.current !== seq) return;
-      const p = rel.replace(/\\/g, '/');
-      setPreview({ path: p, ...r });
-      setMdView(/\.(?:md|markdown)$/i.test(p));
-      setScrollLine(line && line > 0 ? line : null);
-    } catch (err) {
-      if (liveId.current === sid && readSeq.current === seq) toast(err instanceof Error ? err.message : String(err), 'error');
-    }
-  };
+  const navigate = (dir: string) => setPath(dir);
+  const openFile = (rel: string) => useStore.getState().revealFile(session.id, rel.replace(/\\/g, '/'), undefined, { exact: true, workspace: missionWorkspaceId ?? '' });
 
   useEffect(() => {
-    liveId.current = session.id;
-    readSeq.current += 1;
-    setPath('');
-    setEntries([]);
-    setPreview(null);
-    setMdView(false);
-    setScrollLine(null);
-  }, [session.id]);
-  // A transcript file link asks for one path; list its folder and preview it, then clear the request
-  // so remounting the tab does not reopen a file the user has since navigated away from.
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  // A transcript folder link asks for one folder; list it, then clear the request so remounting the
+  // tab does not jump back to a folder the user has since navigated away from.
   useEffect(() => {
     if (!reveal || reveal.sessionId !== session.id || consumedReveal.current === reveal) return;
     consumedReveal.current = reveal;
     useStore.getState().consumeFileReveal();
     const rel = workspaceRelativePath(session.cwd, reveal.path);
-    if (rel === null) {
-      toast(`Cannot open files outside ${session.cwd}`, 'error');
-      return;
-    }
-    const dir = /[\\/]$/.test(reveal.path.trim());
-    const clean = rel.replace(/\/+$/, '');
-    if (dir || clean === '') {
-      setPreview(null);
-      setPath(clean);
-      return;
-    }
-    const slash = clean.lastIndexOf('/');
-    setPath(slash >= 0 ? clean.slice(0, slash) : '');
-    void openFile(clean, reveal.line);
+    if (rel !== null) navigate(rel.replace(/\/+$/, ''));
   }, [reveal, session.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  // Once the raw preview is mounted, bring the mentioned line into view. The pre grows with its
-  // content, so the panel body is what actually scrolls.
-  useEffect(() => {
-    if (scrollLine === null) return;
-    const pre = preBody.current;
-    if (!pre) return;
-    const lineHeight = Number.parseFloat(getComputedStyle(pre).lineHeight) || 18;
-    const scroller = pre.closest('.panel-body') as HTMLElement | null;
-    const offset = (scrollLine - 1) * lineHeight - (scroller?.clientHeight ?? pre.clientHeight) / 2;
-    if (scroller && scroller.scrollHeight > scroller.clientHeight) {
-      const preTop = pre.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-      scroller.scrollTop = Math.max(0, preTop + offset);
-    } else {
-      pre.scrollTop = Math.max(0, offset);
-    }
-    setScrollLine(null);
-  }, [scrollLine, preview, mdView]);
   useEffect(() => {
     const sid = session.id;
     let stale = false;
     invoke('fs:list', { sessionId: sid, relPath: path || undefined, ...(session.mission ? { missionWorkspaceId } : {}) })
       .then((list) => {
-        if (!stale && liveId.current === sid) setEntries(list);
+        if (!stale && mounted.current) setEntries(list);
       })
       .catch((e) => {
-        if (!stale && liveId.current === sid) toast(String(e.message ?? e), 'error');
+        if (!stale && mounted.current) toast(invokeErrorMessage(e), 'error');
       });
     return () => {
       stale = true;
     };
   }, [session.id, path]); // eslint-disable-line react-hooks/exhaustive-deps
-  const isMd = !!preview && /\.(?:md|markdown)$/i.test(preview.path);
-  const mdHtml = useMemo(() => (isMd && preview ? renderMarkdown(preview.content, { fileLinks: true }) : ''), [isMd, preview]);
-  useEffect(() => {
-    if (!mdView || !mdBody.current) return;
-    return installMarkdownHandlers(
-      mdBody.current,
-      (url) => void invoke('app:openExternal', { url }),
-      (p, line) => useStore.getState().revealFile(session.id, p, line)
-    );
-  }, [mdView, mdHtml, session.id]);
   const crumbs = path.split(/[\\/]/).filter(Boolean);
   return (
     <div className="files">
       <div className="crumbs">
-        <button type="button" onClick={() => setPath('')}>{session.cwd.split(/[\\/]/).pop()}</button>
+        <button type="button" onClick={() => navigate('')}>{session.cwd.split(/[\\/]/).pop()}</button>
         {crumbs.map((c, i) => (
           <React.Fragment key={i}>
             <span className="muted">/</span>
-            <button type="button" onClick={() => setPath(crumbs.slice(0, i + 1).join('/'))}>{c}</button>
+            <button type="button" onClick={() => navigate(crumbs.slice(0, i + 1).join('/'))}>{c}</button>
           </React.Fragment>
         ))}
       </div>
-      {preview ? (
-        <div className="file-preview">
-          <div className="file-preview-head">
-            <span className="mono">{preview.path}</span>
-            <span className="spacer" />
-            {isMd && (
-              <Button
-                size="sm"
-                variant="ghost"
-                icon={mdView ? 'file' : 'eye'}
-                onClick={() => setMdView((v) => !v)}
-                title={mdView ? 'Show source' : 'Show markdown preview'}
-              />
-            )}
-            {!session.mission && <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}`, sessionId: session.id })} title="Open in editor" />}
-            <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} />
-          </div>
-          {isMd && mdView ? (
-            <div ref={mdBody} className="md file-md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
-          ) : (
-            <pre className="mono" ref={preBody}>{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>
-          )}
-        </div>
-      ) : (
-        <div className="file-list">
-          {entries.map((e) => (
+      <div className="file-list">
+        {entries.map((e) => {
+          const rel = e.path.replace(/\\/g, '/');
+          return (
             <button
               key={e.path}
               type="button"
-              className="file-row"
-              onClick={async () => {
-                if (e.isDir) setPath(e.path.replace(/\\/g, '/'));
-                else void openFile(e.path);
+              className={`file-row ${!e.isDir && previewing === rel ? 'active' : ''}`}
+              title={e.isDir ? undefined : `Open ${rel} in the file preview`}
+              onClick={() => {
+                if (e.isDir) navigate(rel);
+                else openFile(rel);
               }}
             >
               <Icon name={e.isDir ? 'folder' : 'file'} size={13} />
               <span className="file-path">{e.name}</span>
               {!e.isDir && e.size !== undefined && <span className="muted small">{e.size > 1024 ? `${(e.size / 1024).toFixed(1)} KB` : `${e.size} B`}</span>}
             </button>
-          ))}
-        </div>
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 }

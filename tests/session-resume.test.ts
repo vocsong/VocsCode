@@ -26,6 +26,7 @@ import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
 import { PiAdapter } from '../src/main/harness/pi';
 import { ClaudeAdapter } from '../src/main/harness/claude';
 import { NativeAdapter } from '../src/main/harness/native';
+import { deferred } from '../src/main/util/async';
 
 type AnyRecord = Record<string, any>;
 
@@ -268,6 +269,7 @@ const REFS_BY_HARNESS: Record<HarnessId, HarnessRef> = {
   cursor: { cursorAgentId: 'cursor-agent-1' },
   pi: { piSessionFile: '/sessions/pi/pi-session-1.jsonl' },
   acp: { acpSessionId: 'acp-session-1' },
+  antigravity: { acpSessionId: 'antigravity-session-1' },
   native: { nativeHistory: true }
 };
 
@@ -300,6 +302,35 @@ function makeManagerDeps(store: SessionStore): SessionManagerDeps {
 }
 
 describe('session resume persistence', () => {
+  it('revokes memory access at Stop and does not let a retired runtime mint another grant', async () => {
+    const home = path.join(tmpRoot, 'memory-runtime');
+    const store = new SessionStore(home);
+    await store.load();
+    const meta = persistedMeta('native', {});
+    meta.cwd = meta.config.projectRoot = home;
+    await store.upsert(meta);
+    const settings = defaultSettings();
+    settings.mcpDisabledBuiltins = ['gitnexus', 'cua-driver'];
+    let serial = 0;
+    const attach = vi.fn((_id: string) => ({ url: 'http://127.0.0.1:14141/call', token: `test-grant-${++serial}` }));
+    const revoke = vi.fn();
+    const manager = new SessionManager({ ...makeManagerDeps(store), settings: { get: () => settings } as never, memoryServerPath: '/vocs-memory.mjs', memoryGateway: attach, revokeMemoryGateway: revoke });
+    try {
+      await manager.send(meta.id, { text: 'Start one runtime' });
+      const first = mocks.adapterCalls.at(-1)!.ctx;
+      await expect(first.mcpServers()).resolves.toMatchObject([{ def: { id: 'vocs-memory', env: { VOCS_MEMORY_GATEWAY_TOKEN: 'test-grant-1' } } }]);
+      await manager.stop(meta.id);
+      expect(revoke).toHaveBeenCalledExactlyOnceWith(meta.id);
+      await expect(first.mcpServers()).rejects.toThrow(/no longer current/);
+      expect(attach).toHaveBeenCalledTimes(1);
+      await manager.send(meta.id, { text: 'Start another runtime' });
+      await expect(mocks.adapterCalls.at(-1)!.ctx.mcpServers()).resolves.toMatchObject([{ def: { env: { VOCS_MEMORY_GATEWAY_TOKEN: 'test-grant-2' } } }]);
+      expect(attach).toHaveBeenCalledTimes(2);
+    } finally {
+      await manager.stopAll();
+    }
+  });
+
   it('round-trips every harness ref through the store and a fresh manager', async () => {
     const dir = path.join(tmpRoot, 'store-roundtrip');
     const store = new SessionStore(dir);
@@ -311,7 +342,7 @@ describe('session resume persistence', () => {
     // A restart is a brand-new store reading the same on-disk index.
     const freshStore = new SessionStore(dir);
     const loaded = await freshStore.load();
-    expect(loaded).toHaveLength(7);
+    expect(loaded).toHaveLength(Object.keys(REFS_BY_HARNESS).length);
     for (const [harness, ref] of Object.entries(REFS_BY_HARNESS) as [HarnessId, HarnessRef][]) {
       expect(loaded.find((s) => s.config.harness === harness)?.harnessRef).toEqual(ref);
     }
@@ -327,16 +358,102 @@ describe('session resume persistence', () => {
       expect(mocks.adapterCalls[0].ctx.session().harnessRef).toEqual(ref);
     }
   });
+
+  it('keeps automated turns and unsupported modes out of Antigravity dispatch', async () => {
+    const store = new SessionStore(path.join(tmpRoot, 'antigravity-interactive'));
+    await store.load();
+    const meta = persistedMeta('antigravity', REFS_BY_HARNESS.antigravity);
+    await store.upsert(meta);
+    const manager = new SessionManager(makeManagerDeps(store));
+    const control = {
+      operationId: 'test', inputId: 'u_test', beforeStart: vi.fn(), startAllowed: vi.fn(), beforeDispatch: vi.fn()
+    };
+    mocks.adapterCalls.length = 0;
+
+    await expect(manager.runControlled(meta.id, { text: 'Say hello' }, control)).rejects.toThrow('direct user prompts');
+    await expect(manager.goal(meta.id, 'set', { objective: 'Say hello' })).rejects.toThrow('direct user prompts');
+    await expect(manager.setPermissionMode(meta.id, 'yolo' as PermissionMode)).rejects.toThrow('does not offer that permission mode');
+    expect(control.beforeStart).not.toHaveBeenCalled();
+    expect(mocks.adapterCalls).toHaveLength(0);
+    expect(await manager.transcript(meta.id)).toEqual([]);
+    expect(manager.get(meta.id)).toMatchObject({ config: { permissionMode: 'ask' }, status: 'idle' });
+  });
+
+  it('holds Antigravity turn admission until a permission change is saved', async () => {
+    const store = new SessionStore(path.join(tmpRoot, 'antigravity-permissions'));
+    await store.load();
+    const meta = persistedMeta('antigravity', REFS_BY_HARNESS.antigravity);
+    await store.upsert(meta);
+    const manager = new SessionManager(makeManagerDeps(store));
+    const writing = deferred<void>();
+    const finish = deferred<void>();
+    const upsert = store.upsert.bind(store);
+    vi.spyOn(store, 'upsert').mockImplementationOnce(async (value) => {
+      writing.resolve();
+      await finish.promise;
+      return upsert(value);
+    });
+    mocks.adapterCalls.length = 0;
+
+    const change = manager.setPermissionMode(meta.id, 'plan');
+    await writing.promise;
+    try {
+      await expect(manager.send(meta.id, { text: 'While permissions change' })).rejects.toThrow('permission update');
+      expect(mocks.adapterCalls).toHaveLength(0);
+      expect(await manager.transcript(meta.id)).toEqual([]);
+    } finally {
+      finish.resolve();
+    }
+    expect((await change).config.permissionMode).toBe('plan');
+    await manager.send(meta.id, { text: 'After permissions change' });
+    expect(mocks.adapterCalls).toHaveLength(1);
+    expect(mocks.adapterCalls[0].ctx.permissionMode()).toBe('plan');
+  });
+
+  it.each(['accept-edits', 'auto', 'full-auto'] as const)('saves Antigravity %s and dispatches the next turn under it', async (mode) => {
+    const store = new SessionStore(path.join(tmpRoot, `antigravity-${mode}`));
+    await store.load();
+    const meta = persistedMeta('antigravity', REFS_BY_HARNESS.antigravity);
+    await store.upsert(meta);
+    const manager = new SessionManager(makeManagerDeps(store));
+    mocks.adapterCalls.length = 0;
+
+    expect((await manager.setPermissionMode(meta.id, mode)).config.permissionMode).toBe(mode);
+    await manager.send(meta.id, { text: 'Go' });
+    expect(mocks.adapterCalls).toHaveLength(1);
+    expect(mocks.adapterCalls[0].ctx.permissionMode()).toBe(mode);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
 // 2. Per-adapter resume seams / stale-resume fallback.
 // ---------------------------------------------------------------------------------------------
 
-describe('codex app-server stale resume', () => {
+describe('codex app-server resume', () => {
   beforeEach(() => {
     mocks.spawnChildren.length = 0;
     mocks.spawnCalls.length = 0;
+  });
+
+  it('accepts restored usage while the resume handshake is pending', async ({ onTestFinished }) => {
+    const threadId = 'saved-thread';
+    const h = makeAdapterCtx({ harness: 'codex', ref: { codexThreadId: threadId }, runtime: { resolve: () => ({ name: 'codex', path: 'C:/fake/codex.exe' }) } });
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    const server = new FakeJsonRpcServer(child).on('thread/resume', () => {
+      const tokenUsage = {
+        total: { inputTokens: 10, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 0 },
+        last: { totalTokens: 15 }, modelContextWindow: 1000
+      };
+      child.stdout.write(JSON.stringify({ method: 'thread/tokenUsage/updated', params: { threadId, tokenUsage } }) + '\n');
+      return { thread: { id: threadId }, model: 'gpt-5', modelProvider: 'openai', reasoningEffort: null };
+    });
+    const adapter = new CodexAppServerAdapter(h.ctx);
+    onTestFinished(() => adapter.dispose());
+    await adapter.start();
+
+    expect(server.requests.some((r) => r.method === 'thread/start')).toBe(false);
+    expect(h.events.filter((e) => e.type === 'usage')).toMatchObject([{ totals: { inputTokens: 10, outputTokens: 5, contextTokens: 15 } }]);
   });
 
   it('warns and starts a fresh thread when thread/resume is rejected', async () => {

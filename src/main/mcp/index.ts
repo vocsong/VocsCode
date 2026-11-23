@@ -3,14 +3,16 @@
  * need to show. The one place that knows about settings, the repo file and the secret store at
  * the same time; adapters only ever see the resolved list through `ctx.mcpServers()`.
  */
-import type { AppSettings, HarnessId, McpBuiltinInfo, McpProjectInfo, McpProjectState, McpServerDef } from '../../shared/types';
+import type { AppSettings, HarnessId, McpBuiltinInfo, McpProjectInfo, McpProjectState, McpRejectedServer, McpServerDef } from '../../shared/types';
 import { MCP_BUILTIN_IDS } from '../../shared/types';
+import { mcpIdIssues } from '../../shared/mcp-ids';
 import { HARNESS_BY_ID } from '../../shared/harness-meta';
+import { resolveIntelligenceSettings } from '../../shared/intelligence';
 import { which } from '../runtime';
 import { builtinEntries, effectiveEntries, effectiveServers, normalizeStdio, resolveVars, type ResolvedServer } from './effective';
 import { globalStores, projectStores, readProjectMcp, readStores } from './file';
 import { GITNEXUS_SERVER_ID, gitnexusBaseDef, gitnexusSharedRoots, isBuiltinServerId, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './gitnexus';
-import { VOCS_MEMORY_SERVER_ID, hasMemoryWiki, memoryServerDef, vocsMemoryBaseDef } from './memory';
+import { MEMORY_GATEWAY_TOKEN_ENV, VOCS_MEMORY_SERVER_ID, hasMemoryWiki, memoryServerDef, vocsMemoryBaseDef } from './memory';
 import { CUA_SERVER_ID, cuaBaseDef, cuaDefState } from './cua';
 
 export * from './effective';
@@ -38,6 +40,8 @@ export interface McpHostDeps {
   memoryServerPath?: string;
   /** userData path, so the memory server can recall session history (search.db). */
   memoryUserData?: string;
+  /** Mints this session's gateway endpoint and capability token; null when the gateway is off. */
+  memoryGateway?: (sessionId: string) => { url: string; token: string } | null;
 }
 
 export interface SessionScope {
@@ -49,10 +53,27 @@ export interface SessionScope {
   harness: HarnessId;
   /** The worktree's branch name, when the session runs in one (branch-scope wiki pages). */
   branch?: string;
+  /** The session being started, so a per-session capability can be bound to it. */
+  sessionId?: string;
+  /** Managed Mission runs do not inherit the desktop's memory grants. */
+  managed?: boolean;
+  /** Legacy memory cannot enforce a read-only capability. */
+  readOnly?: boolean;
 }
 
 function stateFor(settings: AppSettings, projectRoot: string): McpProjectState {
   return settings.mcpProjectState?.[projectRoot] ?? {};
+}
+
+/**
+ * User and repository servers that are never loaded for their name, with the reason the MCP surfaces
+ * show. The repo list is the file as written, including an entry under a built-in's exact id.
+ */
+export function rejectedServers(globals: readonly McpServerDef[], repo: readonly McpServerDef[]): McpRejectedServer[] {
+  return [
+    ...mcpIdIssues(repo).map((issue): McpRejectedServer => ({ id: issue.id, scope: 'repo', reason: issue.reason })),
+    ...mcpIdIssues(globals).map((issue): McpRejectedServer => ({ id: issue.id, scope: 'global', reason: issue.reason }))
+  ];
 }
 
 /** The app-shipped built-in servers, with the installed binary preferred over `npx`. */
@@ -121,12 +142,21 @@ async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps
       materialized = await sharedGitnexusDef(scope, def, deps);
       if (!materialized) continue;
     } else if (def.id === VOCS_MEMORY_SERVER_ID) {
-      if (!(await hasMemoryWiki(scope))) continue;
-      materialized = memoryServerDef(scope, def, { memoryServerPath: deps.memoryServerPath, memoryUserData: deps.memoryUserData, log: deps.log });
+      if (scope.managed || !deps.memoryServerPath) continue;
+      let memoryGateway: ReturnType<NonNullable<McpHostDeps['memoryGateway']>> = null;
+      if (resolveIntelligenceSettings(scope.settings.intelligence).gateway) {
+        // An unavailable or revoked gateway may never turn a scoped server into a direct disk reader.
+        memoryGateway = scope.sessionId ? (deps.memoryGateway?.(scope.sessionId) ?? null) : null;
+        if (!memoryGateway) continue;
+      } else if (scope.readOnly || !(await hasMemoryWiki(scope))) continue;
+      materialized = memoryServerDef(scope, def, { memoryServerPath: deps.memoryServerPath, memoryUserData: deps.memoryUserData, memoryGateway, log: deps.log });
       if (!materialized) continue;
     }
     const resolved = await resolveVars(materialized, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });
     if (resolved.missing.length) deps.log?.('warn', `mcp ${def.id}: no value for ${resolved.missing.join(', ')}`);
+    // The capability token is a secret like any `${VAR}`-resolved value: an adapter that flattens
+    // its MCP config into argv must hand it over through the environment instead.
+    if (def.id === VOCS_MEMORY_SERVER_ID && resolved.def.env?.[MEMORY_GATEWAY_TOKEN_ENV]) resolved.secretEnvKeys.push(MEMORY_GATEWAY_TOKEN_ENV);
     out.push({ ...resolved, def: normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }) });
   }
   return out;
@@ -145,6 +175,7 @@ export async function resolveForSession(scope: SessionScope, deps: McpHostDeps):
   const repoDefs = repo.servers.filter((d) => !isBuiltinServerId(d.id));
   const chosen = effectiveServers({ global: globals, repo: repoDefs, state, harness: scope.harness, support, builtin: builtinDefs(scope.settings) });
   if (repo.error) deps.log?.('warn', `mcp: ${repo.file} could not be used: ${repo.error}`);
+  for (const r of rejectedServers(globals, repo.servers)) deps.log?.('warn', `mcp ${r.id} (${r.scope}) not loaded: ${r.reason}`);
   const out: ResolvedServer[] = await resolveBuiltins(scope, state, deps);
   for (const def of chosen) {
     const resolved = await resolveVars(def, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });
@@ -168,6 +199,7 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
   const registry = await readGitnexusRegistry(realGitnexusHome());
   const indexed = isGitnexusIndexed(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd });
   const wiki = await hasMemoryWiki(scope);
+  const usesGateway = resolveIntelligenceSettings(scope.settings.intelligence).gateway;
   const globalDisabled = scope.settings.mcpDisabledBuiltins ?? [];
   const cua = cuaDefState(scope.settings);
   const builtin: McpBuiltinInfo[] = defs.map((def) => {
@@ -175,12 +207,15 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
     if (def.id === VOCS_MEMORY_SERVER_ID) {
       return {
         def,
-        enabled: injectable && !off && wiki,
+        enabled: injectable && !off && !scope.managed && (usesGateway || (!scope.readOnly && wiki)),
         disabledGlobally: globalDisabled.includes(def.id),
         shared: false,
-        indexed: wiki,
+        indexed: !scope.managed && (usesGateway || wiki),
         claimed: canClaimBuiltins(scope.harness),
-        note: wiki ? 'Reads .vocs-code/wiki in this project.' : 'No project wiki yet — generate one from the Knowledge panel.'
+        note: scope.managed ? 'Not available to managed Mission sessions.'
+          : usesGateway ? 'Uses the app’s scoped memory gateway; a wiki is optional.'
+          : scope.readOnly ? 'Legacy memory is not available in Plan mode.'
+          : wiki ? 'Legacy mode: reads .vocs-code/wiki in this project.' : 'No project wiki yet — generate one from the Knowledge panel.'
       };
     }
     if (def.id === CUA_SERVER_ID) {
@@ -218,6 +253,7 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
     state,
     builtin,
     detected,
+    rejected: rejectedServers(globals, repo.servers),
     effective: [
       ...builtinEntries({ builtin: defs, state, globalDisabled, harness: scope.harness, support }),
       ...effectiveEntries({ global: globals, repo: repoDefs, state, harness: scope.harness, support, builtin: defs })

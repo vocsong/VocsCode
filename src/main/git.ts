@@ -1,7 +1,9 @@
 /** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees plus the /pr and /merge GitHub flow. */
-import { promises as fs } from 'node:fs';
+import fsCallback, { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitComment, GitCommentList, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSetupStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
+import { DEFAULT_BRANCH_PREFIX, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
+import { parseGitHubPullRequestUrl } from '../shared/github-pull-request';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitComment, GitCommentList, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestDetail, GitPullRequestList, GitSetupStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import type { Logger } from './log';
 import { runCapture, which, type CaptureResult } from './runtime';
@@ -36,6 +38,15 @@ const MAX_UNTRACKED_DIFF_BYTES = 500_000;
 const MAX_SINGLE_FILE_DIFF_BYTES = 2_000_000;
 /** A PR reflection reads a bounded patch, not the whole change; the commits carry the rest. */
 const MAX_PR_DIFF_CHARS = 12_000;
+
+/**
+ * Lines in a file's text the way `git diff --numstat` counts them: the final newline ends the last
+ * line rather than starting another, so an untracked file reads the same as once it is added.
+ */
+function lineCount(text: string): number {
+  if (!text) return 0;
+  return text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+}
 
 /** Reads a file only when it is small enough; a multi-GB artifact is never buffered just to be sized. */
 async function readCapped(file: string, maxBytes: number): Promise<string | undefined> {
@@ -112,7 +123,7 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
     let additions = c?.additions;
     if (st === '?' && additions === undefined) {
       const content = await readCapped(path.join(root, p), MAX_UNTRACKED_COUNT_BYTES);
-      if (content !== undefined) additions = content.split('\n').length;
+      if (content !== undefined) additions = lineCount(content);
     }
     files.push({ path: p, status: st, staged: x !== ' ' && x !== '?', additions, deletions: c?.deletions });
   }
@@ -577,13 +588,15 @@ export async function gitCreateGitHubRepo(cwd: string, name: string, isPrivate: 
 
 type PrResult = { ok: boolean; url?: string; output?: string };
 
-const noGh = (): PrResult => ({ ok: false, output: 'GitHub CLI (gh) is required — install it and run `gh auth login`.' });
+const GH_REQUIRED = 'GitHub CLI (gh) is required — install it and run `gh auth login`.';
+const noGh = (): PrResult => ({ ok: false, output: GH_REQUIRED });
 
-async function gh(cwd: string, args: string[], timeoutMs = 120_000): Promise<CaptureResult> {
+async function gh(cwd: string | undefined, args: string[], timeoutMs = 120_000): Promise<CaptureResult> {
   const r = await runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
   // gh talks to GitHub: a timeout or a non-zero exit here is the reason a PR badge or list is missing.
-  if (timedOut(r)) gitLog('warn', `gh ${describeArgs(args)} in ${cwd} timed out after ${timeoutMs}ms`);
-  else if (r.code !== 0) gitLog('debug', `gh ${describeArgs(args)} in ${cwd} exited ${r.code ?? 'null'}: ${failure(r).split('\n')[0].slice(0, 300)}`);
+  const location = cwd ? ` in ${cwd}` : '';
+  if (timedOut(r)) gitLog('warn', `gh ${describeArgs(args)}${location} timed out after ${timeoutMs}ms`);
+  else if (r.code !== 0) gitLog('debug', `gh ${describeArgs(args)}${location} exited ${r.code ?? 'null'}: ${failure(r).split('\n')[0].slice(0, 300)}`);
   return r;
 }
 
@@ -699,7 +712,7 @@ export async function gitPrMap(cwd: string): Promise<{ prs?: Record<string, GitP
   }
 }
 
-const PR_LIST_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,author,createdAt,updatedAt,mergedAt,reviewDecision,additions,deletions,body,labels,comments';
+const PR_DETAILS_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,author,createdAt,updatedAt,mergedAt,reviewDecision,additions,deletions,body,labels,comments';
 
 const isoMs = (v: unknown): number | undefined => {
   if (typeof v !== 'string' || !v) return undefined;
@@ -723,44 +736,68 @@ function ghCommentCount(v: unknown): number | undefined {
   return typeof v === 'number' ? v : undefined;
 }
 
+function ghPullRequest(p: Record<string, unknown>): GitPullRequest | undefined {
+  if (!p || typeof p.number !== 'number' || typeof p.url !== 'string') return;
+  const state = p.state === 'MERGED' || p.state === 'CLOSED' ? p.state : 'OPEN';
+  const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
+  const pr: GitPullRequest = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
+  if (p.isDraft === true) pr.isDraft = true;
+  if (typeof p.headRefName === 'string') pr.headRefName = p.headRefName;
+  if (typeof p.baseRefName === 'string') pr.baseRefName = p.baseRefName;
+  if (author?.login || author?.name) pr.author = author.login || author.name;
+  const created = isoMs(p.createdAt), updated = isoMs(p.updatedAt), merged = isoMs(p.mergedAt);
+  if (created !== undefined) pr.createdAt = created;
+  if (updated !== undefined) pr.updatedAt = updated;
+  if (merged !== undefined) pr.mergedAt = merged;
+  if (typeof p.reviewDecision === 'string' && p.reviewDecision) pr.reviewDecision = p.reviewDecision;
+  if (typeof p.additions === 'number') pr.additions = p.additions;
+  if (typeof p.deletions === 'number') pr.deletions = p.deletions;
+  if (typeof p.body === 'string') pr.body = p.body;
+  const labels = ghLabels(p.labels);
+  if (labels) pr.labels = labels;
+  const comments = ghCommentCount(p.comments);
+  if (comments !== undefined) pr.comments = comments;
+  return pr;
+}
+
 /** Pulls the repo's pull requests from GitHub (`gh pr list`, every state, newest first) for the Git panel's PR view. */
 export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> {
   const fetchedAt = Date.now();
   if (!ghBin()) return { prs: [], fetchedAt, ghMissing: true };
   const root = await gitRoot(cwd);
   if (!root) return { prs: [], fetchedAt, error: 'Not a git repository' };
-  const r = await gh(root, ['pr', 'list', '--state', 'all', '--limit', '100', '--json', PR_LIST_FIELDS], 30_000);
+  const r = await gh(root, ['pr', 'list', '--state', 'all', '--limit', '100', '--json', PR_DETAILS_FIELDS], 30_000);
   if (r.code !== 0 || r.truncated) return { prs: [], fetchedAt, error: r.truncated ? 'gh pr list response was truncated' : (r.stderr || r.stdout).trim() || 'gh pr list failed' };
   try {
     const list = JSON.parse(r.stdout.trim()) as Record<string, unknown>[];
     const prs: GitPullRequest[] = [];
     for (const p of list) {
-      if (typeof p.number !== 'number' || typeof p.url !== 'string') continue;
-      const state = p.state === 'MERGED' || p.state === 'CLOSED' ? p.state : 'OPEN';
-      const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
-      const pr: GitPullRequest = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
-      if (p.isDraft === true) pr.isDraft = true;
-      if (typeof p.headRefName === 'string') pr.headRefName = p.headRefName;
-      if (typeof p.baseRefName === 'string') pr.baseRefName = p.baseRefName;
-      if (author?.login || author?.name) pr.author = author.login || author.name;
-      const created = isoMs(p.createdAt), updated = isoMs(p.updatedAt), merged = isoMs(p.mergedAt);
-      if (created !== undefined) pr.createdAt = created;
-      if (updated !== undefined) pr.updatedAt = updated;
-      if (merged !== undefined) pr.mergedAt = merged;
-      if (typeof p.reviewDecision === 'string' && p.reviewDecision) pr.reviewDecision = p.reviewDecision;
-      if (typeof p.additions === 'number') pr.additions = p.additions;
-      if (typeof p.deletions === 'number') pr.deletions = p.deletions;
-      if (typeof p.body === 'string') pr.body = p.body;
-      const labels = ghLabels(p.labels);
-      if (labels) pr.labels = labels;
-      const comments = ghCommentCount(p.comments);
-      if (comments !== undefined) pr.comments = comments;
-      prs.push(pr);
+      const pr = ghPullRequest(p);
+      if (pr) prs.push(pr);
     }
     prs.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || b.number - a.number);
     return { prs, fetchedAt };
   } catch {
     return { prs: [], fetchedAt, error: 'gh pr list returned something that is not JSON' };
+  }
+}
+
+/** The URL supplies the repo even when the transcript's checkout has been removed. */
+export async function gitPullRequest(url: string): Promise<GitPullRequestDetail> {
+  const link = parseGitHubPullRequestUrl(url);
+  if (!link) return { error: 'Invalid GitHub pull request link.' };
+  if (!ghBin()) return { error: GH_REQUIRED };
+  const r = await gh(undefined, ['pr', 'view', link.url, '--json', PR_DETAILS_FIELDS], 30_000);
+  if (r.code !== 0 || r.truncated) {
+    return { error: r.truncated ? 'gh pr view response was truncated' : (r.stderr || r.stdout).trim() || 'gh pr view failed' };
+  }
+  try {
+    const data = JSON.parse(r.stdout.trim()) as Record<string, unknown>;
+    const pr = ghPullRequest(data);
+    if (!pr || pr.number !== link.number) return { error: 'GitHub did not return the linked pull request.' };
+    return { pr, comments: ghComments(data.comments) };
+  } catch {
+    return { error: 'gh pr view returned something that is not JSON' };
   }
 }
 
@@ -866,6 +903,13 @@ export async function gitBranches(cwd: string): Promise<{ current?: string; bran
   return { current, branches };
 }
 
+/** A directory's real long path for comparison: links resolved, 8.3 short names expanded, case folded on Windows. */
+async function canonicalDir(dir: string): Promise<string> {
+  const resolved = path.resolve(dir);
+  const real = await new Promise<string>((resolve) => fsCallback.realpath.native(resolved, (error, out) => resolve(error ? resolved : out)));
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
+
 export async function gitWorktrees(cwd: string): Promise<{ current: string; worktrees: GitWorktreeInfo[] }> {
   const current = path.resolve(cwd);
   const r = await git(cwd, ['worktree', 'list', '--porcelain']);
@@ -912,6 +956,26 @@ export function parseUpstreamTrack(track: string): { ahead?: number; behind?: nu
   };
 }
 
+async function readBranchOverviewRefs(root: string) {
+  const refs = await git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)%09%(objectname)']);
+  const rows = refs.stdout.split('\n').filter(Boolean).map((line) => line.split('\t'));
+  const base = pickBase(rows.map(([name]) => name).filter(Boolean));
+  const baseCommit = rows.find(([name]) => name === base)?.at(-1)?.trim();
+  const counts = new Map<string, { ahead: number; behind: number }>();
+  if (refs.code === 0 && !refs.truncated && !timedOut(refs) && rows.length > 1 && baseCommit && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(baseCommit)) {
+    // Git can walk all tips in one process. Join by object ID (not ref name) so a branch
+    // advanced between the two reads cannot lend its new counts to the older snapshot.
+    const batch = await git(root, ['for-each-ref', 'refs/heads', `--format=%(objectname)%09%(ahead-behind:${baseCommit})`]);
+    if (batch.code === 0 && !batch.truncated && !timedOut(batch)) {
+      for (const line of batch.stdout.split('\n')) {
+        const match = line.trimEnd().match(/^(\S+)\t(\d+) (\d+)$/);
+        if (match) counts.set(match[1], { ahead: Number(match[2]), behind: Number(match[3]) });
+      }
+    }
+  }
+  return { refs, rows, base, counts };
+}
+
 /**
  * GitHub-style branch overview for the Branches panel: age, ahead/behind vs base, merged state, worktree binding.
  * The list is the repo's LOCAL branches (`refs/heads`), which a server-side delete never removes — a branch
@@ -921,29 +985,31 @@ export function parseUpstreamTrack(track: string): { ahead?: number; behind?: nu
 export async function gitBranchesOverview(cwd: string): Promise<GitBranchOverview> {
   const root = await gitRoot(cwd);
   if (!root) return { isRepo: false, branches: [], worktrees: [] };
-  const [wt, refs, pr] = await Promise.all([
+  const [wt, { refs, rows, base, counts: batchCounts }, pr] = await Promise.all([
     gitWorktrees(cwd),
-    git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)']),
+    readBranchOverviewRefs(root),
     gitPrMap(cwd)
   ]);
   if (timedOut(refs)) {
     return { isRepo: true, branches: [], worktrees: wt.worktrees, error: 'git for-each-ref timed out — the branch list could not be loaded. Refresh to retry.' };
   }
-  const names = refs.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
-  const base = pickBase(names);
+  // Git prints each worktree's real long path; the session's cwd may be a Windows 8.3 short name
+  // (`RUNNER~1`), another case, or a link to it. Compare real paths, or no branch reads as current.
+  const here = await canonicalDir(wt.current);
+  const currentWorktree = (await Promise.all(wt.worktrees.map(async (w) => (await canonicalDir(w.path)) === here ? w : undefined))).find(Boolean);
   const wtByBranch = new Map(wt.worktrees.filter((w) => w.branch).map((w) => [w.branch!, w.path]));
-  const lines = refs.stdout.split('\n').filter(Boolean);
-  const branches: GitBranchOverviewItem[] = new Array(lines.length);
+  const branches: GitBranchOverviewItem[] = new Array(rows.length);
   let next = 0;
-  // A repo can have hundreds of local refs; keep their child processes bounded.
-  await Promise.all(Array.from({ length: Math.min(4, lines.length) }, async () => {
-    while (next < lines.length) {
+  // Older Git or unobserved tips fall back to individual, bounded probes.
+  await Promise.all(Array.from({ length: Math.min(4, rows.length) }, async () => {
+    while (next < rows.length) {
       const index = next++;
-      const [name, date, subject, upstream, track] = lines[index].split('\t');
+      const row = rows[index];
+      const [name, date, subject, upstream, track] = row;
       const counts =
         name === base
           ? undefined
-          : await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
+          : batchCounts.get(row.at(-1)!.trim()) ?? await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
               if (r.code !== 0 || r.truncated || timedOut(r)) return undefined;
               const m = r.stdout.trim().match(/^(\d+)\s+(\d+)$/);
               return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : undefined;
@@ -955,7 +1021,7 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
       const up = parseUpstreamTrack(track ?? '');
       const item: GitBranchOverviewItem = {
         name,
-        current: Boolean(wt.worktrees.find((w) => w.branch === name && path.resolve(w.path) === wt.current)),
+        current: currentWorktree?.branch === name,
         isBase: name === base,
         lastCommitAt: date ? Number(date) * 1000 : undefined,
         lastCommitSubject: subject || undefined,
@@ -1027,13 +1093,7 @@ export async function gitFetchPrune(cwd: string): Promise<{ ok: boolean; output:
   return { ok: r.code === 0, output: (r.stderr || r.stdout).trim() || 'Up to date.' };
 }
 
-export function slugify(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40) || 'session';
-}
+export const slugify = branchSlug;
 
 /** Keeps the app's `.vocs-code/` folder (worktrees, project wiki) out of git status. */
 export async function excludeVocsCodeDir(root: string): Promise<void> {
@@ -1046,22 +1106,66 @@ export async function excludeVocsCodeDir(root: string): Promise<void> {
   }
 }
 
-/** Creates an isolated worktree under <root>/.vocs-code/worktrees/<slug> on a new branch, at `startPoint` when given. */
-export async function createWorktree(projectRoot: string, slug: string, startPoint?: string): Promise<{ path: string; branch: string }> {
+const pathKey = (value: string): string => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+const within = (root: string, target: string): boolean => {
+  const relative = path.relative(pathKey(root), pathKey(target));
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+};
+
+/**
+ * The repository root a worktree for `projectRoot` is created under, or null when there is no
+ * repository. Throws unless that root IS `confine` and every write `git worktree add` makes stays
+ * inside it: the worktree folder (no existing `.vocs-code` link out), the new branch and Git's
+ * worktree bookkeeping (no git directory elsewhere, as in a linked worktree or submodule).
+ */
+export async function confinedWorktreeRoot(projectRoot: string, confine: string): Promise<string | null> {
   const root = await gitRoot(projectRoot);
+  if (!root) return null;
+  const real = await fs.realpath(root);
+  if (pathKey(real) !== pathKey(await fs.realpath(confine))) throw new Error('The worktree would be created outside this project.');
+  const dirs = await git(real, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir']);
+  const gitDirs = dirs.code === 0 && !dirs.truncated ? dirs.stdout.split(/\r?\n/).filter(Boolean) : [];
+  if (gitDirs.length !== 2) throw new Error('Could not resolve the repository git directory.');
+  for (const dir of gitDirs) if (!within(real, await fs.realpath(dir))) throw new Error('The repository keeps its git directory outside this project.');
+  for (const dir of [path.join(real, '.vocs-code'), path.join(real, '.vocs-code', 'worktrees')]) {
+    const stat = await fs.lstat(dir).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (!stat) break;
+    if (!stat.isDirectory() || stat.isSymbolicLink() || pathKey(await fs.realpath(dir)) !== pathKey(dir)) throw new Error('The worktree folder links outside this project.');
+  }
+  return real;
+}
+
+/**
+ * Creates an isolated worktree under <root>/.vocs-code/worktrees/<slug> on a new branch
+ * `<branchPrefix>/<slug>` (`vocscode/` by default), at `startPoint` when given. With `confineTo`,
+ * every write stays inside that folder (see confinedWorktreeRoot), checked again after creating
+ * the parent folders; a worktree that resolves elsewhere anyway is removed with its branch.
+ */
+export async function createWorktree(projectRoot: string, slug: string, opts: { startPoint?: string; branchPrefix?: string; confineTo?: string } = {}): Promise<{ path: string; branch: string }> {
+  const { startPoint, confineTo } = opts;
+  const prefix = opts.branchPrefix ?? DEFAULT_BRANCH_PREFIX;
+  if (normalizeBranchPrefix(prefix) !== prefix) throw new Error(`Invalid branch prefix: ${prefix}`);
+  const root = confineTo ? await confinedWorktreeRoot(projectRoot, confineTo) : await gitRoot(projectRoot);
   if (!root) throw new Error('Worktrees require a git repository.');
   const base = path.join(root, '.vocs-code', 'worktrees');
   await fs.mkdir(base, { recursive: true });
+  if (confineTo && await confinedWorktreeRoot(root, confineTo) !== root) throw new Error('The worktree would be created outside this project.');
   await excludeVocsCodeDir(root);
   // Pick a name whose directory AND branch are both free (a removed worktree leaves its branch behind).
   const branchExists = async (b: string) => (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`])).code === 0;
   let name = slug;
   let i = 1;
-  while ((await exists(path.join(base, name))) || (await branchExists(`vocscode/${name}`))) name = `${slug}-${++i}`;
+  while ((await exists(path.join(base, name))) || (await branchExists(`${prefix}/${name}`))) name = `${slug}-${++i}`;
   const wtPath = path.join(base, name);
-  const branch = `vocscode/${name}`;
+  const branch = `${prefix}/${name}`;
   const r = await git(root, ['worktree', 'add', '-b', branch, wtPath, ...(startPoint ? [startPoint] : [])], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
+  if (confineTo && !within(root, await fs.realpath(wtPath))) {
+    const removed = await git(root, ['worktree', 'remove', '--force', wtPath]);
+    const deleted = await git(root, ['branch', '-D', branch]);
+    if (removed.code !== 0 || deleted.code !== 0) gitLog('warn', `Could not fully remove an unconfined worktree ${wtPath} (${branch}): ${failure(removed.code !== 0 ? removed : deleted)}`);
+    throw new Error('The worktree was created outside this project and has been removed.');
+  }
   return { path: wtPath, branch };
 }
 
@@ -1080,14 +1184,14 @@ async function gitBranchHead(root: string, branch: string): Promise<string | nul
 /**
  * Creates the worktree a fork runs in: a new branch starting at the source checkout's HEAD, so
  * committed work carries over. A source whose folder is already gone (an archived session) still
- * has its kept branch to start from; with neither, the repository's own HEAD stands in. Returns
- * null when the project has no repository at all.
+ * has its kept branch to start from; with neither, the repository's own HEAD stands in. The new
+ * branch takes the source session's prefix. Returns null when the project has no repository at all.
  */
-export async function createForkWorktree(projectRoot: string, slug: string, source: { cwd: string; branch: string }): Promise<{ path: string; branch: string } | null> {
+export async function createForkWorktree(projectRoot: string, slug: string, source: { cwd: string; branch: string; branchPrefix?: string }): Promise<{ path: string; branch: string } | null> {
   const root = await gitRoot(projectRoot);
   if (!root) return null;
   const start = (await gitHeadCommit(source.cwd)) ?? (await gitBranchHead(root, source.branch)) ?? undefined;
-  return createWorktree(root, slug, start);
+  return createWorktree(root, slug, { startPoint: start, branchPrefix: source.branchPrefix });
 }
 
 /** Creates a worktree under .vocs-code/worktrees for an EXISTING branch (new-session-on-branch flow). */
@@ -1163,4 +1267,49 @@ export async function worktreeInfo(cwd: string): Promise<{ branch?: string; main
   const common = r.stdout.trim();
   const branch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
   return { branch, mainRoot: path.dirname(path.resolve(cwd, common)) };
+}
+
+/**
+ * Provenance for the exact checkout. Origin and root commit are hints, not permission to link
+ * projects. A Git common directory is identity evidence only for a registered worktree, not for an
+ * arbitrary folder containing a `.git` pointer or a directory below the checkout root.
+ */
+export async function gitIdentityFacts(cwd: string): Promise<{ origin?: string; rootCommit?: string; head?: string; commonDir?: string }> {
+  const real = await fs.realpath(cwd).catch(() => null);
+  const root = real ? await gitRoot(real) : null;
+  if (!real || !root || pathKey(real) !== pathKey(root)) return {};
+  const out: { origin?: string; rootCommit?: string; head?: string; commonDir?: string } = {};
+  const [remote, head, common, registered] = await Promise.all([
+    git(real, ['config', '--get', 'remote.origin.url']),
+    gitHeadCommit(real),
+    git(real, ['rev-parse', '--path-format=absolute', '--git-common-dir']),
+    git(real, ['worktree', 'list', '--porcelain', '-z'])
+  ]);
+  if (remote.code === 0 && !remote.truncated && remote.stdout.trim()) out.origin = remote.stdout.trim();
+  if (head && /^[0-9a-f]{40,64}$/i.test(head)) out.head = head;
+  const dir = common.stdout.trim();
+  if (common.code === 0 && !common.truncated && path.isAbsolute(dir) && registered.code === 0 && !registered.truncated && registered.stdout.split('\0').some(
+    (field) => field.startsWith('worktree ') && pathKey(field.slice(9)) === pathKey(real)
+  )) {
+    const canonical = await fs.realpath(dir).catch(() => null);
+    if (canonical) out.commonDir = canonical;
+  }
+  if (out.head) {
+    // A shallow clone's oldest commit is only its graft boundary, which differs per clone.
+    const shallow = await git(cwd, ['rev-parse', '--is-shallow-repository']);
+    if (shallow.code === 0 && shallow.stdout.trim() === 'false') {
+      const roots = await git(cwd, ['rev-list', '--max-parents=0', 'HEAD']);
+      const first = roots.code === 0 && !roots.truncated ? roots.stdout.trim().split('\n').filter(Boolean).sort()[0] : undefined;
+      if (first && /^[0-9a-f]{40,64}$/i.test(first)) out.rootCommit = first;
+    }
+  }
+  return out;
+}
+
+/** The full SHA a revision names in this repository, or null when it does not name a commit. */
+export async function gitResolveCommit(cwd: string, revision: string): Promise<string | null> {
+  if (!/^[0-9a-f]{7,64}$/i.test(revision)) return null;
+  const r = await git(cwd, ['rev-parse', '--verify', '--quiet', `${revision}^{commit}`]);
+  const sha = r.stdout.trim();
+  return r.code === 0 && /^[0-9a-f]{40,64}$/i.test(sha) ? sha : null;
 }

@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { HarnessId, McpInspectResult, McpServerDef, McpTransport } from '../../../shared/types';
 import { HARNESSES } from '../../../shared/harness-meta';
+import { mcpIdProblem } from '../../../shared/mcp-ids';
 import { invoke } from '../api';
 import { Badge, Button, Field, Icon, Spinner } from './ui';
 
@@ -92,10 +93,11 @@ export function McpServerForm({ value, portableOnly, takenIds = [], sessionId, o
     return def;
   }, [draft, envText, headerText, portableOnly]);
 
-  const idTaken = !!built.id && takenIds.some((x) => x !== value.id && x === built.id);
+  // Names compare the way harnesses fold them into tool names, so `Vocs.Memory` is the built-in's.
+  const idProblem = built.id ? mcpIdProblem(built.id, takenIds.filter((x) => x !== value.id)) : null;
   const idValid = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(built.id);
   const complete = built.transport === 'stdio' ? !!built.command : /^https?:\/\//i.test(built.url ?? '');
-  const error = !built.id ? 'A name is required.' : !idValid ? 'Use letters, digits, dot, dash or underscore.' : idTaken ? 'That name is already used here.' : !complete ? (built.transport === 'stdio' ? 'A command is required.' : 'An http:// or https:// URL is required.') : null;
+  const error = !built.id ? 'A name is required.' : !idValid ? 'Use letters, digits, dot, dash or underscore.' : idProblem ? idProblem : !complete ? (built.transport === 'stdio' ? 'A command is required.' : 'An http:// or https:// URL is required.') : null;
 
   const test = async () => {
     setProbing(true);

@@ -1,10 +1,12 @@
 /** In-app auto-update state machine (issue #198). Packaged builds check GitHub Releases through
- * electron-updater; this module owns only the transitions, so `npm test` drives it against a fake
+ * electron-updater. This module owns the schedule and transitions, so tests drive it against a fake
  * facade with no electron, keychain or settings coupling. The electron-updater adapter lives in
  * ./updater-electron and is wired up in index.ts. */
 import type { UpdateProgress, UpdateState } from '../shared/types';
 import type { Logger } from './log';
 
+const STARTUP_CHECK_DELAY_MS = 5_000;
+const CHECK_INTERVAL_MS = 60 * 60_000;
 /** A check that produces neither terminal event within this window is treated as an error. */
 const CHECK_TIMEOUT_MS = 30_000;
 /** A download with no progress event for this long is treated as stuck (real feeds emit frequent ticks). */
@@ -46,6 +48,8 @@ export class UpdateService {
    *  the state a newer phase already produced. */
   private epoch = 0;
   private timer: NodeJS.Timeout | null = null;
+  private nextCheck: NodeJS.Timeout | undefined;
+  private shuttingDown = false;
 
   constructor(private readonly deps: UpdaterDeps) {
     if (!deps.isPackaged) return;
@@ -58,6 +62,7 @@ export class UpdateService {
       this.endPhase();
       this.deps.log('info', `update available: ${version}`);
       this.setState({ status: 'available', version, progress: undefined, error: undefined, deferred: undefined });
+      this.download();
     });
     deps.facade.onNotAvailable(() => {
       if (this.phase !== 'checking') return;
@@ -85,9 +90,21 @@ export class UpdateService {
     return this.state;
   }
 
-  /** Startup or user-initiated check. A no-op while another check or a download is running. */
+  startChecking(): void {
+    if (!this.deps.isPackaged || this.nextCheck || this.shuttingDown) return;
+    this.scheduleCheck(STARTUP_CHECK_DELAY_MS);
+  }
+
+  stopChecking(): void {
+    this.shuttingDown = true;
+    clearTimeout(this.nextCheck);
+    this.nextCheck = undefined;
+    if (this.phase === 'checking') this.endPhase();
+  }
+
+  /** Scheduled or user-initiated check. Keep an in-flight or downloaded update in place. */
   check(): UpdateState {
-    if (!this.deps.isPackaged || this.phase !== 'none') return this.state;
+    if (!this.deps.isPackaged || this.shuttingDown || this.phase !== 'none' || this.state.status === 'restart-pending') return this.state;
     const at = ++this.epoch;
     this.phase = 'checking';
     this.setState({ status: 'checking', version: undefined, progress: undefined, error: undefined, deferred: undefined });
@@ -139,6 +156,14 @@ export class UpdateService {
     if (this.deps.isAnySessionLive()) return;
     this.setState({ ...this.state, deferred: undefined });
     this.deps.log('info', 'all sessions idle; update prompt re-offered');
+  }
+
+  private scheduleCheck(delay: number): void {
+    this.nextCheck = setTimeout(() => {
+      this.scheduleCheck(CHECK_INTERVAL_MS);
+      this.check();
+    }, delay);
+    this.nextCheck.unref();
   }
 
   /** A promise resolution whose phase already moved on (event arrived first) is a no-op. */

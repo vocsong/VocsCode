@@ -273,8 +273,15 @@ describe('Production Mission runtime boundary', () => {
     expect(changes).toHaveBeenCalled();
     expect(sessions.get(mission.leadSessionId)?.config.model).toEqual({ provider: 'fixture', model: 'frontier' });
   });
+  it('dispatches on first-reply model attestation, which the adapter then enforces', async () => {
+    readiness = { ...readiness, modelAvailable: undefined, modelAttestation: 'first_response' };
+    const mission = await start();
+    await wait(() => expect(sent).toHaveBeenCalledTimes(1));
+    expect(runtime.service.get(mission.id)).toMatchObject({ status: 'running', phase: 'planning' });
+  });
   it.each([
     ['missing handshake', { ready: false, reason: 'Gate not loaded' }],
+    ['unobserved model availability', { modelAvailable: undefined }],
     ['wrong observed model', { model: { provider: 'fixture', model: 'cheaper' } }],
     ['unobserved model', { model: undefined }],
     ['missing exact credentials', { connectionAvailable: false }],

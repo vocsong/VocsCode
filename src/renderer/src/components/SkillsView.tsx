@@ -1,6 +1,8 @@
 /** Skills page: browses and manages each harness's global skills (SKILL.md folders). */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillHarness, SkillInfo, SkillRootInfo } from '../../../shared/types';
+import { HOUSEKEEP_SKILL } from '../../../shared/built-in-skills';
+import { canHousekeepHere, openHousekeep } from '../housekeep';
 import { invoke } from '../api';
 import { basename, relTime } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
@@ -8,6 +10,8 @@ import { useStore } from '../store';
 import { askConfirm, Badge, Button, Dropdown, EmptyState, Field, Icon, MenuItem, Modal, Spinner } from './ui';
 
 const TONE: Record<SkillHarness, 'amber' | 'green' | 'purple'> = { claude: 'amber', codex: 'green', pi: 'purple' };
+const BUILTIN_HOUSEKEEP = 'builtin:housekeep';
+const housekeepDocHtml = () => renderMarkdown(HOUSEKEEP_SKILL);
 
 export function SkillsView() {
   const setView = useStore((s) => s.setView);
@@ -73,6 +77,9 @@ export function SkillsView() {
   }, [roots, harness]);
 
   const q = query.trim().toLowerCase();
+  const showBuiltin = canHousekeepHere() && (!q || `housekeep sessions built-in ${HOUSEKEEP_SKILL.toLowerCase()}`.includes(q));
+  const builtinSelected = showBuiltin && (!selectedPath || selectedPath === BUILTIN_HOUSEKEEP);
+  const builtinHtml = useMemo(housekeepDocHtml, []);
   const activeRoot = useMemo(() => (roots ?? []).find((r) => r.harness === harness), [roots, harness]);
   const activeSkills = useMemo(() => {
     if (!activeRoot) return [];
@@ -163,6 +170,12 @@ export function SkillsView() {
       )}
       <div className="skills-body">
         <div className="skills-list">
+          {showBuiltin && (
+            <div className="skill-root">
+              <div className="skill-root-head">Vocs Code · Built-in</div>
+              <Button size="sm" variant={builtinSelected ? 'subtle' : 'ghost'} icon="archive" onClick={() => setSelectedPath(BUILTIN_HOUSEKEEP)}>Housekeep sessions</Button>
+            </div>
+          )}
           {roots === null && (
             <div className="skills-loading">
               <Spinner size={16} /> Scanning skill folders…
@@ -202,7 +215,18 @@ export function SkillsView() {
           )}
         </div>
         <div className="skills-preview">
-          {selected ? (
+          {builtinSelected ? (
+            <>
+              <div className="skills-preview-head">
+                <Icon name="archive" size={14} />
+                <span className="skills-preview-name">housekeep</span>
+                <Badge tone="purple">Built-in</Badge>
+                <span className="spacer" />
+                <Button size="sm" onClick={() => openHousekeep()}>Run /housekeep</Button>
+              </div>
+              <div className="md file-md skills-md" dangerouslySetInnerHTML={{ __html: builtinHtml }} />
+            </>
+          ) : selected ? (
             <>
               <div className="skills-preview-head">
                 <Icon name="puzzle" size={14} />

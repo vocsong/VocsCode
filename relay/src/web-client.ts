@@ -9,6 +9,7 @@
 import { clientFinish, createHello, generateKeyIdentity, importAesKey, lockIdentity, openBlob, openFrame, openSealedToKey, pairingTokenContext, publicOf, sealFrame, sign, tokenProofPayload, type AnyIdentity, type Identity, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
 import type { MirrorIndex, MirrorSnapshot } from '../../src/shared/mirror';
 import type { RemoteDeviceInfo } from '../../src/shared/types';
+import { assertEndpointUrl, credentialFetch, endpointSocketUrl } from '../../src/shared/endpoint-policy';
 
 /** One browser↔computer pairing: relay URL, relay credential, host trust anchor, own keys. */
 export interface WebCredentials {
@@ -86,7 +87,9 @@ export const LEGACY_CREDENTIALS_KEY = 'vocs-web-credentials';
  *  Worker forwards `/app`, `/v1` and `/ws` to the relay), so the default is the page's own origin;
  *  `override` is the `?relay=` escape hatch for pointing a build at another deployment. */
 export function relayBaseFor(origin: string, override?: string | null): string {
-  return (override?.trim() || origin).replace(/\/$/, '');
+  const base = (override?.trim() || origin).replace(/\/$/, '');
+  assertEndpointUrl(base);
+  return base;
 }
 
 interface InnerFrame {
@@ -200,6 +203,7 @@ export class RelayClient {
     try {
       old = JSON.parse(raw) as WebCredentials & { identity: Identity };
       if (!old.webDeviceId || !old.hostDeviceId || !old.identity?.sig?.priv) throw new Error('incomplete');
+      assertEndpointUrl(old.relayBase);
     } catch {
       legacy.remove(LEGACY_CREDENTIALS_KEY);
       return null;
@@ -291,8 +295,8 @@ export class RelayClient {
   /** Enters a pairing code, claims it with a fresh identity, polls until the desktop approves.
    *  The new pairing is added and made active. */
   async pair(input: { relayBase: string; code: string; deviceName: string }): Promise<WebCredentials> {
-    const doFetch = this.deps.fetchImpl ?? fetch;
-    const base = input.relayBase.replace(/\/$/, '');
+    const doFetch = credentialFetch(this.deps.fetchImpl);
+    const base = relayBaseFor(input.relayBase);
     const code = input.code.trim().toUpperCase();
     const identity = await (this.deps.newIdentity ?? generateKeyIdentity)();
     const claim = await doFetch(`${base}/v1/pair/claim`, {
@@ -318,7 +322,7 @@ export class RelayClient {
     return body.filter((h): h is OwnerHost => !!h && typeof h === 'object' && typeof (h as OwnerHost).deviceId === 'string' && typeof (h as OwnerHost).name === 'string');
   }
 
-  /** Adds the computer that clicked Connect with GitHub, known here only by its connect hash. */
+  /** Adds the computer that clicked Connect with Vocs, known here only by its connect hash. */
   async addComputer(relayBase: string, nonceHash: string): Promise<void> {
     await this.ownerFetch(relayBase, '/v1/owner/enroll-grant', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nonceHash }) });
   }
@@ -332,7 +336,7 @@ export class RelayClient {
   /** Asks a registered, online computer to pair this browser: no code to carry. The computer still
    *  shows the request and the user clicks Allow there; then this completes like a code pairing. */
   async pairWithHost(input: { relayBase: string; hostDeviceId: string; deviceName: string }): Promise<WebCredentials> {
-    const base = input.relayBase.replace(/\/$/, '');
+    const base = relayBaseFor(input.relayBase);
     const identity = await (this.deps.newIdentity ?? generateKeyIdentity)();
     const response = await this.ownerFetch(base, '/v1/owner/pair-request', {
       method: 'POST',
@@ -348,8 +352,8 @@ export class RelayClient {
    *  the landing its session cookie; the landing replaces any Authorization with the relay
    *  credential, so none is sent from here. */
   private async ownerFetch(relayBase: string, path: string, init: RequestInit = {}): Promise<Response> {
-    const doFetch = this.deps.fetchImpl ?? fetch;
-    const response = await doFetch(`${relayBase.replace(/\/$/, '')}${path}`, init);
+    const doFetch = credentialFetch(this.deps.fetchImpl);
+    const response = await doFetch(`${relayBaseFor(relayBase)}${path}`, init);
     if (response.ok) return response;
     const body = (await response.json().catch(() => ({}))) as { error?: unknown };
     if (response.status === 401) throw new Error('sign in with GitHub first');
@@ -361,7 +365,7 @@ export class RelayClient {
 
   /** Polls a claimed pairing until the desktop decides, then stores the new pairing. */
   private async awaitApproval(base: string, code: string, pollToken: string, identity: AnyIdentity): Promise<WebCredentials> {
-    const doFetch = this.deps.fetchImpl ?? fetch;
+    const doFetch = credentialFetch(this.deps.fetchImpl);
     const now = this.deps.now ?? Date.now;
     const deadline = now() + 5 * 60_000;
     for (;;) {
@@ -399,7 +403,7 @@ export class RelayClient {
     // attempts cannot leak connections, and drop frames buffered for the abandoned session.
     this.disconnect();
     const attempt = this.connectAttempt;
-    const base = creds.relayBase.replace(/\/$/, '');
+    const base = relayBaseFor(creds.relayBase);
     // The socket URL carries a 30-second single-use ticket, bought with an access token in a
     // header: neither credential ever appears in a URL.
     const response = await this.relayFetch(creds, '/v1/ws/ticket', { method: 'POST' });
@@ -407,7 +411,7 @@ export class RelayClient {
     const { ticket } = (await response.json()) as { ticket?: unknown };
     if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) throw new Error('invalid socket ticket');
     if (attempt !== this.connectAttempt || this.creds !== creds) throw new Error('connection superseded');
-    const wsBase = base.replace(/^http/, 'ws');
+    const wsBase = endpointSocketUrl(base).replace(/\/$/, '');
     const url = `${wsBase}/v1/ws/client?device=${encodeURIComponent(creds.webDeviceId)}&ticket=${encodeURIComponent(ticket)}`;
     let socket: SimpleSocket;
     const handleDrop = () => {
@@ -445,10 +449,21 @@ export class RelayClient {
   }
 
   private onMessage(raw: string): void {
-    let msg: { t?: string; payload?: unknown };
+    let msg: { t?: string; payload?: unknown; host?: unknown };
     try {
-      msg = JSON.parse(raw) as { t?: string; payload?: unknown };
+      msg = JSON.parse(raw) as { t?: string; payload?: unknown; host?: unknown };
     } catch {
+      return;
+    }
+    // The relay says this computer is not (or no longer) connected: a handshake would only time
+    // out and invokes would hang, so end the session now. Closing the socket takes the normal drop
+    // path, which tells the transport to show the computer offline (or its mirror) and retry.
+    if (msg.t === 'host.gone' && typeof msg.host === 'string' && msg.host === this.creds?.hostDeviceId) {
+      if (this.hsWaiter) {
+        this.hsWaiter.reject(new Error('the computer is offline'));
+        this.hsWaiter = null;
+      }
+      this.socket?.close();
       return;
     }
     if (msg.t === 'hs' && this.hsWaiter) {
@@ -553,8 +568,8 @@ export class RelayClient {
    *  device key signs it, and only that signature buys an access token. A pairing the relay no
    *  longer knows is forgotten. */
   private async refreshAccess(creds: WebCredentials): Promise<string> {
-    const doFetch = this.deps.fetchImpl ?? fetch;
-    const base = creds.relayBase.replace(/\/$/, '');
+    const doFetch = credentialFetch(this.deps.fetchImpl);
+    const base = relayBaseFor(creds.relayBase);
     const query = `?device=${encodeURIComponent(creds.webDeviceId)}`;
     const challengeRes = await doFetch(`${base}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${creds.webToken}` } });
     if (challengeRes.status === 401) {
@@ -580,8 +595,8 @@ export class RelayClient {
   /** An authenticated relay REST call as one pairing's device. A 401 means the access token
    *  expired or was dropped: prove possession once more and retry, then report what the relay says. */
   private async relayFetch(creds: WebCredentials, path: string, init: RequestInit = {}): Promise<Response> {
-    const doFetch = this.deps.fetchImpl ?? fetch;
-    const url = `${creds.relayBase.replace(/\/$/, '')}${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(creds.webDeviceId)}`;
+    const doFetch = credentialFetch(this.deps.fetchImpl);
+    const url = `${relayBaseFor(creds.relayBase)}${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(creds.webDeviceId)}`;
     for (let attempt = 0; ; attempt++) {
       const token = await this.accessToken(creds);
       const res = await doFetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
@@ -653,6 +668,7 @@ export class RelayClient {
 }
 
 export function browserSocket(url: string, onMessage: (raw: string) => void, onClose: () => void): SimpleSocket {
+  assertEndpointUrl(url, 'ws');
   const ws = new WebSocket(url);
   const queued: string[] = [];
   let closed = false;

@@ -13,7 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { SettingsView } from '../src/renderer/src/components/SettingsView';
 import { useStore } from '../src/renderer/src/store';
-import type { AppSettings, HarnessAvailability, HarnessId, HarnessUpdate } from '../src/shared/types';
+import type { AppSettings, HarnessAvailability, HarnessId, HarnessUpdate, ModelInfo } from '../src/shared/types';
+import { searchSettings } from '../src/renderer/src/settings-catalog';
 
 const baseSettings = {
   theme: 'system',
@@ -83,12 +84,139 @@ beforeEach(() => {
     value: () => ({ matches: false, addEventListener: () => undefined, removeEventListener: () => undefined })
   });
   respond();
-  useStore.setState({ availability, settings: { ...baseSettings } as AppSettings, toasts: [] });
+  useStore.setState({ availability, settings: { ...baseSettings } as AppSettings, modelCatalog: {}, toasts: [] });
 });
 
 afterEach(async () => {
   await act(async () => {
     cleanup();
+  });
+});
+
+const oldModels: ModelInfo[] = [{ id: 'old-model', provider: 'test', displayName: 'Old model' }];
+const newModels: ModelInfo[] = [
+  { id: 'new-model', provider: 'test', displayName: 'New model' },
+  { id: 'another-model', provider: 'test', displayName: 'Another model' }
+];
+type ModelResponse = { models: ModelInfo[]; error?: string };
+function respondModels(handler: (harness: HarnessId) => Promise<ModelResponse>): void {
+  const fallback = invokeMock.getMockImplementation()!;
+  invokeMock.mockImplementation((channel: string, payload?: { harness: HarnessId }) => {
+    if (channel === 'harness:models') return handler(payload!.harness);
+    return fallback(channel);
+  });
+}
+function modelCalls(): unknown[][] {
+  return invokeMock.mock.calls.filter(([channel]) => channel === 'harness:models');
+}
+
+describe('harness model catalog refresh', () => {
+  it('is discoverable in Settings search', () => {
+    expect(searchSettings('refresh models')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ section: 'providers', topic: expect.objectContaining({ anchor: 'providers-logins' }) })
+    ]));
+  });
+
+  it('does not probe models, check updates or install when opening Providers or refreshing logins', async () => {
+    await openProviders();
+    expect(screen.getByRole('button', { name: 'Refresh Claude Agent SDK models' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Refresh Codex (app-server) models' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Refresh Pi models' })).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Refresh logins' })));
+    expect(modelCalls()).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'harness:checkUpdates' || channel === 'harness:install' || channel.startsWith('session:'))).toHaveLength(0);
+    expect(invokeMock).toHaveBeenCalledWith('harness:availability', { refresh: true });
+  });
+
+  it.each([
+    ['claude', 'Claude Agent SDK'], ['pi', 'Pi'], ['codex', 'Codex (app-server)']
+  ] as const)('refreshes %s on demand and replaces the shared composer catalog cache', async (harness, name) => {
+    useStore.setState({ modelCatalog: {
+      [harness]: { models: oldModels, loading: false },
+      'codex-exec': { models: oldModels, loading: false }
+    } });
+    respondModels(async () => ({ models: newModels }));
+    await openProviders();
+    expect(modelCalls()).toHaveLength(0);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: `Refresh ${name} models` })));
+
+    const expectedHarnesses = harness === 'codex' ? ['codex', 'codex-exec'] : [harness];
+    // An explicit refresh must bypass main's 7-day catalog cache, or it would only replay it.
+    expect(modelCalls().map(([, payload]) => payload)).toEqual(expectedHarnesses.map((id) => ({ harness: id, refresh: true })));
+    for (const id of expectedHarnesses as HarnessId[]) {
+      expect(useStore.getState().modelCatalog[id]).toEqual({ models: newModels, loading: false });
+    }
+    expect(screen.getByText(new RegExp(`${name.replace(/[()]/g, '\\$&')}: 2 models`))).toBeTruthy();
+    expect(useStore.getState().toasts.at(-1)).toMatchObject({ kind: 'success', text: expect.stringContaining(`${name}: 2 models`) });
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'harness:install' || channel === 'harness:checkUpdates' || channel.startsWith('session:'))).toHaveLength(0);
+  });
+
+  it.each(['rejection', 'response'] as const)('reports a %s failure in the row and toast, preserves the cache, then retries', async (failure) => {
+    useStore.setState({ modelCatalog: { pi: { models: oldModels, loading: false } } });
+    let attempts = 0;
+    respondModels(async () => {
+      attempts++;
+      if (attempts === 1) {
+        if (failure === 'rejection') throw new Error('catalog offline');
+        return { models: [], error: 'catalog offline' };
+      }
+      return { models: newModels };
+    });
+    await openProviders();
+    const button = screen.getByRole('button', { name: 'Refresh Pi models' });
+    await act(async () => fireEvent.click(button));
+    expect(screen.getByText(/Could not refresh.*Pi.*catalog offline/)).toBeTruthy();
+    expect(useStore.getState().toasts.at(-1)).toMatchObject({ kind: 'error', text: expect.stringContaining('catalog offline') });
+    expect(useStore.getState().modelCatalog.pi).toMatchObject({ models: oldModels, loading: false, error: 'catalog offline' });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => fireEvent.click(button));
+    expect(modelCalls()).toHaveLength(2);
+    expect(screen.queryByText(/catalog offline/)).toBeNull();
+    expect(screen.getByText('Pi: 2 models')).toBeTruthy();
+    expect(useStore.getState().modelCatalog.pi).toEqual({ models: newModels, loading: false });
+    expect(useStore.getState().toasts.at(-1)).toMatchObject({ kind: 'success' });
+  });
+
+  it('reports a Codex exec catalog failure even when the app-server refresh succeeded', async () => {
+    useStore.setState({ modelCatalog: { 'codex-exec': { models: oldModels, loading: false } } });
+    respondModels(async (harness) => harness === 'codex-exec' ? { models: [], error: 'exec unavailable' } : { models: newModels });
+    await openProviders();
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Refresh Codex (app-server) models' })));
+    expect(modelCalls()).toHaveLength(2);
+    expect(screen.getByText(/Could not refresh.*Codex \(exec SDK\).*exec unavailable/)).toBeTruthy();
+    expect(useStore.getState().toasts.at(-1)).toMatchObject({ kind: 'error', text: expect.stringContaining('exec unavailable') });
+    expect(useStore.getState().modelCatalog.codex).toMatchObject({ models: newModels, loading: false });
+    expect(useStore.getState().modelCatalog['codex-exec']).toMatchObject({ models: oldModels, loading: false });
+  });
+
+  it('blocks duplicate refreshes while allowing another row to refresh independently', async () => {
+    let finishPi!: (result: ModelResponse) => void;
+    let finishClaude!: (result: ModelResponse) => void;
+    respondModels((harness) => new Promise((resolve) => {
+      if (harness === 'pi') finishPi = resolve;
+      if (harness === 'claude') finishClaude = resolve;
+    }));
+    await openProviders();
+    const piButton = screen.getByRole('button', { name: 'Refresh Pi models' }) as HTMLButtonElement;
+    const claudeButton = screen.getByRole('button', { name: 'Refresh Claude Agent SDK models' }) as HTMLButtonElement;
+    await act(async () => {
+      fireEvent.click(piButton);
+      fireEvent.click(piButton);
+      fireEvent.click(claudeButton);
+    });
+    expect(modelCalls()).toHaveLength(2);
+    expect(piButton.disabled).toBe(true);
+    expect(claudeButton.disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Refresh Codex (app-server) models' }) as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => finishClaude({ models: newModels }));
+    expect(claudeButton.disabled).toBe(false);
+    expect(piButton.disabled).toBe(true);
+    expect(screen.getByText('Claude Agent SDK: 2 models')).toBeTruthy();
+    await act(async () => finishPi({ models: oldModels }));
+    expect(piButton.disabled).toBe(false);
+    expect(screen.getByText('Pi: 1 model')).toBeTruthy();
+    expect(useStore.getState().modelCatalog.claude?.models).toEqual(newModels);
+    expect(useStore.getState().modelCatalog.pi?.models).toEqual(oldModels);
   });
 });
 
@@ -108,17 +236,21 @@ describe('harness login updates', () => {
     expect(update).toBeTruthy();
   });
 
-  it('installs the newer version, then refreshes the card and the check', async () => {
+  it('rechecks the selected runtime after installation rather than claiming the registry version was installed', async () => {
     await openAndCheck();
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Update to 0.87.1' }));
     });
 
     expect(invokeMock).toHaveBeenCalledWith('harness:install', { id: 'pi' });
-    // The card re-reads availability and re-checks, so the button cannot outlive the update.
+    // This fixture still reports the older selected binary: installer success must not invent
+    // a newer version or drop the offer. Recheck the actual selected runtime without cached probes.
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'harness:availability')).toHaveLength(1);
+    expect(invokeMock).toHaveBeenCalledWith('harness:availability', { refresh: true });
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'harness:checkUpdates')).toHaveLength(2);
-    expect(useStore.getState().toasts.at(-1)?.text).toContain('Updated Pi to 0.87.1');
+    expect(useStore.getState().toasts.at(-1)?.text).toBe('Installer finished for Pi; rechecking the selected runtime.');
+    expect(useStore.getState().availability.pi?.version).toBe('0.85.1');
+    expect(screen.getByRole('button', { name: 'Update to 0.87.1' })).toBeTruthy();
   });
 
   it('keeps the offer and reports the failure when the install fails', async () => {

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import path from 'node:path';
 import { processOwnershipReceipted, retireUnclaimedProcessIntent, type ProcessOwnershipIntent } from './process-ownership';
-import { spawnIndependentWindowsSupervisor } from '../owned-windows-job';
+import { spawnIndependentWindowsSupervisor, WINDOWS_SUPERVISOR_STARTUP_MS } from '../owned-windows-job';
 
 export interface CheckOutcome {
   code: number | null;
@@ -28,6 +28,8 @@ interface CheckProcessOptions {
   windowsJobHelper?: string;
   /** Fsynced host intent; the supervisor publishes proof even after the host's stdio disappears. */
   ownershipIntent?: ProcessOwnershipIntent;
+  /** Bound on the supervisor reaching `ready`; defaults to WINDOWS_SUPERVISOR_STARTUP_MS. */
+  startupTimeoutMs?: number;
   /** Release OS resource reservations only after the root is safely owned and not yet executing. */
   beforeResume?(): Promise<void>;
   quiescent(): void;
@@ -92,8 +94,9 @@ function windowsCheck(options: CheckProcessOptions): OwnedCheckProcess {
     cancel();
     uncertain('Check supervisor did not confirm complete process-tree quiescence');
   };
-  // PowerShell/Add-Type startup is bounded separately from the actual command's timeout.
-  let watchdog = setTimeout(expired, 30_000);
+  // PowerShell/Add-Type startup is bounded separately from the actual command's timeout, and
+  // generously: a cold compile can outlast 30 s, which is not a hung supervisor.
+  let watchdog = setTimeout(expired, options.startupTimeoutMs ?? WINDOWS_SUPERVISOR_STARTUP_MS);
   child.stdin.on('error', () => { /* close/error below determines whether a receipt exists */ });
   child.stdout.on('data', (chunk: Buffer) => {
     pending += chunk.toString('utf8');

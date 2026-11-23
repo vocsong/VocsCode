@@ -1,4 +1,8 @@
+import type { VocsAccountSignInRequest, VocsAccountState } from './vocs-account';
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
+import type { ControlGrantInput, ControlOwnerState } from './control';
+import type { HousekeepInventory, HousekeepOutcome, HousekeepPreview } from './housekeep';
+import type { AntigravityQuota, HarnessSetupStatus, LoginHarnessId } from './harness-setup';
 import type {
   AnalyticsSummary,
   AppInstructionFile,
@@ -17,6 +21,7 @@ import type {
   GitBranchOverview,
   GitCommentList,
   GitIssueList,
+  GitPullRequestDetail,
   GitPullRequestList,
   GitSetupStatus,
   GitSummary,
@@ -58,15 +63,31 @@ import type {
   UserInput
 } from './types';
 import type { AgentClientContext, AgentState } from './agent';
+import type { ChatImportPreview, ChatImportSource } from './chat-import';
 import type { ExecutionRecord } from './analytics/records';
 import type { KnowledgeGraph, KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
+import type { CollectionMember, ContextPacket, IntelligenceSearchResponse, IntelligenceView, MemoryExportBundle, MemoryState, MemoryType } from './intelligence';
 import type { AgentTypeInfo, SubagentRun, SubagentRunSummary } from './subagents';
 import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
 import type { ClaudeAgentFileInfo } from './claude-agent-files';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
+import type { DictationLocalStatus, DictationResult, LocalModelId } from './dictation';
+import type { RemoteTerminalFrame, RemoteTerminalSnapshot } from './remote-terminal';
 import type { CreateMissionRequest, MissionControlRequest, MissionRecord } from './mission';
 import type { MissionCommandRequest } from './mission-command';
+import type { WorkspaceImage } from './image-files';
+import type { ProcessEndResult, ProcessList, ProcessSummary, ProcessTarget } from './processes';
+
+/** Paths are session/workspace-relative, with forward slashes. Incomplete scans cannot pick a file. */
+export type WorkspaceFileResolution =
+  | { status: 'resolved'; path: string }
+  | { status: 'ambiguous'; paths: string[] }
+  | { status: 'missing' }
+  | { status: 'incomplete' };
+
+/** Text previews and their desktop Save action share this UTF-8 byte limit. */
+export const FILE_PREVIEW_MAX_BYTES = 200_000;
 
 /** Readable text exports fail explicitly rather than silently truncating a saved artifact. */
 export const TEXT_EXPORT_MAX_BYTES = 1024 * 1024;
@@ -103,6 +124,8 @@ export interface IpcContract {
   'app:doctor': [void, DoctorReport];
   'app:openExternal': [{ url: string }, void];
   'app:openPath': [{ path: string; sessionId: string }, void];
+  /** Desktop only: shows a local file in the system file manager, even outside the session; never opens it. */
+  'app:showInFolder': [{ path: string; sessionId: string }, { ok: boolean; error?: string }];
   'app:openInEditor': [{ path: string; sessionId: string; line?: number }, { ok: boolean; error?: string }];
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
@@ -130,8 +153,17 @@ export interface IpcContract {
 
   /** The renderer reports the session it is showing; local only, never on the remote surface. */
   'desktop:setFocus': [{ sessionId: string | null }, void];
+  /** The sessions in the panes on screen; local-only, so main can tell whether a finished turn was seen. */
+  'desktop:setVisible': [{ sessionIds: string[] }, void];
   /** The session the desktop is on, for a paired browser to open by default. */
   'desktop:focus': [void, DesktopFocus];
+
+  /** Local desktop owner only; no tokens, URLs or client configuration accepted. */
+  'vocsAccount:get': [void, VocsAccountState];
+  'vocsAccount:signIn': [VocsAccountSignInRequest | void, VocsAccountState];
+  'vocsAccount:cancel': [void, VocsAccountState];
+  'vocsAccount:signOut': [void, VocsAccountState];
+  'vocsAccount:refresh': [void, VocsAccountState];
 
   'settings:get': [void, AppSettings];
   'settings:update': [Partial<AppSettings>, AppSettings];
@@ -156,9 +188,31 @@ export interface IpcContract {
   /** Corrects one model's advertised capabilities; `null` clears that field's override. */
   'models:setOverride': [{ provider: string; model: string; supportsImages: boolean | null }, Record<string, ModelOverride>];
 
-  'harness:availability': [{ id?: HarnessId } | void, Partial<Record<HarnessId, HarnessAvailability>>];
+  /**
+   * Dictation, desktop only: `audio` is a base64 16 kHz mono WAV clip, transcribed by the engine in
+   * settings. Keys stay in main; the renderer never sees one.
+   */
+  'dictation:transcribe': [{ audio: string }, DictationResult];
+  /** Transcription models a provider offers; OpenRouter's list is fetched live. */
+  'dictation:cloudModels': [{ provider: string }, { models: { id: string; label: string }[]; error?: string }];
+  'dictation:status': [void, DictationLocalStatus];
+  /** Downloads the whisper.cpp build and model the saved local settings need; progress is pushed. */
+  'dictation:install': [void, DictationLocalStatus];
+  'dictation:cancelInstall': [void, void];
+  'dictation:removeModel': [{ model: LocalModelId }, DictationLocalStatus];
+  /** Stops the local server now, freeing its GPU memory; the next local clip starts it again. */
+  'dictation:stopLocal': [void, DictationLocalStatus];
+
+  'harness:availability': [{ id?: HarnessId; refresh?: boolean } | void, Partial<Record<HarnessId, HarnessAvailability>>];
+  /** Fresh selected-runtime and dependency checks; no model request and no credentials returned. */
+  'harness:setup': [{ harness: HarnessId }, HarnessSetupStatus];
+  /** Desktop-owner action only. Opens the selected runtime's vendor login in a terminal. */
+  'harness:login': [{ harness: LoginHarnessId; device?: boolean }, { ok: boolean; error?: string }];
+  /** Desktop-owner action only. Returns account quota bars, never credentials or raw CLI output. */
+  'harness:antigravityQuota': [void, AntigravityQuota];
+  /** Served from a 7-day disk cache of the last clean discovery; `refresh` rediscovers now. */
   'harness:models': [
-    { harness: HarnessId; acpAgent?: string; projectRoot?: string },
+    { harness: HarnessId; acpAgent?: string; projectRoot?: string; refresh?: boolean },
     { models: ModelInfo[]; error?: string }
   ];
   'harness:install': [{ id: 'pi' | 'dsh' | 'codex' | 'claude' }, { ok: boolean; log: string }];
@@ -223,6 +277,10 @@ export interface IpcContract {
   'cua:test': [void, McpInspectResult];
   /** Runs Cua Driver's official installer after an explicit confirmation. */
   'cua:install': [void, CuaInstallResult];
+  /** Every process the app started, through any session, terminal or tool, as last sampled. Desktop only. */
+  'processes:list': [void, ProcessList];
+  /** Ends each target and its whole subtree; only processes in the tracked set can be named. Desktop only. */
+  'processes:end': [{ targets: ProcessTarget[] }, ProcessEndResult];
 
   /** Mission control is user-only; model tools have a separate authenticated transport. */
   'missions:list': [void, MissionRecord[]];
@@ -235,6 +293,9 @@ export interface IpcContract {
   'missions:command': [MissionCommandRequest, MissionCommandResponse];
 
   'sessions:list': [void, SessionMeta[]];
+  /** Desktop-only explicit discovery; the renderer never supplies filesystem paths. */
+  'sessions:importList': [{ source: ChatImportSource }, ChatImportPreview];
+  'sessions:import': [{ source: ChatImportSource; ids: string[]; repairOnly?: boolean }, { imported: SessionMeta[]; skipped: number }];
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
@@ -270,9 +331,17 @@ export interface IpcContract {
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
   'sessions:label': [{ id: string; label?: string }, SessionMeta];
   'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean; forceWorktree?: boolean }, SessionMeta];
+  /** Local desktop only; review first, then apply a one-use preview. */
+  'housekeep:preview': [{ protectedIds: string[]; recentDaysOverride?: number }, HousekeepPreview];
+  'housekeep:assess': [{ previewId: string }, HousekeepPreview];
+  'housekeep:apply': [{ previewId: string; ids: string[]; protectedIds: string[] }, HousekeepOutcome[]];
+  /** Local desktop only, read-only, with no renderer-supplied scan paths. */
+  'housekeep:inventory': [void, HousekeepInventory];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];
+  /** The desktop viewed this session: clears "done · not viewed". Local-only. */
+  'sessions:markViewed': [{ id: string }, SessionMeta];
   'sessions:send': [{ id: string; input: UserInput; idempotencyKey?: string }, void];
   /** Replaces a sent message, discards its later transcript items, and runs it again. */
   'sessions:editAndResend': [{ id: string; userItemId: string; input: UserInput }, TranscriptItem[]];
@@ -280,6 +349,7 @@ export interface IpcContract {
   'sessions:stop': [{ id: string }, void];
   'sessions:setModel': [{ id: string; model: ModelRef }, SessionMeta];
   'sessions:setEffort': [{ id: string; effort: EffortLevel }, SessionMeta];
+  'sessions:setFastMode': [{ id: string; enabled: boolean }, SessionMeta];
   'sessions:setPermissionMode': [{ id: string; mode: PermissionMode }, SessionMeta];
   'sessions:compact': [{ id: string }, { ok: boolean; detail?: string }];
   'sessions:clearTranscript': [{ id: string }, void];
@@ -310,7 +380,7 @@ export interface IpcContract {
   /** `relayUrl` is the relay this desktop uses (code.vocs.io unless VOCS_CODE_RELAY_URL is set);
    *  `registered` means this computer already has its own relay credential and needs no secret. */
   'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string; registered: boolean; signInAvailable: boolean }];
-  /** Connect with GitHub: opens the relay's page in the browser to add this computer; no secret. */
+  /** Connect with Vocs: opens the relay's page in the browser to add this computer; no secret. */
   'remote:signIn': [void, RemoteState];
   /** `enrollToken` is needed only for this computer's first registration; the stored one is reused. */
   'remote:enable': [{ enrollToken?: string }, RemoteState];
@@ -325,10 +395,19 @@ export interface IpcContract {
   /** P4: the offline mirror is opt-in; enabling it syncs the existing sessions, disabling clears it. */
   'remote:setMirror': [{ mirror: boolean }, RemoteState];
   'remote:clearAudit': [void, void];
+  /** Local desktop owner only: never in the remote browser manifest or agent invocation origin. */
+  'control:get': [void, ControlOwnerState];
+  'control:enable': [{ enabled: boolean }, ControlOwnerState];
+  'control:grant': [ControlGrantInput, ControlOwnerState];
+  'control:revoke': [{ grantId: string }, ControlOwnerState];
 
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   /** Pre-session probe for a folder the dialog is configuring: worktree isolation needs a git repository. */
   'git:folderIsRepo': [{ projectRoot: string }, { isRepo: boolean }];
+  /** Pre-session probe: the folder's local branches, offered as the new worktree branch's starting point. */
+  'git:folderBranches': [{ projectRoot: string }, { current?: string; branches: string[] }];
+  /** A worktree branch name for the intent of a first prompt: the background model's, or the offline one. */
+  'git:suggestBranchName': [{ prompt: string; model?: ModelRef }, { name: string; source: 'model' | 'prompt' }];
   'git:summary': [{ sessionId: string }, GitSummary];
   /** A lead defaults to the accepted Mission result; a workspace selector is read-only inspection. */
   'git:diff': [{ sessionId: string; path?: string; staged?: boolean; missionWorkspaceId?: string }, { diff: string; error?: string }];
@@ -367,6 +446,8 @@ export interface IpcContract {
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
   /** Pulls the repo's pull requests (all states) from GitHub through gh, for the Git panel's PR view. */
   'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
+  /** Loads the exact GitHub pull request and conversation named by a desktop transcript link. */
+  'git:pullRequest': [{ sessionId: string; url: string }, GitPullRequestDetail];
   /** Pulls the repo's issues (all states) from GitHub through gh, for the Git panel's Issues view. */
   'git:issues': [{ sessionId: string }, GitIssueList];
   /** Pulls one issue's conversation comments through gh, for the Git panel's issue preview. */
@@ -377,7 +458,15 @@ export interface IpcContract {
   /** Mission leads default to integration; tool-file reveals select the explicit lead workspace. */
   'fs:list': [{ sessionId: string; relPath?: string; missionWorkspaceId?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number; missionWorkspaceId?: string }, string[]];
-  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean }];
+  /** Exact file first, then a bounded component-suffix search within the selected workspace. */
+  'fs:resolve': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceFileResolution];
+  /** `binary` comes with empty content. `readOnly` excludes placeholders and protected files from editing. */
+  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean; binary?: boolean; readOnly?: boolean }];
+  /** Desktop Save: replace only existing workspace text that still matches the original read bytes.
+   * Both strings are literal UTF-8 text, including any BOM and line endings. */
+  'fs:writeText': [{ sessionId: string; path: string; content: string; expectedContent: string; missionWorkspaceId?: string }, void];
+  /** An image file as base64 for the Files panel preview; null outside the workspace or for a non-image path. */
+  'fs:readImage': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceImage | null];
 
   /** Layer 2 project knowledge for one session's project: pages, proposals and review state. */
   'knowledge:view': [{ sessionId: string }, KnowledgeView];
@@ -400,6 +489,38 @@ export interface IpcContract {
   /** Deletes one page without tombstoning it; rejecting is what stops a claim returning. */
   'knowledge:delete': [{ sessionId: string; id: string }, KnowledgeView];
 
+  /** Memory records, collections, the graph provider and the gateway for one session's project. */
+  'intelligence:view': [{ sessionId: string }, IntelligenceView];
+  /** Federated, permission-scoped evidence search: the planner the agents' tools use, for the panel. */
+  'intelligence:search': [{ sessionId: string; query: string; scope?: 'project' | 'collection'; limit?: number; includeHistorical?: boolean }, IntelligenceSearchResponse];
+  /** A bounded, cited context packet for one question. */
+  'intelligence:compile': [{ sessionId: string; query: string; budgetTokens?: number; scope?: 'project' | 'collection' }, ContextPacket];
+  /** Adds a record by hand: a lesson for the project, or a preference the user declares. */
+  'intelligence:memory:add': [{ sessionId: string; type: MemoryType; title: string; text: string; scope: 'project' | 'personal' }, IntelligenceView];
+  /** A person's decision about one record: verify, activate, mark uncertain, reject, expire or revoke. */
+  'intelligence:memory:decide': [{ sessionId: string; id: string; to: MemoryState; note?: string }, IntelligenceView];
+  /** Deletes a record, its index entry and anything promoted from it; the text is tombstoned. */
+  'intelligence:memory:forget': [{ sessionId: string; id: string }, IntelligenceView];
+  /** Writes a record into the project wiki as a human-reviewed page. */
+  'intelligence:memory:apply': [{ sessionId: string; id: string }, { pageId: string; view: IntelligenceView }];
+  /** This project's own records as a portable bundle; collection and personal memory stay behind. */
+  'intelligence:memory:export': [{ sessionId: string }, MemoryExportBundle];
+  'intelligence:memory:import': [{ sessionId: string; bundle: unknown }, { imported: number; skipped: number; view: IntelligenceView }];
+  /** Session-end reflection, on request: one captured episode plus candidate lessons. */
+  'intelligence:reflect': [{ sessionId: string }, { ok: boolean; captured: number; candidates: number; detail?: string; error?: string }];
+  /** Promotes a wiki page or a record into a collection or personal memory; the caller is the reviewer. */
+  'intelligence:promote': [{ sessionId: string; pageId?: string; recordId?: string; to: 'collection' | 'personal'; collectionId?: string }, IntelligenceView];
+  /** Approves or rejects a promotion an agent asked for. */
+  'intelligence:promotion:decide': [{ sessionId: string; id: string; decision: 'approve' | 'reject' }, IntelligenceView];
+  /** Creates a collection, or replaces an existing one's name, description and membership. */
+  'intelligence:collection:save': [{ sessionId: string; id?: string; name: string; description?: string; members: CollectionMember[] }, IntelligenceView];
+  /** Deletes a collection and revokes everything promoted into it. */
+  'intelligence:collection:delete': [{ sessionId: string; id: string }, IntelligenceView];
+  /** Builds the optional graph index for a project that opted in; never runs on its own. */
+  'intelligence:graph:index': [{ sessionId: string }, IntelligenceView];
+  /** Clears the derived graph cache; authoritative records are untouched. */
+  'intelligence:graph:clear': [{ sessionId: string }, IntelligenceView];
+
   'terminal:list': [void, TerminalInfo[]];
   /** Read-only plain-text screen of one terminal (remote P3.5): never attaches, pauses or resizes it. */
   'terminal:screen': [{ terminalId: string; lines?: number }, { info: TerminalInfo; lines: string[]; seq: number }];
@@ -417,6 +538,13 @@ export interface IpcContract {
   'terminal:close': [{ terminalId: string }, void];
   'terminal:clear': [{ terminalId: string }, void];
   'terminal:rename': [{ terminalId: string; title: string }, TerminalInfo];
+  /** Remote P3.5, served by the remote host (it needs the caller): stream one terminal to this
+   *  browser. Answers the current screen; output follows as `push:remoteTerminal` frames. */
+  'terminal:watch': [{ terminalId: string }, RemoteTerminalSnapshot];
+  'terminal:unwatch': [{ terminalId: string }, void];
+  /** The browser consumed `chars` of streamed output and, with `snapshot`, applied the snapshot of
+   *  that seq; past its window it gets a fresh snapshot once it has acknowledged both. */
+  'terminal:watchAck': [{ terminalId: string; chars: number; snapshot?: number }, void];
 }
 
 export type IpcChannel = keyof IpcContract;
@@ -435,7 +563,9 @@ export const PUSH_CHANNELS = {
   agentState: 'push:agentState',
   remoteState: 'push:remoteState',
   desktopFocus: 'push:desktopFocus',
-  updateState: 'push:updateState'
+  updateState: 'push:updateState',
+  processSummary: 'push:processSummary',
+  dictationStatus: 'push:dictationStatus'
 } as const;
 
 export type PushPayloads = {
@@ -455,7 +585,13 @@ export type PushPayloads = {
   'push:desktopFocus': DesktopFocus;
   /** Remote-only: the view-only policy, pushed to paired browsers over the e2e session. */
   'push:remotePolicy': { viewOnly: boolean };
+  /** Remote-only: output of a terminal this browser watches, sealed to it alone (never broadcast). */
+  'push:remoteTerminal': RemoteTerminalFrame;
   'push:updateState': UpdateState;
+  /** Tracked process counts for the Processes tab badge, sent with every background sample. */
+  'push:processSummary': ProcessSummary;
+  /** Local dictation engine: download progress and server state. Desktop only. */
+  'push:dictationStatus': DictationLocalStatus;
 };
 
 export type PushChannel = keyof PushPayloads;

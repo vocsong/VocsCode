@@ -1,21 +1,31 @@
 /** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrowserWindow, Menu, Notification, app, nativeTheme, screen, shell } from 'electron';
+import { BrowserWindow, Menu, Notification, app, nativeTheme, net, screen, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
+import { sessionTitleText } from '../shared/session-title';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
-import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
+import { DEFAULT_PALETTE, chromeFor, themeSourceFor, type PaletteId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
-import { DesktopFocusTracker } from './desktop-focus';
+import { DesktopFocusTracker, forgetVisibleOnRendererReset } from './desktop-focus';
 import { watchEventLoop } from './diag';
-import { setGitLog } from './git';
+import { gitIdentityFacts, gitResolveCommit, setGitLog } from './git';
 import { PRODUCT_APP_ID, resolveAppIdentity } from './identity';
 import { registerIpc, pushToRenderer } from './ipc';
 import { KnowledgeService } from './knowledge/service';
 import { createKnowledgeCompleter } from './knowledge/llm';
 import { createGitnexusAnchorResolver } from './knowledge/anchors';
+import { IntelligenceGateway, callIntelligenceTool } from './intelligence/gateway';
+import { GraphifyProvider, TESTED_GRAPHIFY_VERSION } from './intelligence/graphify';
+import { GraphScheduler } from './intelligence/graph-scheduler';
+import { graphHead, graphHeadStamp, snapshotCommittedCode } from './intelligence/graph-snapshot';
+import { MemoryStore } from './intelligence/memory-store';
+import { ProjectRegistry } from './intelligence/registry';
+import { IntelligenceService } from './intelligence/service';
+import { resolveIntelligenceSettings } from '../shared/intelligence';
 import { GITNEXUS_SERVER_ID, gitnexusSharedRoots, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './mcp/gitnexus';
 import { GitnexusIndexer } from './mcp/indexer';
 import { createLogger, describeError, type Logger } from './log';
@@ -24,9 +34,13 @@ import { SharedGitnexusServer } from './mcp/shared-server';
 import { RuntimeResolver, which } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
+import { providerSecrets } from './secret-ids';
+import { createVocsAccount, VOCS_ACCOUNT_VAULT_IDS, vocsAccountRealm } from './vocs-account';
 import { SessionManager } from './session-manager';
 import { MissionRuntime } from './mission/runtime';
 import { ordinaryProcessOwnership as ordinaryOwnershipEnabled, ownedWindowsJobProbe } from './owned-windows-job';
+import { createProcessSource } from './process-snapshot';
+import { ProcessTracker } from './process-tracker';
 import { SettingsStore } from './settings';
 import { AppInstructions } from './app-instructions';
 import { SessionStore } from './store';
@@ -37,6 +51,8 @@ import { inheritedUsageOf, pricedModelOf, repricingOf, turnUsageTotals, type For
 import { errorMessage } from './util/async';
 import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
+import { ControlJournal } from './control/journal';
+import { ControlService } from './control/service';
 import { RemoteAudit } from './remote/audit';
 import { RemoteMirror } from './remote/mirror';
 import { relayUrl } from './remote/relay-url';
@@ -131,7 +147,9 @@ async function main(): Promise<void> {
   installAppProcessHandlers();
   const settings = new SettingsStore(userData, logTo);
   await settings.load();
-  const secrets = new SecretStore(userData, logTo);
+  // Remote-access identity and enrollment secrets, and a Vocs sign-in kept on this computer, never
+  // fall back to obfuscated storage on disk: without a real OS keychain they live for this run only.
+  const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll'], keychainOnly: VOCS_ACCOUNT_VAULT_IDS });
   await secrets.load();
   const store = new SessionStore(userData, logTo);
   await store.load();
@@ -164,10 +182,17 @@ async function main(): Promise<void> {
   // Deep search index: derived from transcripts, so it lives beside them and rebuilds itself.
   const search = new SearchIndex(userData, { store, log });
   await search.init();
+  // Assigned further down; a deleted session takes its capability and its unverified memory with it.
+  let intelligence: IntelligenceService | null = null;
+  let intelligenceGateway: IntelligenceGateway | null = null;
   store.hooks = {
     onAppend: (id, item) => search.indexItem(id, item),
     onRewrite: (id) => search.resyncSession(id),
-    onRemove: (id) => search.dropSession(id)
+    onRemove: (id) => {
+      search.dropSession(id);
+      intelligenceGateway?.revoke(id);
+      intelligence?.onSessionRemoved(id);
+    }
   };
 
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
@@ -213,22 +238,24 @@ async function main(): Promise<void> {
 
   // Layer 2 project knowledge: the wiki store, its background jobs, and the digest every new
   // session may be primed with. The MCP server it feeds is a built-in, materialized per session.
+  const transcriptLines = async (sessionId: string): Promise<string[]> => {
+    const items = await store.readTranscript(sessionId);
+    const lines: string[] = [];
+    for (const item of items.slice(-60)) {
+      if (item.kind === 'user') lines.push(`user: ${item.text.slice(0, 500)}`);
+      else if (item.kind === 'assistant' && item.text.trim()) lines.push(`assistant: ${item.text.slice(0, 500)}`);
+      else if (item.kind === 'tool') lines.push(`tool ${item.name} [${item.status}] ${(item.summary ?? item.title ?? '').slice(0, 200)}`);
+      else if (item.kind === 'turn' && item.error) lines.push(`turn ${item.status}: ${item.error.slice(0, 200)}`);
+    }
+    return lines;
+  };
+  const knowledgeCompleter = createKnowledgeCompleter({ settings: () => settings.get(), getSecret: providerSecrets((id) => secrets.get(id)), log });
   const knowledge = new KnowledgeService({
     log,
     settings: () => settings.get(),
-    transcript: async (sessionId) => {
-      const items = await store.readTranscript(sessionId);
-      const lines: string[] = [];
-      for (const item of items.slice(-60)) {
-        if (item.kind === 'user') lines.push(`user: ${item.text.slice(0, 500)}`);
-        else if (item.kind === 'assistant' && item.text.trim()) lines.push(`assistant: ${item.text.slice(0, 500)}`);
-        else if (item.kind === 'tool') lines.push(`tool ${item.name} [${item.status}] ${(item.summary ?? item.title ?? '').slice(0, 200)}`);
-        else if (item.kind === 'turn' && item.error) lines.push(`turn ${item.status}: ${item.error.slice(0, 200)}`);
-      }
-      return lines;
-    },
+    transcript: transcriptLines,
     synth: {
-      completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: (id) => secrets.get(id), log })
+      completer: knowledgeCompleter
     },
     anchors: createGitnexusAnchorResolver({
       // A cold shared server is started lazily; the panel must not wait on it forever.
@@ -241,6 +268,82 @@ async function main(): Promise<void> {
       log
     })
   });
+
+  // The intelligence core: stable project identity and collections, the memory ledger, the local
+  // Graphify cache, and the gateway. Reflection alone can call the configured utility model
+  // when explicitly requested or opted in.
+  const intelligenceDir = path.join(userData, 'intelligence');
+  const projectRegistry = new ProjectRegistry(intelligenceDir, { log, facts: (root) => gitIdentityFacts(root) });
+  const memoryStore = new MemoryStore(intelligenceDir, { log });
+  memoryStore.init();
+  const graphPayload = app.isPackaged ? runtime.resource('graphify-runtime') : runtime.resource('graphify-runtime', `${process.platform}-${process.arch}`);
+  const graphPython = path.join(graphPayload, 'python', process.platform === 'win32' ? 'python.exe' : 'bin/python3');
+  const graphLauncher = path.join(graphPayload, 'launch.py');
+  // Never launch a PATH executable or a saved override in an automatic indexer.
+  const graphCommand = () => existsSync(graphPython) && existsSync(graphLauncher) ? graphPython : null;
+  const graphify = new GraphifyProvider({
+    command: graphCommand,
+    commandArgs: ['-I', '-S', '-B', graphLauncher],
+    requireVersion: TESTED_GRAPHIFY_VERSION,
+    cacheRoot: path.join(intelligenceDir, 'graphs'),
+    headRevision: graphHead,
+    revisionStamp: graphHeadStamp,
+    snapshot: snapshotCommittedCode,
+    timeoutMs: 180_000,
+    log
+  });
+  intelligence = new IntelligenceService({
+    log,
+    settings: () => settings.get(),
+    knowledge,
+    registry: projectRegistry,
+    memory: memoryStore,
+    graph: graphify,
+    sessions: () => store.list().map((s) => ({ id: s.id, title: s.title, projectRoot: s.config.projectRoot, ...(s.archived ? { archived: true } : {}) })),
+    history: (query, sessionIds, limit, opts) => search.recall({ q: query, sessionIds, limit, strict: opts?.strict }),
+    transcript: transcriptLines,
+    completer: knowledgeCompleter,
+    git: {
+      head: async (cwd) => (await gitIdentityFacts(cwd)).head ?? null,
+      resolveCommit: (cwd, revision) => gitResolveCommit(cwd, revision)
+    },
+    gatewayState: () => intelligenceGateway?.state() ?? { listening: false, sessions: 0 }
+  });
+  const intelligenceCore = intelligence;
+  const graphSettings = () => resolveIntelligenceSettings(settings.get().intelligence).graphify;
+  const graphScheduler = new GraphScheduler({
+    enabled: () => graphSettings().enabled && graphCommand() !== null,
+    refresh: async (id, signal) => {
+      const meta = store.get(id);
+      if (!meta || meta.archived || meta.mission) return;
+      await intelligenceCore.refreshGraph({ sessionId: id, projectRoot: meta.config.projectRoot, cwd: meta.cwd }, signal);
+    },
+    onError: (error) => log('debug', `Graphify refresh could not be scheduled: ${describeError(error)}`)
+  });
+  intelligenceGateway = new IntelligenceGateway({
+    log,
+    enabled: () => resolveIntelligenceSettings(settings.get().intelligence).gateway,
+    // Scope comes from live app state. Plans can read but not write, and widening scope only
+    // queues a request. Deleting durable memory is a desktop-owner action.
+    session: (sessionId) => {
+      const meta = store.get(sessionId);
+      if (!meta || meta.archived || meta.mission) return null;
+      return {
+        sessionId,
+        projectRoot: meta.config.projectRoot,
+        cwd: meta.cwd,
+        ...(meta.worktreeBranch ? { branch: meta.worktreeBranch } : {}),
+        actions: meta.config.permissionMode === 'plan' ? ['read'] : ['read', 'record', 'promote'],
+        allowCollections: resolveIntelligenceSettings(settings.get().intelligence).collections
+      };
+    },
+    call: (session, tool, args, signal) => callIntelligenceTool({ intelligence: intelligenceCore, knowledge }, session, tool, args, signal)
+  });
+  await intelligenceGateway.start();
+  const memoryGateway = intelligenceGateway;
+  // Session-end reflection, when the user chose `auto`: archiving a session or merging its PR is the
+  // signal that it is finished. Remembered per session so a restart does not reflect on old ones.
+  const reflectedStates = new Map(store.list().map((session) => [session.id, session.archived === true || session.status === 'merged']));
 
   // Git state can change outside the app (an agent may run `gh` itself). Remember the last state so
   // the existing PR/merge poll becomes a passive indexing hook too, without re-indexing old parked
@@ -257,11 +360,16 @@ async function main(): Promise<void> {
     settings,
     runtime,
     analytics,
-    getSecret: (id) => secrets.get(id),
+    getSecret: providerSecrets((id) => secrets.get(id)),
+    // Read on turn end only, long after the tracker below exists.
+    isViewing: (id): boolean => desktopFocus.isViewing(id),
     sharedGitnexus: () => sharedGitnexus.ensure(),
     gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
     memoryUserData: userData,
+    memoryGateway: (sessionId) => memoryGateway.attach(sessionId),
+    revokeMemoryGateway: (sessionId) => memoryGateway.revoke(sessionId),
+    restrictMemoryGateway: (sessionId) => memoryGateway.restrictToRead(sessionId),
     appInstructions: (harness) => appInstructions.effective(harness),
     withWorkspaceDispatch: (meta, dispatch) => missions ? missions.admission.dispatch(meta.cwd, dispatch) : dispatch(),
     ordinaryProcessOwnership,
@@ -290,6 +398,16 @@ async function main(): Promise<void> {
         }
       }
       for (const id of indexedGitStates.keys()) if (!liveIds.has(id)) indexedGitStates.delete(id);
+      for (const session of list) {
+        const finished = session.archived === true || session.status === 'merged';
+        const before = reflectedStates.get(session.id);
+        reflectedStates.set(session.id, finished);
+        if (!finished || before !== false || session.mission || resolveIntelligenceSettings(settings.get().intelligence).reflection !== 'auto') continue;
+        void intelligenceCore
+          .reflect({ sessionId: session.id, projectRoot: session.config.projectRoot, cwd: session.cwd, ...(session.worktreeBranch ? { branch: session.worktreeBranch } : {}) }, { title: session.title }, 'auto')
+          .catch((e) => log('debug', `intelligence: automatic reflection skipped: ${e instanceof Error ? e.message : String(e)}`));
+      }
+      for (const id of reflectedStates.keys()) if (!liveIds.has(id)) reflectedStates.delete(id);
       for (const hook of sessionsChangedHooks) hook();
       remoteMirror?.notifyIndex();
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
@@ -301,7 +419,12 @@ async function main(): Promise<void> {
       if (!settings.get().notifications) return;
       if (mainWindow?.isFocused()) return;
       if (!Notification.isSupported()) return;
-      const n = new Notification({ title, body: body.slice(0, 200), silent: !settings.get().soundOnApproval });
+      const session = store.get(sessionId);
+      const n = new Notification({
+        title: session ? sessionTitleText({ title, config: session.config }) : title,
+        body: body.slice(0, 200),
+        silent: !settings.get().soundOnApproval
+      });
       n.on('click', () => {
         mainWindow?.show();
         mainWindow?.focus();
@@ -326,11 +449,32 @@ async function main(): Promise<void> {
   const desktopFocus = new DesktopFocusTracker({
     hasSession: (id) => !!sessionsRef.get(id),
     push: (focus) => {
+      graphScheduler.select(focus.sessionId);
       pushAll(PUSH_CHANNELS.desktopFocus, focus);
       remoteMirror?.notifyIndex();
     }
   });
   sessionsChangedHooks.push(() => desktopFocus.reconcile());
+
+  // The Processes panel: every process the app starts, through any session, terminal or tool. It
+  // observes spawns from here on, before a session, server or shell can start one, and saves what
+  // it tracks so the next launch can find anything this run leaves behind.
+  const processes = new ProcessTracker({
+    source: createProcessSource(runtime.resource('processes', 'windows-process-snapshot.ps1')),
+    rootPid: process.pid,
+    internalPids: () => app.getAppMetrics().map((metric) => metric.pid),
+    terminalRoots: () => {
+      const titles = new Map((terminals?.list() ?? []).map((t) => [t.id, t.title]));
+      return (terminals?.activity() ?? []).map((a) => ({ pid: a.pid, sessionId: a.sessionId, terminalId: a.terminalId, title: titles.get(a.terminalId), owned: a.managed || !!a.ownershipNonce }));
+    },
+    // Mission sessions prove quiescence through Jobs of their own; nothing of theirs joins a session Job.
+    adoptable: (owner) => !owner.sessionId || !sessionsRef.get(owner.sessionId)?.mission,
+    registryFile: path.join(userData, 'processes.json'),
+    cpuCount: os.availableParallelism(),
+    onSummary: (summary) => pushAll(PUSH_CHANNELS.processSummary, summary),
+    log
+  });
+  processes.start();
 
   // In-app auto-update (issue #198): packaged builds only — never in dev, and opt-out for e2e runs.
   // The startup check is deferred a beat so the first paint and git reads do not share its network.
@@ -343,10 +487,7 @@ async function main(): Promise<void> {
       log
     });
     sessionsChangedHooks.push(() => updater?.notifySessionsChanged());
-    const startupCheck = setTimeout(() => {
-      updater?.check();
-    }, 5_000);
-    startupCheck.unref?.();
+    updater.startChecking();
     log('info', 'in-app updates enabled (GitHub Releases)');
   } else {
     log('debug', 'in-app updates disabled: unpackaged build' + (process.env.VOCS_CODE_UPDATER_DISABLE ? ' or VOCS_CODE_UPDATER_DISABLE' : ''));
@@ -361,7 +502,11 @@ async function main(): Promise<void> {
     onActivity: (id) => { const missionId = sessionsRef.get(id)?.mission?.missionId; if (missionId) missions?.service.ownedActivityChanged(missionId); },
     ordinaryProcessOwnership,
     windowsJobHelper,
-    push: pushAll,
+    push: (channel, payload) => {
+      pushAll(channel, payload);
+      // A new shell joins its session's process Job at the next sample; make that one soon.
+      if (channel === PUSH_CHANNELS.terminalsChanged) processes.soon();
+    },
     log
   });
   await terminals.load();
@@ -378,7 +523,17 @@ async function main(): Promise<void> {
   const remoteAudit = new RemoteAudit({ dir: userData, log });
   await remoteAudit.load();
   let registryRef: import('./handlers').HandlerRegistry | null = null;
+  const controlJournal = new ControlJournal(userData);
+  await controlJournal.load().catch(() => log('warn', 'External control journal unavailable; automation is disabled.'));
+  const control = new ControlService({
+    journal: controlJournal, sessions: sessionsRef, settings: () => settings.get(),
+    guard: async (resource) => {
+      if (!registryRef?.assertControlResource) throw new Error('Control resource guard is unavailable.');
+      await registryRef.assertControlResource(resource);
+    },
+  });
   remoteHost = new RemoteHost({
+    control,
     registry: () => registryRef!,
     secrets: { get: (key) => secrets.get(key), set: (key, value) => secrets.set(key, value) },
     pushState: () => pushAll(PUSH_CHANNELS.remoteState, remoteHost!.state()),
@@ -388,7 +543,9 @@ async function main(): Promise<void> {
     // Read live: toggling view-only must apply to an already-connected browser without a reconnect.
     viewOnly: () => settings.get().remote?.viewOnly === true,
     // A re-keyed mirror must be re-sealed: the relay copy under the old key was just dropped.
-    onMirrorRotated: () => remoteMirror?.sync()
+    onMirrorRotated: () => remoteMirror?.sync(),
+    // P3.5: a paired browser streams a terminal it watches; it never attaches the desktop's view.
+    terminals: () => terminals
   });
 
   // Offline mirror (P4): the desktop seals transcript snapshots for paired browsers to read while
@@ -402,22 +559,30 @@ async function main(): Promise<void> {
     log
   });
 
+  // Built here, not in the registry, because it needs the OS vault; restored after the window opens.
+  const vocsAccount = createVocsAccount({ realm: vocsAccountRealm(), openExternal: (url) => shell.openExternal(url), vault: secrets, isOnline: () => net.isOnline() });
   const registry = registerIpc({
+    vocsAccount,
     settings,
     secrets,
     sessions,
     missions: missions.service,
+    withWorkspaceWrite: missions.admission.dispatch.bind(missions.admission),
     terminals,
     runtime,
     analytics,
     search,
     knowledge,
+    intelligence: intelligenceCore,
+    revokeMemoryGrants: () => memoryGateway.revokeAll(),
     gitnexusIndexer,
     appInstructions,
     remote: remoteHost,
+    control,
     desktopFocus,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
     updater: updater ?? undefined,
+    processes,
     broadcast: (channel, payload) => {
       webServer?.broadcast(channel, payload);
     },
@@ -447,17 +612,27 @@ async function main(): Promise<void> {
     await webServer.start();
   }
 
+  let lastGraphSettings = JSON.stringify(graphSettings());
   settings.onChange((s) => {
-    currentTheme = s.theme;
+    const nextGraphSettings = JSON.stringify(graphSettings());
+    if (nextGraphSettings !== lastGraphSettings) {
+      lastGraphSettings = nextGraphSettings;
+      void graphify.cancel();
+      graphScheduler.settingsChanged();
+    }
+    currentPalette = s.palette ?? DEFAULT_PALETTE;
     nativeTheme.themeSource = themeSourceFor(s.theme);
-    // Two themes can share one themeSource (Midnight and Abyss are both 'dark'), so nativeTheme
-    // may stay silent on a switch — repaint the caption from the theme id directly.
+    // A palette switch leaves themeSource as it was, so nativeTheme stays silent — repaint the
+    // caption from the palette directly.
     applyChrome();
+    currentUiScale = s.typography?.uiScale ?? 1;
+    applyZoom();
     terminals?.updateSettings(s.terminal);
     ordinaryProcessOwnership(); // Configuring Missions starts the Job helper probe.
   });
-  currentTheme = settings.get().theme;
-  nativeTheme.themeSource = themeSourceFor(currentTheme);
+  currentPalette = settings.get().palette ?? DEFAULT_PALETTE;
+  currentUiScale = settings.get().typography?.uiScale ?? 1;
+  nativeTheme.themeSource = themeSourceFor(settings.get().theme);
 
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
   // buttons over it, so their colors have to follow the theme.
@@ -474,7 +649,9 @@ async function main(): Promise<void> {
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
-  createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused));
+  createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), (contents) => forgetVisibleOnRendererReset(contents, desktopFocus));
+  // A sign-in kept on this computer renews in the background; Settings shows "restoring" meanwhile.
+  void vocsAccount.restore().catch(() => undefined);
 
   log('info', `ready in ${Math.round(process.uptime() * 1000)}ms: ${store.list().length} session(s), ${terminals.list().length} terminal tab(s)`);
 
@@ -486,7 +663,7 @@ async function main(): Promise<void> {
   if (analytics.forkSweepPending) void reconcileForkInheritance(analytics, store, logTo);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused));
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), (contents) => forgetVisibleOnRendererReset(contents, desktopFocus));
   });
   app.on('window-all-closed', () => {
     // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
@@ -498,6 +675,7 @@ async function main(): Promise<void> {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
+    updater?.stopChecking();
     const t0 = Date.now();
     log('info', `quitting: ${sessions?.list().filter((s) => s.status === 'running' || s.status === 'awaiting' || s.status === 'starting').length ?? 0} live session(s), ${terminals?.list().length ?? 0} terminal tab(s)`);
     // Drain debounced session-meta persists after the sessions themselves are stopped. Restored
@@ -521,9 +699,13 @@ async function main(): Promise<void> {
       safe('session drain', drainSessions),
       safe('terminal shutdown', terminals?.shutdown(deadline)),
       safe('search close', search?.close()),
+      safe('intelligence gateway close', intelligenceGateway?.close()),
+      safe('Graphify shutdown', Promise.all([graphScheduler.close(), graphify.cancel()])),
+      safe('memory ledger close', Promise.resolve().then(() => memoryStore.close())),
       safe('web server stop', webServer?.stop()),
       safe('vesta shutdown', registry.shutdown()),
-      safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop()))
+      safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop())),
+      safe('process tracker close', processes.close())
     ]);
     const cap = new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000));
     void Promise.race([shutdown.then(() => false), cap]).then((timedOut) => {
@@ -640,8 +822,8 @@ function reconcileDevShortcut(appRoot: string): void {
 /** Title bar height in CSS pixels; must match --titlebar in styles.css. */
 const TITLEBAR_HEIGHT = 36;
 
-/** The active theme id, so the native caption can follow themes the OS knows nothing about. */
-let currentTheme: ThemeId = 'system';
+/** The active palette, so the native caption can follow colors the OS knows nothing about. */
+let currentPalette: PaletteId = DEFAULT_PALETTE;
 
 /**
  * The one-time sweep for spend a fork inherited from the session it was forked from: it reads every
@@ -694,7 +876,21 @@ async function reconcileForkInheritance(analytics: AnalyticsStore, store: Sessio
 
 /** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
 function chrome(): { color: string; symbolColor: string; height: number } {
-  return { ...chromeFor(currentTheme, nativeTheme.shouldUseDarkColors), height: TITLEBAR_HEIGHT };
+  // themeSource carries the mode, so shouldUseDarkColors is the scheme the renderer resolved too.
+  return { ...chromeFor(currentPalette, nativeTheme.shouldUseDarkColors ? 'dark' : 'light'), height: TITLEBAR_HEIGHT };
+}
+
+/** Settings → Appearance → Interface size, applied as the window's zoom factor. */
+let currentUiScale = 1;
+
+/**
+ * Applies the interface size. The chrome's type is authored in fixed pixels, so zoom is what scales
+ * it without breaking layout; it is reapplied after every load because a reload can reset it.
+ */
+function applyZoom(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const wc = mainWindow.webContents;
+  if (Math.abs(wc.getZoomFactor() - currentUiScale) > 0.001) wc.setZoomFactor(currentUiScale);
 }
 
 /** Repaints the window background and the OS-drawn caption buttons for the active theme. */
@@ -709,7 +905,7 @@ function applyChrome(): void {
   }
 }
 
-function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (focused: boolean) => void): void {
+function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (focused: boolean) => void, watchRenderer: (contents: Electron.WebContents) => void): void {
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
   const icon = appIconPath(appRoot);
@@ -763,10 +959,13 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
   win.on('closed', () => {
     log('debug', 'window closed');
     mainWindow = null;
+    // A closed window shows nothing: a turn that ends now was not seen, whatever the last blur said.
+    onWindowFocus(false);
   });
   // Presence for paired browsers: they follow the desktop only while its window is foregrounded.
   win.on('focus', () => onWindowFocus(true));
   win.on('blur', () => onWindowFocus(false));
+  watchRenderer(win.webContents);
   // A preload failure leaves the renderer with no IPC bridge; the crash, stall and load-failure
   // handlers live with the recovery wiring below.
   win.webContents.on('preload-error', (_e, preloadPath, error) => {
@@ -804,6 +1003,7 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
 
   // A reload drops every xterm instance; stop streaming to it and let paused shells run until it re-attaches.
   win.webContents.on('did-start-loading', () => terminals?.detachAll());
+  win.webContents.on('did-finish-load', applyZoom);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);

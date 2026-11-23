@@ -5,16 +5,20 @@
  * dispatch are exercised; only the child process is fake.
  */
 import { EventEmitter } from 'node:events';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as acp from '@agentclientprotocol/sdk';
-import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
+import type { ApprovalDraft, HarnessAdapter, HarnessContext } from '../src/main/harness/types';
 import type { ResolvedServer } from '../src/main/mcp/effective';
 import type { HarnessRef, PermissionMode, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { emptyUsage } from '../src/main/models/static-models';
 import { defaultSettings } from '../src/main/settings';
-import { AcpAdapter } from '../src/main/harness/acp';
+import { createAdapter } from '../src/main/harness/registry';
+import { ANTIGRAVITY_CANCEL_GRACE_MS, ANTIGRAVITY_PROMPT_QUIET_MS } from '../src/main/harness/acp';
+import { deferred } from '../src/main/util/async';
 
 type AnyRecord = Record<string, any>;
 
@@ -120,7 +124,7 @@ class FakeAcpAgent {
 }
 
 interface Harness {
-  adapter: AcpAdapter;
+  adapter: HarnessAdapter;
   agent: FakeAcpAgent;
   child: AnyRecord;
   ctx: HarnessContext;
@@ -132,8 +136,16 @@ interface Harness {
 }
 
 const created: Harness[] = [];
+const tempDirs: string[] = [];
+const antigravityBin = path.join(os.tmpdir(), 'fake-agy.exe');
+const antigravityModes: acp.SessionModeState = {
+  currentModeId: 'auto',
+  availableModes: [{ id: 'auto', name: 'Auto' }, { id: 'default', name: 'Default' }, { id: 'plan', name: 'Plan' }]
+};
 
-function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode } = {}): Harness {
+function makeHarness(opts: { harness?: 'acp' | 'antigravity'; ref?: HarnessRef; permissionMode?: PermissionMode; cwd?: string } = {}): Harness {
+  const harness = opts.harness ?? 'acp';
+  const cwd = opts.cwd ?? '/proj';
   const child = makeFakeChild();
   spawnState.children.push(child);
   const agent = new FakeAcpAgent(child);
@@ -149,8 +161,8 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     title: 't',
     createdAt: 0,
     updatedAt: 0,
-    config: { harness: 'acp', projectRoot: '/proj', permissionMode: opts.permissionMode ?? 'auto', acpAgent: 'test-agent' },
-    cwd: '/proj',
+    config: { harness, projectRoot: cwd, permissionMode: opts.permissionMode ?? 'auto', acpAgent: 'test-agent' },
+    cwd,
     status: 'idle',
     harnessRef: { ...(opts.ref ?? {}) },
     usage: emptyUsage()
@@ -159,7 +171,10 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     sessionId: meta.id,
     session: () => meta,
     settings: () => settings,
-    runtime: { runtimePaths: { appRuntimeDir: '/tmp' }, resolve: () => null } as never,
+    runtime: {
+      runtimePaths: { appRuntimeDir: '/tmp' },
+      resolve: vi.fn((id: string) => id === 'agy' ? { path: antigravityBin } : null)
+    },
     sessionDir: '/tmp/s1',
     permissionMode: () => meta.config.permissionMode,
     effort: () => undefined,
@@ -189,7 +204,7 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     mcpServers: async () => [],
     ownedMcpIds: () => []
   } as unknown as HarnessContext;
-  const adapter = new AcpAdapter(ctx);
+  const adapter = createAdapter(harness, ctx);
   const h: Harness = { adapter, agent, child, ctx, meta, events, items, approvals, logs };
   created.push(h);
   return h;
@@ -214,12 +229,151 @@ describe('acp adapter', () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
     for (const h of created) {
       await h.adapter.dispose().catch(() => undefined);
       h.child.stdin.destroy();
       h.child.stdout.destroy();
       h.child.stderr.destroy();
     }
+    for (const dir of tempDirs.splice(0)) await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('uses the official Antigravity account launch and resumes an existing session', async () => {
+    const credentialVars = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AGY_ADC_AUTH', 'GOOGLE_APPLICATION_CREDENTIALS'];
+    for (const name of credentialVars) vi.stubEnv(name, 'fake-credential-setting');
+    vi.stubEnv('VOCS_ACP_TEST_MARKER', 'keep');
+    const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask', ref: { acpSessionId: 'agy-saved' } });
+    const getApiKey = vi.fn(async () => 'fake-vault-key');
+    h.ctx.getApiKey = getApiKey;
+    scriptBasics(h, { sessionCapabilities: { resume: {} } });
+    h.agent.on('session/resume', () => ({ modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+
+    await h.adapter.start();
+
+    expect(h.ctx.runtime.resolve).toHaveBeenCalledExactlyOnceWith('agy');
+    expect(getApiKey).not.toHaveBeenCalled();
+    expect(spawnState.spawnCalls).toHaveLength(1);
+    const [{ file, args, opts }] = spawnState.spawnCalls;
+    expect(file).toBe(antigravityBin);
+    expect(args).toEqual(['--settings', expect.any(String), 'acp']);
+    expect(JSON.parse(args[1])).toMatchObject({ modelProvider: '', toolPermission: 'strict', allowNonWorkspaceAccess: false });
+    expect(opts.env.VOCS_ACP_TEST_MARKER).toBe('keep');
+    for (const name of credentialVars) expect(opts.env).not.toHaveProperty(name);
+    expect(h.agent.requests.map((r) => r.method)).toEqual(['initialize', 'session/resume', 'session/set_mode']);
+    expect(h.agent.requests[1].params.sessionId).toBe('agy-saved');
+    expect(h.meta.harnessRef.acpSessionId).toBe('agy-saved');
+    expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
+  });
+
+  it.each([
+    { mode: 'ask', modeId: 'default', stopReason: 'end_turn', turnStatus: 'completed', approvalCount: 1 },
+    { mode: 'plan', modeId: 'plan', stopReason: 'cancelled', turnStatus: 'interrupted', approvalCount: 0 }
+  ] as const)('honors Antigravity $mode during a tool request and records the turn', async ({ mode, modeId, stopReason, turnStatus, approvalCount }) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-antigravity-acp-'));
+    let finishCancelled!: () => void;
+    const cancelled = new Promise<void>((resolve) => { finishCancelled = resolve; });
+    try {
+      const marker = path.join(cwd, 'command-marker.txt');
+      const h = makeHarness({ harness: 'antigravity', permissionMode: mode, cwd });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'deny' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      const toolResponses: unknown[] = [];
+      h.agent.on('session/prompt', async ({ sessionId }) => {
+        const response = await h.agent.serverRequest('session/request_permission', {
+          sessionId,
+          toolCall: { toolCallId: 'write-marker', kind: 'execute', title: 'Write test marker', rawInput: { command: 'write-marker' } },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'deny', name: 'Deny', kind: 'reject_once' }]
+        });
+        if (response.result?.outcome?.optionId === 'allow') await fs.writeFile(marker, 'command ran');
+        h.agent.notify('session/update', { sessionId, update: { sessionUpdate: 'usage_update', used: 37, size: 2_000 } });
+        toolResponses.push(response.result);
+        if (stopReason === 'cancelled') await cancelled;
+        else h.agent.notify('session/update', { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'PONG' } } });
+        return { stopReason };
+      });
+
+      await h.adapter.start();
+      expect(h.agent.requests.filter((r) => r.method === 'session/set_mode').map((r) => r.params)).toEqual([{ sessionId: 'sess-1', modeId }]);
+      await h.adapter.send({ text: 'Check the command approval.' });
+      await vi.waitFor(() => expect(toolResponses).toEqual([{ outcome: { outcome: 'selected', optionId: 'deny' } }]));
+      expect(decide).toHaveBeenCalledTimes(approvalCount);
+      await expect(fs.stat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+      if (stopReason === 'cancelled') {
+        await h.adapter.interrupt();
+        await vi.waitFor(() => expect(h.agent.requests.filter((r) => r.method === 'session/cancel').map((r) => r.params)).toEqual([{ sessionId: 'sess-1' }]));
+        finishCancelled();
+      }
+      await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+
+      expect(turnItems(h.items).map((item) => item.status)).toEqual([turnStatus]);
+      const assistants = [...h.items.values()].filter((i) => i.kind === 'assistant');
+      expect(assistants.map((i) => i.text)).toEqual(stopReason === 'cancelled' ? [] : ['PONG']);
+      const usage = h.events.filter((e) => e.type === 'usage');
+      expect(usage.map(({ totals }) => [totals.contextTokens, totals.contextWindow])).toEqual([[37, 2_000], [37, 2_000]]);
+      expect(h.events.filter((e) => e.type === 'status').map((e) => e.status)).toEqual(['idle', 'running', 'idle']);
+    } finally {
+      finishCancelled();
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { mode: 'accept-edits', kind: 'edit', command: undefined, prompted: false, outcome: 'allow-once' },
+    { mode: 'accept-edits', kind: 'execute', command: 'npm test', prompted: true, outcome: 'deny' },
+    { mode: 'auto', kind: 'execute', command: 'npm test', prompted: false, outcome: 'allow-once' },
+    { mode: 'auto', kind: 'execute', command: 'sudo rm -rf /', prompted: true, outcome: 'deny' },
+    { mode: 'full-auto', kind: 'execute', command: 'sudo rm -rf /', prompted: false, outcome: 'allow-once' }
+  ] as const)('applies Antigravity $mode to a $kind request ($command) with one-time grants only', async ({ mode, kind, command, prompted, outcome }) => {
+    // The outside-project check follows real paths, so the project directory has to exist.
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-antigravity-tier-'));
+    tempDirs.push(cwd);
+    const h = makeHarness({ harness: 'antigravity', permissionMode: mode, cwd });
+    const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'deny' }));
+    h.ctx.requestApproval = decide;
+    scriptBasics(h);
+    h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+    const toolResponses: unknown[] = [];
+    h.agent.on('session/prompt', async ({ sessionId }) => {
+      const response = await h.agent.serverRequest('session/request_permission', {
+        sessionId,
+        toolCall: { toolCallId: 'tool-1', kind, title: 'Tool', rawInput: command ? { command } : { path: 'a.txt' }, locations: [{ path: path.join(cwd, 'a.txt') }] },
+        options: [
+          { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
+          { optionId: 'allow-once', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' }
+        ]
+      });
+      toolResponses.push(response.result);
+      return { stopReason: 'end_turn' };
+    });
+
+    await h.adapter.start();
+    // Only Plan switches the CLI's own mode; the rest stay `default` under the strict tool policy.
+    expect(h.agent.requests.filter((r) => r.method === 'session/set_mode').map((r) => r.params)).toEqual([{ sessionId: 'sess-1', modeId: 'default' }]);
+    await h.adapter.send({ text: 'Run the tool.' });
+    await vi.waitFor(() => expect(toolResponses).toEqual([{ outcome: { outcome: 'selected', optionId: outcome } }]));
+    expect(decide).toHaveBeenCalledTimes(prompted ? 1 : 0);
+    if (prompted) expect(decide.mock.calls[0][0].options.map((o) => o.id)).toEqual(['allow-once', 'deny']);
+    await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+    expect(turnItems(h.items).map((item) => item.status)).toEqual(['completed']);
+  });
+
+  it('preserves the Antigravity session when Google sign-in is required to resume it', async () => {
+    const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask', ref: { acpSessionId: 'agy-saved' } });
+    scriptBasics(h, { sessionCapabilities: { resume: {} } });
+    h.agent.on('session/resume', () => { throw new Error('Authentication required'); });
+
+    await expect(h.adapter.start()).rejects.toThrow(/sign in with google/i);
+    expect(h.agent.requests.map((r) => r.method)).toEqual(['initialize', 'session/resume']);
+    expect(h.meta.harnessRef.acpSessionId).toBe('agy-saved');
+    expect(infoTexts(h.items, 'warn')).toEqual([]);
   });
 
   it('initializes and creates a session when no ref is stored', async () => {
@@ -425,6 +579,73 @@ describe('acp adapter', () => {
     expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
   });
 
+  it('keeps a quiet Antigravity reply, records a failure, and never replays a queued message', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask' });
+    scriptBasics(h);
+    h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+    const finish = deferred<{ stopReason: string }>();
+    h.agent.on('session/prompt', () => finish.promise);
+    const update = (update: AnyRecord) => h.agent.notify('session/update', { sessionId: 'sess-1', update });
+    await h.adapter.start();
+    await h.adapter.send({ text: 'first' });
+    await h.adapter.send({ text: 'queued' });
+    update({ sessionUpdate: 'tool_call', toolCallId: 'work', title: 'Working', status: 'in_progress' });
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Reply' } });
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS);
+    expect(h.adapter.busy).toBe(true); // A known running tool prevents an automatic stop.
+    expect(turnItems(h.items)).toEqual([]);
+    const approval = deferred<{ optionId: string }>();
+    h.ctx.requestApproval = vi.fn(() => approval.promise);
+    const request = h.agent.serverRequest('session/request_permission', {
+      sessionId: 'sess-1', toolCall: { toolCallId: 'pending', title: 'Run pwd', kind: 'execute', rawInput: { command: 'pwd' } },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }]
+    });
+    update({ sessionUpdate: 'tool_call_update', toolCallId: 'work', status: 'completed' });
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS);
+    expect(h.ctx.requestApproval).toHaveBeenCalledOnce();
+    expect(h.adapter.busy).toBe(true); // Time spent waiting for approval is not quiet time.
+    approval.resolve({ optionId: 'allow' });
+    expect(await request).toMatchObject({ result: { outcome: { outcome: 'selected', optionId: 'allow' } } });
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS - 1);
+    expect(h.adapter.busy).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.adapter.busy).toBe(false);
+    expect(turnItems(h.items)).toEqual([expect.objectContaining({ status: 'failed', error: expect.stringContaining('without confirming') })]);
+    expect([...h.items.values()].filter((item) => item.kind === 'assistant')).toEqual([expect.objectContaining({ text: 'Reply', streaming: false })]);
+    expect(h.meta.queued).toBe(0);
+    expect(infoTexts(h.items, 'warn')).toEqual([expect.stringContaining('Queued messages were not sent')]);
+    expect(h.events.at(-1)).toMatchObject({ type: 'status', status: 'stopped' });
+
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'late' } });
+    finish.resolve({ stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS);
+    expect(turnItems(h.items)).toHaveLength(1);
+    expect(h.agent.requests.filter(({ method }) => method === 'session/prompt')).toHaveLength(1);
+    expect([...h.items.values()].filter((item) => item.kind === 'assistant')).toEqual([expect.objectContaining({ text: 'Reply', streaming: false })]);
+    expect(h.events.at(-1)).toMatchObject({ type: 'status', status: 'stopped' });
+  });
+
+  it('keeps interrupt bounded when Antigravity never returns its prompt result', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ harness: 'antigravity' });
+    scriptBasics(h);
+    h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+    h.agent.on('session/prompt', () => deferred().promise);
+    await h.adapter.start();
+    await h.adapter.send({ text: 'still thinking' });
+    await h.adapter.interrupt();
+    await vi.advanceTimersByTimeAsync(ANTIGRAVITY_CANCEL_GRACE_MS - 1);
+    expect(h.agent.requests.filter(({ method }) => method === 'session/cancel')).toHaveLength(1);
+    expect(h.adapter.busy).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(turnItems(h.items)).toEqual([expect.objectContaining({ status: 'interrupted', error: expect.stringContaining('did not acknowledge') })]);
+    expect(h.adapter.busy).toBe(false);
+    expect(h.events.at(-1)).toMatchObject({ type: 'status', status: 'stopped' });
+  });
+
   it('marks a refusal prompt as a failed turn', async () => {
     const h = makeHarness();
     scriptBasics(h);
@@ -485,5 +706,127 @@ describe('acp adapter', () => {
     h.child.emit('close', 0);
     expect(h.adapter.busy).toBe(false);
     expect(h.events.at(-1)).toEqual({ type: 'status', status: 'stopped', detail: 'Test Agent exited (0)' });
+  });
+
+  describe('tier contract for generic ACP agents', () => {
+    const vendorOptions = [
+      { optionId: 'always', name: 'Always allow', kind: 'allow_always' },
+      { optionId: 'once', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'no', name: 'Reject', kind: 'reject_once' }
+    ];
+    const ask = (h: Harness, toolCallId: string, extra: AnyRecord = {}, options: AnyRecord[] = vendorOptions) =>
+      h.agent.serverRequest('session/request_permission', {
+        sessionId: 'sess-1',
+        toolCall: { toolCallId, kind: 'execute', title: 'Run tests', rawInput: { command: 'npm test' }, ...extra },
+        options
+      });
+
+    /** A project directory holding a junction (`linked`) that leads to a sibling outside it. */
+    async function linkedProject(): Promise<{ cwd: string; elsewhere: string }> {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-acp-link-'));
+      tempDirs.push(root);
+      const cwd = path.join(root, 'project');
+      const elsewhere = path.join(root, 'elsewhere');
+      await fs.mkdir(cwd);
+      await fs.mkdir(elsewhere);
+      await fs.symlink(elsewhere, path.join(cwd, 'linked'), 'junction');
+      return { cwd, elsewhere };
+    }
+
+    it('answers an "always allow" choice with the one-time option and keeps the grant app-side', async () => {
+      const h = makeHarness({ permissionMode: 'ask' });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'always' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      await h.adapter.start();
+
+      const first = await ask(h, 'tc1');
+      expect(first.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+      expect(decide).toHaveBeenCalledTimes(1);
+      // The card offers the vendor's "always" as a session grant, not a persistent rule.
+      expect(decide.mock.calls[0][0].options.find((o) => o.id === 'always')).toMatchObject({ kind: 'allow_session', label: 'Allow for session' });
+
+      // The same kind is now allowed app-side, and still answered one-time.
+      const second = await ask(h, 'tc2');
+      expect(second.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+      expect(decide).toHaveBeenCalledTimes(1);
+      // A dangerous command is never covered by the session grant.
+      const dangerous = await ask(h, 'tc3', { rawInput: { command: 'sudo rm -rf /' } });
+      expect(decide).toHaveBeenCalledTimes(2);
+      expect(dangerous.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+    });
+
+    it('forwards the chosen "always" option only when the agent offered no one-time option', async () => {
+      const h = makeHarness({ permissionMode: 'ask' });
+      h.ctx.requestApproval = vi.fn(async () => ({ optionId: 'always' }));
+      scriptBasics(h);
+      await h.adapter.start();
+      const res = await ask(h, 'tc1', {}, [vendorOptions[0], vendorOptions[2]]);
+      expect(res.result).toEqual({ outcome: { outcome: 'selected', optionId: 'always' } });
+    });
+
+    it('clears a session grant on a tier change so the next request prompts again', async () => {
+      const h = makeHarness({ permissionMode: 'ask' });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'always' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      await h.adapter.start();
+      await ask(h, 'tc1');
+      await ask(h, 'tc2');
+      expect(decide).toHaveBeenCalledTimes(1);
+
+      h.meta.config.permissionMode = 'accept-edits';
+      await h.adapter.setPermissionMode('accept-edits');
+      decide.mockImplementation(async () => ({ optionId: 'no' }));
+      const after = await ask(h, 'tc3');
+      expect(decide).toHaveBeenCalledTimes(2);
+      expect(after.result).toEqual({ outcome: { outcome: 'selected', optionId: 'no' } });
+    });
+
+    it('answers allow_once in Full access even when the agent lists "always" first', async () => {
+      const h = makeHarness({ permissionMode: 'full-auto' });
+      scriptBasics(h);
+      await h.adapter.start();
+      const res = await ask(h, 'tc1', { rawInput: { command: 'sudo rm -rf /' } });
+      expect(res.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+      expect(h.approvals).toHaveLength(0);
+    });
+
+    it('asks in Auto for a tool location that leads out of the project through a link', async () => {
+      const { cwd } = await linkedProject();
+      const h = makeHarness({ permissionMode: 'auto', cwd });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'no' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      await h.adapter.start();
+
+      const inside = await ask(h, 'tc1', { kind: 'edit', rawInput: {}, locations: [{ path: path.join(cwd, 'a.txt') }] });
+      expect(inside.result).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } });
+      expect(decide).not.toHaveBeenCalled();
+
+      const linked = await ask(h, 'tc2', { kind: 'edit', rawInput: {}, locations: [{ path: path.join(cwd, 'linked', 'a.txt') }] });
+      expect(decide).toHaveBeenCalledTimes(1);
+      expect(decide.mock.calls[0][0].description).toMatch(/outside/i);
+      expect(linked.result).toEqual({ outcome: { outcome: 'selected', optionId: 'no' } });
+    });
+
+    it('asks in Auto before fs/write_text_file writes through a link that leaves the project', async () => {
+      const { cwd, elsewhere } = await linkedProject();
+      const h = makeHarness({ permissionMode: 'auto', cwd });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'deny' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      await h.adapter.start();
+
+      const inside = await h.agent.serverRequest('fs/write_text_file', { sessionId: 'sess-1', path: path.join(cwd, 'in.txt'), content: 'in' });
+      expect(inside.error).toBeUndefined();
+      expect(await fs.readFile(path.join(cwd, 'in.txt'), 'utf8')).toBe('in');
+      expect(decide).not.toHaveBeenCalled();
+
+      const escaped = await h.agent.serverRequest('fs/write_text_file', { sessionId: 'sess-1', path: path.join(cwd, 'linked', 'out.txt'), content: 'out' });
+      expect(decide).toHaveBeenCalledTimes(1);
+      expect(escaped.error).toBeDefined();
+      await expect(fs.stat(path.join(elsewhere, 'out.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
   });
 });

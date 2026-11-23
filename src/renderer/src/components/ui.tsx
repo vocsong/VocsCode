@@ -1,8 +1,9 @@
 /** Shared presentational primitives: icons, buttons, badges, dropdowns, modals and toggles. */
-import React, { useEffect, useId, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 
 const ICONS: Record<string, string> = {
   logo: 'M6.4 7.2L12 17L17.6 7.2M9.2 19h5.6',
+  menu: 'M4 7h16M4 12h16M4 17h10',
   plus: 'M12 5v14M5 12h14',
   minus: 'M5 12h14',
   // A speech bubble with a plus: "start a new session" rather than the generic "add".
@@ -49,6 +50,8 @@ const ICONS: Record<string, string> = {
   eye: 'M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12zm11 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   eyeOff: 'M3 3l18 18M10.6 10.6a3 3 0 0 0 4.2 4.2M9.9 5.1A11 11 0 0 1 12 5c7 0 11 7 11 7a18 18 0 0 1-3.2 4M6.6 6.6A18 18 0 0 0 1 12s4 7 11 7a11 11 0 0 0 4.1-.8',
   layout: 'M3 5h18v14H3zM15 5v14',
+  splitRight: 'M3 5h18v14H3zM12 5v14',
+  splitDown: 'M3 5h18v14H3zM3 12h18',
   sidebar: 'M3 5h18v14H3zM9 5v14',
   arrowUp: 'M12 19V5M5 12l7-7 7 7',
   arrowLeft: 'M19 12H5M12 19l-7-7 7-7',
@@ -70,6 +73,7 @@ const ICONS: Record<string, string> = {
   cpu: 'M6 6h12v12H6zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3M9.5 9.5h5v5h-5z',
   database: 'M12 8c4.97 0 9-1.34 9-3s-4.03-3-9-3-9 1.34-9 3 4.03 3 9 3zM21 5v14c0 1.66-4.03 3-9 3s-9-1.34-9-3V5M21 12c0 1.66-4.03 3-9 3s-9-1.34-9-3',
   cloud: 'M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z',
+  mic: 'M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v3',
   fire: 'M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.07-2.14-.22-4.05 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.15.43-2.29 1-3a2.5 2.5 0 0 0 2.5 2.5z',
   cube: 'M21 8l-9-5-9 5v8l9 5 9-5V8zM3 8l9 5 9-5M12 13v9',
   layers: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
@@ -84,6 +88,8 @@ const ICONS: Record<string, string> = {
   puzzle: 'M14 4a2 2 0 1 0-4 0v1H7a1 1 0 0 0-1 1v3H5a2 2 0 1 0 0 4h1v3a1 1 0 0 0 1 1h3v1a2 2 0 1 0 4 0v-1h3a1 1 0 0 0 1-1v-3h1a2 2 0 1 0 0-4h-1V6a1 1 0 0 0-1-1h-3V4z',
   robot: 'M8 3h8M12 3v3M5 6h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM9 13h.01M15 13h.01M9 17h6',
   server: 'M4 3h16v7H4zM4 14h16v7H4zM7 6.5h.01M7 17.5h.01',
+  monitor: 'M3 4h18v12H3zM8 20h8M12 16v4',
+  type: 'M4 7V4h16v3M9 20h6M12 4v16',
   tag: 'M20.59 13.41L12 22 2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82zM7 7h.01',
   heart: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z',
   home: 'M3 10l9-7 9 7v10a1 1 0 0 1-1 1h-5v-7h-6v7H4a1 1 0 0 1-1-1V10z',
@@ -136,7 +142,7 @@ export function Badge({ children, tone = 'neutral', title }: { children: React.R
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-const MENU_ITEM_SELECTOR = '[role="menuitem"]:not([disabled])';
+const MENU_ITEM_SELECTOR = ':is([role="menuitem"], [role="menuitemradio"]):not([disabled])';
 
 /** True only inside a Dropdown menu, so MenuItem labels itself without touching the title-bar menus. */
 const MenuContext = React.createContext(false);
@@ -166,12 +172,14 @@ export function Dropdown({
       if (!ref.current?.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === 'Escape') {
         restoreTrigger();
         return;
       }
       const menu = menuRef.current;
-      if (!menu) return;
+      // A dialog opened by a menu item (e.g. Fast mode confirmation) owns its own keys.
+      if (!menu?.contains(document.activeElement)) return;
       const items = Array.from(menu.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR));
       if (items.length === 0) return;
       const current = items.indexOf(document.activeElement as HTMLElement);
@@ -181,6 +189,8 @@ export function Dropdown({
       };
       if (e.key === 'ArrowDown') focusAt(current === -1 ? 0 : current + 1);
       else if (e.key === 'ArrowUp') focusAt(current === -1 ? items.length - 1 : current - 1);
+      // A text field inside the menu keeps Home/End for its caret.
+      else if (current === -1 && document.activeElement instanceof HTMLInputElement) return;
       else if (e.key === 'Home') focusAt(0);
       else if (e.key === 'End') focusAt(items.length - 1);
     };
@@ -191,9 +201,12 @@ export function Dropdown({
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
-  // Moving focus into the menu keeps arrow keys and screen readers on the open items.
+  // Moving focus into the menu keeps arrow keys and screen readers on the open items. A menu that
+  // leads with its own control (a filter box) marks it `data-menu-autofocus` to take focus instead.
   useEffect(() => {
-    if (open) menuRef.current?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR)?.focus();
+    if (!open) return;
+    const menu = menuRef.current;
+    (menu?.querySelector<HTMLElement>('[data-menu-autofocus]') ?? menu?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR))?.focus();
   }, [open]);
   const rendered = trigger(open);
   const triggerNode =
@@ -223,20 +236,82 @@ export function Dropdown({
   );
 }
 
-export function MenuItem({ children, onClick, active, danger, hint, disabled }: { children: React.ReactNode; onClick?: () => void; active?: boolean; danger?: boolean; hint?: string; disabled?: boolean }) {
+export function MenuItem({ children, onClick, active, checked, danger, hint, disabled, trailing }: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  active?: boolean;
+  /** Supplying a checked state makes this a menu radio item inside a Dropdown. */
+  checked?: boolean;
+  danger?: boolean;
+  hint?: string;
+  disabled?: boolean;
+  trailing?: React.ReactNode;
+}) {
   const inMenu = React.useContext(MenuContext);
+  const selected = checked ?? active;
   return (
-    <button type="button" role={inMenu ? 'menuitem' : undefined} className={`menu-item ${active ? 'active' : ''} ${danger ? 'danger' : ''}`} onClick={onClick} disabled={disabled}>
+    <button type="button" role={inMenu ? (checked === undefined ? 'menuitem' : 'menuitemradio') : undefined} aria-checked={inMenu ? checked : undefined} className={`menu-item ${selected ? 'active' : ''} ${danger ? 'danger' : ''}`} onClick={onClick} disabled={disabled}>
       <span className="menu-item-label">{children}</span>
       {hint && <span className="menu-item-hint">{hint}</span>}
-      {active && <Icon name="check" size={14} />}
+      {selected && <Icon name="check" size={14} />}
+      {trailing}
     </button>
   );
 }
 
-export function Modal({ title, onClose, children, width = 720, footer }: { title: React.ReactNode; onClose: () => void; children: React.ReactNode; width?: number; footer?: React.ReactNode }) {
+type Box = { top: number; right: number; bottom: number; left: number };
+
+/**
+ * Where an anchored dialog goes: just below the control that opened it, right edges lined up so the
+ * dialog's buttons land under the pointer, flipped above when the window has no room below, and
+ * always kept `margin` inside the window.
+ */
+export function placeBeside(anchor: Box, size: { width: number; height: number }, viewport: { width: number; height: number }, gap = 6, margin = 8): { top: number; left: number } {
+  const clamp = (v: number, max: number) => Math.max(margin, Math.min(v, max));
+  const left = clamp(anchor.right - size.width, viewport.width - margin - size.width);
+  const below = anchor.bottom + gap;
+  const above = anchor.top - gap - size.height;
+  const fitsBelow = below + size.height <= viewport.height - margin;
+  const top = fitsBelow ? below : above >= margin ? above : clamp(below, viewport.height - margin - size.height);
+  return { top, left };
+}
+
+/** Set on the element an anchored dialog points at, while it is open. CSS keys on it to keep the
+ *  anchor on screen: Zen's rail stays open and a row keeps its hover actions. */
+const DIALOG_ANCHOR_ATTR = 'data-dialog-anchor';
+
+export function Modal({ title, onClose, children, width = 720, footer, anchor }: {
+  title: React.ReactNode;
+  onClose: () => void;
+  children: React.ReactNode;
+  width?: number;
+  footer?: React.ReactNode;
+  /** Opens the dialog as a popover at this element instead of centred over a dimmed window. An
+   *  element that has already left the page falls back to the centred dialog. */
+  anchor?: HTMLElement | null;
+}) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
+  const anchored = !!anchor?.isConnected;
+  const [placed, setPlaced] = useState<{ top: number; left: number } | null>(null);
+  // Layout effect, so the dialog is placed and its anchor held before the first paint: the
+  // transparent backdrop takes the pointer's hover away from the anchor's row in the same commit.
+  useLayoutEffect(() => {
+    if (!anchor?.isConnected) return;
+    anchor.setAttribute(DIALOG_ANCHOR_ATTR, '');
+    const place = () => {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const box = dialog.getBoundingClientRect();
+      setPlaced(placeBeside(anchor.getBoundingClientRect(), { width: box.width, height: box.height }, { width: window.innerWidth, height: window.innerHeight }));
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('resize', place);
+      anchor.removeAttribute(DIALOG_ANCHOR_ATTR);
+    };
+  }, [anchor]);
   // Captured during the first render, before autoFocus can move focus into the dialog.
   const restoreRef = useRef<HTMLElement | null | undefined>(undefined);
   if (restoreRef.current === undefined) {
@@ -247,7 +322,7 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
     const restore = restoreRef.current;
     // An autoFocus child (ConfirmHost) already claimed focus; leave it alone.
     if (dialog && !dialog.contains(document.activeElement)) {
-      const items = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      const items = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.closest('[hidden]'));
       (items[0] ?? dialog).focus();
     }
     return () => {
@@ -256,14 +331,19 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const dialog = dialogRef.current;
+      const dialogs = document.querySelectorAll('.modal[role="dialog"]');
+      // Setup can open above a drafted new session; only the top dialog owns Escape/Tab.
+      if (!dialog || dialogs[dialogs.length - 1] !== dialog || e.defaultPrevented) return;
       if (e.key === 'Escape') {
+        // An open menu inside the dialog (a Dropdown) closes first; the next Escape closes the dialog.
+        if (dialog.querySelector('[role="menu"]')) return;
+        e.stopPropagation();
         onClose();
         return;
       }
       if (e.key !== 'Tab') return;
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const items = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      const items = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.closest('[hidden]'));
       if (items.length === 0) return;
       const first = items[0];
       const last = items[items.length - 1];
@@ -281,9 +361,11 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
+  // Keep the dialog transparent until placed, but let its children receive autoFocus on mount.
+  const position: React.CSSProperties = anchored ? (placed ? { top: placed.top, left: placed.left } : { opacity: 0 }) : {};
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div ref={dialogRef} className="modal" style={{ width, maxWidth: '96vw' }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
+    <div className={`modal-backdrop${anchored ? ' is-anchored' : ''}`} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div ref={dialogRef} className={`modal${anchored ? ' is-anchored' : ''}`} style={{ width, maxWidth: '96vw', ...position }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <div className="modal-header">
           <div className="modal-title" id={titleId}>{title}</div>
           <Button variant="ghost" size="sm" icon="x" onClick={onClose} aria-label="Close" />
@@ -302,6 +384,8 @@ export interface ConfirmOptions {
   cancelLabel?: string;
   /** Styles the confirming button as destructive. */
   danger?: boolean;
+  /** The control that asked: the dialog opens as a popover there rather than centred. */
+  anchor?: HTMLElement | null;
   /** Adds an editable field to the dialog; askPrompt resolves its text instead of a boolean. */
   input?: {
     label?: React.ReactNode;
@@ -370,7 +454,8 @@ export function ConfirmHost() {
   return (
     <Modal
       title={pending.title}
-      width={pending.input ? 560 : 460}
+      width={pending.input ? 560 : pending.anchor ? 380 : 460}
+      anchor={pending.anchor}
       onClose={() => answer(null)}
       footer={
         <>
@@ -427,12 +512,12 @@ export function Field({ label, hint, children, inline }: { label: React.ReactNod
  * at once: the track colour, a check/cross glyph riding inside the thumb, and an On/Off word next
  * to it. Position is then only a confirmation, never the sole cue.
  */
-export function Toggle({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label?: React.ReactNode; disabled?: boolean }) {
+export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; label?: React.ReactNode; disabled?: boolean; /** Names a switch whose visible label sits outside it (a field heading). */ ariaLabel?: string }) {
   return (
     <label className={`toggle ${checked ? 'is-on' : 'is-off'} ${disabled ? 'disabled' : ''}`}>
       {/* The On/Off word lives inside the label, so without this the accessible name would become
           "Off Auto-compaction" and shift every time the switch flips. */}
-      <input type="checkbox" aria-label={typeof label === 'string' ? label : undefined} checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" aria-label={ariaLabel ?? (typeof label === 'string' ? label : undefined)} checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span className="toggle-track" aria-hidden="true">
         <span className="toggle-thumb">
           <svg className="toggle-glyph" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">

@@ -1,11 +1,17 @@
 /** Command palette for slash commands and quick navigation. */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { sessionTitleText } from '../../../shared/session-title';
+import type { SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
-import { harnessShort } from '../format';
+import { canHousekeepHere, openHousekeep } from '../housekeep';
 import { useStore } from '../store';
 import { isTopLevelSession, MISSION_MANAGED_REASON, pauseMissionSession } from '../missions';
 import { createTerminal } from '../terminal/host';
+import { canSplit, sessionPanes } from '../panes';
 import { Icon } from './ui';
+import { SessionTitle } from './SessionTitle';
+import { setUiMode } from '../ui-mode';
+import { UI_MODES } from '../../../shared/ui-modes';
 
 
 interface Cmd {
@@ -15,6 +21,7 @@ interface Cmd {
   icon: string;
   run: () => void;
   disabled?: boolean;
+  session?: SessionMeta;
 }
 
 export function CommandPalette() {
@@ -41,8 +48,11 @@ export function CommandPalette() {
       { id: 'changes', label: 'Show changes', icon: 'diff', run: () => st.setPanelTab('changes') },
       { id: 'goal', label: active?.mission ? 'Show Mission' : 'Show goal', icon: 'target', run: () => st.setPanelTab('goal') },
       { id: 'terminal', label: 'Show terminal', hint: 'Ctrl+`', icon: 'terminal', run: () => { st.setPanelTab('terminal'); st.focusTerminal(); } },
-      { id: 'thinking', label: 'Toggle thinking visibility', icon: 'brain', run: () => st.toggleThinking() }
+      { id: 'thinking', label: 'Toggle thinking visibility', icon: 'brain', run: () => st.toggleThinking() },
+      // The interface mode is one keystroke away from anywhere, so trying Zen costs nothing.
+      ...UI_MODES.filter((m) => m.id !== (st.settings?.uiMode ?? 'standard')).map((m) => ({ id: `ui:${m.id}`, label: `Switch to the ${m.name} interface`, hint: m.tagline, icon: 'layout', run: () => setUiMode(m.id) }))
     ];
+    if (canHousekeepHere()) base.push({ id: 'housekeep', label: 'Housekeep sessions', hint: '/housekeep', icon: 'archive', run: openHousekeep });
     if (activeId) {
       base.push(
         { id: 'new-here', label: 'New session in this folder', hint: 'Ctrl+Shift+N', icon: 'sessionPlus', run: () => void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot) },
@@ -53,7 +63,27 @@ export function CommandPalette() {
         { id: 'compact', label: 'Compact context', icon: 'compact', run: () => void invoke('sessions:compact', { id: activeId }) }
       );
     }
-    for (const s of sessions.filter((s) => !s.archived && isTopLevelSession(s))) base.push({ id: `s:${s.id}`, label: s.title, hint: `${harnessShort(s.config.harness)} · ${s.config.projectRoot.split(/[\\/]/).pop()}`, icon: 'sparkles', run: () => void st.setActive(s.id) });
+    // Split view: the pane commands only appear when they can do something.
+    const layout = st.layout;
+    if (activeId && canSplit(layout)) {
+      base.push(
+        { id: 'split-right', label: 'Split right', hint: 'Ctrl+\\', icon: 'splitRight', run: () => st.splitPane('horizontal') },
+        { id: 'split-down', label: 'Split down', hint: 'Ctrl+Shift+\\', icon: 'splitDown', run: () => st.splitPane('vertical') }
+      );
+    }
+    // A file preview is never the active pane, so only session panes take part.
+    const slots = sessionPanes(layout);
+    if (slots.length > 1) {
+      const at = slots.findIndex((p) => p.id === layout.activePaneId);
+      const other = slots[(at + 1) % slots.length]!;
+      base.push(
+        { id: 'pane-next', label: 'Focus other pane', icon: 'layout', run: () => st.focusPane(other.id) },
+        { id: 'pane-close', label: 'Close pane (session keeps running)', icon: 'x', run: () => st.closePane(layout.activePaneId) }
+      );
+    }
+    for (const session of sessions.filter((s) => !s.archived && isTopLevelSession(s))) {
+      base.push({ id: `s:${session.id}`, label: sessionTitleText(session), session, icon: 'sparkles', run: () => void st.setActive(session.id) });
+    }
     return base;
   }, [sessions, activeId]);
 
@@ -89,7 +119,7 @@ export function CommandPalette() {
           {filtered.slice(0, 40).map((c, i) => (
             <button key={c.id} type="button" disabled={c.disabled} className={`palette-item ${i === idx ? 'active' : ''}`} onMouseEnter={() => setIdx(i)} onClick={() => { close(); c.run(); }}>
               <Icon name={c.icon} size={14} />
-              <span>{c.label}</span>
+              {c.session ? <SessionTitle session={c.session} /> : <span>{c.label}</span>}
               <span className="spacer" />
               {c.hint && <span className="muted small">{c.hint}</span>}
             </button>

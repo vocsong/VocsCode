@@ -11,6 +11,7 @@ import type { SessionEvent } from '../src/shared/types';
 
 interface PendingRequest {
   method: string;
+  params: unknown;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
 }
@@ -31,9 +32,9 @@ function fixture() {
   const pending: PendingRequest[] = [];
   const rpc = {
     request: vi.fn(
-      (method: string) =>
+      (method: string, params: unknown) =>
         new Promise((resolve, reject) => {
-          pending.push({ method, resolve, reject });
+          pending.push({ method, params, resolve, reject });
         })
     ),
     onNotification: (method: string, handler: (params: unknown) => void) => notifications.set(method, handler),
@@ -43,8 +44,8 @@ function fixture() {
   (adapter as unknown as { threadId: string }).threadId = 'thread-1';
   (adapter as unknown as { wireNotifications: (client: unknown) => void }).wireNotifications(rpc);
   const statuses = () => events.filter((e): e is Extract<SessionEvent, { type: 'status' }> => e.type === 'status').map((e) => e.status);
-  const complete = (status: 'completed' | 'failed' = 'completed') =>
-    notifications.get('turn/completed')!({ turn: { id: 'turn-1', status, error: null, durationMs: 12 } });
+  const complete = (status: 'completed' | 'interrupted' = 'completed', id = 'turn-1') =>
+    notifications.get('turn/completed')!({ threadId: 'thread-1', turn: { id, status, error: null, durationMs: 12 } });
   return { adapter, events, pending, statuses, complete, notifications };
 }
 
@@ -93,6 +94,33 @@ describe('codex turn/start lifecycle', () => {
     expect(adapter.busy).toBe(true);
   });
 
+  it('interrupts the parent and releases queued input only on parent completion', async () => {
+    const { adapter, events, pending, complete, notifications, statuses } = fixture();
+    const sending = adapter.send({ text: 'parent task' });
+    pending[0]!.resolve({ turn: { id: 'turn-1' } });
+    await sending;
+    await adapter.send({ text: 'follow-up', mode: 'queue' });
+
+    notifications.get('turn/started')!({ threadId: 'child', turn: { id: 'child-turn' } });
+    const interrupting = adapter.interrupt();
+    expect(pending[1]).toMatchObject({ method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-1' } });
+    pending[1]!.resolve({});
+    await interrupting;
+
+    notifications.get('turn/completed')!({ threadId: 'child', turn: { id: 'child-turn', status: 'interrupted', error: null, durationMs: 5 } });
+    expect(statuses()).toEqual(['running']);
+    expect(pending.map((r) => r.method)).toEqual(['turn/start', 'turn/interrupt']);
+
+    complete('interrupted');
+    expect(pending.map((r) => r.method)).toEqual(['turn/start', 'turn/interrupt', 'turn/start']);
+    pending[2]!.resolve({ turn: { id: 'turn-2' } });
+    await Promise.resolve();
+    complete('completed', 'turn-2');
+    expect(adapter.busy).toBe(false);
+    expect(statuses()).toEqual(['running', 'idle', 'running', 'idle']);
+    expect(events.flatMap((e) => e.type === 'item.upsert' && e.item.kind === 'turn' ? [e.item.status] : [])).toEqual(['interrupted', 'completed']);
+  });
+
   it('clears busy and reports idle when turn/start itself fails', async () => {
     const { adapter, pending, statuses } = fixture();
     const err = new Error('transport closed');
@@ -108,6 +136,7 @@ describe('codex token usage accounting', () => {
   it('stores input tokens excluding the cached subset codex counts inside them', () => {
     const { events, notifications } = fixture();
     notifications.get('thread/tokenUsage/updated')!({
+      threadId: 'thread-1',
       tokenUsage: {
         total: { inputTokens: 1_000_000, cachedInputTokens: 900_000, cacheWriteInputTokens: 0, outputTokens: 5_000, reasoningOutputTokens: 1_000, totalTokens: 905_000 },
         last: { totalTokens: 905_000 },
@@ -123,6 +152,7 @@ describe('codex token usage accounting', () => {
     const { adapter, events, notifications } = fixture();
     const notify = (inputTokens: number, outputTokens: number) =>
       notifications.get('thread/tokenUsage/updated')!({
+        threadId: 'thread-1',
         tokenUsage: {
           total: { inputTokens, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens, reasoningOutputTokens: 0, totalTokens: inputTokens + outputTokens },
           last: { totalTokens: inputTokens + outputTokens },

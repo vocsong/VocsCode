@@ -1,7 +1,8 @@
-/** The web session header: a slim bar with back, title and folder, status and an overflow menu. */
+/** The web session header: session identity, status, and navigation and actions. */
 import { useState } from 'react';
 import { canInvoke, invoke } from '@renderer/api';
 import { basename } from '@renderer/format';
+import { SessionTitle } from '@renderer/components/SessionTitle';
 import { askPrompt, Button, Icon } from '@renderer/components/ui';
 import { useStore } from '@renderer/store';
 import type { SessionMeta } from '@shared/types';
@@ -44,8 +45,8 @@ export function SessionHeader({ session, onBack, onTerminal }: { session: Sessio
     <header className="w-session-head">
       <button type="button" className="w-icon-btn" onClick={onBack} aria-label="Back to sessions"><Icon name="chevron" size={18} className="w-back" /></button>
       <div className="w-session-title">
-        <span className="w-session-name" title={session.title}>{session.title}</span>
-        <span className="w-session-path" title={session.cwd}>{basename(session.cwd)}</span>
+        <SessionTitle session={session} className="w-session-name" />
+        {session.cwd !== session.config.projectRoot && <span className="w-session-path" title={session.cwd}>{basename(session.cwd)}</span>}
       </div>
       <StatusChip status={session.status} label={session.statusLabel} />
       <button type="button" className="w-icon-btn" onClick={() => setMenu(true)} aria-label="Session actions"><Icon name="more" size={18} /></button>

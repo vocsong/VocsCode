@@ -274,6 +274,55 @@ export class SearchIndex {
     return { available: true, results };
   }
 
+  /**
+   * Transcript recall for the intelligence core: body rows only, restricted in SQL to the session
+   * ids the caller already resolved as in scope, so a row from another project is never read.
+   * Every term must match first; unless `strict`, a natural-language question nothing holds in full
+   * falls back to any term, and those hits are flagged partial.
+   */
+  recall({ q, sessionIds, limit, strict }: { q: string; sessionIds: string[]; limit?: number; strict?: boolean }): { available: boolean; partial: boolean; results: SearchResult[] } {
+    if (!this.db) return { available: false, partial: false, results: [] };
+    const ids = [...new Set(sessionIds)].slice(0, 2000);
+    const terms = (q ?? '')
+      .split(/[^\p{L}\p{N}_]+/u)
+      .filter((t) => t.length > 1)
+      .slice(0, 8);
+    if (!ids.length || !terms.length) return { available: true, partial: false, results: [] };
+    const cap = Math.min(Math.max(limit ?? 6, 1), 40);
+    const db = this.db;
+    const run = (match: string): SearchResult[] => {
+      const rows = db
+        .prepare(
+          `SELECT i.sessionId AS sessionId, i.itemId AS itemId, i.kind AS kind, i.ts AS ts,
+                  snippet(fts, 0, char(1), char(2), char(8230), 18) AS snip
+           FROM fts JOIN items i ON i.id = fts.rowid
+           WHERE fts MATCH ? AND i.sessionId IN (${ids.map(() => '?').join(',')})
+           ORDER BY bm25(fts) LIMIT ?`
+        )
+        .all(match, ...ids, cap * 10) as { sessionId: string; itemId: string; kind: SearchResult['kind']; ts: number; snip: string }[];
+      const perSession = new Map<string, number>();
+      const out: SearchResult[] = [];
+      for (const r of rows) {
+        const n = perSession.get(r.sessionId) ?? 0;
+        if (n >= 3) continue;
+        perSession.set(r.sessionId, n + 1);
+        out.push({ sessionId: r.sessionId, itemId: r.itemId, kind: r.kind, ts: r.ts, snippet: r.snip });
+        if (out.length >= cap) break;
+      }
+      return out;
+    };
+    const quoted = terms.map((t) => `"${t.replace(/"/g, '""')}"`);
+    try {
+      const all = run(quoted.join(' '));
+      if (all.length || terms.length < 2 || strict) return { available: true, partial: false, results: all };
+      const any = run(quoted.join(' OR '));
+      return { available: true, partial: any.length > 0, results: any };
+    } catch (e) {
+      this.deps.log('warn', `search recall failed: ${e instanceof Error ? e.message : String(e)}`);
+      return { available: true, partial: false, results: [] };
+    }
+  }
+
   /** The set of session ids a query may touch; archived sessions stay out unless opted in. */
   private sessionScope(filters?: SearchFilters): Set<string> {
     const f = filters;

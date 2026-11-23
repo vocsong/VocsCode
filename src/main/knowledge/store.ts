@@ -15,6 +15,7 @@
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { knowledgeCollision, sameKnowledgeClaim, sameRejectedKnowledgeClaim, withKnowledgeWriteLock, writeKnowledgeFileAtomic } from '../../../resources/mcp/knowledge-write.mjs';
 import {
   KNOWLEDGE_BRANCHES_DIR,
   KNOWLEDGE_DIR,
@@ -36,6 +37,7 @@ import {
   type KnowledgePage,
   type KnowledgePageMeta,
   type KnowledgePageScope,
+  type KnowledgeProposalInput,
   type KnowledgeScope,
   type KnowledgeSource,
   type KnowledgeStatus
@@ -77,13 +79,30 @@ function isInside(parent: string, child: string): boolean {
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+/** A desktop-selected root may be an alias, but no repo-controlled wiki path may follow a link. */
+async function unlinkedWikiPath(scope: KnowledgeScope, target: string): Promise<boolean> {
+  if (!isInside(scope.projectRoot, target)) return false;
+  let current = path.resolve(scope.projectRoot);
+  for (const part of path.relative(current, target).split(path.sep)) {
+    current = path.join(current, part);
+    try {
+      if ((await fs.lstat(current)).isSymbolicLink()) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+      throw error;
+    }
+  }
+  return true;
+}
+
+/** A directory name is only a lookup hint: different branch names can share a legacy slug. */
+function pageInSlice(meta: Pick<KnowledgePageMeta, 'scope' | 'branch'>, branch?: string): boolean {
+  return branch ? meta.scope === 'branch' && meta.branch === branch : meta.scope === 'repo';
+}
+
 export class KnowledgeStore {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly ignored = new Set<string>();
-  private evidence: Record<string, EvidenceEntry> | null = null;
-  private rejected: Record<string, RejectedEntry> | null = null;
-  private evidenceFile: string | null = null;
-  private rejectedFile: string | null = null;
 
   /** The project's shared wiki; every session of the project writes and reads here. */
   repoDir(scope: KnowledgeScope): string {
@@ -109,15 +128,10 @@ export class KnowledgeStore {
   }
 
   async hasWiki(scope: KnowledgeScope): Promise<boolean> {
-    return exists(this.repoDir(scope));
+    return await unlinkedWikiPath(scope, this.repoDir(scope)) && await exists(this.repoDir(scope));
   }
 
-  /**
-   * Creates the wiki directory without writing a page into it. The directory itself is what turns
-   * the project's memory on — the `vocs-memory` MCP server is injected and git-boundary episodes are
-   * captured only once it exists — so a project whose docs are too thin to bootstrap from can still
-   * start one and fill it by hand.
-   */
+  /** Creates the wiki directory for manual recording even if the project has no docs to ingest. */
   async createWiki(scope: KnowledgeScope): Promise<void> {
     await this.ensureIgnored(scope);
     await ensureDir(this.repoDir(scope));
@@ -148,9 +162,12 @@ export class KnowledgeStore {
   /** Repo pages, then branch pages overriding same-id entries: the merged view a session sees. */
   async load(scope: KnowledgeScope): Promise<StoredPage[]> {
     const byId = new Map<string, StoredPage>();
-    for (const page of await this.walkDir(this.repoDir(scope))) byId.set(page.meta.id, page);
+    if (!(await unlinkedWikiPath(scope, this.repoDir(scope)))) return [];
+    for (const page of await this.walkDir(this.repoDir(scope))) if (pageInSlice(page.meta)) byId.set(page.meta.id, page);
     const branchDir = this.branchDir(scope);
-    if (branchDir) for (const page of await this.walkDir(branchDir)) byId.set(page.meta.id, page);
+    if (branchDir && await unlinkedWikiPath(scope, branchDir)) {
+      for (const page of await this.walkDir(branchDir)) if (pageInSlice(page.meta, scope.branch)) byId.set(page.meta.id, page);
+    }
     return [...byId.values()];
   }
 
@@ -160,22 +177,116 @@ export class KnowledgeStore {
     return all.find((p) => p.meta.id === id) ?? null;
   }
 
+  /** Serialize app instances and standalone MCP writers, then discard every cached page. */
+  private async withWriteLock<T>(scope: KnowledgeScope, action: () => Promise<T>): Promise<T> {
+    if (!(await unlinkedWikiPath(scope, this.repoDir(scope)))) throw new Error('Refusing to write through a linked wiki directory.');
+    return withKnowledgeWriteLock(this.repoDir(scope), async () => {
+      this.cache.clear();
+      return action();
+    });
+  }
+
+  /**
+   * Resolve identity and merge fresh metadata inside the same cross-process write boundary.
+   *
+   * A page a human reviewed or wrote is never rewritten by a lower-authority writer. The same claim
+   * from an agent adds its evidence and leaves the human's text alone (`kept`); a different claim
+   * is refused with `KnowledgeProtectedError`, so the caller can file it as a candidate instead.
+   */
+  async ingest(
+    scope: KnowledgeScope,
+    input: KnowledgeProposalInput & { projectId?: string },
+    origin: string,
+    sessionId?: string,
+    signal?: AbortSignal
+  ): Promise<{ page: StoredPage | null; evidenceCount: number; kept?: boolean }> {
+    signal?.throwIfAborted();
+    if (input.pageId !== undefined && !isKnowledgeId(input.pageId)) throw new Error('Invalid knowledge page id');
+    return this.withWriteLock(scope, async () => {
+      signal?.throwIfAborted();
+      if (await this.isRejected(scope, input.claim)) return { page: null, evidenceCount: 0 };
+      const pages = await this.load(scope);
+      const existing = input.pageId
+        ? pages.find((p) => p.meta.id === input.pageId)
+        : pages.find((p) => sameKnowledgeClaim(p.meta.claim, input.claim));
+      const id = input.pageId ?? existing?.meta.id ?? pathForProposal(input.kind ?? 'concept', input.title).replace(/\.md$/, '');
+      const previous = await this.readForWrite(scope, id);
+      if (!input.pageId && previous && !sameKnowledgeClaim(previous.meta.claim, input.claim)) throw knowledgeCollision(id);
+      const pageScope = input.scope ?? previous?.meta.scope ?? 'repo';
+      const protectedPage = !!previous && isHumanAuthored(previous.meta) && !isHumanOrigin(origin);
+      if (previous && protectedPage && !sameKnowledgeClaim(previous.meta.claim, input.claim)) throw new KnowledgeProtectedError(id);
+      const meta = proposalMeta({ ...input, id, scope: pageScope, branch: pageScope === 'branch' ? scope.branch : undefined, base: previous?.meta });
+      delete meta.targetPageId;
+      if (previous && protectedPage) {
+        // Corroboration only: the human's title, kind, text and authorship stay exactly as they are.
+        const kept: KnowledgePageMeta = { ...meta, title: previous.meta.title, kind: previous.meta.kind, status: previous.meta.status };
+        if (previous.meta.confidence) kept.confidence = previous.meta.confidence;
+        else delete kept.confidence;
+        if (previous.meta.updatedBy) kept.updatedBy = previous.meta.updatedBy;
+        else delete kept.updatedBy;
+        const page = await this.writeUnlocked(scope, kept, previous.body, undefined, signal);
+        const evidenceCount = await this.recordEvidenceUnlocked(scope, input.claim, sessionId);
+        return { page, evidenceCount, kept: true };
+      }
+      const page = await this.writeUnlocked(scope, { ...meta, status: 'current', updatedBy: origin }, input.body, input.pageId ? undefined : input.claim, signal);
+      const evidenceCount = await this.recordEvidenceUnlocked(scope, input.claim, sessionId);
+      return { page, evidenceCount };
+    });
+  }
+
   /** Writes a page into the scope it names, preserving `createdAt` on an update. */
   async write(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string): Promise<StoredPage> {
+    return this.withWriteLock(scope, () => this.writeUnlocked(scope, meta, body));
+  }
+
+  /** Exact, uncached reads for write decisions; bounded retrieval scans are not identity checks. */
+  private async readForWrite(scope: KnowledgeScope, id: string): Promise<StoredPage | null> {
+    const branchDir = this.branchDir(scope);
+    for (const dir of [branchDir, this.repoDir(scope)]) {
+      if (!dir) continue;
+      const file = path.join(dir, `${id}.md`);
+      if (!(await unlinkedWikiPath(scope, file))) throw new Error('Refusing to update a linked wiki page.');
+      try {
+        const parsed = parseKnowledgeDocument(await fs.readFile(file, 'utf8'), `${id}.md`);
+        if (!parsed || parsed.meta.id !== id) throw new Error(`Cannot update invalid knowledge page "${id}".`);
+        if (!pageInSlice(parsed.meta, dir === branchDir ? scope.branch : undefined)) throw new Error(`Cannot update out-of-scope knowledge page "${id}".`);
+        return { ...parsed, abs: file, scopeDir: dir, mtimeMs: Date.now() };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    return null;
+  }
+
+  private async writeUnlocked(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string, implicitClaim?: string, signal?: AbortSignal): Promise<StoredPage> {
     if (!isKnowledgeId(meta.id)) throw new Error('Invalid knowledge page id');
-    const dir = meta.scope === 'branch' ? this.branchDir(scope) : this.repoDir(scope);
-    if (!dir) throw new Error('Branch-scope pages need a branch name (only worktree sessions carry one)');
-    await this.ensureIgnored(scope);
+    const branch = meta.scope === 'branch' ? scope.branch : undefined;
+    if (meta.scope === 'branch' && (!branch || (meta.branch && meta.branch !== branch))) throw new Error('A branch-scope page must belong to the active branch');
+    const dir = branch ? this.branchDir(scope)! : this.repoDir(scope);
     const file = path.join(dir, `${meta.id}.md`);
-    if (!isInside(dir, file)) throw new Error('Knowledge page path escapes the wiki');
-    const previous = await this.read(scope, meta.id);
+    if (!isInside(dir, file) || !(await unlinkedWikiPath(scope, file))) throw new Error('Knowledge page path escapes the wiki or is a link');
+    signal?.throwIfAborted();
+    await this.ensureIgnored(scope);
+    // An unreadable or malformed destination is not an absent page and must never be replaced.
+    let previous: KnowledgePage | null = null;
+    try {
+      previous = parseKnowledgeDocument(await fs.readFile(file, 'utf8'), `${meta.id}.md`);
+      if (!previous || previous.meta.id !== meta.id) throw new Error(`Cannot update invalid knowledge page "${meta.id}".`);
+      if (!pageInSlice(previous.meta, branch)) throw new Error(`Cannot update out-of-scope knowledge page "${meta.id}".`);
+      if (implicitClaim !== undefined && !sameKnowledgeClaim(previous.meta.claim, implicitClaim)) throw knowledgeCollision(meta.id);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     const now = new Date().toISOString();
     const next: KnowledgePageMeta = {
       ...meta,
+      branch,
       createdAt: previous?.meta.createdAt ?? meta.createdAt ?? now,
       updatedAt: now
     };
     await ensureDir(path.dirname(file));
+    // Do not start a durable write after the gateway call has been revoked while waiting for disk.
+    signal?.throwIfAborted();
     await writeFileAtomic(file, serializeKnowledgeDocument(next, body));
     const page: StoredPage = { meta: next, body, path: `${meta.id}.md`, abs: file, scopeDir: dir, mtimeMs: Date.now() };
     this.cache.delete(file);
@@ -184,9 +295,11 @@ export class KnowledgeStore {
 
   /** Applies a patch to an existing page and writes it back; null when the page is gone. */
   async patch(scope: KnowledgeScope, id: string, patch: Partial<KnowledgePageMeta>): Promise<StoredPage | null> {
-    const page = await this.read(scope, id);
-    if (!page) return null;
-    return this.write(scope, { ...page.meta, ...patch, id: page.meta.id }, page.body);
+    return this.withWriteLock(scope, async () => {
+      const page = await this.read(scope, id);
+      if (!page) return null;
+      return this.writeUnlocked(scope, { ...page.meta, ...patch, id: page.meta.id }, page.body);
+    });
   }
 
   /**
@@ -196,12 +309,19 @@ export class KnowledgeStore {
    * would survive on disk while the caller reported success.
    */
   async deletePage(scope: KnowledgeScope, id: string): Promise<boolean> {
+    return this.withWriteLock(scope, () => this.deletePageUnlocked(scope, id));
+  }
+
+  private async deletePageUnlocked(scope: KnowledgeScope, id: string): Promise<boolean> {
     if (!isKnowledgeId(id)) return false;
-    for (const dir of [this.branchDir(scope), this.repoDir(scope)]) {
+    const branchDir = this.branchDir(scope);
+    for (const dir of [branchDir, this.repoDir(scope)]) {
       if (!dir) continue;
       const file = path.join(dir, `${id}.md`);
-      if (!isInside(dir, file) || !(await exists(file))) continue;
+      if (!isInside(dir, file) || !(await unlinkedWikiPath(scope, file))) continue;
       try {
+        const page = parseKnowledgeDocument(await fs.readFile(file, 'utf8'), `${id}.md`);
+        if (!page || page.meta.id !== id || !pageInSlice(page.meta, dir === branchDir ? scope.branch : undefined)) continue;
         await fs.rm(file, { force: true });
       } catch {
         continue; // try the next scope
@@ -248,52 +368,49 @@ export class KnowledgeStore {
     return { evidence: path.join(dir, '_evidence.json'), rejected: path.join(dir, '_rejected.json') };
   }
 
-  private async loadLedgers(scope: KnowledgeScope): Promise<void> {
-    const { evidence, rejected } = await this.ledgerFiles(scope);
-    if (this.evidenceFile !== evidence) {
-      this.evidence = await readJson<Record<string, EvidenceEntry>>(evidence, {});
-      this.evidenceFile = evidence;
-    }
-    if (this.rejectedFile !== rejected) {
-      this.rejected = await readJson<Record<string, RejectedEntry>>(rejected, {});
-      this.rejectedFile = rejected;
-    }
-  }
-
   /** Records one sighting of a claim; returns the number of distinct sessions that have seen it. */
   async recordEvidence(scope: KnowledgeScope, claim: string, sessionId?: string): Promise<number> {
-    await this.loadLedgers(scope);
+    return this.withWriteLock(scope, () => this.recordEvidenceUnlocked(scope, claim, sessionId));
+  }
+
+  private async recordEvidenceUnlocked(scope: KnowledgeScope, claim: string, sessionId?: string): Promise<number> {
+    const { evidence: file } = await this.ledgerFiles(scope);
+    // Local fresh snapshots cannot be replaced by concurrent readers on this store instance.
+    const evidence = await readJson<Record<string, EvidenceEntry>>(file, {});
     const key = claimKey(claim);
     const now = new Date().toISOString();
-    const entry = this.evidence?.[key] ?? { count: 0, sessions: [], firstAt: now, lastAt: now };
+    const entry = evidence[key] ?? { count: 0, sessions: [], firstAt: now, lastAt: now };
     const sessions = sessionId && !entry.sessions.includes(sessionId) ? [...entry.sessions, sessionId] : entry.sessions;
     const next: EvidenceEntry = { count: sessions.length, sessions, firstAt: entry.firstAt, lastAt: now };
-    this.evidence = { ...(this.evidence ?? {}), [key]: next };
-    await ensureDir(this.repoDir(scope));
-    await writeFileAtomic(this.evidenceFile!, JSON.stringify(this.evidence, null, 2));
+    await writeFileAtomic(file, JSON.stringify({ ...evidence, [key]: next }, null, 2));
     return next.count;
   }
 
   async evidenceFor(scope: KnowledgeScope, claim: string): Promise<number> {
-    await this.loadLedgers(scope);
-    return this.evidence?.[claimKey(claim)]?.count ?? 0;
+    const { evidence: file } = await this.ledgerFiles(scope);
+    const evidence = await readJson<Record<string, EvidenceEntry>>(file, {});
+    return evidence[claimKey(claim)]?.count ?? 0;
   }
 
   async reject(scope: KnowledgeScope, claim: string, by?: string): Promise<void> {
-    await this.loadLedgers(scope);
-    this.rejected = { ...(this.rejected ?? {}), [claimKey(claim)]: { claim, at: new Date().toISOString(), ...(by ? { by } : {}) } };
-    await ensureDir(this.repoDir(scope));
-    await writeFileAtomic(this.rejectedFile!, JSON.stringify(this.rejected, null, 2));
+    await this.withWriteLock(scope, async () => {
+      const { rejected: file } = await this.ledgerFiles(scope);
+      const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
+      const next = { ...rejected, [claimKey(claim)]: { claim, at: new Date().toISOString(), ...(by ? { by } : {}) } };
+      await writeFileAtomic(file, JSON.stringify(next, null, 2));
+    });
   }
 
   async rejectedClaims(scope: KnowledgeScope): Promise<string[]> {
-    await this.loadLedgers(scope);
-    return Object.values(this.rejected ?? {}).map((r) => r.claim);
+    const { rejected: file } = await this.ledgerFiles(scope);
+    const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
+    return Object.values(rejected).map((r) => r.claim);
   }
 
   async isRejected(scope: KnowledgeScope, claim: string): Promise<boolean> {
-    await this.loadLedgers(scope);
-    return !!this.rejected?.[claimKey(claim)];
+    const { rejected: file } = await this.ledgerFiles(scope);
+    const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
+    return sameRejectedKnowledgeClaim(rejected[claimKey(claim)]?.claim, claim);
   }
 
   /* ------------------------------------------------------------------ */
@@ -442,9 +559,7 @@ function newestFirst(episodes: KnowledgeEpisode[]): KnowledgeEpisode[] {
 
 /** Serializes only the pages the caller asked for, from a summary list; shared with publish. */
 export async function writeFileAtomic(file: string, content: string): Promise<void> {
-  const tmp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, content, 'utf8');
-  await fs.rename(tmp, file);
+  await writeKnowledgeFileAtomic(file, content);
 }
 
 /** Builds a proposal record's meta from an input, on top of the page it may edit. */
@@ -465,6 +580,11 @@ export function proposalMeta(input: {
   contradicts?: string[];
   confidence?: KnowledgePageMeta['confidence'];
   targetPageId?: string;
+  memoryType?: KnowledgePageMeta['memoryType'];
+  verification?: KnowledgePageMeta['verification'];
+  validFrom?: string;
+  validUntil?: string;
+  projectId?: string;
   base?: KnowledgePageMeta;
 }): KnowledgePageMeta {
   const existing = input.base;
@@ -475,6 +595,7 @@ export function proposalMeta(input: {
     kind: input.kind ?? existing?.kind ?? 'concept',
     status: input.status ?? existing?.status ?? 'proposed',
     scope: input.scope,
+    ...(existing?.review ? { review: existing.review } : {}),
     keywords: [...new Set([...(input.keywords ?? []), ...(existing?.keywords ?? [])])].slice(0, 24),
     labels: normalizeLabels([...(input.labels ?? []), ...(existing?.labels ?? [])]),
     sources: dedupeSources([...(input.sources ?? []), ...(existing?.sources ?? [])]),
@@ -492,7 +613,39 @@ export function proposalMeta(input: {
   if (input.confidence ?? existing?.confidence) meta.confidence = input.confidence ?? existing?.confidence;
   if (input.supersedes?.length) meta.supersededBy = existing?.supersededBy;
   if (existing?.supersededBy && !input.supersedes?.length) meta.supersededBy = existing.supersededBy;
+  const memoryType = input.memoryType ?? existing?.memoryType;
+  if (memoryType) meta.memoryType = memoryType;
+  const projectId = input.projectId ?? existing?.projectId;
+  if (projectId) meta.projectId = projectId;
+  // A check made against one claim says nothing about a different one: verification survives an
+  // update only while the claim it verified is still the claim on the page.
+  const verification = input.verification ?? (existing && sameKnowledgeClaim(existing.claim, input.claim) ? existing.verification : undefined);
+  if (verification) meta.verification = verification;
+  const validFrom = input.validFrom ?? existing?.validFrom;
+  if (validFrom) meta.validFrom = validFrom;
+  const validUntil = input.validUntil ?? existing?.validUntil;
+  if (validUntil) meta.validUntil = validUntil;
+  // Fields this version does not model ride along untouched.
+  if (existing?.extra) meta.extra = existing.extra;
   return meta;
+}
+
+/** A page a human reviewed or wrote: the top authority rung a wiki page can hold. */
+export function isHumanAuthored(meta: Pick<KnowledgePageMeta, 'review' | 'updatedBy'>): boolean {
+  return meta.review?.state === 'reviewed' || isHumanOrigin(meta.updatedBy);
+}
+
+function isHumanOrigin(origin: string | undefined): boolean {
+  return origin === 'human' || !!origin?.startsWith('human:');
+}
+
+/** Raised when a lower-authority writer tries to change the claim of a human-reviewed page. */
+export class KnowledgeProtectedError extends Error {
+  readonly code = 'KNOWLEDGE_PROTECTED';
+  constructor(readonly pageId: string) {
+    super(`Knowledge page "${pageId}" is human-reviewed and was not changed. A different claim needs the user's review: it can be filed as a candidate, or edited in the Knowledge panel.`);
+    this.name = 'KnowledgeProtectedError';
+  }
 }
 
 function dedupeSources(sources: KnowledgeSource[]): KnowledgeSource[] {

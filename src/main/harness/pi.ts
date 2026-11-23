@@ -4,26 +4,34 @@ import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem, UserInput } from '../../shared/types';
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
-import { modelName } from '../../shared/model-names';
+import { modelName, UNKNOWN_MODEL_KEY } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { quoteWin, shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
-import { launchOwnedWindowsJob, spawnIndependentWindowsSupervisor, windowsJobCommandLine, type OwnedWindowsJob } from '../owned-windows-job';
+import { launchOwnedWindowsJob, spawnIndependentWindowsSupervisor, windowsJobCommandLine, WINDOWS_SUPERVISOR_STARTUP_MS, type OwnedWindowsJob } from '../owned-windows-job';
 import { which } from '../runtime';
 import { createManagedPiOwnershipIntent, inspectManagedPiOwnership, recordUnlaunchedManagedPiIntent, type ManagedPiOwnershipIntent } from './pi-ownership';
 import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { MISSION_SERVER_ID } from '../../../resources/pi/vocs-code-mission';
+import { PI_FAST_MODE_COMMAND, PI_FAST_MODE_MARKER } from '../../../resources/pi/vocs-code-fast-mode';
+import { parseQuestionPayload, QUESTION_MARKER, QUESTION_RESPONSE_LIMIT, QUESTION_TOOL } from '../../../resources/pi/question-tool';
+import { questionResponse } from '../../shared/question-response';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { installPiAgentOverrides } from '../pi-agents';
+import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, VOCS_MEMORY_SERVER_ID } from '../mcp/memory';
 import { mergePiCatalog } from '../models/pi-catalog';
+import { estimateCostUsd } from '../models/static-models';
+import { fastModePricing } from './native/fast-mode-pricing';
 
 export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
 const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
 const PI_READY_MARKER = 'VCODE_PI_READY::';
 const PI_EXTENSION_ERROR_MARKER = 'VCODE_PI_ERROR::';
 const PI_TOOL_INPUT_MARKER = 'VCODE_PI_TOOL_INPUT::';
+const PI_FAST_FALLBACK_MULTIPLIER = 2;
+const PI_FAST_FALLBACK_ESTIMATE = `${PI_FAST_FALLBACK_MULTIPLIER}x Pi's standard cost estimate`;
 /** Vocs Code's own subagent extension reports run activity as these notifications. */
 const PI_SUBAGENT_MARKER = 'VCODE_SUBAGENT::';
 /** Tool names our subagent extension registers; their cards read as agent work, not shell work. */
@@ -204,11 +212,32 @@ export class PiAdapter implements HarnessAdapter {
   private extensionCapabilities = new Set<string>();
   private extensionFailure: string | null = null;
   private effortFile: string | null = null;
+  private fastModeRequested = false;
+  /** Only the nonce-bound extension's endpoint-checked runtime model can select Fast pricing. */
+  private fastModeEffectiveModel: ModelRef | undefined;
+  private streamFastModeModel: ModelRef | undefined;
+  /** Additive premium above Pi's standard-rate cumulative session cost, including earlier turns. */
+  private fastModeCostAdjustment = 0;
+  private readonly unknownFastCostReported = new Set<string>();
+  private fastModeRevision = 0;
+  private fastModeChange: { requestId: string; revision: number; enabled: boolean; ack: Deferred<void> } | null = null;
   private missionSecrets: string[] = [];
   /** Only the nonce-bound gate can report the active managed surface. Never the configured list. */
   private missionTools: string[] = [];
   private missionSettling = false;
   private missionInterrupted = false;
+  private turnFinishing: Promise<void> | null = null;
+  private statsOverlapped = false;
+  private readonly deferredLines: string[] = [];
+  /** Keep user input outside Pi's queues: 0.85.1 can consume queued input under an aborted signal. */
+  private readonly followUps: UserInput[] = [];
+  private inputDispatch: Promise<void> = Promise.resolve();
+  private pendingInputs = 0;
+  private pendingSteers = 0;
+  private inputRevision = 0;
+  private runtimeQueued = 0;
+  private steeringInterrupt = false;
+  private idleReported = true;
   /** Survives root exit and failed stop attempts until the Job's positive teardown receipt. */
   private missionProcess: OwnedWindowsJob<ChildProcess> | null = null;
   private missionIntent: ManagedPiOwnershipIntent | null = null;
@@ -232,7 +261,7 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   get busy(): boolean {
-    return this._busy;
+    return this._busy || this.pendingInputs > 0;
   }
 
   workspaceWriterState(): 'active' | 'unknown' | 'quiescent' | undefined {
@@ -271,6 +300,10 @@ export class PiAdapter implements HarnessAdapter {
     const meta = this.ctx.session();
     const s = this.ctx.settings();
     const mission = meta.mission;
+    this.fastModeRequested = !mission && meta.config.fastMode === true;
+    this.fastModeRevision = 0;
+    this.fastModeChange = null;
+    this.ctx.updateMeta({ fastModeStatus: { state: this.fastModeRequested ? 'requested' : 'off' } });
     // A POSIX process group does not contain detached/setsid descendants. Refuse managed startup
     // until an equivalent ownership proof exists; ordinary Pi remains available everywhere.
     if (mission && process.platform !== 'win32') throw new Error('Managed Pi process-tree ownership is unverified on this platform.');
@@ -312,27 +345,26 @@ export class PiAdapter implements HarnessAdapter {
         log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
       });
 
-      // The MCP bridge extension reads this file and registers each server's tools with pi.
-      const mcpServers = await this.ctx.mcpServers();
-      const missionServers = mcpServers.filter((server) => server.def.id === MISSION_SERVER_ID);
-      if (mission && (missionServers.length !== 1 || missionServers[0].def.transport !== 'http' || !missionServers[0].def.headers?.Authorization)) {
+      const mcpServers = (await this.ctx.mcpServers()).map(({ def }) => def);
+      const missionServers = mcpServers.filter((server) => server.id === MISSION_SERVER_ID);
+      if (mission && (missionServers.length !== 1 || missionServers[0].transport !== 'http' || !missionServers[0].headers?.Authorization)) {
         throw new Error('Managed Mission requires its authenticated MCP bridge.');
       }
       if (!mission && missionServers.length) throw new Error('Mission MCP bridge requires a managed session.');
-      this.missionSecrets = missionServers.flatMap((server) => Object.values(server.def.headers ?? {}).flatMap((value) => [value, value.replace(/^Bearer /, '')]));
+      this.missionSecrets = missionServers.flatMap((server) => Object.values(server.headers ?? {}).flatMap((value) => [value, value.replace(/^Bearer /, '')]));
+      // The bridge consumes the gateway definition from the launch environment, never the file.
+      // Also exclude incomplete gateway definitions rather than persisting any part of them.
+      const gatewayMemory = mcpServers.filter((server) => server.id === VOCS_MEMORY_SERVER_ID
+        && (server.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || server.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined));
+      const ephemeral = mission ? missionServers : gatewayMemory;
+      const persisted = mcpServers.filter((server) => server.id !== MISSION_SERVER_ID && !gatewayMemory.includes(server));
       const args = ['--mode', 'rpc',
         ...(mission ? ['--no-extensions', '--no-approve', '-e', this.ctx.runtime.resource('pi', 'vocs-code-mission.ts')] : []),
-        '-e', ext, '-e', toolsExt, ...(!mission ? ['-e', subagentsExt] : []), '--session-dir', sessionDir];
-      let mcpConfigFile: string | null = null;
-      if (mcpServers.length) {
-        args.push('-e', mcpExt);
-        const persisted = mcpServers.filter((server) => server.def.id !== MISSION_SERVER_ID);
-        const file = path.join(sessionDir, 'mcp.json');
-        if (persisted.length) {
-          mcpConfigFile = file;
-          await fs.writeFile(file, JSON.stringify({ servers: persisted.map((r) => r.def) }, null, 2) + '\n', 'utf8');
-        } else if (mission) await fs.rm(file, { force: true });
-      }
+        '-e', ext, '-e', toolsExt, ...(!mission ? ['-e', this.ctx.runtime.resource('pi', 'vocs-code-fast-mode.ts'), '-e', subagentsExt] : []), '--session-dir', sessionDir];
+      if (persisted.length || ephemeral.length) args.push('-e', mcpExt);
+      const mcpConfigFile = path.join(sessionDir, 'mcp.json');
+      if (persisted.length) await fs.writeFile(mcpConfigFile, JSON.stringify({ servers: persisted }, null, 2) + '\n', 'utf8');
+      else await fs.rm(mcpConfigFile, { force: true }); // A resumed/disabled session may still have the older generated file.
       if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
       if (meta.config.model) {
         if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
@@ -354,17 +386,20 @@ export class PiAdapter implements HarnessAdapter {
       // Managed presets use Pi's actual thinking selection, never a catalog-driven payload override.
       await this.writeEffortConfig(mission ? undefined : intendedEffort, meta.config.model);
       const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE_PROJECT_ROOT: meta.config.projectRoot, VOCS_CODE: '1' };
+      // Explicit on every launch: resume and inherited parent env cannot restore stale Fast mode.
+      env.VOCS_CODE_FAST_MODE = this.fastModeRequested ? '1' : '0';
       // Never inherit another session's broker capability, mode or MCP config.
-      delete env.VOCS_CODE_MISSION_POLICY;
-      delete env.VOCS_CODE_MCP_EPHEMERAL;
-      delete env.VOCS_CODE_MCP_CONFIG;
+      const reservedEnv = ['VOCS_CODE_MISSION_POLICY', 'VOCS_CODE_MCP_EPHEMERAL', 'VOCS_CODE_MCP_CONFIG', MEMORY_GATEWAY_URL_ENV, MEMORY_GATEWAY_TOKEN_ENV];
+      for (const key of Object.keys(env)) {
+        if (reservedEnv.includes(process.platform === 'win32' ? key.toUpperCase() : key)) delete env[key];
+      }
       if (mission) {
         delete env.VOCS_CODE_SUBAGENT_DIR;
         env.VOCS_CODE_PERMISSION_MODE = permissionMode;
         env.VOCS_CODE_MISSION_POLICY = JSON.stringify({ role: mission.role, sourceAccess: mission.sourceAccess, requestedTools: mission.requestedTools, questionId: mission.questionId });
-        env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: missionServers.map((server) => server.def) });
       }
-      if (mcpConfigFile) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
+      if (ephemeral.length) env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: ephemeral });
+      if (persisted.length) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
       for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
         if (!env[envKey]) {
           const key = await this.ctx.getApiKey(pid);
@@ -421,6 +456,7 @@ export class PiAdapter implements HarnessAdapter {
       this._busy = false;
       for (const d of this.pending.values()) d.reject(new Error(`pi exited (${code})`));
       this.pending.clear();
+      this.fastModeChange?.ack.reject(new Error(`pi exited (${code})`));
       this.ctx.emit({ type: 'status', status: 'stopped', detail: `pi exited (${code})` });
     });
     child.on('error', (e) => { if (this.child === child) this.ctx.emit({ type: 'error', message: `pi failed to start: ${errorMessage(e)}`, fatal: true }); });
@@ -464,7 +500,7 @@ export class PiAdapter implements HarnessAdapter {
         executable: shim ? shell : executable,
         args: shim ? [] : args,
         ...(shim ? { commandLine: `${windowsJobCommandLine(shell, ['/d', '/s', '/c'])} "${[quoteWin(executable), ...args.map(quoteWin)].join(' ')}"` } : {}),
-        cwd, helperPath: this.ctx.runtime.resource('mission', 'windows-check-job.ps1'), startupTimeoutMs: 15_000,
+        cwd, helperPath: this.ctx.runtime.resource('mission', 'windows-check-job.ps1'), startupTimeoutMs: WINDOWS_SUPERVISOR_STARTUP_MS,
         launch: (file, argv) => spawnIndependentWindowsSupervisor(file, argv, { cwd, env }),
         observeExit: (process, exited) => { process.once('close', exited); process.once('error', exited); },
       });
@@ -485,6 +521,7 @@ export class PiAdapter implements HarnessAdapter {
 
   private assertExtensionsReady(): void {
     const required = this.ctx.session().mission ? ['approvals', 'tools', 'mcp', 'mission'] : ['approvals', 'tools', 'subagents'];
+    if (this.fastModeRequested) required.push('fast-mode');
     const missing = required.filter((capability) => !this.extensionCapabilities.has(capability));
     if (this.extensionFailure || missing.length) {
       throw new Error(`Incompatible Pi runtime: Vocs Code requires working approvals and tool compatibility extensions (Pi 0.85.1 APIs). ${this.extensionFailure ?? `Missing readiness: ${missing.join(', ')}.`} Update Pi or disable conflicting extensions; no prompt was sent.`);
@@ -573,27 +610,40 @@ export class PiAdapter implements HarnessAdapter {
       return;
     }
     if (this.ctx.session().mission ? this.missionStopping : this.ordinaryStopping) return;
+    // A new extension-started run can arrive while the old run's stats are in flight. Do not
+    // mix its usage/stop reason into the old turn or let old bookkeeping publish a stale idle.
+    const customMessage = (type === 'message_start' || type === 'message_end') && (ev.message as { role?: string } | undefined)?.role === 'custom';
+    // Out-of-band child completions still belong to the pending accounting report.
+    if (this.turnFinishing && type !== 'extension_ui_request' && type !== 'queue_update' && !customMessage) {
+      if (type === 'agent_start' || type === 'message_start' || type === 'message_update') this.statsOverlapped = true;
+      this.deferredLines.push(line);
+      return;
+    }
     switch (type) {
       case 'agent_start':
+        this.missionSettling = false;
+        this.idleReported = false;
         this._busy = true;
         if (!this.turnStartedAt) this.usage.beginTurn();
         this.turnStartedAt = this.turnStartedAt || Date.now();
         this.ctx.emit({ type: 'status', status: 'running' });
         return;
-      case 'agent_end': {
-        // A retry (or compaction) follows this run; wait for the final agent_end so the
-        // turn item reflects the whole prompt, not the failed attempt.
-        if (this.ctx.session().mission || (ev as { willRetry?: boolean }).willRetry) return;
-        void this.finishTurn();
+      case 'agent_end':
+        // This is only a low-level run boundary. Retry, compaction or extension work may follow.
+        return;
+      case 'agent_settled': {
+        if (this.missionSettling || this.ctx.session().mission && !this.turnStartedAt) return;
+        this.missionSettling = true;
+        const finishing = this.finishTurn();
+        this.turnFinishing = finishing;
+        void finishing.finally(() => {
+          if (this.turnFinishing !== finishing) return;
+          this.turnFinishing = null;
+          for (const deferredLine of this.deferredLines.splice(0)) this.handleLine(deferredLine);
+          this.advanceInputs();
+        }).catch((error) => this.ctx.log('warn', `Pi turn finalization failed: ${errorMessage(error)}`));
         return;
       }
-      case 'agent_settled':
-        // Mission must not release its attempt on agent_end: Pi may still have scheduler,
-        // retry, compaction or queued follow-up work. The installed RPC drain boundary is settled.
-        if (!this.ctx.session().mission || !this.turnStartedAt || this.missionSettling) return;
-        this.missionSettling = true;
-        void this.finishTurn();
-        return;
       case 'turn_start':
       case 'turn_end':
         return;
@@ -602,6 +652,8 @@ export class PiAdapter implements HarnessAdapter {
         if (msg?.role === 'assistant') {
           // Pi's streaming usage is cumulative for one assistant message, not the whole session.
           this.streamUsage = null;
+          const effective = this.fastModeRequested ? this.fastModeEffectiveModel : undefined;
+          this.streamFastModeModel = effective && (!msg.provider || msg.provider === effective.provider) && (!msg.model || msg.model === effective.model) ? effective : undefined;
           this.currentAssistant = { id: shortId('a_'), kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, model: msg.model };
           this.ctx.emit({ type: 'item.upsert', item: { ...this.currentAssistant } });
         }
@@ -638,8 +690,9 @@ export class PiAdapter implements HarnessAdapter {
           return;
         }
         if (msg?.role === 'assistant') {
-          this.reportPiUsage(msg.usage);
+          this.reportPiUsage(msg.usage, true);
           this.streamUsage = null;
+          this.streamFastModeModel = undefined;
           this.lastStopReason = msg.stopReason ?? null;
           this.lastErrorMessage = msg.errorMessage ?? null;
         }
@@ -702,7 +755,8 @@ export class PiAdapter implements HarnessAdapter {
         return;
       case 'queue_update': {
         const e = ev as { steering?: unknown[]; followUp?: unknown[] };
-        this.ctx.updateMeta({ queued: (e.steering?.length ?? 0) + (e.followUp?.length ?? 0) });
+        this.runtimeQueued = (e.steering?.length ?? 0) + (e.followUp?.length ?? 0);
+        this.updateQueued();
         return;
       }
       case 'compaction_start':
@@ -722,6 +776,10 @@ export class PiAdapter implements HarnessAdapter {
       }
       case 'extension_error': {
         const e = ev as { extensionPath?: string; error?: string };
+        if (e.extensionPath === `command:${PI_FAST_MODE_COMMAND}` || e.extensionPath && /vocs-code-fast-mode\.[cm]?[jt]s$/.test(e.extensionPath)) {
+          this.fastModeChange?.ack.reject(new Error(e.error ?? 'Pi Fast mode extension failed.'));
+          this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: 'Pi Fast mode extension failed.' } });
+        }
         if (!e.extensionPath || /vocs-code-(?:tools|approvals|subagents|mission|mcp)\.[cm]?[jt]s$/.test(e.extensionPath)) {
           this.extensionFailure = e.error ?? 'Required Pi extension failed.';
           this.extensionCapabilities.clear();
@@ -905,21 +963,18 @@ export class PiAdapter implements HarnessAdapter {
     if (this.recordedSubagents.has(agentId)) return;
     this.recordedSubagents.add(agentId);
     const costUsd = typeof d.cost === 'number' ? d.cost : typeof d.totalCost === 'number' ? d.totalCost : undefined;
-    const model = this.resolveSubagentModel(this.subagentModelNames.get(agentId));
-    if (costUsd && costUsd > 0) {
-      const ref = model ?? this.ctx.session().activeModel;
-      if (ref?.provider && ref.model) {
-        const key = `${ref.provider}/${ref.model}`;
-        const cur = this.pendingSubagentCost.get(key) ?? { provider: ref.provider, model: ref.model, costUsd: 0 };
-        cur.costUsd += costUsd;
-        this.pendingSubagentCost.set(key, cur);
-      }
+    const model = this.resolveSubagentModel(d.modelName ?? this.subagentModelNames.get(agentId));
+    if (costUsd && Number.isFinite(costUsd) && costUsd > 0) {
+      const key = model ? modelName(model.provider, model.model) : UNKNOWN_MODEL_KEY;
+      const cur = this.pendingSubagentCost.get(key) ?? { ...(model ?? { provider: null, model: null }), costUsd: 0 };
+      cur.costUsd += costUsd;
+      this.pendingSubagentCost.set(key, cur);
     }
     const completion: SubagentCompletion = {
       agentId,
       description: d.description,
       status: d.status ?? 'completed',
-      model: model ?? undefined,
+      model,
       toolUses: typeof d.toolUses === 'number' ? d.toolUses : 0,
       costUsd,
       tokens: typeof d.totalTokens === 'number' ? d.totalTokens : undefined,
@@ -933,32 +988,64 @@ export class PiAdapter implements HarnessAdapter {
       this.subagentRuns.delete(agentId);
     }
     const bits: string[] = [completion.status === 'error' ? 'failed' : 'finished'];
-    if (model) bits.push(`${model.provider}/${model.model}`);
+    bits.push(model ? modelName(model.provider, model.model) : 'model unknown');
     if (completion.toolUses) bits.push(`${completion.toolUses} tool ${completion.toolUses === 1 ? 'use' : 'uses'}`);
     if (completion.tokens) bits.push(`${completion.tokens.toLocaleString()} tokens`);
     if (costUsd) bits.push(`$${costUsd.toFixed(4)}`);
     this.info(`Subagent${d.description ? ` "${d.description}"` : ''}: ${bits.join(' · ')}`, completion.status === 'error' ? 'error' : 'info');
   }
 
-  /** Best-effort match of a pi-subagents display name to a known model, for spend attribution. */
+  /** Resolve a legacy name only when its best match identifies one provider/model, never by order. */
   private resolveSubagentModel(name?: string): ModelRef | null {
     if (!name || !this.models.length) return null;
+    const typed = name.trim();
+    const unique = (matches: ModelInfo[]): ModelRef | null => {
+      const refs = new Map(matches.map((m) => [modelName(m.provider, m.id), { provider: m.provider, model: m.id }]));
+      return refs.size === 1 ? refs.values().next().value ?? null : null;
+    };
+    // Preserve explicit routes before normalization can merge distinct punctuation or providers.
+    const qualified = this.models.filter((m) => modelName(m.provider, m.id) === typed);
+    if (qualified.length) return unique(qualified);
     const norm = (s: string) => s.toLowerCase().replace(/^claude\s+/, '').replace(/[^a-z0-9]/g, '');
-    const target = norm(name);
+    const target = norm(typed);
     if (!target) return null;
-    for (const m of this.models) {
-      if (norm(m.displayName) === target || norm(m.id) === target || norm(modelName(m.provider, m.id)) === target) return { provider: m.provider, model: m.id };
-    }
-    for (const m of this.models) {
-      if (norm(m.displayName).includes(target) || target.includes(norm(m.id))) return { provider: m.provider, model: m.id };
-    }
-    return null;
+    const exact = this.models.filter((m) => norm(m.displayName) === target || norm(m.id) === target || norm(modelName(m.provider, m.id)) === target);
+    if (exact.length) return unique(exact);
+    // An unresolved slashed route must not become a different provider through a fuzzy id match.
+    if (typed.includes('/')) return null;
+    return unique(this.models.filter((m) => {
+      const display = norm(m.displayName);
+      const id = norm(m.id);
+      return (display && display.includes(target)) || (id && target.includes(id));
+    }));
   }
 
   /** Applies the latest per-assistant usage snapshot and publishes a throttled live session update. */
-  private reportPiUsage(raw: unknown): void {
+  private reportPiUsage(raw: unknown, final = false): void {
     const current = piStreamUsage(raw);
     if (!current) return;
+    // Price the completed request, not growing partial input (long-context rates can differ).
+    // Pi exposes no response tier; this is a requested-service estimate, not confirmed billing.
+    const model = final ? this.streamFastModeModel : undefined;
+    if (model) {
+      const pricing = model.provider === 'openai' || model.provider === 'anthropic'
+        ? fastModePricing(model.model, current.input + current.cacheRead + current.cacheWrite) : undefined;
+      // Pi does not expose cache TTL; Anthropic cache writes use the five-minute estimate.
+      const hasFastRates = pricing && (!current.cacheWrite || pricing.cacheWrite !== undefined);
+      const estimate = hasFastRates
+        ? estimateCostUsd(pricing, { inputTokens: current.input, outputTokens: current.output, cacheReadTokens: current.cacheRead, cacheWriteTokens: current.cacheWrite })
+        : current.cost * PI_FAST_FALLBACK_MULTIPLIER;
+      const premium = Math.max(0, estimate - current.cost);
+      current.cost += premium;
+      this.fastModeCostAdjustment += premium;
+      if (!hasFastRates) {
+        const key = `${model.provider}/${model.model}`;
+        if (!this.unknownFastCostReported.has(key)) {
+          this.unknownFastCostReported.add(key);
+          this.info(`Pi Fast pricing is unavailable for this model or context. Analytics estimates spend at ${PI_FAST_FALLBACK_ESTIMATE} when available. Check provider billing for actual charges.`, 'warn');
+        }
+      }
+    }
     const delta = piUsageDelta(this.streamUsage, current);
     this.streamUsage = current;
     if (!hasPiUsage(delta)) return;
@@ -974,6 +1061,11 @@ export class PiAdapter implements HarnessAdapter {
         /* process gone */
       }
     };
+    // A dialog emitted by the retiring run must not wedge cancellation or acquire a new grant.
+    if ((this.steeringInterrupt || this.pendingSteers > 0) && ['select', 'confirm', 'input', 'editor'].includes(req.method)) {
+      respond({ cancelled: true });
+      return;
+    }
     // Mission questions go through the broker to the lead. Keep only the shipped permission
     // gate's cards; a worker extension must never create another user conversation channel.
     if (this.ctx.session().mission && ['select', 'confirm', 'input', 'editor'].includes(req.method) &&
@@ -984,6 +1076,24 @@ export class PiAdapter implements HarnessAdapter {
     switch (req.method) {
       case 'select': {
         const title = req.title ?? '';
+        if (title.startsWith(QUESTION_MARKER)) {
+          try {
+            const question = parseQuestionPayload(title.slice(QUESTION_MARKER.length), this.extensionNonce);
+            const decision = await this.ctx.requestApproval({
+              kind: 'question', title: 'Pi has a question', toolName: QUESTION_TOOL, toolItemId: question.toolCallId,
+              supportsQuestionComment: true, maxQuestionResponseLength: QUESTION_RESPONSE_LIMIT,
+              options: [{ id: 'allow', label: 'Answer', kind: 'allow' }, { id: 'deny', label: 'Skip', kind: 'deny' }],
+              questions: [{ id: 'answer', header: question.header, question: question.question, options: question.options, allowOther: question.allowOther }],
+            });
+            respond({ value: JSON.stringify(questionResponse(decision, 'answer')) });
+          } catch {
+            // Malformed/stale dialogs and an interrupted host request must always unblock Pi,
+            // without turning model text or a missing response into a fabricated user answer.
+            this.ctx.log('warn', 'pi: structured question was invalid or interrupted');
+            respond({ cancelled: true });
+          }
+          return;
+        }
         if (title.startsWith(PI_APPROVAL_MARKER)) {
           let payload: { tool: string; toolCallId?: string; input: Record<string, unknown>; summary?: string } = { tool: 'tool', input: {} };
           try {
@@ -1014,6 +1124,7 @@ export class PiAdapter implements HarnessAdapter {
         const decision = await this.ctx.requestApproval({
           kind: 'question',
           title: title || 'pi asks',
+          supportsQuestionComment: false,
           options: [
             { id: 'allow', label: 'Choose', kind: 'allow' },
             { id: 'deny', label: 'Cancel', kind: 'cancel' }
@@ -1042,6 +1153,7 @@ export class PiAdapter implements HarnessAdapter {
         const decision = await this.ctx.requestApproval({
           kind: 'question',
           title: req.title ?? 'Input requested',
+          supportsQuestionComment: false,
           options: [
             { id: 'allow', label: 'Submit', kind: 'allow' },
             { id: 'deny', label: 'Cancel', kind: 'cancel' }
@@ -1075,12 +1187,36 @@ export class PiAdapter implements HarnessAdapter {
       this.handleSubagentEvent(message.slice(PI_SUBAGENT_MARKER.length));
       return true;
     }
-    const marker = [PI_READY_MARKER, PI_EXTENSION_ERROR_MARKER, PI_TOOL_INPUT_MARKER].find((prefix) => message.startsWith(prefix));
+    const marker = [PI_READY_MARKER, PI_EXTENSION_ERROR_MARKER, PI_TOOL_INPUT_MARKER, PI_FAST_MODE_MARKER].find((prefix) => message.startsWith(prefix));
     if (!marker) return false;
     try {
       const payload = JSON.parse(message.slice(marker.length)) as Record<string, unknown>;
       if (!payload || payload.version !== 1 || !this.extensionNonce || payload.nonce !== this.extensionNonce) return true;
-      if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'mission' || payload.capability === 'mcp')) {
+      if (marker === PI_FAST_MODE_MARKER) {
+        const change = this.fastModeChange;
+        const acknowledged = !!change && payload.requestId === change.requestId && payload.revision === change.revision && payload.enabled === change.enabled;
+        const current = payload.revision === this.fastModeRevision && payload.enabled === this.fastModeRequested;
+        if ((!acknowledged && !current) || !['off', 'requested', 'unavailable', 'cooldown'].includes(String(payload.state)) ||
+            (payload.enabled === false) !== (payload.state === 'off')) return true;
+        if (acknowledged) {
+          this.fastModeRequested = change!.enabled;
+          this.fastModeRevision = change!.revision;
+          change!.ack.resolve();
+        }
+        const effective = payload.effectiveModel as Partial<ModelRef> | undefined;
+        this.fastModeEffectiveModel = effective && typeof effective.provider === 'string' && typeof effective.model === 'string'
+          ? { provider: effective.provider, model: effective.model } : undefined;
+        let detail = typeof payload.detail === 'string' ? payload.detail : undefined;
+        if (payload.enabled && this.fastModeEffectiveModel) {
+          const model = this.fastModeEffectiveModel;
+          const priced = (model.provider === 'openai' || model.provider === 'anthropic') && fastModePricing(model.model, 0);
+          const pricingDetail = priced
+            ? `Analytics uses published Fast rates where available, or ${PI_FAST_FALLBACK_ESTIMATE} otherwise. Anthropic cache writes assume a five-minute TTL.`
+            : `Fast pricing is unavailable; analytics estimates spend at ${PI_FAST_FALLBACK_ESTIMATE} when available.`;
+          detail = `${detail ?? ''} ${pricingDetail} Check provider billing for actual charges.`.trim();
+        }
+        this.ctx.updateMeta({ fastModeStatus: { state: payload.state as 'off' | 'requested' | 'unavailable' | 'cooldown', ...(detail ? { detail } : {}) } });
+      } else if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'mission' || payload.capability === 'mcp' || payload.capability === 'fast-mode')) {
         if (payload.ready === false) this.extensionCapabilities.delete(payload.capability);
         else this.extensionCapabilities.add(payload.capability);
         if (payload.capability === 'mission') {
@@ -1117,8 +1253,8 @@ export class PiAdapter implements HarnessAdapter {
 
   private async finishTurn(): Promise<void> {
     const child = this.child;
+    this.statsOverlapped = false;
     this.declinedTools.clear();
-    if (!this.ctx.session().mission) this._busy = false;
     // The turn ends now, but the stats round-trip below is app bookkeeping rather than model work:
     // measuring the wall time after it would fold a stalled request (up to the 10s timeout) into the
     // turn's duration and depress the speed the panel derives from it. A turn that ends after
@@ -1138,12 +1274,15 @@ export class PiAdapter implements HarnessAdapter {
       );
       if (stats.sessionFile) this.ctx.updateRef({ piSessionFile: stats.sessionFile });
       const t = stats.tokens ?? {};
-      this.usage.setCumulative({
+      // A snapshot that overlaps a newer run already includes its deferred samples. Keep this
+      // turn's streamed usage; the next non-overlapping cumulative snapshot reconciles both.
+      if (!this.statsOverlapped) this.usage.setCumulative({
         inputTokens: t.input,
         outputTokens: t.output,
         cacheReadTokens: t.cacheRead,
         cacheWriteTokens: t.cacheWrite,
-        costUsd: stats.cost,
+        // Pi's stats remain standard-rate. Keep all locally estimated premiums across toggles.
+        costUsd: typeof stats.cost === 'number' ? stats.cost + this.fastModeCostAdjustment : undefined,
         contextTokens: stats.contextUsage?.tokens,
         contextWindow: stats.contextUsage?.contextWindow
       });
@@ -1169,13 +1308,13 @@ export class PiAdapter implements HarnessAdapter {
     // has no measured usage at all, so the row stays unknown instead of claiming a measured zero.
     const turnUsage = completed.usage && Object.values(completed.usage).some((value) => (value ?? 0) > 0) ? completed.usage : undefined;
     // pi ends a failed turn with an assistant message (stopReason 'error'), not an error event.
-    const stopReason = this.ctx.session().mission && this.missionInterrupted ? 'aborted' : this.lastStopReason;
+    const stopReason = this.steeringInterrupt || this.ctx.session().mission && this.missionInterrupted ? 'aborted' : this.lastStopReason;
     const errorMsg = this.lastErrorMessage;
     this.lastStopReason = null;
     this.lastErrorMessage = null;
     const failed = stopReason === 'error' && errorMsg;
     if (failed) this.info(`Turn failed: ${errorMsg}`, 'error');
-    if (this.ctx.session().mission) this._busy = false;
+    this._busy = false;
     this.ctx.emit({
       type: 'item.upsert',
       item: {
@@ -1190,7 +1329,23 @@ export class PiAdapter implements HarnessAdapter {
       }
     });
     this.turnStartedAt = 0;
-    this.ctx.emit({ type: 'status', status: 'idle' });
+    if (this.ctx.session().mission) this.ctx.emit({ type: 'status', status: 'idle' });
+  }
+
+  private updateQueued(): void {
+    this.ctx.updateMeta({ queued: this.runtimeQueued + this.followUps.length + this.pendingInputs });
+  }
+
+  private advanceInputs(): void {
+    if (this.ctx.session().mission || this._busy || this.pendingInputs || this.turnFinishing || this.ordinaryStopping || this.exited) return;
+    const next = this.followUps.shift();
+    this.updateQueued();
+    if (next) {
+      void this.send({ ...next, mode: 'queue' }).catch((error) => this.ctx.emit({ type: 'error', message: `Pi queued input failed: ${errorMessage(error)}`, fatal: false }));
+    } else if (!this.idleReported) {
+      this.idleReported = true;
+      this.ctx.emit({ type: 'status', status: 'idle' });
+    }
   }
 
   private info(text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
@@ -1206,12 +1361,69 @@ export class PiAdapter implements HarnessAdapter {
       if (!readiness.ready) throw new Error(readiness.reason ?? 'Managed Mission runtime is unverified.');
     }
     if (!this.ctx.session().mission && this.ctx.permissionMode() !== 'plan') this.ordinaryWritersUnproven = true;
-    const images = (input.images ?? []).map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }));
-    if (this._busy) {
-      const type = input.mode === 'queue' ? 'follow_up' : 'steer';
-      await this.request(type, { message: input.text, images });
+    if (this.ctx.session().mission) {
+      if (this._busy) {
+        await this.request(input.mode === 'queue' ? 'follow_up' : 'steer', { message: input.text, images: this.images(input) });
+      } else await this.promptInput(input);
       return;
     }
+    if (input.mode === 'queue' && this.busy) {
+      this.followUps.push(input);
+      this.updateQueued();
+      return;
+    }
+    const child = this.child;
+    const revision = this.inputRevision;
+    const assertCurrent = () => {
+      if (this.child !== child || this.exited || this.ordinaryStopping || revision !== this.inputRevision) throw new Error('Pi stopped before the message could be sent.');
+    };
+    let steeringPending = this.busy;
+    if (steeringPending) this.pendingSteers++;
+    this.pendingInputs++;
+    this.updateQueued();
+    // Serialize only cancellation/admission, never a whole model response. Rapid steers each
+    // enter once, in order, and queued follow-ups cannot overtake an urgent directive.
+    const dispatch = this.inputDispatch.then(async () => {
+      assertCurrent();
+      await this.turnFinishing;
+      if (this._busy && input.mode === 'queue') {
+        // An extension can start work between selecting a follow-up and admitting it.
+        // Queue must still wait, preserving its place ahead of later follow-ups.
+        this.followUps.unshift(input);
+        return;
+      }
+      if (this._busy) {
+        this.steeringInterrupt = true;
+        try {
+          await withTimeout(this.request('abort'), 15_000, 'Pi steering cancellation');
+          await this.turnFinishing;
+          assertCurrent();
+          if (this._busy) throw new Error('Pi did not settle after cancellation; stop the session before retrying.');
+        } finally {
+          this.steeringInterrupt = false;
+        }
+      }
+      assertCurrent();
+      if (steeringPending) { this.pendingSteers--; steeringPending = false; }
+      await this.promptInput(input);
+    });
+    const completed = dispatch.finally(() => {
+      if (steeringPending) this.pendingSteers--;
+      this.pendingInputs--;
+      this.updateQueued();
+      this.advanceInputs();
+    });
+    this.inputDispatch = completed.catch(() => undefined);
+    await completed;
+  }
+
+  private images(input: UserInput): { type: string; data: string; mimeType: string }[] {
+    return (input.images ?? []).map((image) => ({ type: 'image', data: image.data, mimeType: image.mimeType }));
+  }
+
+  private async promptInput(input: UserInput): Promise<void> {
+    const child = this.child;
+    this.idleReported = false;
     this._busy = true;
     this.missionSettling = false;
     this.missionInterrupted = false;
@@ -1221,10 +1433,12 @@ export class PiAdapter implements HarnessAdapter {
     this.usage.beginTurn();
     this.ctx.emit({ type: 'status', status: 'running' });
     try {
-      await this.request('prompt', { message: input.text, images });
+      await this.request('prompt', { message: input.text, images: this.images(input) });
     } catch (e) {
-      this._busy = false;
-      this.ctx.emit({ type: 'status', status: 'idle' });
+      if (this.child === child && !this.exited && !this.ordinaryStopping && !this.missionStopping) {
+        this._busy = false;
+        if (this.ctx.session().mission) this.ctx.emit({ type: 'status', status: 'idle' });
+      }
       throw e;
     }
   }
@@ -1245,6 +1459,32 @@ export class PiAdapter implements HarnessAdapter {
     await this.request('set_model', { provider: model.provider, modelId: model.model });
     this.ctx.updateMeta({ activeModel: model });
     await this.writeEffortConfig(this.ctx.effort(), model);
+  }
+
+  async setFastMode(enabled: boolean): Promise<void> {
+    if (typeof enabled !== 'boolean') throw new Error('Pi Fast mode must be a boolean.');
+    if (this.ctx.session().mission) throw new Error('Mission presets are fixed for the attempt.');
+    if (this._busy || this.fastModeChange) throw new Error('Pi Fast mode can only change while idle.');
+    if (!this.child || this.exited) throw new Error('pi process is not running');
+    if (!this.extensionCapabilities.has('fast-mode')) throw new Error('Pi Fast mode extension is unavailable. Update Pi and restart the session.');
+    const change = { requestId: randomUUID(), revision: this.fastModeRevision + 1, enabled, ack: deferred<void>() };
+    this.fastModeChange = change;
+    try {
+      // prompt executes an extension command without adding a user/model turn. RPC success alone
+      // is insufficient: require the exact nonce/revision acknowledgement from our extension.
+      await withTimeout(Promise.all([
+        this.request('prompt', { message: `/${PI_FAST_MODE_COMMAND} ${JSON.stringify({ nonce: this.extensionNonce, requestId: change.requestId, revision: change.revision, enabled })}` }),
+        change.ack.promise
+      ]), 10_000, 'Pi Fast mode acknowledgement');
+    } catch (error) {
+      this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: 'Pi Fast mode change was not confirmed. Restart the session before retrying.' } });
+      // An acknowledgement can be lost after mutation. Never let an unconfirmed paid tier serve
+      // another turn; the next launch reconstructs the last committed preference from config.
+      await this.dispose();
+      throw error;
+    } finally {
+      this.fastModeChange = null;
+    }
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {
@@ -1304,10 +1544,16 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.inputRevision++;
+    this.followUps.length = 0;
+    this.deferredLines.length = 0;
+    this.runtimeQueued = 0;
+    this.updateQueued();
     this.usageReporter.close();
     this.extensionCapabilities.clear();
     this.missionTools = [];
     this.declinedTools.clear();
+    this.fastModeChange?.ack.reject(new Error('Pi stopped before Fast mode was confirmed.'));
     const child = this.child;
     if (this.ctx.session().mission) {
       this.missionStopping = true;

@@ -1,9 +1,7 @@
 name: release
 
-# Builds the installers for a version tag and attaches them to the GitHub
-# Release. Triggered by the tag release-please pushes (v*), or dispatched
-# manually with a tag when the default-token recursion rule blocked it.
-# See docs/RELEASING.md.
+# Build read-only, then let one publisher expose a validated complete draft.
+# Both jobs check out the exact master/CI SHA from verify-tag, never a moving tag.
 on:
   push:
     tags: ['v*']
@@ -14,34 +12,107 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
+
+# Serializes push + dispatch runs for the same tag, including the build/publish handoff.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+  verify-tag:
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/verify-release-tag.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+
   build:
+    needs: verify-tag
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
-            target: --win
+            platform: windows
+            target: --win --x64
           - os: macos-latest
+            platform: macos
             target: --mac
           - os: ubuntu-latest
-            target: --linux
+            platform: linux
+            target: --linux --x64
     runs-on: ${{ matrix.os }}
     env:
       # No signing certs yet; skip the identity search so mac builds don't fail.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      RELEASE_SHA: ${{ needs.verify-tag.outputs.sha }}
+      RELEASE_WORKFLOW_SHA: ${{ github.workflow_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+          ref: ${{ needs.verify-tag.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
       - run: npm ci --include=dev
+      - run: node scripts/release-artifacts.mjs identity
       - run: npx electron-vite build
-      - run: npx electron-builder ${{ matrix.target }} --config electron-builder.yml --publish always
+      # Keep publish config: the locked builder writes updater YAML with publishing disabled.
+      - run: npx electron-builder ${{ matrix.target }} --config electron-builder.yml --publish never
+      - name: Verify bundled Graphify in the built app
+        run: node scripts/graphify-smoke.mjs --packaged
+      - run: node scripts/release-artifacts.mjs stage ${{ matrix.platform }}
+      # Sign the exact validated bundle bytes with GitHub OIDC, not a publisher certificate.
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: release-bundle/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          # Stable within the run: failed-leg reruns reuse the successful legs' bundles.
+          name: release-${{ matrix.platform }}
+          path: release-bundle/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  publish:
+    needs: [verify-tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.verify-tag.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --include=dev --ignore-scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-windows
+          path: release-bundles/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-macos
+          path: release-bundles/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-linux
+          path: release-bundles/linux
+      - run: node scripts/publish-release.mjs
         env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_SHA: ${{ needs.verify-tag.outputs.sha }}
           GH_TOKEN: ${{ github.token }}

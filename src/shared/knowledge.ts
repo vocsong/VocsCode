@@ -63,7 +63,31 @@ export interface KnowledgeSource {
   type: KnowledgeSourceType;
   ref: string;
   note?: string;
+  /** Full commit SHA the source was read at, so a citation survives the file changing. */
+  revision?: string;
 }
+
+/** How a claim was checked. `human-review` is the only method that verifies design intent. */
+export const KNOWLEDGE_VERIFICATION_METHODS = ['human-review', 'commit', 'test', 'source-check'] as const;
+export type KnowledgeVerificationMethod = (typeof KNOWLEDGE_VERIFICATION_METHODS)[number];
+
+/** Recorded evidence that a claim was checked against a source, never a score. */
+export interface KnowledgeVerification {
+  method: KnowledgeVerificationMethod;
+  at: string;
+  /** `human`, or the checker that ran. */
+  by?: string;
+  /** The commit the evidence was checked against, when the method has one. */
+  revision?: string;
+  note?: string;
+}
+
+/** What kind of memory a page is. Absent on pages written before the field existed (semantic). */
+export const KNOWLEDGE_MEMORY_TYPES = ['semantic', 'procedural'] as const;
+export type KnowledgeMemoryType = (typeof KNOWLEDGE_MEMORY_TYPES)[number];
+
+/** A frontmatter value this app does not model but must write back exactly as it found it. */
+export type KnowledgeExtraValue = string | string[] | Array<Record<string, string>>;
 
 /** A pointer into the current implementation. Resolved live through GitNexus when available. */
 export interface KnowledgeAnchor {
@@ -117,6 +141,20 @@ export interface KnowledgePageMeta {
   updatedBy?: string;
   evidenceCount?: number;
   review?: KnowledgeReview;
+  /** Semantic (a fact, decision or rationale) or procedural (a verified way of working). */
+  memoryType?: KnowledgeMemoryType;
+  /** Stable id of the project this page belongs to; survives a moved or re-cloned checkout. */
+  projectId?: string;
+  /** Set once the claim was checked against a source; absent means agent-ingested and unchecked. */
+  verification?: KnowledgeVerification;
+  /** The claim holds from / until these instants, when it is known to be time-bound. */
+  validFrom?: string;
+  validUntil?: string;
+  /**
+   * Frontmatter keys this version does not model, kept in file order and written back verbatim, so
+   * a hand-added field or one from a newer schema survives every rewrite.
+   */
+  extra?: Record<string, KnowledgeExtraValue>;
 }
 
 export interface KnowledgePage {
@@ -155,6 +193,9 @@ export interface KnowledgePageSummary {
   confidence?: KnowledgeConfidence;
   /** Higher is more authoritative; human-reviewed outranks a draft (see knowledgeAuthority). */
   authority: number;
+  /** How the claim was checked, when it was; the panel never shows "verified" without it. */
+  verifiedBy?: KnowledgeVerificationMethod;
+  memoryType?: KnowledgeMemoryType;
   evidenceCount?: number;
   /** Match excerpt with \u0001/\u0002 around the hit, when the summary came from a search. */
   snippet?: string;
@@ -210,9 +251,9 @@ export interface KnowledgeProposalInput {
   claim: string;
   body: string;
   kind?: KnowledgeKind;
-  /** Where the accepted page lands; defaults by scope (see KnowledgeService.defaultScope). */
+  /** Where the page lands; inherits an existing page's scope, otherwise defaults to repo. */
   scope?: KnowledgePageScope;
-  /** Updates this existing page when accepted; a new slug is minted when absent. */
+  /** Explicitly updates this id, even for a changed claim; implicit slug collisions are refused. */
   pageId?: string;
   keywords?: string[];
   labels?: string[];
@@ -222,6 +263,11 @@ export interface KnowledgeProposalInput {
   supersedes?: string[];
   contradicts?: string[];
   confidence?: KnowledgeConfidence;
+  memoryType?: KnowledgeMemoryType;
+  /** Recorded only by a checker or a human; a writer's own say-so is not verification. */
+  verification?: KnowledgeVerification;
+  validFrom?: string;
+  validUntil?: string;
 }
 
 export interface KnowledgeProposalRecord extends KnowledgeProposalInput {
@@ -320,9 +366,11 @@ export function isPendingStatus(status: KnowledgeStatus): boolean {
   return status === 'draft' || status === 'proposed';
 }
 
-export function authorityLabel(meta: Pick<KnowledgePageMeta, 'status' | 'review' | 'updatedBy'>): string {
+export function authorityLabel(meta: Pick<KnowledgePageMeta, 'status' | 'review' | 'updatedBy' | 'verification'>): string {
   const rank = authorityOf(meta);
   if (rank <= 2) return 'human-reviewed';
+  // Checked against a source but not reviewed by a human: stronger than accepted, same rung.
+  if (meta.status === 'current' && meta.verification) return 'verified';
   if (meta.status === 'current') return 'accepted';
   if (meta.status === 'uncertain') return 'uncertain';
   if (meta.status === 'deprecated') return 'deprecated';
@@ -352,7 +400,19 @@ function asStringList(value: unknown): string[] {
 
 function stripQuotes(value: string): string {
   const t = value.trim();
-  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) return t.slice(1, -1);
+  if (t.length < 2) return t;
+  if (t.startsWith("'") && t.endsWith("'")) return t.slice(1, -1);
+  if (t.startsWith('"') && t.endsWith('"')) {
+    // `quote()` writes JSON strings, so a quote or backslash inside a value must decode back;
+    // slicing the delimiters off would double every backslash on each rewrite.
+    try {
+      const decoded: unknown = JSON.parse(t);
+      if (typeof decoded === 'string') return decoded;
+    } catch {
+      /* a hand-written "…" that is not valid JSON keeps its inner text */
+    }
+    return t.slice(1, -1);
+  }
   return t;
 }
 
@@ -431,7 +491,8 @@ function sourceOf(raw: unknown): KnowledgeSource | null {
   const type = asString(raw.type) as KnowledgeSourceType | undefined;
   if (!ref || !type || !SOURCE_TYPES.includes(type)) return null;
   const note = asString(raw.note);
-  return { type, ref, ...(note ? { note } : {}) };
+  const revision = asString(raw.revision);
+  return { type, ref, ...(note ? { note } : {}), ...(revision ? { revision } : {}) };
 }
 
 function anchorOf(raw: unknown): KnowledgeAnchor | null {
@@ -461,6 +522,47 @@ function reviewOf(raw: Record<string, unknown>): KnowledgeReview | undefined {
   const at = asString(raw.reviewed_at);
   const note = asString(raw.review_note);
   return { state, ...(by ? { by } : {}), ...(at ? { at } : {}), ...(note ? { note } : {}) };
+}
+
+function verificationOf(raw: Record<string, unknown>): KnowledgeVerification | undefined {
+  const method = asString(raw.verified_by) as KnowledgeVerificationMethod | undefined;
+  const at = asString(raw.verified_at);
+  if (!method || !at || !(KNOWLEDGE_VERIFICATION_METHODS as readonly string[]).includes(method)) return undefined;
+  const by = asString(raw.verified_actor);
+  const revision = asString(raw.verified_revision);
+  const note = asString(raw.verified_note);
+  return { method, at, ...(by ? { by } : {}), ...(revision ? { revision } : {}), ...(note ? { note } : {}) };
+}
+
+/** Every frontmatter key the typed mapping owns; anything else is carried in `extra`. */
+const KNOWN_FRONTMATTER_KEYS = new Set([
+  'id', 'title', 'kind', 'status', 'scope', 'branch', 'confidence', 'claim', 'target_page', 'keywords', 'labels', 'sources', 'anchors',
+  'related', 'supersedes', 'superseded_by', 'contradicts', 'created_at', 'updated_at', 'updated_by', 'evidence_count',
+  'review_state', 'reviewed_by', 'reviewed_at', 'review_note',
+  'memory_type', 'project_id', 'verified_by', 'verified_at', 'verified_actor', 'verified_revision', 'verified_note', 'valid_from', 'valid_until'
+]);
+
+function extraOf(raw: Record<string, unknown>): Record<string, KnowledgeExtraValue> | undefined {
+  const out: Record<string, KnowledgeExtraValue> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (KNOWN_FRONTMATTER_KEYS.has(key) || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)) continue;
+    if (typeof value === 'string') out[key] = value;
+    else if (Array.isArray(value)) {
+      if (value.every((v) => typeof v === 'string')) out[key] = value as string[];
+      else out[key] = value.filter(isRecord).map((entry) => Object.fromEntries(Object.entries(entry).filter((pair): pair is [string, string] => typeof pair[1] === 'string')));
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Which schema a page was written with: 2 once it carries any lifecycle field, else 1. Detection
+ * only — a version-1 page is read as-is and never rewritten just for being old.
+ */
+export function knowledgeSchemaVersion(raw: Record<string, unknown>): 1 | 2 {
+  for (const key of ['memory_type', 'project_id', 'verified_by', 'valid_from', 'valid_until']) if (raw[key] !== undefined) return 2;
+  if (Array.isArray(raw.sources) && raw.sources.some((s) => isRecord(s) && s.revision !== undefined)) return 2;
+  return 1;
 }
 
 /** Maps a parsed document onto the typed page; null when identity/kind are unusable. */
@@ -503,6 +605,18 @@ export function toKnowledgePage(raw: Record<string, unknown>, body: string, path
   if (evidence !== undefined && Number.isFinite(evidence)) meta.evidenceCount = evidence;
   const review = reviewOf(raw);
   if (review) meta.review = review;
+  const memoryType = asString(raw.memory_type);
+  if (memoryType && (KNOWLEDGE_MEMORY_TYPES as readonly string[]).includes(memoryType)) meta.memoryType = memoryType as KnowledgeMemoryType;
+  const projectId = asString(raw.project_id);
+  if (projectId) meta.projectId = projectId;
+  const verification = verificationOf(raw);
+  if (verification) meta.verification = verification;
+  const validFrom = asString(raw.valid_from);
+  if (validFrom) meta.validFrom = validFrom;
+  const validUntil = asString(raw.valid_until);
+  if (validUntil) meta.validUntil = validUntil;
+  const extra = extraOf(raw);
+  if (extra) meta.extra = extra;
   return { meta, body, path };
 }
 
@@ -536,6 +650,7 @@ export function serializeKnowledgeDocument(meta: KnowledgePageMeta, body: string
     for (const s of meta.sources) {
       lines.push(`  - type: ${s.type}`, `    ref: ${quote(s.ref)}`);
       if (s.note) lines.push(`    note: ${quote(s.note)}`);
+      if (s.revision) lines.push(`    revision: ${quote(s.revision)}`);
     }
   }
   if (meta.anchors.length) {
@@ -558,6 +673,27 @@ export function serializeKnowledgeDocument(meta: KnowledgePageMeta, body: string
     if (meta.review.by) lines.push(`reviewed_by: ${quote(meta.review.by)}`);
     if (meta.review.at) lines.push(`reviewed_at: ${meta.review.at}`);
     if (meta.review.note) lines.push(`review_note: ${quote(meta.review.note)}`);
+  }
+  if (meta.memoryType) lines.push(`memory_type: ${meta.memoryType}`);
+  if (meta.projectId) lines.push(`project_id: ${quote(meta.projectId)}`);
+  if (meta.verification) {
+    lines.push(`verified_by: ${meta.verification.method}`, `verified_at: ${meta.verification.at}`);
+    if (meta.verification.by) lines.push(`verified_actor: ${quote(meta.verification.by)}`);
+    if (meta.verification.revision) lines.push(`verified_revision: ${quote(meta.verification.revision)}`);
+    if (meta.verification.note) lines.push(`verified_note: ${quote(meta.verification.note)}`);
+  }
+  if (meta.validFrom) lines.push(`valid_from: ${meta.validFrom}`);
+  if (meta.validUntil) lines.push(`valid_until: ${meta.validUntil}`);
+  for (const [key, value] of Object.entries(meta.extra ?? {})) {
+    if (KNOWN_FRONTMATTER_KEYS.has(key)) continue;
+    if (typeof value === 'string') lines.push(`${key}: ${quote(value)}`);
+    else if (value.every((v): v is string => typeof v === 'string')) lines.push(...linesOfList(key, value));
+    else {
+      const entries = (value as Array<Record<string, string>>).filter((entry) => Object.keys(entry).length);
+      if (!entries.length) continue;
+      lines.push(`${key}:`);
+      for (const entry of entries) Object.entries(entry).forEach(([k, v], i) => lines.push(`${i === 0 ? '  - ' : '    '}${k}: ${quote(v)}`));
+    }
   }
   lines.push('---', '');
   return `${lines.join('\n')}${body.replace(/^\n+/, '').replace(/\s+$/, '')}\n`;

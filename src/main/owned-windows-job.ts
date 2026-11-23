@@ -9,6 +9,16 @@ import path from 'node:path';
 import type { AppSettings } from '../shared/types';
 import { applyMissionProjectOverride, type MissionProjectOverride } from '../shared/mission-config';
 
+/**
+ * How long a Windows Job supervisor may take to start (PowerShell plus compiling its Add-Type
+ * helper) before it is treated as hung. On a cold machine — first use after boot, antivirus
+ * scanning the compiler — that compile alone took over 30 s on GitHub's Windows runners, which
+ * turned the first Mission check into a false "blocked" result. A supervisor PowerShell refuses
+ * to start (AppLocker, WDAC, AMSI) exits at once and is reported from its exit instead, so this
+ * bound only decides how long a genuinely hung start is waited for.
+ */
+export const WINDOWS_SUPERVISOR_STARTUP_MS = 120_000;
+
 export interface OwnedWindowsJob<T> {
   process: T;
   /** Positive empty-Job receipt AND supervisor exit. A lost proof rejects, never becomes success. */
@@ -138,7 +148,7 @@ export function launchOwnedWindowsJob<T>(options: OwnedWindowsJobOptions<T>): Ow
     if (socket) socket.write('cancel\n');
     fail('Job supervisor did not establish process ownership');
     socket?.destroy(); server.close();
-  }, options.startupTimeoutMs ?? 30_000);
+  }, options.startupTimeoutMs ?? WINDOWS_SUPERVISOR_STARTUP_MS);
   const system = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
   let root: T;
   try {

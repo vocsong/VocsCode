@@ -136,6 +136,14 @@ describe('cross-harness fork context', () => {
     expect(sent[1].text).toBe('and run it');
   });
 
+  it('starts a fork clean: it never inherits the source\'s "done · not viewed" mark or view stamp', async () => {
+    const { manager } = makeManager({ ...source('claude'), unseenAt: 5_000, unseenFailed: true, lastViewedAt: 4_000 }, conversation);
+    const fork = (await manager.fork('s_src'))!;
+    expect(fork.unseenAt).toBeUndefined();
+    expect(fork.unseenFailed).toBeUndefined();
+    expect(fork.lastViewedAt).toBeUndefined();
+  });
+
   it('does not seed a same-harness fork that stayed in the source directory', async () => {
     sent.length = 0;
     const { manager } = makeManager(source('claude'), conversation);
@@ -144,6 +152,21 @@ describe('cross-harness fork context', () => {
     await manager.send(fork!.id, { text: 'continue' });
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toBe('continue');
+  });
+
+  it.each(['codex', 'codex-exec'] as const)('hands prior conversation to a fresh same-harness %s fork without resuming the source thread', async (harness) => {
+    sent.length = 0;
+    const src = { ...source(harness), worktreeBranch: undefined, harnessRef: { codexThreadId: 'source-thread' } };
+    const { manager } = makeManager(src, conversation);
+    const fork = (await manager.fork(src.id))!;
+    expect(fork.harnessRef).toEqual({});
+    expect(fork.pendingForkContext).toBe(true);
+    await manager.send(fork.id, { text: 'continue the fork' });
+    expect(sent[0].text).toContain('fix the login bug');
+    expect(sent[0].text).toContain('I found the cause in session.ts');
+    expect(sent[0].text.endsWith('continue the fork')).toBe(true);
+    await manager.send(fork.id, { text: 'next question' });
+    expect(sent[1].text).toBe('next question');
   });
 
   it('hands the conversation to a same-harness fork that moved to its own worktree', async () => {

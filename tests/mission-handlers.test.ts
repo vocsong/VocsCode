@@ -12,6 +12,7 @@ import { isMissionRevisionConflict, missionRevisionConflictMessage } from '../sr
 import type { SessionMeta, UserInput } from '../src/shared/types';
 import { SettingsStore } from '../src/main/settings';
 import { missionDeliveryBranch } from '../src/main/mission/delivery';
+import { MissionWorkspaceAdmission } from '../src/main/mission/admission';
 import type { TargetObservation } from '../src/main/mission/workspaces';
 import { missionFixture } from './support/mission-fixture';
 import * as git from '../src/main/git';
@@ -33,7 +34,8 @@ afterEach(async () => {
 });
 
 async function rig() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-mission-handler-'));
+  // Provisioned Mission roots are canonical, including macOS's /var → /private/var alias.
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-mission-handler-')));
   dirs.push(dir);
   const root = path.join(dir, 'project');
   const leadPath = path.join(dir, 'lead');
@@ -514,7 +516,7 @@ describe('Mission resource ownership at generic handlers', () => {
     await fs.writeFile(path.join(r.integrationPath, 'result.txt'), 'integrated');
     await fs.writeFile(path.join(r.leadPath, 'lead.txt'), 'lead work');
     await fs.writeFile(path.join(r.workerPath, 'worker.txt'), 'candidate');
-    expect(await r.registry.invoke('fs:read', { sessionId: 'lead', path: 'result.txt' })).toEqual({ content: 'integrated', truncated: false });
+    expect(await r.registry.invoke('fs:read', { sessionId: 'lead', path: 'result.txt' })).toEqual({ content: 'integrated', truncated: false, readOnly: true });
     expect(await r.registry.invoke('fs:read', { sessionId: 'lead', missionWorkspaceId: 'lead-workspace', path: 'lead.txt' })).toEqual({ content: 'lead work', truncated: false });
     expect(await r.registry.invoke('fs:search', { sessionId: 'lead', missionWorkspaceId: 'worker-workspace', query: 'worker' })).toEqual(['worker.txt']);
     expect(await r.registry.invoke('fs:list', { sessionId: 'lead' })).toEqual([expect.objectContaining({ name: 'result.txt' })]);
@@ -522,7 +524,95 @@ describe('Mission resource ownership at generic handlers', () => {
     await expect(r.registry.invoke('fs:list', { sessionId: 'lead', missionWorkspaceId: 'foreign' })).rejects.toThrow(/unavailable/);
     r.patch({ workspaces: r.record().workspaces.map((w) => w.role === 'worker' ? { ...w, cleanedAt: 2 } : w) });
     await expect(r.registry.invoke('fs:list', { sessionId: 'lead', missionWorkspaceId: 'worker-workspace' })).rejects.toThrow(/cleaned/);
-    expect(await r.registry.invoke('fs:read', { sessionId: 'lead', path: '../worker/worker.txt' })).toEqual({ content: '', truncated: false });
+    expect(await r.registry.invoke('fs:read', { sessionId: 'lead', path: '../worker/worker.txt' })).toEqual({ content: '', truncated: false, readOnly: true });
+  });
+
+  it('resolves file mentions against exactly the same selected Mission root as file reads', async () => {
+    const r = await rig();
+    for (const [root, content] of [[r.root, 'source'], [r.leadPath, 'lead'], [r.workerPath, 'worker'], [r.integrationPath, 'integration'], [r.verificationPath, 'verification']] as const) {
+      await fs.mkdir(path.join(root, content));
+      await fs.writeFile(path.join(root, content, 'result.txt'), content);
+    }
+    for (const [missionWorkspaceId, content] of [[undefined, 'integration'], ['lead-workspace', 'lead'], ['worker-workspace', 'worker'], ['integration-workspace', 'integration'], ['verification-workspace', 'verification']] as const) {
+      const scope = { sessionId: 'lead', ...(missionWorkspaceId ? { missionWorkspaceId } : {}) };
+      await expect(r.registry.invoke('fs:resolve', { ...scope, path: 'result.txt' })).resolves.toEqual({ status: 'resolved', path: `${content}/result.txt` });
+      await expect(r.registry.invoke('fs:read', { ...scope, path: `${content}/result.txt` })).resolves.toEqual({ content, truncated: false, ...(content === 'lead' ? {} : { readOnly: true }) });
+    }
+    await fs.writeFile(path.join(r.leadPath, 'lead-only.txt'), 'lead');
+    await fs.writeFile(path.join(r.workerPath, 'worker-only.txt'), 'worker');
+    await fs.writeFile(path.join(r.root, 'source-only.txt'), 'source');
+    for (const p of ['lead-only.txt', 'worker-only.txt', 'source-only.txt']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 'lead', path: p })).resolves.toEqual({ status: 'missing' });
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 'lead', missionWorkspaceId: 'lead-workspace', path: 'worker-only.txt' })).resolves.toEqual({ status: 'missing' });
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 'worker', path: 'worker-only.txt' })).resolves.toEqual({ status: 'resolved', path: 'worker-only.txt' });
+  });
+
+  it('rejects foreign, unauthorized and cleaned Mission file-resolution scopes before returning paths', async () => {
+    const r = await rig();
+    await fs.writeFile(path.join(r.workerPath, 'worker.txt'), 'retained candidate');
+    for (const sessionId of ['source', 'worker']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId, missionWorkspaceId: 'worker-workspace', path: 'worker.txt' })).rejects.toThrow(/owning Mission lead/);
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 'lead', missionWorkspaceId: 'foreign', path: 'worker.txt' })).rejects.toThrow(/unavailable/);
+    r.patch({ workspaces: r.record().workspaces.map((w) => w.role === 'worker' ? { ...w, cleanedAt: 2 } : w) });
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 'lead', missionWorkspaceId: 'worker-workspace', path: 'worker.txt' })).rejects.toThrow(/cleaned/);
+    await expect(r.registry.invoke('fs:read', { sessionId: 'lead', missionWorkspaceId: 'worker-workspace', path: 'worker.txt' })).rejects.toThrow(/cleaned/);
+  });
+
+  it('saves only in the active lead’s workspace, never in protected or aliased Mission workspaces', async () => {
+    const r = await rig();
+    const protectedRoots = [r.root, r.integrationPath, r.workerPath, r.verificationPath];
+    for (const root of [...protectedRoots, r.leadPath]) await fs.writeFile(path.join(root, 'save.txt'), 'before');
+    const req = { sessionId: 'lead', path: 'save.txt', content: 'after', expectedContent: 'before' };
+    const leadScope = { ...req, missionWorkspaceId: 'lead-workspace' };
+    const admission = vi.fn(async (_cwd: string, write: () => Promise<void>) => write());
+    const registry = createHandlerRegistry({ ...r.deps, withWorkspaceWrite: admission });
+    for (const missionWorkspaceId of [undefined, 'integration-workspace', 'worker-workspace', 'verification-workspace']) {
+      await expect(registry.invoke('fs:writeText', { ...req, missionWorkspaceId }, 'desktop')).rejects.toThrow(/own executing workspace/);
+    }
+    await expect(registry.invoke('fs:writeText', leadScope, 'desktop')).resolves.toBeUndefined();
+    expect(admission).toHaveBeenCalledExactlyOnceWith(r.leadPath, expect.any(Function));
+    const leadFile = path.join(r.leadPath, 'save.txt');
+    await expect(fs.readFile(leadFile, 'utf8')).resolves.toBe('after');
+
+    r.live.push(r.meta('ordinary-alias', r.workerPath));
+    await expect(registry.invoke('fs:read', { sessionId: 'ordinary-alias', path: 'save.txt' })).resolves.toEqual({ content: 'before', truncated: false, readOnly: true });
+    await expect(registry.invoke('fs:writeText', { ...req, sessionId: 'ordinary-alias' }, 'desktop')).rejects.toThrow(/Mission owns/);
+    await expect(registry.invoke('fs:writeText', { ...req, sessionId: 'worker' }, 'desktop')).rejects.toThrow(/workers are read-only/);
+    await expect(registry.invoke('fs:writeText', { ...req, sessionId: 'source', missionWorkspaceId: 'worker-workspace' }, 'desktop')).rejects.toThrow(/owning Mission lead/);
+    await expect(registry.invoke('fs:writeText', { ...req, missionWorkspaceId: 'foreign' }, 'desktop')).rejects.toThrow(/unavailable/);
+    // Recheck authority after waiting on a snapshot lease; the Mission may have paused.
+    admission.mockImplementationOnce(async (_cwd, write) => {
+      r.patch({ status: 'paused' });
+      await write();
+    });
+    await expect(registry.invoke('fs:writeText', { ...leadScope, content: 'later', expectedContent: 'after' }, 'desktop')).rejects.toThrow(/own executing workspace/);
+    await expect(registry.invoke('fs:read', { sessionId: 'lead', missionWorkspaceId: 'lead-workspace', path: 'save.txt' })).resolves.toEqual({ content: 'after', truncated: false, readOnly: true });
+    await expect(fs.readFile(leadFile, 'utf8')).resolves.toBe('after');
+    for (const root of protectedRoots) await expect(fs.readFile(path.join(root, 'save.txt'), 'utf8')).resolves.toBe('before');
+  });
+
+  it('waits for a real Mission snapshot lease before editing the lead workspace', async () => {
+    const r = await rig();
+    const file = path.join(r.leadPath, 'save.txt');
+    await fs.writeFile(file, 'before');
+    const admission = new MissionWorkspaceAdmission({ sessions: () => [], activity: () => { throw new Error('No test sessions are running'); }, terminals: () => [] });
+    const reserve = vi.fn(admission.dispatch.bind(admission));
+    const registry = createHandlerRegistry({ ...r.deps, withWorkspaceWrite: reserve });
+    const lease = await admission.acquire(r.leadPath);
+    expect(lease).toBeDefined();
+    const save = registry.invoke('fs:writeText', { sessionId: 'lead', missionWorkspaceId: 'lead-workspace', path: 'save.txt', content: 'after', expectedContent: 'before' }, 'desktop');
+    try {
+      await vi.waitFor(() => expect(reserve).toHaveBeenCalledOnce());
+      await lease!.assertQuiescent();
+      await expect(fs.readFile(file, 'utf8')).resolves.toBe('before');
+    } finally {
+      lease!.release();
+      await save;
+      admission.close();
+    }
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('after');
   });
 
   it('compares immutable baseline to accepted tree in integration, not lead edits or the live index', async () => {

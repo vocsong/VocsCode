@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NativeAdapter } from '../src/main/harness/native';
-import { globTool, grepTool, readFileTool, runBash, MAX_OUTPUT } from '../src/main/harness/native/tools';
+import { detectShell, globTool, grepTool, readFileTool, runBash, MAX_OUTPUT } from '../src/main/harness/native/tools';
 import type { StepParams, StepResult, NativeMessage } from '../src/main/harness/native/drivers';
 import type { HarnessContext } from '../src/main/harness/types';
 import type { PermissionMode, SessionEvent, SessionMeta } from '../src/shared/types';
@@ -11,7 +11,8 @@ import { defaultSettings } from '../src/main/settings';
 import { emptyUsage } from '../src/main/models/static-models';
 import { which } from '../src/main/runtime';
 
-const mocks = vi.hoisted(() => ({ fallback: false, failWorker: false, workerTerminated: vi.fn(), step: vi.fn<(p: StepParams) => Promise<StepResult>>() }));
+const mocks = vi.hoisted(() => ({ fallback: false, failWorker: false, shell: 'default' as 'default' | 'powershell' | 'cmd', workerTerminated: vi.fn(), step: vi.fn<(p: StepParams) => Promise<StepResult>>() }));
+const shellModes: Array<typeof mocks.shell> = process.platform === 'win32' ? ['default', 'powershell', 'cmd'] : ['default'];
 vi.mock('node:worker_threads', async (original) => {
   const real = await original<typeof import('node:worker_threads')>();
   const { EventEmitter } = await import('node:events');
@@ -28,25 +29,31 @@ vi.mock('node:worker_threads', async (original) => {
 vi.mock('../src/main/harness/native/drivers', () => ({ openaiStep: mocks.step, anthropicStep: mocks.step, isAnthropicProvider: () => false }));
 vi.mock('../src/main/runtime', async (original) => {
   const real = await original<typeof import('../src/main/runtime')>();
-  return { ...real, which: (name: string) => name === 'rg' && mocks.fallback ? null : real.which(name) };
+  return { ...real, which: (name: string) => {
+    if (name === 'rg' && mocks.fallback) return null;
+    if (mocks.shell !== 'default' && name === 'bash') return null;
+    if (mocks.shell !== 'default' && name === 'pwsh') return null;
+    if (mocks.shell === 'cmd' && name === 'powershell') return null;
+    return real.which(name);
+  } };
 });
 let cwd: string;
 const signal = () => new AbortController().signal;
-beforeEach(async () => { cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'native-tools-')); mocks.fallback = false; mocks.failWorker = false; mocks.workerTerminated.mockClear(); mocks.step.mockReset(); });
+beforeEach(async () => { cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'native-tools-')); mocks.fallback = false; mocks.failWorker = false; mocks.shell = 'default'; mocks.workerTerminated.mockClear(); mocks.step.mockReset(); });
 afterEach(async () => { await fs.rm(cwd, { recursive: true, force: true }); });
 const usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
 type Call = { id: string; name: string; args: Record<string, unknown> };
 const call = (name: string, args: Record<string, unknown>, id = name): Call => ({ name, args, id });
 
-function harness(mode: PermissionMode = 'full-auto') {
+function harness(mode: PermissionMode = 'full-auto', directory = cwd) {
   const settings = defaultSettings();
   settings.providers = [{ id: 'local', name: 'Local', kind: 'ollama', enabled: true, hasApiKey: false, models: [{ id: 'test', displayName: 'Test', provider: 'local' }] }];
-  const meta = { id: 'native-s1', cwd, usage: emptyUsage(), config: { harness: 'native', model: { provider: 'local', model: 'test' } }, harnessRef: {} } as SessionMeta;
+  const meta = { id: 'native-s1', cwd: directory, usage: emptyUsage(), config: { harness: 'native', model: { provider: 'local', model: 'test' } }, harnessRef: {} } as SessionMeta;
   const events: SessionEvent[] = [];
   let saved: unknown = null;
   const approval = vi.fn<HarnessContext['requestApproval']>(async () => ({ optionId: 'allow' }));
   const ctx = {
-    sessionId: 'test', session: () => meta, settings: () => settings, sessionDir: cwd,
+    sessionId: 'test', session: () => meta, settings: () => settings, sessionDir: directory,
     permissionMode: () => mode, effort: () => undefined, getApiKey: async () => undefined,
     emit: (e: SessionEvent) => events.push(e), requestApproval: approval,
     updateRef: (p: object) => Object.assign(meta.harnessRef, p), updateMeta: (p: object) => Object.assign(meta, p),
@@ -74,6 +81,70 @@ function harness(mode: PermissionMode = 'full-auto') {
     },
   };
 }
+
+describe('native real shell quoting', () => {
+  const argument = 'literal & | < > ^ ( ) with spaces';
+
+  async function fixture() {
+    const project = path.join(cwd, 'project with spaces & (meta)');
+    const script = path.join(project, 'output with spaces & (meta).cjs');
+    await fs.mkdir(project);
+    await fs.writeFile(script, [
+      "const fs = require('node:fs');",
+      "fs.appendFileSync('executions.jsonl', JSON.stringify({ script: __filename, cwd: process.cwd(), args: process.argv.slice(2) }) + '\\n');",
+      "fs.writeSync(1, 'STDOUT\\n');",
+      "fs.writeSync(2, 'STDERR\\n');",
+      'process.exitCode = Number(process.argv.at(-1));',
+    ].join('\n'));
+    return { project, script };
+  }
+
+  function expectCompletion(h: ReturnType<typeof harness>, result: Extract<NativeMessage, { role: 'tool' }>, code: number) {
+    expect(result).toMatchObject({ toolCallId: 'bash', name: 'bash', isError: code !== 0 });
+    expect(result.content.split(/\r?\n/).filter(Boolean).sort()).toEqual(['STDERR', 'STDOUT', `[exit code: ${code}]`]);
+    expect(mocks.step).toHaveBeenCalledTimes(2);
+    expect(mocks.step.mock.calls[1][0].history.filter((m) => m.role === 'tool')).toEqual([result]);
+    const tools = h.events.flatMap((e) => e.type === 'item.upsert' && e.item.kind === 'tool' ? [e.item] : []);
+    expect(tools.map((item) => item.status)).toEqual(['running', code === 0 ? 'done' : 'error']);
+    expect(tools[1]).toMatchObject({ id: 'bash', output: result.content, exitCode: code });
+    const streamed = h.events.flatMap((e) => e.type === 'item.delta' && e.id === 'bash' ? [e.outputDelta ?? ''] : []).join('');
+    expect(streamed.split(/\r?\n/).filter(Boolean).sort()).toEqual(['STDERR', 'STDOUT']);
+    const turns = h.events.flatMap((e) => e.type === 'item.upsert' && e.item.kind === 'turn' ? [e.item] : []);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ status: 'completed', error: undefined });
+    expect(h.events.flatMap((e) => e.type === 'status' ? [e.status] : [])).toEqual(['idle', 'running', 'idle']);
+    expect(h.approval).not.toHaveBeenCalled();
+  }
+
+  it.each(shellModes.flatMap((shell) => ['absolute', 'relative'].flatMap((scriptPath) => [0, 7].map((exitCode) => ({ shell, scriptPath, exitCode })))))
+  ('preserves quoted script paths, arguments and output ($shell shell, $scriptPath path, exit $exitCode)', async ({ shell, scriptPath, exitCode }) => {
+    mocks.shell = shell;
+    const name = detectShell().name;
+    if (process.platform === 'win32') expect(name).toBe(shell === 'default' ? 'bash (Git Bash)' : shell === 'cmd' ? 'cmd.exe' : 'PowerShell');
+    const { project, script } = await fixture();
+    const target = scriptPath === 'absolute' ? script.replace(/\\/g, '/') : `./${path.basename(script)}`;
+    const h = harness('full-auto', project);
+    const [result] = await h.run([call('bash', { command: `node "${target}" "${argument}" ${exitCode}` })]);
+    // PowerShell collapses a native child's nonzero exit status to 1, not its original code.
+    expectCompletion(h, result, name === 'PowerShell' && exitCode !== 0 ? 1 : exitCode);
+    const executions = (await fs.readFile(path.join(project, 'executions.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+    expect(executions).toEqual([{ script, cwd: project, args: [argument, String(exitCode)] }]);
+  });
+
+  if (process.platform === 'win32') it.each([0, 7])('preserves cmd shell syntax around a quoted executable and redirected paths (exit %s)', async (exitCode) => {
+    mocks.shell = 'cmd';
+    expect(detectShell().name).toBe('cmd.exe');
+    const { project, script } = await fixture();
+    const command = `"${process.execPath}" "${script}" "${argument}" ${exitCode} > "stdout & (capture).txt" 2> "stderr & (capture).txt" & type "stdout & (capture).txt" | findstr /l STDOUT && type "stderr & (capture).txt" 1>&2 & exit /b ${exitCode}`;
+    const h = harness('full-auto', project);
+    const [result] = await h.run([call('bash', { command })]);
+    expectCompletion(h, result, exitCode);
+    expect(await fs.readFile(path.join(project, 'stdout & (capture).txt'), 'utf8')).toBe('STDOUT\n');
+    expect(await fs.readFile(path.join(project, 'stderr & (capture).txt'), 'utf8')).toBe('STDERR\n');
+    const executions = (await fs.readFile(path.join(project, 'executions.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+    expect(executions).toEqual([{ script, cwd: project, args: [argument, String(exitCode)] }]);
+  });
+});
 
 describe('native model-visible mutation reliability', () => {
   it('hands each provider step the session id, for gateways that route or cache by conversation', async () => {
@@ -292,11 +363,16 @@ describe('native model-visible mutation reliability', () => {
     expect(h.approval).toHaveBeenCalledTimes(1);
   });
 
-  it('returns the exit code and retained tail to the model and final transcript upsert', async () => {
+  it.each(shellModes)('returns the exit code and retained tail to the model and final transcript upsert (%s shell)', async (shell) => {
+    mocks.shell = shell;
+    if (shell === 'powershell') expect(detectShell().name).toBe('PowerShell');
+    if (shell === 'cmd') expect(detectShell().name).toBe('cmd.exe');
     const script = path.join(cwd, 'output.cjs');
-    await fs.writeFile(script, "require('node:fs').writeSync(1, 'HEAD' + 'x'.repeat(40000) + 'TAIL'); process.exit(7);");
+    await fs.writeFile(script, "require('node:fs').writeSync(1, 'HEAD' + 'x'.repeat(40000) + 'TAIL');");
+    // Assert the shell's status: PowerShell normalizes a native program's exit 7 to 1.
+    const command = `node output.cjs${detectShell().name === 'cmd.exe' ? ' & ' : '; '}exit 7`;
     const h = harness();
-    const [result] = await h.run([call('bash', { command: `node "${script.replace(/\\/g, '/')}"` })]);
+    const [result] = await h.run([call('bash', { command })]);
     expect(result).toMatchObject({ isError: true });
     expect(result.content).toContain('HEAD');
     expect(result.content).toContain('TAIL');

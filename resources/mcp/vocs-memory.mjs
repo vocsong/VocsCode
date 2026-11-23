@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 /**
- * Layer 2 retrieval for coding harnesses: a dependency-free MCP stdio server over a project wiki.
+ * A dependency-free MCP stdio server for project knowledge and memory.
  *
- * The app injects one copy per session through the same built-in machinery GitNexus uses
- * (src/main/mcp), with `VOCS_MEMORY_ROOT` pointing at the project's `.vocs-code/wiki` and, for a
- * worktree session, `VOCS_MEMORY_BRANCH_ROOT` at the checkout's own wiki. It reads only markdown:
- * no database, no network, no Electron.
+ * The app injects one copy per session. Configured sessions need only the loopback endpoint and
+ * capability; their project, checkout and permissions are resolved in the app.
  *
  * Tools are deliberately pull-based and narrow — search, read, related, propose, status — because
  * a wiki that is pasted into every prompt is just context bloat. `propose` writes durable knowledge
@@ -13,10 +11,19 @@
  * `_rejected.json` is refused instead. Pages carry labels, and retrieval walks the relation graph
  * derived from related / supersedes / contradicts / wikilinks / shared anchors / shared labels.
  *
+ * With the app's intelligence gateway configured (`VOCS_MEMORY_GATEWAY_URL` plus a per-session
+ * `VOCS_MEMORY_GATEWAY_TOKEN`), this process is a thin client: every tool call is posted to the app
+ * and answered by its own services, which is where scope, lifecycle and the single write path live,
+ * and seven more tools appear (federated search, trace, recall, record, promote, forget, context).
+ * Only when both gateway variables are absent can the server use `VOCS_MEMORY_ROOT` and the other
+ * standalone wiki settings. An invalid, denied or unavailable gateway never selects this mode.
+ *
  * The frontmatter subset here must stay in lockstep with src/shared/knowledge.ts. That pairing is
  * covered by tests/knowledge-mcp.test.ts, which writes with one side and reads with the other.
  */
+import { request } from 'node:http';
 import { pathToFileURL } from 'node:url';
+import { knowledgeCollision, sameKnowledgeClaim, sameRejectedKnowledgeClaim, withKnowledgeWriteLock, writeKnowledgeFileAtomic } from './knowledge-write.mjs';
 
 const MAX_PAGES = 800;
 const MAX_BODY_CHARS = 20000;
@@ -167,7 +174,7 @@ function normalizeLabels(values) {
 }
 
 function isValidPageId(value) {
-  return typeof value === 'string' && value.length > 0 && value.length <= 160 && ID_RE.test(value);
+  return typeof value === 'string' && value.length <= 160 && ID_RE.test(value) && value.split('/').every((part) => part && part !== 'branches' && !part.startsWith('_'));
 }
 
 function sourcesOf(raw) {
@@ -178,9 +185,53 @@ function sourcesOf(raw) {
     const ref = typeof entry.ref === 'string' ? entry.ref.trim() : '';
     const type = typeof entry.type === 'string' ? entry.type : '';
     if (!ref || !SOURCE_TYPES.includes(type)) continue;
-    out.push({ type, ref, ...(entry.note ? { note: String(entry.note) } : {}) });
+    out.push({ type, ref, ...(entry.note ? { note: String(entry.note) } : {}), ...(typeof entry.revision === 'string' && entry.revision.trim() ? { revision: entry.revision.trim() } : {}) });
   }
   return out;
+}
+
+/** Frontmatter keys this script models; every other key is carried through a rewrite untouched. */
+const MODELLED_KEYS = new Set([
+  'id', 'title', 'kind', 'status', 'scope', 'branch', 'confidence', 'claim', 'target_page', 'keywords', 'labels', 'sources', 'anchors',
+  'related', 'supersedes', 'superseded_by', 'contradicts', 'created_at', 'updated_at', 'updated_by', 'evidence_count',
+  'review_state', 'reviewed_by', 'reviewed_at', 'review_note'
+]);
+/** Recorded verification belongs to the claim it checked; it does not survive a different claim. */
+const VERIFICATION_KEYS = ['verified_by', 'verified_at', 'verified_actor', 'verified_revision', 'verified_note'];
+
+/**
+ * Keys this script does not model — lifecycle fields the app writes (memory_type, project_id,
+ * verified_*, valid_*) and anything a person added by hand — in file order, so a page rewritten
+ * here loses nothing the app or its author put there.
+ */
+function extraOf(raw) {
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (MODELLED_KEYS.has(key) || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)) continue;
+    if (typeof value === 'string') out[key] = value;
+    else if (Array.isArray(value)) {
+      if (value.every((v) => typeof v === 'string')) out[key] = value;
+      else out[key] = value.filter((v) => v && typeof v === 'object').map((entry) => Object.fromEntries(Object.entries(entry).filter(([, v]) => typeof v === 'string')));
+    }
+  }
+  return out;
+}
+
+function extraLines(extra) {
+  const lines = [];
+  for (const [key, value] of Object.entries(extra ?? {})) {
+    if (MODELLED_KEYS.has(key)) continue;
+    if (typeof value === 'string') lines.push(`${key}: ${quoteValue(value)}`);
+    else if (value.every((v) => typeof v === 'string')) {
+      if (value.length) lines.push(`${key}:`, ...value.map((v) => `  - ${quoteValue(v)}`));
+    } else {
+      const entries = value.filter((entry) => Object.keys(entry).length);
+      if (!entries.length) continue;
+      lines.push(`${key}:`);
+      for (const entry of entries) Object.entries(entry).forEach(([k, v], i) => lines.push(`${i === 0 ? '  - ' : '    '}${k}: ${quoteValue(v)}`));
+    }
+  }
+  return lines;
 }
 
 function anchorsOf(raw) {
@@ -195,7 +246,7 @@ function anchorsOf(raw) {
 
 /* ───────────────────────────── wiki access ─────────────────────────────── */
 
-function toPage(text, abs) {
+function toPage(text, abs, complete = false) {
   const parsed = parseFrontmatter(text);
   if (!parsed) return null;
   const raw = parsed.raw;
@@ -213,20 +264,25 @@ function toPage(text, abs) {
     branch: typeof raw.branch === 'string' ? raw.branch : undefined,
     claim: typeof raw.claim === 'string' ? raw.claim : undefined,
     confidence: typeof raw.confidence === 'string' ? raw.confidence : undefined,
-    keywords: list(raw.keywords),
+    keywords: list(raw.keywords, complete ? Infinity : 12),
     labels: normalizeLabels(list(raw.labels, 24)),
     sources: sourcesOf(raw),
     anchors: anchorsOf(raw),
-    related: list(raw.related),
-    supersedes: list(raw.supersedes),
-    contradicts: list(raw.contradicts),
+    related: list(raw.related, complete ? Infinity : 12),
+    supersedes: list(raw.supersedes, complete ? Infinity : 12),
+    contradicts: list(raw.contradicts, complete ? Infinity : 12),
     supersededBy: typeof raw.superseded_by === 'string' ? raw.superseded_by : undefined,
     createdAt: typeof raw.created_at === 'string' ? raw.created_at : undefined,
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : undefined,
     updatedBy: typeof raw.updated_by === 'string' ? raw.updated_by : undefined,
     reviewState: typeof raw.review_state === 'string' ? raw.review_state : undefined,
+    reviewedBy: typeof raw.reviewed_by === 'string' ? raw.reviewed_by : undefined,
+    reviewedAt: typeof raw.reviewed_at === 'string' ? raw.reviewed_at : undefined,
+    reviewNote: typeof raw.review_note === 'string' ? raw.review_note : undefined,
     evidenceCount: evidence,
-    body: parsed.body.slice(0, MAX_BODY_CHARS),
+    verified: typeof raw.verified_by === 'string' && typeof raw.verified_at === 'string',
+    extra: extraOf(raw),
+    body: complete ? parsed.body : parsed.body.slice(0, MAX_BODY_CHARS),
     abs
   };
 }
@@ -250,15 +306,39 @@ async function listMarkdown(fs, path, dir, depth = 0) {
   return out;
 }
 
-export async function loadPages({ root, branchRoot }) {
+// A selected project root may itself be an alias; repo-controlled descendants may not follow
+// links. When used standalone without a project root, the supplied wiki's parent is that anchor.
+async function unlinkedWikiPath(fs, path, base, target) {
+  let current = path.resolve(base);
+  const rel = path.relative(current, target);
+  if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false;
+  for (const part of rel.split(path.sep)) {
+    current = path.join(current, part);
+    try {
+      if ((await fs.lstat(current)).isSymbolicLink()) return false;
+    } catch (error) {
+      if (error.code === 'ENOENT') return true;
+      throw error;
+    }
+  }
+  return true;
+}
+
+function pageInSlice(page, branch) {
+  return page && (branch ? page.scope === 'branch' && page.branch === branch : page.scope === 'repo');
+}
+
+export async function loadPages({ root, branchRoot, projectRoot, branch }) {
   const fs = await import('node:fs/promises');
   const path = await import('node:path');
+  const base = projectRoot ?? path.dirname(path.resolve(root));
   const byId = new Map();
-  for (const dir of [root, branchRoot].filter(Boolean)) {
+  for (const dir of [root, branch && branchRoot].filter(Boolean)) {
+    if (!(await unlinkedWikiPath(fs, path, base, dir))) continue;
     for (const abs of await listMarkdown(fs, path, dir)) {
       try {
         const page = toPage(await fs.readFile(abs, 'utf8'), abs);
-        if (page && byId.size < MAX_PAGES) byId.set(page.id, page);
+        if (pageInSlice(page, dir === branchRoot ? branch : null) && byId.size < MAX_PAGES) byId.set(page.id, page);
       } catch {
         /* an unreadable page is not a reason to fail a tool call */
       }
@@ -272,14 +352,20 @@ export function servable(page) {
 }
 
 function authorityOf(page) {
-  if (page.reviewState === 'reviewed' || page.updatedBy === 'human') return 2;
+  if (isHumanAuthored(page)) return 2;
   if (page.status === 'current') return 3;
   if (page.status === 'uncertain' || page.status === 'deprecated') return 4;
   return 5;
 }
 
+/** A page a person reviewed or wrote: an agent may add evidence to it, never change what it says. */
+function isHumanAuthored(page) {
+  return page.reviewState === 'reviewed' || page.updatedBy === 'human' || (typeof page.updatedBy === 'string' && page.updatedBy.startsWith('human:'));
+}
+
 function authorityLabel(page) {
   if (authorityOf(page) <= 2) return 'human-reviewed';
+  if (page.status === 'current' && page.verified) return 'verified';
   if (page.status === 'current') return 'accepted';
   if (page.status === 'uncertain') return 'uncertain';
   if (page.status === 'deprecated') return 'deprecated';
@@ -565,7 +651,7 @@ function mergeAnchors(a, b) {
 
 /** Writes a current page the app's own parser reads back; `labels` is the graph's grouping key. */
 export function serializePage(meta, body) {
-  const lines = ['---', yamlLine('id', meta.id), yamlLine('title', meta.title), `kind: ${meta.kind}`, 'status: current', `scope: ${meta.scope}`];
+  const lines = ['---', yamlLine('id', meta.id), yamlLine('title', meta.title), `kind: ${meta.kind}`, `status: ${meta.keepStatus ?? 'current'}`, `scope: ${meta.scope}`];
   if (meta.branch) lines.push(yamlLine('branch', meta.branch));
   if (meta.confidence) lines.push(`confidence: ${meta.confidence}`);
   if (meta.claim) lines.push(yamlLine('claim', meta.claim));
@@ -576,6 +662,7 @@ export function serializePage(meta, body) {
     for (const s of meta.sources) {
       lines.push(`  - type: ${s.type}`, `    ref: ${quoteValue(s.ref)}`);
       if (s.note) lines.push(`    note: ${quoteValue(s.note)}`);
+      if (s.revision) lines.push(`    revision: ${quoteValue(s.revision)}`);
     }
   }
   if (meta.anchors.length) {
@@ -588,7 +675,14 @@ export function serializePage(meta, body) {
   if (meta.related?.length) lines.push(`related: [${meta.related.map((v) => quoteValue(v)).join(', ')}]`);
   if (meta.supersedes?.length) lines.push(`supersedes: [${meta.supersedes.map((v) => quoteValue(v)).join(', ')}]`);
   if (meta.contradicts?.length) lines.push(`contradicts: [${meta.contradicts.map((v) => quoteValue(v)).join(', ')}]`);
-  lines.push(`created_at: ${meta.createdAt}`, `updated_at: ${meta.updatedAt}`, `updated_by: ${quoteValue(meta.updatedBy)}`, '---', '');
+  if (meta.supersededBy) lines.push(yamlLine('superseded_by', meta.supersededBy));
+  if (meta.reviewState) lines.push(yamlLine('review_state', meta.reviewState));
+  if (meta.reviewedBy) lines.push(yamlLine('reviewed_by', meta.reviewedBy));
+  if (meta.reviewedAt) lines.push(yamlLine('reviewed_at', meta.reviewedAt));
+  if (meta.reviewNote) lines.push(yamlLine('review_note', meta.reviewNote));
+  if (meta.evidenceCount !== undefined) lines.push(`evidence_count: ${meta.evidenceCount}`);
+  lines.push(`created_at: ${meta.createdAt}`, `updated_at: ${meta.updatedAt}`, `updated_by: ${quoteValue(meta.updatedBy)}`);
+  lines.push(...extraLines(meta.extra), '---', '');
   return `${lines.join('\n')}${String(body).replace(/\s+$/, '')}\n`;
 }
 
@@ -603,7 +697,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Words that appear in the page (all terms must match).' },
-        limit: { type: 'number', description: 'Max results (default 12).' },
+        limit: { type: 'integer', minimum: 1, description: 'Max results (default 12).' },
         include_historical: { type: 'boolean', description: 'Include superseded/deprecated pages.' }
       },
       required: ['query'],
@@ -623,7 +717,7 @@ const TOOLS = [
   {
     name: 'knowledge_propose',
     description:
-      'Record durable project knowledge discovered while working (a convention, gotcha, decision or invariant) in the project wiki. This writes immediately: nothing is queued for human review, so record only claims that stay true beyond the current task and are evidenced by files, a command output or a commit. A claim tombstoned in _rejected.json is refused.',
+      'Record a durable project finding with its evidence. A new claim is saved as accepted knowledge, not human-reviewed or verified. A human-reviewed page is protected and a tombstoned claim is refused. If a generated id already contains a different claim, choose a different title for a new page or pass page_id for an intentional update.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -654,7 +748,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Words to look for in past transcripts (all terms must match).' },
-        limit: { type: 'number', description: 'Max results (default 6, max 20).' },
+        limit: { type: 'integer', minimum: 1, description: 'Max results (default 6, max 20).' },
         include_archived: { type: 'boolean', description: 'Also search archived sessions.' }
       },
       required: ['query'],
@@ -663,9 +757,184 @@ const TOOLS = [
   }
 ];
 
+/**
+ * Tools answered only by the app's intelligence gateway: they need what this script cannot hold —
+ * the project registry, the memory ledger, collection grants and the user's review. Listed only
+ * when the app handed this session a gateway.
+ */
+const GATEWAY_TOOLS = [
+  {
+    name: 'intelligence_search',
+    description:
+      'One question across every source this session may read: the project wiki, memory records, past sessions of this project, the optional graph index and, with scope "collection", what this project\'s collections share. Natural-language questions work. Every result names its provider, project, authority, revision and freshness; results marked historical are what happened, not what is true now. For current code structure (callers, impact) use GitNexus instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The question or the words to look for.' },
+        scope: { type: 'string', enum: ['project', 'collection'], description: 'project (default) stays inside this project; collection adds what its collections share.' },
+        sources: { type: 'array', minItems: 1, items: { type: 'string', enum: ['wiki', 'memory', 'history', 'graph', 'collection'] }, description: 'Restrict to these sources (default: all permitted sources).' },
+        limit: { type: 'integer', minimum: 1, description: 'Max results (default 12, max 40).' },
+        include_historical: { type: 'boolean', description: 'Include superseded pages, expired records and archived sessions.' }
+      },
+      required: ['query'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'intelligence_trace',
+    description:
+      'How two things are related, step by step with the relation behind each step. Give two wiki page ids to trace the wiki\'s relation graph, or one to list its relations. When the project opted into the Graphify index, names of code or document nodes are traced there, with the indexed revision and whether it is stale.',
+    inputSchema: { type: 'object', properties: { from: { type: 'string', description: 'A wiki page id, or a graph node id or label.' }, to: { type: 'string', description: 'Optional second endpoint; omit to list the relations of `from`.' } }, required: ['from'], additionalProperties: false }
+  },
+  {
+    name: 'context_compile',
+    description:
+      'A bounded, cited context packet for one task or question: current knowledge, history (labelled as history), graph references, conflicts and missing evidence, inside a token budget. Use it at the start of a task instead of several separate searches.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The task or question.' },
+        budget_tokens: { type: 'integer', minimum: 1, description: 'Token budget for the packet (default 1500, max 6000).' },
+        scope: { type: 'string', enum: ['project', 'collection'] }
+      },
+      required: ['query'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'memory_recall',
+    description:
+      'Episodes, lessons, procedures and preferences recorded for this project, plus matching excerpts from its past sessions: what was tried, what failed, what fixed it. Records that are not servable are unverified recollection — confirm against the code before acting. Omit the query to list the most recent records.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What to recall; natural language works.' },
+        types: { type: 'array', minItems: 1, items: { type: 'string', enum: ['episodic', 'semantic', 'procedural', 'preference'] } },
+        limit: { type: 'integer', minimum: 1, description: 'Max records (default 8, max 30).' },
+        include_unverified: { type: 'boolean', description: 'Include captured and candidate records (default true).' }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'knowledge_record',
+    description:
+      'Record sourced knowledge with its memory type. Semantic (a fact or decision) and procedural (a way of working) go to the project wiki; episodic (what was attempted and what happened) goes to memory. Cite real files or commits as evidence, not as proof of a claim. A human-reviewed page is protected; conflicting claims require a human decision.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        claim: { type: 'string', description: 'One sentence stating what is true or what happened.' },
+        body: { type: 'string', description: 'Markdown: rationale and how to apply it. Required for semantic and procedural.' },
+        memory_type: { type: 'string', enum: ['semantic', 'procedural', 'episodic'], description: 'Default semantic.' },
+        kind: { type: 'string', description: `Wiki kind (${KINDS.join(', ')}) for semantic/procedural; attempt, failure, fix, lesson or procedure for episodic.` },
+        scope: { type: 'string', enum: ['project', 'branch'], description: 'branch keeps it to this session\'s branch (default project).' },
+        page_id: { type: 'string', description: 'Existing wiki page id this intentionally updates.' },
+        keywords: { type: 'array', items: { type: 'string' } },
+        labels: { type: 'array', items: { type: 'string' } },
+        sources: { type: 'array', items: { type: 'object', properties: { type: { type: 'string', enum: SOURCE_TYPES }, ref: { type: 'string' }, note: { type: 'string' } }, required: ['type', 'ref'] } },
+        anchors: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, symbol: { type: 'string' } }, required: ['file'] } }
+      },
+      required: ['title', 'claim'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'knowledge_promote',
+    description:
+      'Ask for a wiki page or a memory record to be shared beyond this project: into one of its collections, or into the user\'s personal memory. This only files a request — nothing leaves the project until the user approves it in the Knowledge panel.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        page: { type: 'string', description: 'Wiki page id to promote.' },
+        record: { type: 'string', description: 'Memory record id to promote (from memory_recall).' },
+        to: { type: 'string', enum: ['collection', 'personal'] },
+        collection: { type: 'string', description: 'Collection name or id; optional when the project is in exactly one.' },
+        reason: { type: 'string', description: 'Why it is worth sharing.' }
+      },
+      required: ['to'],
+      oneOf: [{ required: ['page'] }, { required: ['record'] }],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'memory_forget',
+    description:
+      'Delete one memory record this session\'s agent recorded in this project, with its search index entry; the same statement is not re-captured. Records a person wrote, verified or shared can only be removed by the user.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Memory record id from memory_recall.' } }, required: ['id'], additionalProperties: false }
+  }
+];
+const GATEWAY_ONLY = new Set(GATEWAY_TOOLS.map((tool) => tool.name));
+
 /** Tools that only read: the app's native harness may run these without a prompt, and plan mode keeps them. */
-const READ_ONLY_TOOLS = new Set(['knowledge_search', 'knowledge_read', 'knowledge_related', 'knowledge_status', 'session_history_search']);
-for (const tool of TOOLS) tool.annotations = { readOnlyHint: READ_ONLY_TOOLS.has(tool.name), title: tool.name };
+const READ_ONLY_TOOLS = new Set(['knowledge_search', 'knowledge_read', 'knowledge_related', 'knowledge_status', 'session_history_search', 'intelligence_search', 'intelligence_trace', 'context_compile', 'memory_recall']);
+const DESTRUCTIVE_TOOLS = new Set(['knowledge_propose', 'knowledge_record', 'memory_forget']);
+for (const tool of [...TOOLS, ...GATEWAY_TOOLS]) {
+  const readOnlyHint = READ_ONLY_TOOLS.has(tool.name);
+  tool.annotations = { title: tool.name, readOnlyHint, destructiveHint: DESTRUCTIVE_TOOLS.has(tool.name), openWorldHint: false, ...(!readOnlyHint ? { idempotentHint: false } : {}) };
+  for (const field of ['sources', 'anchors']) {
+    const items = tool.inputSchema.properties[field]?.items;
+    if (items?.type === 'object') items.additionalProperties = false;
+  }
+}
+
+/** The tools this server lists: the six originals, plus the gateway's seven when one is configured. */
+export function memoryToolList(hasGateway) {
+  return hasGateway ? [...TOOLS, ...GATEWAY_TOOLS] : TOOLS;
+}
+
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function toolResult(result) {
+  return isObject(result) && Object.keys(result).every((key) => key === 'content' || key === 'isError')
+    && (result.isError === undefined || typeof result.isError === 'boolean')
+    && Array.isArray(result.content) && result.content.every((item) => isObject(item) && item.type === 'text' && typeof item.text === 'string' && Object.keys(item).length === 2);
+}
+
+/** A configured client has no local disk fallback, including on denial, I/O failure or timeout. */
+export function createGatewayClient({ url, token, timeoutMs = 90_000 }) {
+  const port = typeof url === 'string' && /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/call$/.exec(url)?.[1];
+  if (!port || Number(port) > 65535 || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    throw new Error('Invalid intelligence gateway configuration.');
+  }
+  const unavailable = () => errorResult('The intelligence gateway is unavailable. Restart the session to reconnect.');
+  return async function viaGateway(name, args, cancelled) {
+    try {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const signal = cancelled ? AbortSignal.any([cancelled, timeout]) : timeout;
+      const body = JSON.stringify({ tool: name, arguments: args });
+      // Do not follow redirects, use a proxy, or resolve an attacker-controlled DNS name with a bearer.
+      const response = await new Promise((resolve, reject) => {
+        const req = request({
+          host: '127.0.0.1', port, path: '/call', method: 'POST', agent: false, signal,
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${token}` }
+        }, resolve);
+        req.on('error', reject);
+        req.end(body);
+      });
+      if (response.statusCode !== 200 || response.headers['content-type']?.split(';', 1)[0] !== 'application/json') {
+        response.destroy();
+        return response.statusCode === 401 || response.statusCode === 403
+          ? errorResult('The intelligence gateway denied this call. Restart the session to renew its authorization.')
+          : unavailable();
+      }
+      let size = 0;
+      const chunks = [];
+      for await (const chunk of response) {
+        size += chunk.length;
+        if (size > 4_000_000) return unavailable();
+        chunks.push(chunk);
+      }
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      return toolResult(payload?.result) ? payload.result : unavailable();
+    } catch {
+      // Neither errors from HTTP nor the endpoint itself belong in MCP diagnostics.
+      return unavailable();
+    }
+  };
+}
 
 function textResult(payload) {
   return { content: [{ type: 'text', text: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2) }] };
@@ -675,7 +944,7 @@ function errorResult(message) {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
-export function createMemoryTools({ root, branchRoot, branch, userData = null, projectRoot = null }) {
+export function createMemoryTools({ root, branchRoot, branch, userData = null, projectRoot = null, gateway = null }) {
   let searchDb = undefined;
   let searchError = null;
   /** Opens search.db read-only on first use; the app's index is the only source of session history. */
@@ -707,8 +976,11 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
     }
   };
 
-  return async function call(name, args) {
-    const pages = await loadPages({ root, branchRoot });
+  return async function call(name, args, signal) {
+    signal?.throwIfAborted();
+    if (gateway) return gateway(name, args, signal);
+    if (GATEWAY_ONLY.has(name)) return errorResult(`${name} requires the intelligence gateway; this session started in standalone wiki mode.`);
+    const pages = name === 'knowledge_propose' || name === 'session_history_search' ? [] : await loadPages({ root, branchRoot, projectRoot, branch });
     if (name === 'knowledge_search') {
       const query = typeof args.query === 'string' ? args.query : '';
       if (!query.trim()) return errorResult('knowledge_search needs a query.');
@@ -771,63 +1043,118 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       const body = typeof args.body === 'string' ? args.body.trim() : '';
       if (!title || !claim || !body) return errorResult('knowledge_propose needs a title, a claim and a body.');
       const requestedId = typeof args.page_id === 'string' && args.page_id.trim() ? args.page_id.trim() : '';
-      const claimHash = claimKey(claim);
-      // A rejected claim is tombstoned in the wiki root; refiling it changes nothing.
-      let rejected = null;
-      try {
-        const parsed = JSON.parse(await fs.readFile(path.join(root, '_rejected.json'), 'utf8'));
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) rejected = parsed;
-      } catch {
-        rejected = null;
-      }
-      if (rejected && rejected[claimHash]) {
-        return textResult({ id: '', targetPageId: '', status: 'rejected', saved: false, rejected: true, note: 'This claim was rejected before and is tombstoned in _rejected.json; nothing was written.' });
-      }
-      const byId = requestedId ? pages.find((p) => p.id === requestedId) : undefined;
-      // Updating the page the claim already lives on avoids a second file for the same statement.
-      const existing = byId ?? pages.find((p) => p.claim && claimKey(p.claim) === claimHash);
-      const kind = KINDS.includes(args.kind) ? args.kind : existing ? existing.kind : 'concept';
-      const targetPageId = requestedId && isValidPageId(requestedId) ? requestedId : existing ? existing.id : `${kind}/${slugify(title)}`;
-      if (!isValidPageId(targetPageId)) return errorResult(`"${targetPageId}" is not a usable page id.`);
-      // Knowledge belongs to the project, not to the checkout it was discovered in. A worktree
-      // session is the app's default, and a page filed into its branch slice would be invisible to
-      // every other session of the project — so branch scope is only ever inherited from a page that
-      // already declared it, never inferred from the presence of a branch root.
-      const scope = existing ? existing.scope : 'repo';
-      const pageBranch = scope === 'branch' ? existing?.branch ?? branch ?? undefined : undefined;
-      // An inherited branch page must be rewritten in its own slice, or the update would leave the
-      // old copy behind and drop a repo-scope twin of it.
-      const targetRoot = pageBranch && branchRoot ? branchRoot : root;
-      const now = new Date().toISOString();
-      const meta = {
-        id: targetPageId,
-        title,
-        kind,
-        scope,
-        ...(pageBranch ? { branch: pageBranch } : {}),
-        claim,
-        keywords: list(args.keywords, 12),
-        labels: normalizeLabels([...(existing?.labels ?? []), ...list(args.labels, 24)]),
-        sources: mergeSources(existing?.sources ?? [], sourcesOf({ sources: Array.isArray(args.sources) ? args.sources : [] })),
-        anchors: mergeAnchors(existing?.anchors ?? [], anchorsOf({ anchors: Array.isArray(args.anchors) ? args.anchors : [] })),
-        related: existing?.related ?? [],
-        supersedes: existing?.supersedes ?? [],
-        contradicts: existing?.contradicts ?? [],
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-        updatedBy: 'agent:mcp'
+      if (requestedId && !isValidPageId(requestedId)) return errorResult(`"${requestedId}" is not a usable page id.`);
+      const base = projectRoot ?? path.dirname(path.resolve(root));
+      const assertUnlinked = async (target) => {
+        if (!(await unlinkedWikiPath(fs, path, base, target))) throw new Error('Refusing to write through a linked wiki path.');
       };
-      const file = path.join(targetRoot, `${targetPageId}.md`);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, serializePage(meta, body), 'utf8');
-      return textResult({
-        id: targetPageId,
-        targetPageId,
-        status: 'current',
-        saved: true,
-        scope,
-        note: scope === 'branch' ? `Recorded in the project wiki, on branch ${pageBranch}.` : 'Recorded in the project wiki automatically.'
-      });
+      try {
+        await assertUnlinked(root);
+        signal?.throwIfAborted();
+        return await withKnowledgeWriteLock(root, async () => {
+          signal?.throwIfAborted();
+          // Read only after acquiring the app/MCP mutex: a call-start snapshot is not a guard.
+          const pages = await loadPages({ root, branchRoot, projectRoot, branch });
+          let rejected = null;
+          try {
+            const tombstones = path.join(root, '_rejected.json');
+            if (await unlinkedWikiPath(fs, path, base, tombstones)) rejected = JSON.parse(await fs.readFile(tombstones, 'utf8'));
+          } catch {
+            rejected = null;
+          }
+          if (sameRejectedKnowledgeClaim(rejected?.[claimKey(claim)]?.claim, claim)) {
+            return textResult({ id: '', targetPageId: '', status: 'rejected', saved: false, rejected: true, note: 'This claim was rejected before and is tombstoned in _rejected.json; nothing was written.' });
+          }
+          const readForWrite = async (id) => {
+            for (const dir of [branch && branchRoot, root].filter(Boolean)) {
+              const file = path.join(dir, `${id}.md`);
+              await assertUnlinked(file);
+              try {
+                const page = toPage(await fs.readFile(file, 'utf8'), file, true);
+                if (!page || page.id !== id || !pageInSlice(page, dir === branchRoot ? branch : null)) throw new Error(`Cannot update invalid or out-of-scope knowledge page "${id}".`);
+                return page;
+              } catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+              }
+            }
+            return null;
+          };
+          let existing = requestedId ? await readForWrite(requestedId) : pages.find((p) => sameKnowledgeClaim(p.claim, claim));
+          const kind = KINDS.includes(args.kind) ? args.kind : existing?.kind ?? 'concept';
+          const targetPageId = requestedId || existing?.id || `${kind}/${slugify(title)}`;
+          if (!isValidPageId(targetPageId)) throw new Error(`"${targetPageId}" is not a usable page id.`);
+          existing = await readForWrite(targetPageId);
+          if (!requestedId && existing && !sameKnowledgeClaim(existing.claim, claim)) throw knowledgeCollision(targetPageId);
+          // A page a person reviewed or wrote is never rewritten from here: the same claim adds its
+          // evidence below and keeps the human's text; a different claim is the user's to decide.
+          if (existing && isHumanAuthored(existing) && !sameKnowledgeClaim(existing.claim, claim)) {
+            throw new Error(`Knowledge page "${targetPageId}" is human-reviewed and was not changed. A different claim needs the user's review: ask them to edit it in the Knowledge panel.`);
+          }
+          // New knowledge is repo-scoped; an existing branch page stays in its own slice.
+          const scope = existing?.scope ?? 'repo';
+          const pageBranch = scope === 'branch' ? existing?.branch ?? branch ?? undefined : undefined;
+          const targetRoot = scope === 'branch' && branchRoot ? branchRoot : root;
+          const file = path.join(targetRoot, `${targetPageId}.md`);
+          await assertUnlinked(file);
+          // Also protect files omitted by the bounded retrieval scan, and fail closed on damage.
+          try {
+            const current = toPage(await fs.readFile(file, 'utf8'), file, true);
+            if (!current || current.id !== targetPageId || !pageInSlice(current, pageBranch)) throw new Error(`Cannot update invalid or out-of-scope knowledge page "${targetPageId}".`);
+            if (!requestedId && !sameKnowledgeClaim(current.claim, claim)) throw knowledgeCollision(targetPageId);
+            existing = current;
+          } catch (error) {
+            if (error.code !== 'ENOENT') throw error;
+          }
+          const kept = !!existing && isHumanAuthored(existing);
+          if (kept && !sameKnowledgeClaim(existing.claim, claim)) {
+            throw new Error(`Knowledge page "${targetPageId}" is human-reviewed and was not changed. A different claim needs the user's review: ask them to edit it in the Knowledge panel.`);
+          }
+          const now = new Date().toISOString();
+          // Verification was recorded against the old claim; a changed claim starts unverified.
+          const extra = { ...(existing?.extra ?? {}) };
+          if (existing && !sameKnowledgeClaim(existing.claim, claim)) for (const key of VERIFICATION_KEYS) delete extra[key];
+          const meta = {
+            ...existing,
+            id: targetPageId,
+            title: kept ? existing.title : title,
+            kind: kept ? existing.kind : kind,
+            ...(kept ? { keepStatus: existing.status } : {}),
+            extra,
+            scope,
+            ...(pageBranch ? { branch: pageBranch } : {}),
+            claim,
+            keywords: [...new Set([...(existing?.keywords ?? []), ...list(args.keywords, 12)])].slice(0, 24),
+            labels: normalizeLabels([...(existing?.labels ?? []), ...list(args.labels, 24)]),
+            sources: mergeSources(existing?.sources ?? [], sourcesOf({ sources: Array.isArray(args.sources) ? args.sources : [] })),
+            anchors: mergeAnchors(existing?.anchors ?? [], anchorsOf({ anchors: Array.isArray(args.anchors) ? args.anchors : [] })),
+            related: existing?.related ?? [],
+            supersedes: existing?.supersedes ?? [],
+            contradicts: existing?.contradicts ?? [],
+            createdAt: existing?.createdAt ?? now,
+            updatedAt: now,
+            updatedBy: kept ? existing.updatedBy ?? 'human' : 'agent:mcp',
+            evidenceCount: (existing?.evidenceCount ?? 0) + 1
+          };
+          signal?.throwIfAborted();
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          signal?.throwIfAborted();
+          await writeKnowledgeFileAtomic(file, serializePage(meta, kept ? existing.body : body));
+          return textResult({
+            id: targetPageId,
+            targetPageId,
+            status: 'current',
+            saved: true,
+            scope,
+            note: kept
+              ? `Page ${targetPageId} is human-reviewed: its text was kept and your sources were added as evidence.`
+              : scope === 'branch'
+                ? `Recorded in the project wiki, on branch ${pageBranch}.`
+                : 'Recorded in the project wiki automatically.'
+          });
+        });
+      } catch (error) {
+        return errorResult(error.message ?? String(error));
+      }
     }
     if (name === 'knowledge_status') {
       const fs = await import('node:fs/promises');
@@ -835,7 +1162,10 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       // Legacy proposal files may still be on disk; nothing writes there any more.
       let awaitingReview = 0;
       try {
-        awaitingReview = (await fs.readdir(path.join(root, '_proposals'))).filter((f) => f.endsWith('.md')).length;
+        const proposals = path.join(root, '_proposals');
+        if (await unlinkedWikiPath(fs, path, projectRoot ?? path.dirname(path.resolve(root)), proposals)) {
+          awaitingReview = (await fs.readdir(proposals)).filter((f) => f.endsWith('.md')).length;
+        }
       } catch {
         awaitingReview = 0;
       }
@@ -919,14 +1249,18 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
 
 /* ────────────────────────────── MCP loop ───────────────────────────────── */
 
-export async function runMemoryServer({ input, output, root, branchRoot = null, branch = null, userData = null, projectRoot = null, log = () => {} } = {}) {
+export async function runMemoryServer({ input, output, root, branchRoot = null, branch = null, userData = null, projectRoot = null, gateway = null, log = () => {} } = {}) {
   if (!input || !output) throw new Error('runMemoryServer: input and output streams are required');
-  if (!root) throw new Error('runMemoryServer: a wiki root is required');
-  const call = createMemoryTools({ root, branchRoot, branch, userData, projectRoot });
+  if (!gateway && !root) throw new Error('runMemoryServer: a wiki root is required in standalone mode');
+  const call = gateway ? createGatewayClient(gateway) : createMemoryTools({ root, branchRoot, branch, userData, projectRoot });
+  const pending = new Map();
   let buffer = '';
+  let closed = false;
   const write = (message) => {
+    if (closed) return;
     try {
-      output.write(`${JSON.stringify(message)}\n`);
+      const json = JSON.stringify(message);
+      output.write(`${gateway ? json.replaceAll(gateway.token, '<redacted>') : json}\n`);
     } catch {
       /* the host is gone */
     }
@@ -935,43 +1269,56 @@ export async function runMemoryServer({ input, output, root, branchRoot = null, 
   const respondError = (id, code, message) => write({ jsonrpc: '2.0', id, error: { code, message } });
 
   const handle = async (message) => {
-    if (!message || typeof message !== 'object') return;
+    if (!isObject(message) || message.jsonrpc !== '2.0' || typeof message.method !== 'string') return;
     const { id, method, params } = message;
-    const isRequest = id !== undefined && id !== null;
+    if (id === undefined) {
+      if (method === 'notifications/cancelled') pending.get(params?.requestId)?.abort();
+      return; // Notifications (including a tool call with no request id) cannot dispatch a tool.
+    }
+    if ((typeof id !== 'string' && !Number.isFinite(id)) || pending.has(id)) return;
     if (method === 'initialize') {
       respond(id, {
-        protocolVersion: params?.protocolVersion ?? '2024-11-05',
+        protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : '2024-11-05',
         capabilities: { tools: {} },
         serverInfo: { name: 'vocs-memory', version: '1.0.0' },
-        instructions: 'Curated project knowledge: what this project means, why it is built this way, what must stay true. Search it before changing invariants; record durable findings with knowledge_propose, which writes to the wiki automatically.'
+        instructions: gateway
+          ? 'Project knowledge and memory. knowledge_search / knowledge_read: what this project means and what must stay true — search before changing an invariant. context_compile: one cited packet for a task. memory_recall and session_history_search: what was tried before. knowledge_record: record durable findings with their evidence. Results marked historical are past events, not present fact; AGENTS.md and the current code outrank everything here.'
+          : 'Curated project knowledge: what this project means, why it is built this way, what must stay true. Search it before changing invariants; record durable findings with knowledge_propose, which writes to the wiki automatically.'
       });
       return;
     }
-    if (method === 'notifications/initialized' || method === 'notifications/cancelled') return;
     if (method === 'ping') {
-      if (isRequest) respond(id, {});
+      respond(id, {});
       return;
     }
     if (method === 'tools/list') {
-      respond(id, { tools: TOOLS });
+      respond(id, { tools: memoryToolList(!!gateway) });
       return;
     }
     if (method === 'tools/call') {
-      const name = typeof params?.name === 'string' ? params.name : '';
-      const args = params?.arguments && typeof params.arguments === 'object' ? params.arguments : {};
+      const name = params?.name;
+      const args = params?.arguments === undefined ? {} : params.arguments;
+      if (typeof name !== 'string' || !isObject(args)) return respondError(id, -32602, 'Expected a tool name and an arguments object');
+      const controller = new AbortController();
+      pending.set(id, controller);
       try {
-        respond(id, await call(name, args));
+        const result = await call(name, args, controller.signal);
+        if (!controller.signal.aborted) respond(id, result);
       } catch (error) {
-        log(`knowledge MCP ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
-        respond(id, errorResult(error instanceof Error ? error.message : String(error)));
+        if (!controller.signal.aborted) {
+          log('knowledge MCP call failed');
+          respond(id, errorResult(gateway ? 'The intelligence gateway call failed.' : error instanceof Error ? error.message : String(error)));
+        }
+      } finally {
+        pending.delete(id);
       }
       return;
     }
-    if (isRequest) respondError(id, -32601, `Method not found: ${method}`);
+    respondError(id, -32601, 'Method not found');
   };
 
   input.setEncoding?.('utf8');
-  input.on('data', (chunk) => {
+  const onData = (chunk) => {
     buffer += chunk.toString();
     let index;
     while ((index = buffer.indexOf('\n')) >= 0) {
@@ -984,11 +1331,23 @@ export async function runMemoryServer({ input, output, root, branchRoot = null, 
       } catch {
         continue;
       }
-      void handle(message).catch((error) => log(`knowledge MCP handler failed: ${error instanceof Error ? error.message : String(error)}`));
+      void handle(message).catch(() => log('knowledge MCP handler failed'));
     }
+  };
+  await new Promise((resolve) => {
+    const finish = () => {
+      closed = true;
+      input.off('data', onData);
+      input.off('end', finish);
+      input.off('close', finish);
+      for (const controller of pending.values()) controller.abort();
+      resolve();
+    };
+    input.once('end', finish);
+    input.once('close', finish);
+    input.on('data', onData);
+    if (input.readableEnded || input.destroyed) finish();
   });
-  await new Promise((resolve) => input.on('end', resolve));
-  await new Promise((resolve) => input.on('close', resolve));
 }
 
 const isMain = (() => {
@@ -1000,19 +1359,24 @@ const isMain = (() => {
 })();
 
 if (isMain) {
-  const root = process.env.VOCS_MEMORY_ROOT;
-  if (!root) {
-    console.error('vocs-memory: VOCS_MEMORY_ROOT is not set');
-    process.exit(1);
+  const { VOCS_MEMORY_GATEWAY_URL: url, VOCS_MEMORY_GATEWAY_TOKEN: token } = process.env;
+  // Presence, not truthiness: even an explicitly empty gateway variable must fail closed.
+  const configured = url !== undefined || token !== undefined;
+  try {
+    await runMemoryServer({
+      input: process.stdin,
+      output: process.stdout,
+      ...(configured ? { gateway: { url, token } } : {
+        root: process.env.VOCS_MEMORY_ROOT,
+        branchRoot: process.env.VOCS_MEMORY_BRANCH_ROOT || null,
+        branch: process.env.VOCS_MEMORY_BRANCH || null,
+        userData: process.env.VOCS_MEMORY_USER_DATA || null,
+        projectRoot: process.env.VOCS_MEMORY_PROJECT_ROOT || null
+      }),
+      log: (message) => console.error(`vocs-memory: ${message}`)
+    });
+  } catch {
+    console.error(configured ? 'vocs-memory: Invalid intelligence gateway configuration.' : 'vocs-memory: Could not start the standalone wiki server (VOCS_MEMORY_ROOT is required).');
+    process.exitCode = 1;
   }
-  await runMemoryServer({
-    input: process.stdin,
-    output: process.stdout,
-    root,
-    branchRoot: process.env.VOCS_MEMORY_BRANCH_ROOT || null,
-    branch: process.env.VOCS_MEMORY_BRANCH || null,
-    userData: process.env.VOCS_MEMORY_USER_DATA || null,
-    projectRoot: process.env.VOCS_MEMORY_PROJECT_ROOT || null,
-    log: (message) => console.error(`vocs-memory: ${message}`)
-  });
 }

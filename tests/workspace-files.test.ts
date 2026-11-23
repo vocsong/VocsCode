@@ -3,8 +3,12 @@ import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { listWorkspaceFiles, readWorkspaceFile } from '../src/main/workspace-files';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { listWorkspaceFiles, MAX_IMAGE_BYTES, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile, writeWorkspaceText } from '../src/main/workspace-files';
+import { FILE_PREVIEW_MAX_BYTES } from '../src/shared/ipc';
+import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
+import type { SessionMeta } from '../src/shared/types';
+import { missionFixture } from './support/mission-fixture';
 
 const tempDirs: string[] = [];
 
@@ -19,6 +23,7 @@ function workspace(): { container: string; root: string; sibling: string } {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -62,7 +67,7 @@ describe('listWorkspaceFiles', () => {
     await fs.symlink(sibling, path.join(root, 'outside-link'), process.platform === 'win32' ? 'junction' : 'dir');
 
     await expect(listWorkspaceFiles(root, 'outside-link')).resolves.toEqual([]);
-    await expect(readWorkspaceFile(root, path.join('outside-link', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false });
+    await expect(readWorkspaceFile(root, path.join('outside-link', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false, readOnly: true });
   });
 });
 
@@ -74,8 +79,16 @@ describe('readWorkspaceFile', () => {
     const outside = path.join(sibling, 'outside.txt');
     await fs.writeFile(outside, 'outside');
 
-    await expect(readWorkspaceFile(root, outside)).resolves.toEqual({ content: '', truncated: false });
-    await expect(readWorkspaceFile(root, path.join('..', 'proj2', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false });
+    await expect(readWorkspaceFile(root, outside)).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+    await expect(readWorkspaceFile(root, path.join('..', 'proj2', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+  });
+
+  it('distinguishes a directory placeholder from an existing empty regular file', async () => {
+    const { root } = workspace();
+    await fs.mkdir(path.join(root, 'dir'), { recursive: true });
+    await fs.writeFile(path.join(root, 'empty.txt'), '');
+    await expect(readWorkspaceFile(root, 'dir')).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+    await expect(readWorkspaceFile(root, 'empty.txt')).resolves.toEqual({ content: '', truncated: false });
   });
 
   it('returns only the bounded UTF-8 prefix and reports truncation', async () => {
@@ -85,6 +98,35 @@ describe('readWorkspaceFile', () => {
 
     await expect(readWorkspaceFile(root, 'sample.txt', 3)).resolves.toEqual({ content: 'abc', truncated: true });
     await expect(readWorkspaceFile(root, 'sample.txt', 20)).resolves.toEqual({ content: 'abcdefgh', truncated: false });
+  });
+
+  it('names a missing file and the folder it was looked for in, not the realpath error', async () => {
+    const { root } = workspace();
+    await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+    const where = path.resolve(root);
+
+    // A reply named a bundle that lives in another repository, so the session folder has no such file.
+    await expect(readWorkspaceFile(root, 'SideGuard-Q-2026-10.zip')).rejects.toThrow(new Error(`SideGuard-Q-2026-10.zip was not found in ${where}`));
+    await expect(readWorkspaceFile(root, path.join('docs', 'gone.md'))).rejects.toThrow(new Error(`docs/gone.md was not found in ${where}`));
+    await expect(readWorkspaceImage(root, 'gone.png')).rejects.toThrow(new Error(`gone.png was not found in ${where}`));
+    await expect(listWorkspaceFiles(root, 'nope')).rejects.toThrow(new Error(`nope was not found in ${where}`));
+  });
+
+  it('says the session folder itself is gone rather than blaming the file', async () => {
+    const { root } = workspace();
+
+    await expect(readWorkspaceFile(root, 'a.txt')).rejects.toThrow(new Error(`${path.resolve(root)} no longer exists`));
+  });
+
+  it('flags binary content instead of decoding it as text', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    // A zip's local file header: the NULs a UTF-8 decode would turn into noise.
+    await fs.writeFile(path.join(root, 'bundle.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]));
+    await fs.writeFile(path.join(root, 'notes.txt'), 'plain text');
+
+    await expect(readWorkspaceFile(root, 'bundle.zip')).resolves.toEqual({ content: '', truncated: false, binary: true });
+    await expect(readWorkspaceFile(root, 'notes.txt')).resolves.toEqual({ content: 'plain text', truncated: false });
   });
 
   it('honors a zero-byte maximum', async () => {
@@ -108,5 +150,318 @@ describe('readWorkspaceFile', () => {
     const clampedRead = await readWorkspaceFile(root, 'clamped.txt', 3_000_000);
     expect(clampedRead.content).toHaveLength(2_000_000);
     expect(clampedRead.truncated).toBe(true);
+  });
+});
+
+describe('writeWorkspaceText', () => {
+  it('rejects binary and invalid UTF-8 but permits a literal replacement character', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root);
+    for (const bytes of [Buffer.from([0xff]), Buffer.from('x'.repeat(8001) + '\0')]) {
+      const file = path.join(root, 'invalid.txt');
+      await fs.writeFile(file, bytes);
+      await expect(readWorkspaceFile(root, 'invalid.txt', FILE_PREVIEW_MAX_BYTES)).resolves.toEqual({ content: '', truncated: false, binary: true });
+      await expect(writeWorkspaceText(root, 'invalid.txt', 'edit', '')).rejects.toThrow(/valid UTF-8 text files/);
+      await expect(fs.readFile(file)).resolves.toEqual(bytes);
+    }
+    await fs.writeFile(path.join(root, 'valid.txt'), '\uFFFD');
+    for (const invalid of ['\uD800', '\0']) {
+      await expect(writeWorkspaceText(root, 'valid.txt', invalid, '\uFFFD')).rejects.toThrow(/valid UTF-8 text/);
+      await expect(writeWorkspaceText(root, 'valid.txt', '', invalid)).rejects.toThrow(/valid UTF-8 text/);
+    }
+    await expect(writeWorkspaceText(root, 'valid.txt', '', '\uFFFD')).resolves.toBeUndefined();
+    await expect(writeWorkspaceText(root, 'valid.txt', 'new', '')).resolves.toBeUndefined();
+    await expect(fs.readFile(path.join(root, 'valid.txt'), 'utf8')).resolves.toBe('new');
+  });
+
+  it('caps old and new content by UTF-8 bytes, including a truncated multibyte preview', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root);
+    const file = path.join(root, 'edit.txt');
+    const max = 'é'.repeat(FILE_PREVIEW_MAX_BYTES / 2);
+    const tooLong = `a${max}`;
+    await fs.writeFile(file, 'before');
+    await expect(writeWorkspaceText(root, 'edit.txt', tooLong, 'before')).rejects.toThrow(/size limit/);
+    await expect(writeWorkspaceText(root, 'edit.txt', 'after', tooLong)).rejects.toThrow(/size limit/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('before');
+    await expect(writeWorkspaceText(root, 'edit.txt', max, 'before')).resolves.toBeUndefined();
+    await expect(fs.readFile(file)).resolves.toHaveLength(FILE_PREVIEW_MAX_BYTES);
+    await fs.writeFile(file, tooLong);
+    const preview = await readWorkspaceFile(root, 'edit.txt', FILE_PREVIEW_MAX_BYTES);
+    expect(preview.truncated).toBe(true);
+    expect(preview.binary).toBeUndefined();
+    await expect(writeWorkspaceText(root, 'edit.txt', 'after', max)).rejects.toThrow(/too large/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe(tooLong);
+  });
+
+  it('refuses directories and hard-linked files, leaving the outside alias untouched', async () => {
+    const { container, root } = workspace();
+    await fs.mkdir(path.join(root, 'dir'), { recursive: true });
+    const outside = path.join(container, 'outside.txt');
+    await fs.writeFile(outside, 'before');
+    await fs.link(outside, path.join(root, 'linked.txt'));
+    await expect(writeWorkspaceText(root, 'dir', 'edit', '')).rejects.toThrow(/existing regular files/);
+    await expect(writeWorkspaceText(root, 'linked.txt', 'edit', 'before')).rejects.toThrow(/hard links/);
+    await expect(fs.readFile(outside, 'utf8')).resolves.toBe('before');
+  });
+
+  it('leaves the original intact on an injected write failure and releases the next save', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root);
+    const file = path.join(root, 'edit.txt');
+    await fs.writeFile(file, 'before');
+    const open = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementationOnce(async (...args) => {
+      const handle = await open(...args);
+      vi.spyOn(handle, 'write').mockRejectedValueOnce(new Error('injected write failure'));
+      return handle;
+    });
+    await expect(writeWorkspaceText(root, 'edit.txt', 'x', 'before')).rejects.toThrow(/injected write failure/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('before');
+    await expect(writeWorkspaceText(root, 'edit.txt', 'x', 'before')).resolves.toBeUndefined();
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('x');
+  });
+});
+
+describe('readWorkspaceImage', () => {
+  // A 1x1 transparent PNG: real image bytes that a UTF-8 decode would mangle.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+
+  it('returns the exact bytes as base64 with the MIME type of the extension', async () => {
+    const { root } = workspace();
+    await fs.mkdir(path.join(root, 'runs'), { recursive: true });
+    await fs.writeFile(path.join(root, 'runs', 'chart.PNG'), PNG);
+
+    const image = await readWorkspaceImage(root, path.join('runs', 'chart.PNG'));
+    expect(image).toEqual({ mimeType: 'image/png', data: PNG.toString('base64'), size: PNG.length, tooLarge: false });
+    expect(Buffer.from(image!.data, 'base64').equals(PNG)).toBe(true);
+  });
+
+  it('refuses non-image paths and images outside the workspace', async () => {
+    const { root, sibling } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    await fs.mkdir(sibling);
+    await fs.writeFile(path.join(root, 'notes.txt'), 'text');
+    await fs.writeFile(path.join(sibling, 'outside.png'), PNG);
+
+    await expect(readWorkspaceImage(root, 'notes.txt')).resolves.toBeNull();
+    await expect(readWorkspaceImage(root, path.join('..', 'proj2', 'outside.png'))).resolves.toBeNull();
+    await expect(readWorkspaceImage(root, path.join(sibling, 'outside.png'))).resolves.toBeNull();
+  });
+
+  it('reports an image over the cap without sending its bytes', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    const big = path.join(root, 'huge.png');
+    await fs.writeFile(big, PNG);
+    await fs.truncate(big, MAX_IMAGE_BYTES + 1);
+
+    await expect(readWorkspaceImage(root, 'huge.png')).resolves.toEqual({ mimeType: 'image/png', data: '', size: MAX_IMAGE_BYTES + 1, tooLarge: true });
+  });
+});
+
+
+describe('resolveWorkspaceFile', () => {
+  async function put(root: string, name: string): Promise<void> {
+    await fs.mkdir(path.dirname(path.join(root, name)), { recursive: true });
+    await fs.writeFile(path.join(root, name), name);
+  }
+
+  it('prefers the exact regular file, including files in skipped directories', async () => {
+    const { root } = workspace();
+    await put(root, 'notes.md');
+    await put(root, 'docs/notes.md');
+    await put(root, 'node_modules/pkg/notes.md');
+    const scan = vi.spyOn(fs, 'opendir');
+    await expect(resolveWorkspaceFile(root, 'notes.md')).resolves.toEqual({ status: 'resolved', path: 'notes.md' });
+    await expect(resolveWorkspaceFile(root, 'node_modules/pkg/notes.md')).resolves.toEqual({ status: 'resolved', path: 'node_modules/pkg/notes.md' });
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it('matches component suffixes and bare basenames, never discarding supplied directories', async () => {
+    const { root } = workspace();
+    await put(root, 'src/api/tools.ts');
+    await put(root, 'src/notapi/tools.ts');
+    await expect(resolveWorkspaceFile(root, 'api/tools.ts')).resolves.toEqual({ status: 'resolved', path: 'src/api/tools.ts' });
+    await expect(resolveWorkspaceFile(root, 'missing/tools.ts')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'tools.ts')).resolves.toEqual({ status: 'ambiguous', paths: ['src/api/tools.ts', 'src/notapi/tools.ts'] });
+    await expect(resolveWorkspaceFile(root, 'Tools.ts')).resolves.toEqual(process.platform === 'win32'
+      ? { status: 'ambiguous', paths: ['src/api/tools.ts', 'src/notapi/tools.ts'] }
+      : { status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'API/TOOLS.ts')).resolves.toEqual(process.platform === 'win32'
+      ? { status: 'resolved', path: 'src/api/tools.ts' }
+      : { status: 'missing' });
+    await put(root, 'nested/unique.md');
+    await expect(resolveWorkspaceFile(root, 'unique.md')).resolves.toEqual({ status: 'resolved', path: 'nested/unique.md' });
+  });
+
+  it('skips generated/dependency trees and never resolves directories', async () => {
+    const { root } = workspace();
+    for (const dir of ['.git', '.vocs-code', 'node_modules', 'dist', 'out', 'build', '.next', '.venv', 'venv', 'target']) await put(root, `${dir}/hidden.ts`);
+    await fs.mkdir(path.join(root, 'nested', 'directory.ts'), { recursive: true });
+    await expect(resolveWorkspaceFile(root, 'hidden.ts')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'directory.ts')).resolves.toEqual({ status: 'missing' });
+    await put(root, 'other/nested/file.md');
+    await fs.mkdir(path.join(root, 'nested', 'file.md'));
+    await expect(resolveWorkspaceFile(root, 'nested/file.md')).resolves.toEqual({ status: 'missing' });
+  });
+
+  it('rejects malformed and unsafe paths before accessing the filesystem', async () => {
+    const realpath = vi.spyOn(fs, 'realpath');
+    const stat = vi.spyOn(fs, 'lstat');
+    for (const target of [null, undefined, {}, [], 42, '', ' ', '/etc/passwd', '../file', 'a/../file', 'a/..', 'C:/file', 'C:file', String.raw`\\host\share`, 'a\u0000b', 'a\nb', 'a\u007fb', 'https://host/file', 'a:b', 'a?b']) {
+      await expect(resolveWorkspaceFile('/unused', target as string)).rejects.toThrow();
+    }
+    expect(realpath).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+  });
+
+  it('searches only the current worktree, not its project or sibling worktrees', async () => {
+    const { root } = workspace();
+    const cwd = path.join(root, '.vocs-code', 'worktrees', 'current');
+    await put(root, 'src/project-only.ts');
+    await put(path.join(root, '.vocs-code', 'worktrees', 'other'), 'src/sibling-only.ts');
+    await put(cwd, 'src/current.ts');
+    await expect(resolveWorkspaceFile(cwd, 'project-only.ts')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(cwd, 'sibling-only.ts')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(cwd, 'current.ts')).resolves.toEqual({ status: 'resolved', path: 'src/current.ts' });
+  });
+
+  it('allows safe exact links but never follows links during fallback or falls back after escape', async () => {
+    const { root, sibling } = workspace();
+    await put(root, 'actual/inside.md');
+    await put(root, 'nested/escape/missing.md');
+    await put(root, 'actual/dangling-dir/dangling-only.md');
+    await put(root, 'node_modules/link-target/fallback.md');
+    await put(sibling, 'outside.md');
+    const directoryLink = process.platform === 'win32' ? 'junction' : 'dir';
+    await fs.symlink(sibling, path.join(root, 'escape'), directoryLink);
+    await fs.symlink(path.join(root, 'actual'), path.join(root, 'safe-dir'), directoryLink);
+    await fs.mkdir(path.join(root, 'links'));
+    await fs.symlink(path.join(root, 'node_modules', 'link-target'), path.join(root, 'links', 'fallback-dir'), directoryLink);
+    const gone = path.join(root, 'gone');
+    await fs.mkdir(gone);
+    await fs.symlink(gone, path.join(root, 'dangling-dir'), directoryLink);
+    await fs.rmdir(gone);
+    expect((await fs.lstat(path.join(root, 'dangling-dir'))).isSymbolicLink()).toBe(true);
+    await expect(fs.realpath(path.join(root, 'dangling-dir'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const scan = vi.spyOn(fs, 'opendir');
+    await expect(resolveWorkspaceFile(root, 'safe-dir/inside.md')).resolves.toEqual({ status: 'resolved', path: 'safe-dir/inside.md' });
+    await expect(resolveWorkspaceFile(root, 'links/fallback-dir/fallback.md')).resolves.toEqual({ status: 'resolved', path: 'links/fallback-dir/fallback.md' });
+    await expect(resolveWorkspaceFile(root, 'escape/outside.md')).rejects.toThrow(/outside workspace/i);
+    await expect(resolveWorkspaceFile(root, 'escape/missing.md')).rejects.toThrow(/outside workspace/i);
+    await expect(resolveWorkspaceFile(root, 'dangling-dir/dangling-only.md')).resolves.toEqual({ status: 'missing' });
+    expect(scan).not.toHaveBeenCalled();
+    await expect(resolveWorkspaceFile(root, 'inside.md')).resolves.toEqual({ status: 'resolved', path: 'actual/inside.md' });
+    await expect(resolveWorkspaceFile(root, 'safe-dir/missing-other.md')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'fallback.md')).resolves.toEqual({ status: 'missing' });
+
+    // Windows junctions above exercise directory boundaries without file-symlink privileges.
+    // POSIX additionally keeps the native file-link cases; junctions are not file symlinks.
+    if (process.platform !== 'win32') {
+      await put(root, 'actual/outside.md');
+      await put(root, 'actual/dangling.md');
+      await fs.symlink(path.join(root, 'actual', 'inside.md'), path.join(root, 'alias.md'), 'file');
+      await fs.symlink(path.join(sibling, 'outside.md'), path.join(root, 'outside.md'), 'file');
+      await fs.symlink(path.join(root, 'actual', 'inside.md'), path.join(root, 'links', 'fallback-file.md'), 'file');
+      await fs.symlink(path.join(root, 'gone.md'), path.join(root, 'dangling.md'), 'file');
+      await expect(resolveWorkspaceFile(root, 'alias.md')).resolves.toEqual({ status: 'resolved', path: 'alias.md' });
+      await expect(resolveWorkspaceFile(root, 'outside.md')).rejects.toThrow(/outside workspace/i);
+      await expect(resolveWorkspaceFile(root, 'absent/alias.md')).resolves.toEqual({ status: 'missing' });
+      await expect(resolveWorkspaceFile(root, 'fallback-file.md')).resolves.toEqual({ status: 'missing' });
+      await expect(resolveWorkspaceFile(root, 'dangling.md')).resolves.toEqual({ status: 'missing' });
+    }
+  });
+
+  it('preserves missing-root and non-ENOENT exact errors without scanning', async () => {
+    const { root } = workspace();
+    const scan = vi.spyOn(fs, 'opendir');
+    await expect(resolveWorkspaceFile(root, 'file.md')).rejects.toThrow(`${path.resolve(root)} no longer exists`);
+    await put(root, 'blocker');
+    // A real blocked descendant reports ENOENT on Windows, not POSIX's ENOTDIR.
+    const notDirectory = Object.assign(new Error('not a directory'), { code: 'ENOTDIR' });
+    const blocked = path.join(await fs.realpath(root), 'blocker', 'file.md');
+    const original = fs.lstat.bind(fs);
+    const stat = vi.spyOn(fs, 'lstat').mockImplementation((async (file: string) => {
+      if (file === blocked) throw notDirectory;
+      return original(file);
+    }) as typeof fs.lstat);
+    await expect(resolveWorkspaceFile(root, 'blocker/file.md')).rejects.toBe(notDirectory);
+    const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
+    stat.mockRejectedValue(denied);
+    await expect(resolveWorkspaceFile(root, 'file.md')).rejects.toBe(denied);
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it('reports incomplete on any unreadable subtree instead of declaring a unique match', async () => {
+    const { root } = workspace();
+    await put(root, 'readable/unique.md');
+    await fs.mkdir(path.join(root, 'unreadable'));
+    const original = fs.opendir.bind(fs);
+    vi.spyOn(fs, 'opendir').mockImplementation((async (dir: string) => {
+      if (String(dir).endsWith('unreadable')) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return original(dir);
+    }) as typeof fs.opendir);
+    await expect(resolveWorkspaceFile(root, 'unique.md')).resolves.toEqual({ status: 'incomplete' });
+  });
+
+  it('bounds visited entries and matches without expensive filesystem fixtures', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    let visited = 0;
+    let matches = false;
+    vi.spyOn(fs, 'opendir').mockImplementation((async () => ({
+      async *[Symbol.asyncIterator]() {
+        for (let i = 0; i < 50_001; i++) {
+          visited++;
+          yield { name: matches || i === 0 ? 'hit.md' : `${i}.md`, isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false };
+        }
+      }
+    })) as unknown as typeof fs.opendir);
+    await expect(resolveWorkspaceFile(root, 'hit.md')).resolves.toEqual({ status: 'incomplete' });
+    expect(visited).toBe(50_001);
+    matches = true;
+    visited = 0;
+    await expect(resolveWorkspaceFile(root, 'hit.md')).resolves.toEqual({ status: 'incomplete' });
+    expect(visited).toBe(100);
+  });
+
+  it('validates the registered IPC payload before scoped filesystem access and uses session cwd', async () => {
+    const { root, sibling } = workspace();
+    await put(root, 'nested/current.md');
+    await put(sibling, 'project-only.md');
+    const get = vi.fn(() => ({ id: 'session', cwd: root, config: { projectRoot: sibling } } as SessionMeta));
+    const registry = createHandlerRegistry({ sessions: { get }, desktop: {}, runtime: {}, log: vi.fn(), push: vi.fn() } as unknown as HandlerDeps);
+    const realpath = vi.spyOn(fs, 'realpath');
+    for (const input of [null, [], {}, { sessionId: 'session', path: 4 }, { sessionId: 'session', path: '../file' }, { sessionId: '../bad', path: 'file' }, { sessionId: 'session', path: 'file', missionWorkspaceId: 4 }, { sessionId: 'session', path: 'file', missionWorkspaceId: '../bad' }, { sessionId: 'session', path: 'file', cwd: sibling }]) {
+      await expect(registry.invoke('fs:resolve', input)).rejects.toThrow();
+    }
+    expect(realpath).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'current.md' })).resolves.toEqual({ status: 'resolved', path: 'nested/current.md' });
+    await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'project-only.md' })).resolves.toEqual({ status: 'missing' });
+    await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'current.md', missionWorkspaceId: 'unowned' })).rejects.toThrow(/owning Mission lead/);
+    await registry.shutdown();
+  });
+
+  it('resolves Mission leads against integration by default and honors an explicit owned workspace', async () => {
+    const { root, sibling } = workspace();
+    await put(root, 'lead/selected.md');
+    await put(sibling, 'integration/selected.md');
+    const leadPath = await fs.realpath(root);
+    const integrationPath = await fs.realpath(sibling);
+    const session = { id: 'lead', cwd: leadPath, config: { projectRoot: leadPath }, mission: { missionId: 'mission', role: 'lead' } } as SessionMeta;
+    const record = missionFixture({
+      id: 'mission', leadSessionId: 'lead', workspaces: [
+        { id: 'lead-workspace', role: 'lead', path: leadPath, branch: 'mission/lead', ownerSessionId: 'lead', base: { baseCommitSha: 'base', contentHash: 'tree' } },
+        { id: 'integration-workspace', role: 'integration', path: integrationPath, branch: 'mission/integration', base: { baseCommitSha: 'base', contentHash: 'tree' } }
+      ]
+    });
+    const registry = createHandlerRegistry({ sessions: { get: () => session }, missions: { get: () => record }, desktop: {}, runtime: {}, log: vi.fn(), push: vi.fn() } as unknown as HandlerDeps);
+    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md' })).resolves.toEqual({ status: 'resolved', path: 'integration/selected.md' });
+    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md', missionWorkspaceId: 'lead-workspace' })).resolves.toEqual({ status: 'resolved', path: 'lead/selected.md' });
+    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md', missionWorkspaceId: 'unknown' })).rejects.toThrow(/unavailable or cleaned/);
+    await registry.shutdown();
   });
 });

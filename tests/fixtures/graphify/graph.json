@@ -1,0 +1,41 @@
+{
+  "directed": true,
+  "multigraph": false,
+  "graph": { "schema_version": 1, "graphify_version": "0.9.115" },
+  "nodes": [
+    { "id": "auth_login_handle_login", "label": "handleLogin()", "norm_label": "handlelogin()", "file_type": "code", "source_file": "src/auth/login.ts", "source_location": "L12", "community": 0, "community_name": "Community 0" },
+    { "id": "auth_login_validate_user", "label": "validateUser()", "norm_label": "validateuser()", "file_type": "code", "source_file": "src/auth/login.ts", "source_location": "L40", "community": 0, "community_name": "Community 0" },
+    { "id": "auth_session_issue_session", "label": "issueSession()", "norm_label": "issuesession()", "file_type": "code", "source_file": "src/auth/session.ts", "source_location": "L8", "community": 0, "community_name": "Community 0" },
+    { "id": "auth_session_session_store", "label": "SessionStore", "norm_label": "sessionstore", "file_type": "code", "source_file": "src/auth/session.ts", "source_location": "L30", "community": 0, "community_name": "Community 0", "type": "class" },
+    { "id": "auth_tokens_sign_token", "label": "signToken()", "norm_label": "signtoken()", "file_type": "code", "source_file": "src/auth/tokens.ts", "source_location": "L5", "community": 1, "community_name": "Community 1" },
+    { "id": "auth_tokens_verify_token", "label": "verifyToken()", "norm_label": "verifytoken()", "file_type": "code", "source_file": "src/auth/tokens.ts", "source_location": "L22", "community": 1, "community_name": "Community 1" },
+    { "id": "db_users_find_user", "label": "findUser()", "norm_label": "finduser()", "file_type": "code", "source_file": "src/db/users.ts", "source_location": "L10", "community": 2, "community_name": "Community 2" },
+    { "id": "db_pool_get_connection", "label": "getConnection()", "norm_label": "getconnection()", "file_type": "code", "source_file": "src/db/pool.ts", "source_location": "L3", "community": 2, "community_name": "Community 2" },
+    { "id": "docs_auth_md", "label": "Authentication guide", "norm_label": "authentication guide", "file_type": "document", "source_file": "docs/auth.md", "community": 3, "community_name": "Community 3" },
+    { "id": "docs_auth_md_session_lifetime", "label": "Session lifetime", "norm_label": "session lifetime", "file_type": "document", "source_file": "docs/auth.md", "source_location": "L20", "community": 3, "community_name": "Community 3" },
+    { "id": "concept_token_rotation", "label": "Token rotation", "norm_label": "token rotation", "file_type": "concept", "source_file": "docs/auth.md", "community": 1, "community_name": "Community 1" },
+    { "id": "util_log_log_event", "label": "logEvent()", "norm_label": "logevent()", "file_type": "code", "source_file": "src/util/log.ts", "source_location": "L4", "community": 4, "community_name": "Community 4" },
+    { "id": "billing_invoice_render_invoice", "label": "renderInvoice()", "norm_label": "renderinvoice()", "file_type": "code", "source_file": "src/billing/invoice.ts", "source_location": "L7", "community": 5, "community_name": "Community 5" },
+    { "id": "billing_invoice_format_total", "label": "formatTotal()", "norm_label": "formattotal()", "file_type": "code", "source_file": "src/billing/invoice.ts", "source_location": "L31", "community": 5, "community_name": "Community 5" }
+  ],
+  "links": [
+    { "source": "auth_session_issue_session", "target": "util_log_log_event", "relation": "indirect_call", "confidence": "AMBIGUOUS", "confidence_score": 0.3, "source_file": "src/auth/session.ts", "source_location": "L14", "weight": 1.0 },
+    { "source": "concept_token_rotation", "target": "auth_tokens_sign_token", "relation": "related_to", "confidence": "AMBIGUOUS", "confidence_score": 0.4, "source_file": "docs/auth.md", "weight": 1.0 },
+    { "source": "auth_tokens_verify_token", "target": "auth_tokens_sign_token", "relation": "indirect_call", "confidence": "INFERRED", "confidence_score": 0.85, "source_file": "src/auth/tokens.ts", "source_location": "L25", "weight": 1.0 },
+    { "source": "auth_login_handle_login", "target": "auth_login_validate_user", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/auth/login.ts", "source_location": "L14", "weight": 1.0 },
+    { "source": "auth_login_handle_login", "target": "auth_session_issue_session", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/auth/login.ts", "source_location": "L18", "weight": 1.0 },
+    { "source": "auth_login_validate_user", "target": "db_users_find_user", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/auth/login.ts", "source_location": "L44", "weight": 1.0 },
+    { "source": "db_users_find_user", "target": "db_pool_get_connection", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/db/users.ts", "source_location": "L12", "weight": 1.0 },
+    { "source": "auth_session_issue_session", "target": "auth_tokens_sign_token", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/auth/session.ts", "source_location": "L11", "weight": 1.0 },
+    { "source": "auth_session_issue_session", "target": "auth_session_session_store", "relation": "uses", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/auth/session.ts", "source_location": "L12", "weight": 1.0 },
+    { "source": "auth_session_session_store", "target": "db_pool_get_connection", "relation": "indirect_call", "confidence": "INFERRED", "confidence_score": 0.7, "source_file": "src/auth/session.ts", "source_location": "L41", "weight": 1.0 },
+    { "source": "docs_auth_md", "target": "docs_auth_md_session_lifetime", "relation": "contains", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "docs/auth.md", "source_location": "L20", "weight": 1.0 },
+    { "source": "docs_auth_md_session_lifetime", "target": "auth_session_issue_session", "relation": "describes", "confidence": "INFERRED", "confidence_score": 0.8, "source_file": "docs/auth.md", "source_location": "L22", "weight": 1.0 },
+    { "source": "concept_token_rotation", "target": "auth_tokens_verify_token", "relation": "related_to", "confidence": "INFERRED", "confidence_score": 0.6, "source_file": "docs/auth.md", "weight": 1.0 },
+    { "source": "auth_login_handle_login", "target": "util_log_log_event", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/auth/login.ts", "source_location": "L20", "weight": 1.0 },
+    { "source": "billing_invoice_render_invoice", "target": "billing_invoice_format_total", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "src/billing/invoice.ts", "source_location": "L9", "weight": 1.0 },
+    { "source": "docs_auth_md", "target": "auth_login_handle_login", "relation": "references", "confidence": "INFERRED", "confidence_score": 0.75, "source_file": "docs/auth.md", "source_location": "L5", "weight": 1.0 }
+  ],
+  "hyperedges": [],
+  "built_at_commit": "3f9c2ab7d1e04c5a9b8f6e2d7c1a0b4e5f6a7b8c"
+}

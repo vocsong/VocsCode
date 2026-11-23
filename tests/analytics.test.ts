@@ -906,6 +906,41 @@ describe('harness × model recovery', () => {
 });
 
 describe('subagent accounting', () => {
+  it('moves explicitly unknown child cost off both parent slices, retaining all other dimensions', () => {
+    const store = new AnalyticsStore(tmpDir(), { log });
+    const t0 = Date.UTC(2025, 5, 10, 12);
+    const m = meta('s1', 'pi', usage({}), { activeModel: { provider: 'openrouter', model: 'parent' } });
+    store.recordUsage(m, usage({ costUsd: 0.3, inputTokens: 100, turns: 1 }), t0, [{ provider: null, model: null, costUsd: 0.2 }]);
+    const day = store.summary(30, t0 + 1000).days.find((d) => d.date === dayKey(t0))!.usage;
+    expect(day).toMatchObject({ inputTokens: 100, turns: 1 });
+    expect(day.costUsd).toBeCloseTo(0.3);
+    expect(day.by!.harness.pi.costUsd).toBeCloseTo(0.3);
+    expect(day.by!.project['/repo'].costUsd).toBeCloseTo(0.3);
+    expect(day.by!.model['openrouter/parent'].costUsd).toBeCloseTo(0.1);
+    expect(day.by!.harnessModel['pi|openrouter/parent'].costUsd).toBeCloseTo(0.1);
+    expect(day.by!.model['/(unknown)']).toMatchObject({ label: '(unknown)', inputTokens: 0, turns: 0, sessions: ['s1'] });
+    expect(day.by!.model['/(unknown)'].costUsd).toBeCloseTo(0.2);
+    expect(day.by!.harnessModel['pi|/(unknown)'].costUsd).toBeCloseTo(0.2);
+  });
+
+  it('puts a separately reported background run with explicit unknown identity in unknown slices', () => {
+    const store = new AnalyticsStore(tmpDir(), { log });
+    const t0 = Date.UTC(2025, 5, 10, 12);
+    const m = meta('s1', 'pi', usage({}), { activeModel: { provider: 'openrouter', model: 'parent' } });
+    store.recordUsage(m, usage({ costUsd: 0.1, turns: 1 }), t0);
+    store.recordSubagent(m, { agentId: 'child', model: null, status: 'completed', toolUses: 2,
+      usage: { costUsd: 0.2, inputTokens: 50, turns: 1 } }, t0);
+    const day = store.summary(30, t0 + 1000).days.find((d) => d.date === dayKey(t0))!.usage;
+    expect(day).toMatchObject({ inputTokens: 50, turns: 2, toolCalls: 2 });
+    expect(day.costUsd).toBeCloseTo(0.3);
+    expect(day.by!.harness.pi.costUsd).toBeCloseTo(0.3);
+    expect(day.by!.project['/repo'].costUsd).toBeCloseTo(0.3);
+    expect(day.by!.model['openrouter/parent'].costUsd).toBeCloseTo(0.1);
+    expect(day.by!.model['/(unknown)']).toMatchObject({ label: '(unknown)', inputTokens: 50, turns: 1 });
+    expect(day.by!.model['/(unknown)'].costUsd).toBeCloseTo(0.2);
+    expect(day.by!.harnessModel['pi|/(unknown)'].costUsd).toBeCloseTo(0.2);
+  });
+
   it('attributes subagent spend to the model the run used, without changing the day total', () => {
     const dir = tmpDir();
     const store = new AnalyticsStore(dir, { log });

@@ -30,6 +30,7 @@ const PROXY_SERVER_NAME = 'vocs-code-gitnexus-scope';
 const PROXY_VERSION = '1.0.0';
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 const GROUP_TOOL_PREFIX = 'group_';
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /* ──────────────────────────── allow-list helpers ─────────────────────────── */
 
@@ -459,8 +460,18 @@ export class UpstreamClient {
     }
   }
 
-  _post(body) {
-    return this.fetch(this.url, { method: 'POST', headers: this._headers(), body: JSON.stringify(body) });
+  async _post(body) {
+    // The upstream is one fixed URL; a redirect would carry the session headers somewhere else.
+    const response = await this.fetch(this.url, { method: 'POST', headers: this._headers(), body: JSON.stringify(body), redirect: 'manual' });
+    if (response.type === 'opaqueredirect' || REDIRECT_STATUSES.has(response.status) || (response.status >= 300 && response.status < 400 && response.headers?.has?.('location'))) {
+      try {
+        await response.body?.cancel?.();
+      } catch {
+        // The body is discarded either way.
+      }
+      throw new Error(`upstream redirected (HTTP ${response.status}); update its URL`);
+    }
+    return response;
   }
 
   _headers() {

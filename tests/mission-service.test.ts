@@ -1,5 +1,5 @@
-/** Real coordinator, stores, scheduler, Git workspaces and broker host. Only the harness's
- * process boundary is scripted: send accepts immediately, and tests explicitly emit outcomes. */
+/** Real coordinator, stores, scheduler, Git workspaces and broker host. The harness's
+ * process boundary is scripted; unrelated sidebar badge polling is isolated below. */
 import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -35,6 +35,12 @@ import * as processRuntime from '../src/main/runtime';
 const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: 30_000, interval: 30 });
 
 vi.mock('../src/main/harness/registry', () => ({ createAdapter: vi.fn() }));
+// UI badge readers are not part of coordinator quiescence and can keep a worktree cwd open
+// during Windows cleanup. Isolate them, not the real Mission Git/cleanup/delivery boundary.
+vi.mock('../src/main/git', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/main/git')>()),
+  branchGitState: vi.fn(async () => ({ pr: false, merged: false })),
+}));
 let root: string, project: string, data: string, workspaceRoot: string, receiptRoot: string;
 let sessions: SessionManager, sessionStore: SessionStore, store: MissionStore<MissionRecord>, service: MissionService;
 let scheduler: MissionScheduler, workspaces: MissionWorkspaces, verification: MissionVerification;
@@ -373,7 +379,13 @@ describe('Mission coordinator', () => {
     const worker = runtimes.get(first.sessionId)!;
     worker.usage({ inputTokens: 100, costUsd: 1 });
     await report(r, first.attemptId, { status: 'failed' }); worker.finish();
-    await wait(() => expect(service.get(r.id)?.attempts[0].status).toBe('terminal'));
+    // Worker settlement commits the terminal status and mailbox notice separately.
+    // Wait for both before reading the revision used to pause.
+    await wait(() => {
+      const current = service.get(r.id);
+      expect(current?.attempts[0].status).toBe('terminal');
+      expect(current?.mailbox.some((item) => item.sessionId === first.sessionId && item.text.startsWith(`Attempt ${first.attemptId} ended:`))).toBe(true);
+    });
     await service.control({ missionId: r.id, expectedRevision: service.get(r.id)!.revision, idempotencyKey: 'pause-under-budget', control: { action: 'pause' } });
     await crashRestart();
     expect(service.get(r.id)?.status).toBe('paused'); expect(scheduler.snapshot().active).toEqual([]);
@@ -760,11 +772,14 @@ describe('Mission coordinator', () => {
     const r = await start(); await plan(r);
     config.presets[1].enabled = false;
     await tool(r, 'mission_task_delegate', { taskId: 't1', presetId: 'standard', reason: 'Must be refused live' });
-    await wait(() => expect(service.get(r.id)?.operations.some((o) => o.payload.taskId === 't1' && o.state === 'failed')).toBe(true));
+    await wait(() => {
+      const current = service.get(r.id);
+      expect(current?.operations.some((o) => o.payload.taskId === 't1' && o.state === 'failed')).toBe(true);
+      expect(current?.mailbox.some((m) => /disabled|removed/i.test(m.text))).toBe(true);
+    });
     expect(sessions.list().filter((s) => s.mission?.role === 'worker')).toHaveLength(0);
     expect(service.get(r.id)?.blockers).toEqual([]);
     expect(service.get(r.id)?.status).toBe('running');
-    expect(service.get(r.id)?.mailbox.some((m) => /disabled|removed/i.test(m.text))).toBe(true);
     expect(capabilities.mock.calls.length).toBeGreaterThan(0);
   });
 
@@ -838,7 +853,8 @@ describe('Mission coordinator', () => {
     await service.control({ missionId: r.id, expectedRevision: service.get(r.id)!.revision, idempotencyKey: 'stop-for-cleanup', control: { action: 'stop' } });
     const stopped = service.get(r.id)!;
     const cleaned = await service.control({ missionId: r.id, expectedRevision: stopped.revision, idempotencyKey: 'stopped-cleanup', control: { action: 'cleanup' } });
-    expect(cleaned.status).toBe('stopped'); expect(cleaned.operations.find((op) => op.kind === 'cleanup')?.state).toBe('succeeded');
+    const cleanup = cleaned.operations.find((op) => op.kind === 'cleanup');
+    expect(cleaned.status).toBe('stopped'); expect(cleanup?.state, JSON.stringify(cleanup)).toBe('succeeded');
     expect(cleaned.workspaces.map(({ id, ownerSessionId }) => ({ id, ownerSessionId }))).toEqual(stopped.workspaces.map(({ id, ownerSessionId }) => ({ id, ownerSessionId })));
     expect(cleaned.workspaces.every((workspace) => workspace.cleanedAt !== undefined)).toBe(true);
     expect(await store.readSource(r.id, r.sourceSnapshotId!)).toEqual(await store.readSource(r.id, stopped.sourceSnapshotId!));

@@ -5,8 +5,10 @@ import {
   query,
   createSdkMcpServer,
   tool as sdkTool,
+  type AccountInfo,
   type CanUseTool,
   type HookCallback,
+  type McpSdkServerConfigWithInstance,
   type ModelUsage,
   type Options,
   type PermissionMode as SdkPermissionMode,
@@ -17,12 +19,16 @@ import {
   type SettingSource,
   type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
-import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { AppSettings, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { isEffortLevel } from '../../shared/harness-meta';
+import { fastModeSupport } from '../../shared/fast-mode';
+import { assertEndpointUrl } from '../../shared/endpoint-policy';
 import { z } from 'zod';
 import { PiMcpConnection } from '../../../resources/pi/mcp-client';
 import { isMissionCoordinationTool, MISSION_SERVER_ID, missionToolDenial, missionCommandDenial, missionToolSubset } from '../../../resources/pi/vocs-code-mission';
 import { hasClaudeAgentPins } from '../claude-agents';
 import { toClaude } from '../mcp/effective';
+import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, VOCS_MEMORY_SERVER_ID } from '../mcp/memory';
 import { claudeSdkCatalog } from '../models/claude-catalog';
 import { resolveProviderApiKey } from '../models/providers';
 import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
@@ -35,8 +41,10 @@ import { exists } from '../util/fs';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { SUBAGENT_TOOLS, ClaudeSubagentRuns, type NestedAssistantLike, type TaskNotificationLike, type TaskProgressLike, type TaskStartedLike, type TaskUpdatedLike } from './claude-subagents';
-import { gateAction, isOutsideWorkspace, isTrustedMissionCoordination, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
+import { gateAction, isTrustedMissionCoordination, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL, requiresPathApproval, type GateVerdict } from './permissions';
+import { isBuiltinReadOnlyMcpName } from '../../shared/builtin-tools';
 import { projectInstructionBlock } from './project-instructions';
+import { questionAnswerWithNote } from './question-answers';
 import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
 
@@ -98,6 +106,37 @@ const READ_ONLY_TOOLS = new Set([
   'ReadMcpResourceTool',
   'Skill'
 ]);
+/**
+ * Tools that steer the Claude session itself (questions, subagents, plan mode, background-task
+ * control) rather than the project, the shell or the network. The PreToolUse gate leaves them to
+ * Claude Code's own pipeline, which reaches canUseTool when it would ask: AskUserQuestion needs
+ * canUseTool to collect its answers, and what a subagent does is gated call by call in its own run.
+ */
+const SESSION_CONTROL_TOOLS = new Set(['AskUserQuestion', 'Agent', 'Task', 'TaskOutput', 'TaskStop', 'KillShell', 'BashOutput', 'EnterPlanMode']);
+
+/** `get_settings` → `applied`: what the next request will send, after env overrides, org caps and
+ * model-support downgrades. The installed SDK implements `getSettings()` but does not declare it. */
+interface ClaudeAppliedSettings {
+  applied?: { model?: unknown; effort?: unknown; advisor?: unknown; ultracode?: unknown };
+}
+
+/** Whether Claude Code reports a credential it will send. Cloud backends (Bedrock, Vertex, ...)
+ * authenticate outside the CLI, so their account fields stay unknown rather than absent. */
+function claudeCredentialReported(account: AccountInfo | undefined): boolean | undefined {
+  if (!account) return undefined;
+  if (account.apiProvider === 'gateway') return true;
+  if (account.apiProvider && account.apiProvider !== 'firstParty') return undefined;
+  const source = (value: string | undefined) => !!value && value !== 'none';
+  return !!account.email || source(account.apiKeySource) || source(account.tokenSource);
+}
+
+/** A reply names the model the API served: the requested id without Claude Code's `[1m]`-style
+ * context suffix, or an alias resolved to its dated release. */
+function sameClaudeModel(replied: string, requested: string): boolean {
+  const bare = (id: string) => id.replace(/\[[^\]]*\]$/, '');
+  const a = bare(replied), b = bare(requested);
+  return a === b || a.startsWith(`${b}-`) && /^\d{8}$/.test(a.slice(b.length + 1));
+}
 
 /** Slash command names as the user types them — aliases included, lower-cased and de-duplicated. */
 function commandNames(commands: readonly SlashCommand[]): string[] {
@@ -120,10 +159,11 @@ function toSdkMode(mode: PermissionMode): SdkPermissionMode {
     case 'plan':
       return 'plan';
     case 'auto':
-      // Our own gate auto-allows non-dangerous actions; keep the CLI prompting so we see everything.
-      return 'default';
     case 'full-auto':
-      return 'bypassPermissions';
+      // The app gate decides every call (PreToolUse, then canUseTool), so the CLI stays in its
+      // prompting mode and is never handed `bypassPermissions`: Full access is the gate allowing
+      // everything, which applies live and needs no `allowDangerouslySkipPermissions`.
+      return 'default';
   }
 }
 
@@ -175,6 +215,8 @@ function counterDelta(previous: number, current: number): number {
 export class ClaudeAdapter implements HarnessAdapter {
   readonly id = 'claude' as const;
   private q: Query | null = null;
+  private fastMode = false;
+  private fastModeModel: ModelRef | undefined;
   private input = new AsyncQueue<SDKUserMessage>();
   private abort = new AbortController();
   private pump: Promise<void> | null = null;
@@ -186,6 +228,9 @@ export class ClaudeAdapter implements HarnessAdapter {
    *  Anthropic model list must not replace it. */
   private gateway = false;
   private sessionAllowed = new Set<string>();
+  /** Built-in MCP servers this process was handed through `options.mcpServers`; only their
+   * read-only tools run on every tier. */
+  private builtinServers = new Map<string, 'dynamic' | 'sdk'>();
   private currentAssistant: { id: string; text: string; thinking: string } | null = null;
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private fileSnapshots = new Map<string, string | null>();
@@ -203,14 +248,23 @@ export class ClaudeAdapter implements HarnessAdapter {
   private autoCompactionWindow: number | null | undefined;
   /** Records the delegated runs Claude Code spawns, so the Subagents panel can show them. */
   private readonly subagents: ClaudeSubagentRuns;
+  private closeMemoryMcp: (() => Promise<void>) | undefined;
   private missionConnection: PiMcpConnection | null = null;
   private missionAllowed = new Set<string>();
   private missionCoordination = new Set<string>();
   private missionReady = false;
   private missionStreamEnded = false;
-  /** system/init is the only public SDK observation of effective model, effort and tool names.
-   * It normally arrives with the first turn, not the prompt-free initialize control response. */
-  private missionObserved: Pick<MissionReadiness, 'model' | 'effort' | 'tools'> | null = null;
+  /** Tool names from system/init, which arrives with the first turn rather than at startup. */
+  private missionObservedTools: string[] | null = null;
+  /** The credential the initialize response reported; configured, not yet proven to work. */
+  private missionAccount: AccountInfo | undefined;
+  /** Applied model at the last readiness check. Every main-thread reply must come from it. */
+  private missionModel: string | undefined;
+  /** The API served a reply from `missionModel`. Before that its availability is attested by the
+   * first reply, and a failed model or credential ends that attestation as unavailable. */
+  private missionModelAttested = false;
+  private missionModelUnavailable = false;
+  private missionCredentialRejected = false;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
@@ -246,19 +300,21 @@ export class ClaudeAdapter implements HarnessAdapter {
     if (process.platform === 'win32' && !bin) throw new Error('Claude Agent SDK needs a native Claude Code executable. Reinstall Vocs Code (or run npm install --include=dev in a dev checkout), or select a native .exe; npm .cmd/.bat shims cannot be spawned.');
     const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
     // Never let this app's own Claude Code host variables leak into a nested session.
-    for (const k of Object.keys(env)) if (k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_CODE_USE_BEDROCK' && k !== 'CLAUDE_CODE_USE_VERTEX' && k !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[k];
+    for (const k of Object.keys(env)) {
+      if (k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_CODE_USE_BEDROCK' && k !== 'CLAUDE_CODE_USE_VERTEX' && k !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[k];
+      const name = process.platform === 'win32' ? k.toUpperCase() : k;
+      if (name === MEMORY_GATEWAY_URL_ENV || name === MEMORY_GATEWAY_TOKEN_ENV
+        || name === 'VOCS_CODE_MCP_EPHEMERAL' || name === 'VOCS_CODE_MISSION_POLICY') delete env[k];
+    }
     delete env.CLAUDECODE;
     // After the scrub, which would otherwise drop it with every other CLAUDE_CODE_* variable. The
     // SDK reads the cap from the child's environment and, left alone, applies its own default.
     if (!meta.mission) env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = String(MAX_CONCURRENT_SUBAGENTS);
-    delete env.VOCS_CODE_MCP_EPHEMERAL;
-    delete env.VOCS_CODE_MISSION_POLICY;
 
     const options: Options = {
       cwd: meta.cwd,
       model: cfg.model?.model || meta.activeModel?.model,
       permissionMode: toSdkMode(mode),
-      allowDangerouslySkipPermissions: mode === 'full-auto',
       canUseTool: this.canUseTool,
       includePartialMessages: true,
       // Without this the SDK forwards only a subagent's tool_use/tool_result blocks, so a delegated
@@ -268,6 +324,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       env,
       abortController: this.abort,
       settingSources: s.claude.settingSources,
+      // Flag-tier settings are an explicit SDK opt-in; never inherit a paid user preference.
+      settings: { fastMode: this.fastMode && fastModeSupport(this.id, this.fastModeModel, s.providers).supported },
       systemPrompt: append
         ? { type: 'preset', preset: 'claude_code', append }
         : { type: 'preset', preset: 'claude_code' },
@@ -300,6 +358,11 @@ export class ClaudeAdapter implements HarnessAdapter {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    const meta = this.ctx.session();
+    this.fastModeModel = meta.config.model ?? meta.activeModel;
+    this.fastMode = meta.config.fastMode === true && !meta.mission;
+    const support = fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+    this.ctx.updateMeta({ fastModeStatus: !this.fastMode ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
     const options = await this.buildOptions();
     // `strictMcpConfig` stays unset on purpose: the user's own ~/.claude.json and plugin servers
     // must keep working alongside the ones this app injects. With 'project' in settingSources
@@ -307,18 +370,25 @@ export class ClaudeAdapter implements HarnessAdapter {
     // twice under one name; injecting it is still the reliable route, because Claude's
     // project-scope trust prompt has no interactive path in SDK mode (docs/MCP.md §11).
     const mission = this.ctx.session().mission;
-    const mcp = await this.ctx.mcpServers().catch((e) => {
+    const mcp = (await this.ctx.mcpServers().catch((e) => {
       if (mission) throw new Error('Managed Mission MCP configuration is unavailable.');
       this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
       return [];
-    });
-    const missionServers = mcp.filter((entry) => entry.def.id === MISSION_SERVER_ID);
+    })).map(({ def }) => def);
+    const missionServers = mcp.filter((def) => def.id === MISSION_SERVER_ID);
+    // The SDK serializes process MCP configs (including stdio env) into --mcp-config argv.
+    const gatewayMemory = mcp.filter((def) => def.id === VOCS_MEMORY_SERVER_ID
+      && (def.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || def.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined));
+    const processServers = mcp.filter((def) => def.id !== MISSION_SERVER_ID && !gatewayMemory.includes(def));
+    // Built-in servers this process hands Claude, keyed to the source Claude reports for them:
+    // `dynamic` for --mcp-config; the in-process memory gateway bridge below registers as `sdk`.
+    this.builtinServers = new Map(processServers.filter((def) => def.builtin === def.id).map((def) => [def.id, 'dynamic' as const]));
     if (mission) {
-      if (missionServers.length !== 1 || missionServers[0].def.transport !== 'http' || !missionServers[0].def.headers?.Authorization) throw new Error('Managed Mission requires its authenticated MCP bridge.');
-      // Claude serializes HTTP mcpServers into --mcp-config argv. Never pass the capability there:
+      if (missionServers.length !== 1 || missionServers[0].transport !== 'http' || !missionServers[0].headers?.Authorization) throw new Error('Managed Mission requires its authenticated MCP bridge.');
+      // Never pass the Mission capability there either:
       // hold it in the SDK host and expose an in-process SDK server with no serializable secrets.
       try {
-        this.missionConnection = await PiMcpConnection.connect(missionServers[0].def);
+        this.missionConnection = await PiMcpConnection.connect(missionServers[0]);
         const listed = await this.missionConnection.listTools();
         if (!listed.some((entry) => entry.name === 'mission_read') || !listed.some((entry) => entry.name === (mission.questionId ? 'mission_context_read' : 'mission_report')) || listed.some((entry) => !isMissionCoordinationTool(MISSION_SERVER_ID, entry.name)
           || mission.questionId && entry.name !== 'mission_read' && entry.name !== 'mission_context_read')) throw new Error();
@@ -332,7 +402,7 @@ export class ClaudeAdapter implements HarnessAdapter {
             return { content: result.content.map((part) => ({ type: 'text' as const, text: part.text ?? '' })), isError: result.isError };
           } catch { return { content: [{ type: 'text' as const, text: 'Mission coordination request failed; the connection may have been revoked.' }], isError: true }; }
         })) });
-        options.mcpServers = { ...toClaude(mcp.filter((entry) => entry.def.id !== MISSION_SERVER_ID).map((entry) => entry.def)), [MISSION_SERVER_ID]: bridge };
+        options.mcpServers = { ...toClaude(processServers), [MISSION_SERVER_ID]: bridge };
       } catch {
         this.missionConnection?.close();
         this.missionConnection = null;
@@ -341,7 +411,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       }
     } else {
       if (missionServers.length) throw new Error('Mission MCP bridge requires a managed session.');
-      if (mcp.length) options.mcpServers = toClaude(mcp.map((r) => r.def));
+      if (processServers.length) options.mcpServers = toClaude(processServers);
     }
     const s = this.ctx.settings();
     const provider = claudeProviderFor(s, this.ctx.session().config.model ?? this.ctx.session().activeModel);
@@ -351,11 +421,25 @@ export class ClaudeAdapter implements HarnessAdapter {
     let auth = 'login';
     if (Object.keys(overlay).length) {
       options.env = { ...(options.env ?? {}), ...overlay };
-      auth = overlay.ANTHROPIC_BASE_URL ? `endpoint=${overlay.ANTHROPIC_BASE_URL}` : 'stored-key';
+      auth = overlay.ANTHROPIC_BASE_URL ? 'configured-endpoint' : 'stored-key';
     }
     if (!mission) options.env = { ...(options.env ?? {}), ...(await this.subagentModelEnv(options.model)) };
     this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
-    this.q = query({ prompt: this.input, options });
+    if (!mission && gatewayMemory.length) {
+      const bridge = gatewayMemory.length === 1 ? await this.memoryMcpBridge(gatewayMemory[0], meta.cwd) : undefined;
+      this.abort.signal.throwIfAborted();
+      if (bridge) {
+        options.mcpServers = { ...options.mcpServers, [VOCS_MEMORY_SERVER_ID]: bridge };
+        if (gatewayMemory[0]!.builtin === VOCS_MEMORY_SERVER_ID) this.builtinServers.set(VOCS_MEMORY_SERVER_ID, 'sdk');
+      }
+      else this.ctx.log('warn', '[claude] memory gateway MCP unavailable; skipping it for this launch');
+    }
+    try {
+      this.q = query({ prompt: this.input, options });
+    } catch (error) {
+      if (this.closeMemoryMcp) await this.closeMemoryMcp();
+      throw error;
+    }
     // This CLI counts the tokens and dollars of the process that is starting, not of the session:
     // a resumed process opens at zero, so without this the first turn after every resume would be
     // measured against the totals already recorded and thrown away.
@@ -368,14 +452,17 @@ export class ClaudeAdapter implements HarnessAdapter {
       this.missionReady = false;
       this.missionStreamEnded = true;
       this.compactionWaiter?.reject(e instanceof Error ? e : new Error(errorMessage(e)));
+      if (this.fastMode) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: errorMessage(e) } });
       this.ctx.emit({ type: 'error', message: `Claude harness stopped: ${errorMessage(e)}`, fatal: true });
       this.ctx.emit({ type: 'status', status: 'error', detail: errorMessage(e) });
     });
+    if (this.closeMemoryMcp) this.pump = this.pump.finally(this.closeMemoryMcp);
     if (mission) {
       try {
         if (typeof this.q.initializationResult !== 'function') throw new Error('Mission SDK hook initialization is unverified.');
         const initialization = await withTimeout(this.q.initializationResult(), 60_000, 'Mission SDK initialization');
         if (initialization?.hooks_applied !== true) throw new Error('Mission SDK hook registration is unverified or was refused.');
+        this.missionAccount = initialization.account;
         const statuses = await withTimeout(this.q.mcpServerStatus(), 60_000, 'Mission MCP readiness');
         const bridge = statuses.find((entry) => entry.name === MISSION_SERVER_ID && entry.source === 'sdk');
         if (bridge?.status !== 'connected') throw new Error('Required Mission SDK bridge is not connected.');
@@ -397,19 +484,102 @@ export class ClaudeAdapter implements HarnessAdapter {
     this.ctx.emit({ type: 'status', status: 'idle' });
   }
 
-  async missionReadiness(): Promise<MissionReadiness> {
-    if (!this.ctx.session().mission || !this.q || !this.missionReady || this.missionStreamEnded) {
-      return { ready: false, tools: [], reason: 'Managed Claude SDK initialization/control bridge is unverified.' };
+  /** Run the app-owned stdio child from the SDK host, not from Claude Code. */
+  private async memoryMcpBridge(def: McpServerDef, cwd: string): Promise<McpSdkServerConfigWithInstance | undefined> {
+    if (def.builtin !== VOCS_MEMORY_SERVER_ID || def.transport !== 'stdio' || !def.command
+      || !def.env?.[MEMORY_GATEWAY_URL_ENV] || !def.env?.[MEMORY_GATEWAY_TOKEN_ENV]) return;
+    try {
+      const [{ Client }, { StdioClientTransport }, { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode }] = await Promise.all([
+        import('@modelcontextprotocol/sdk/client/index.js'),
+        import('@modelcontextprotocol/sdk/client/stdio.js'),
+        import('@modelcontextprotocol/sdk/types.js')
+      ]);
+      this.abort.signal.throwIfAborted();
+      const client = new Client({ name: 'vocs-code', version: '0.1.0' });
+      // Ignore child stderr: a failed handshake can otherwise surface snippets of launch secrets.
+      const transport = new StdioClientTransport({ command: def.command, args: def.args, env: def.env, cwd, stderr: 'ignore' });
+      let closing: Promise<void> | undefined;
+      this.closeMemoryMcp = () => closing ??= client.close().catch(() => undefined);
+      await client.connect(transport, { signal: this.abort.signal, timeout: 10_000 });
+      const timeout = def.timeoutMs && def.timeoutMs >= 1000 ? def.timeoutMs : undefined;
+      const bridge = createSdkMcpServer({
+        name: VOCS_MEMORY_SERVER_ID,
+        version: client.getServerVersion()?.version,
+        instructions: client.getInstructions(),
+        timeout
+      });
+      // Relay the tool protocol directly: reconstructing via sdkTool() would change the stdio
+      // server's JSON Schemas, annotations and returned content.
+      bridge.instance.server.registerCapabilities({ tools: {} });
+      bridge.instance.server.setRequestHandler(ListToolsRequestSchema, async ({ params }, { signal }) => {
+        try { return await client.listTools(params, { signal, timeout: 10_000 }); }
+        catch { throw new McpError(ErrorCode.InternalError, 'Memory gateway MCP tool discovery failed.'); }
+      });
+      bridge.instance.server.setRequestHandler(CallToolRequestSchema, async ({ params }, { signal }) => {
+        // The gateway can take up to 90 seconds before local fallback starts.
+        try { return await client.callTool(params, undefined, { signal, timeout: timeout ?? 120_000 }); }
+        catch { throw new McpError(ErrorCode.InternalError, 'Memory gateway MCP request failed.'); }
+      });
+      return bridge;
+    } catch {
+      if (this.closeMemoryMcp) await this.closeMemoryMcp();
+      this.closeMemoryMcp = undefined;
+      // No inline fallback and no error detail from the credential-bearing child.
+      return undefined;
     }
-    // The installed SDK's initialize response contains a catalog and account labels, not the
-    // selected model/effort or authenticated model availability. Do not send a sacrificial prompt,
-    // promote supportedModels()/config into proof, or infer authentication from any stored key.
-    // Until a prompt-free API proves those facts this driver remains unverified for Mission dispatch.
-    const observed = this.missionObserved;
-    return { ready: false, tools: observed?.tools.filter((name) => this.missionAllowed.has(name)) ?? [],
-      ...(observed?.model ? { model: observed.model } : {}), ...(observed?.effort ? { effort: observed.effort } : {}),
-      reason: observed?.model ? 'Claude model/provider availability is unverified by its prompt-free SDK control protocol.'
-        : 'Claude effective model and tool inventory were not observed before a prompt; Mission support is unverified.' };
+  }
+
+  async missionReadiness(): Promise<MissionReadiness> {
+    const q = this.q;
+    const unverified = (reason: string): MissionReadiness => ({ ready: false, tools: [], reason });
+    if (!this.ctx.session().mission || !q || !this.missionReady || this.missionStreamEnded) return unverified('Managed Claude SDK initialization/control bridge is unverified.');
+    // Model and effort come from the CLI's applied settings, never from config or the catalog.
+    // Neither supportedModels() nor a context-usage count rejects a model the API would refuse, so
+    // availability is attested by the first reply (see attestMissionModel), never by a sacrificial prompt.
+    const getSettings = (q as Query & { getSettings?: () => Promise<ClaudeAppliedSettings> }).getSettings;
+    if (typeof getSettings !== 'function') return unverified('This Claude Code runtime cannot report its applied model and effort without a prompt.');
+    let applied: ClaudeAppliedSettings['applied'];
+    try { applied = (await withTimeout(getSettings.call(q), 20_000, 'Mission Claude settings'))?.applied; }
+    catch (e) { return unverified(`Claude applied settings were not observed: ${errorMessage(e)}`); }
+    if (this.q !== q || !this.missionReady || this.missionStreamEnded) return unverified('Managed Claude readiness became stale.');
+    const model = typeof applied?.model === 'string' && applied.model ? applied.model : undefined;
+    if (!model) return unverified('Claude effective model was not observed.');
+    // Either would put a second model or an orchestration mode into turns the preset pins.
+    if (applied?.advisor) return unverified('Claude Code has an advisor model configured; a Mission runs only its preset model. Remove advisorModel from the Claude settings.');
+    if (applied?.ultracode === true) return unverified('Claude Code ultracode is on; a Mission owns effort and orchestration. Turn ultracode off in the Claude settings.');
+    if (this.missionModel !== model) {
+      this.missionModel = model;
+      this.missionModelAttested = false;
+      this.missionModelUnavailable = false;
+    }
+    const effort = isEffortLevel(applied?.effort) ? applied.effort : undefined;
+    const connectionAvailable = this.missionCredentialRejected ? false : claudeCredentialReported(this.missionAccount);
+    // system/init lists the loaded tools once a turn has run; before it, the enforced allowlist.
+    const tools = [...this.missionAllowed].filter((name) => !this.missionObservedTools || this.missionObservedTools.includes(name));
+    return {
+      ready: true, tools, model: { provider: this.providerId ?? 'anthropic', model }, ...(effort ? { effort } : {}),
+      ...(connectionAvailable !== undefined ? { connectionAvailable } : {}),
+      ...(this.missionModelUnavailable ? { modelAvailable: false } : this.missionModelAttested ? { modelAvailable: true } : { modelAttestation: 'first_response' as const }),
+    };
+  }
+
+  /** A Mission turn runs only on the model readiness observed. A main-thread reply from another
+   * model stops the runtime before any further turn; the first matching reply proves availability. */
+  private attestMissionModel(msg: { message: { model?: string }; error?: string }): void {
+    if (msg.error === 'model_not_found') this.missionModelUnavailable = true;
+    if (msg.error === 'authentication_failed' || msg.error === 'oauth_org_not_allowed' || msg.error === 'account_on_hold' || msg.error === 'cloud_credential_error') this.missionCredentialRejected = true;
+    const replied = msg.message.model;
+    // Claude Code labels its own error and interruption notices `<synthetic>`; a failed request
+    // settles as a failed turn, so it neither proves nor disproves the model.
+    if (!replied || replied === '<synthetic>' || !this.missionModel) return;
+    if (sameClaudeModel(replied, this.missionModel)) {
+      this.missionModelAttested = true;
+      return;
+    }
+    this.missionReady = false;
+    this.missionModelAttested = false;
+    this.ctx.emit({ type: 'error', message: `Claude answered with ${replied}, but this Mission preset requires ${this.missionModel}. The runtime was stopped so no further turn runs on a different model.`, fatal: true });
+    void this.q?.interrupt().catch(() => undefined);
   }
 
   private missionDenial(toolName: string, input: Record<string, unknown>, server?: { name: string; source: string }): string | undefined {
@@ -429,21 +599,38 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   private canUseTool: CanUseTool = (toolName, input, { mcpServer }) => this.authorizeTool(toolName, input, mcpServer);
 
+  /** A read-only tool of a built-in server this process was handed, reported by Claude with the
+   * source it was handed under (`dynamic` or `sdk`). A user or project server reusing a built-in
+   * name gets nothing. */
+  private builtinReadOnly(toolName: string, mcpServer?: { name: string; source: string }): boolean {
+    if (!isBuiltinReadOnlyMcpName(toolName)) return false;
+    const server = toolName.slice('mcp__'.length, toolName.indexOf('__', 'mcp__'.length));
+    const source = this.builtinServers.get(server);
+    return !!source && (!mcpServer || mcpServer.name === server && mcpServer.source === source);
+  }
+
+  /** The tier's verdict for one call, without asking anyone. */
+  private async gateTool(toolName: string, input: Record<string, unknown>, mcpServer?: { name: string; source: string }): Promise<{ verdict: GateVerdict; isEdit: boolean; command?: string; outsideWorkspace: boolean }> {
+    const mode = this.ctx.session().mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
+    const isEdit = EDIT_TOOLS.has(toolName);
+    const mutating = !READ_ONLY_TOOLS.has(toolName) && !this.builtinReadOnly(toolName, mcpServer);
+    const command = typeof input.command === 'string' ? input.command : undefined;
+    const editTarget = isEdit ? String(input.file_path ?? input.notebook_path ?? '') : '';
+    // Real-path check: a symlink or junction inside the project that leads out of it counts as outside.
+    const outsideWorkspace = !!editTarget && await requiresPathApproval(this.ctx.session().cwd, editTarget);
+    const verdict = gateAction(mode, { mutating, isEdit, command, sessionAllowed: this.sessionAllowed.has(toolName), outsideWorkspace,
+      trustedCoordination: !!this.ctx.session().mission && this.missionCoordination.has(toolName) && isTrustedMissionCoordination(toolName, mcpServer) });
+    return { verdict, isEdit, command, outsideWorkspace };
+  }
+
   private async authorizeTool(toolName: string, input: Record<string, unknown>, mcpServer?: { name: string; source: string }): Promise<PermissionResult> {
     const denied = this.missionDenial(toolName, input, mcpServer);
     if (denied) return { behavior: 'deny', message: denied };
-    const mode = this.ctx.session().mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
-    const isEdit = EDIT_TOOLS.has(toolName);
-    const mutating = !READ_ONLY_TOOLS.has(toolName);
-    const command = typeof (input as Record<string, unknown>).command === 'string' ? ((input as Record<string, unknown>).command as string) : undefined;
 
     if (toolName === 'AskUserQuestion') return this.askUserQuestion(input);
 
     const cwd = this.ctx.session().cwd;
-    const editTarget = isEdit ? String((input as Record<string, unknown>).file_path ?? (input as Record<string, unknown>).notebook_path ?? '') : '';
-    const outsideWorkspace = isEdit && isOutsideWorkspace(cwd, editTarget || undefined, path);
-    const verdict = gateAction(mode, { mutating, isEdit, command, sessionAllowed: this.sessionAllowed.has(toolName), outsideWorkspace,
-      trustedCoordination: !!this.ctx.session().mission && this.missionCoordination.has(toolName) && isTrustedMissionCoordination(toolName, mcpServer) });
+    const { verdict, isEdit, command, outsideWorkspace } = await this.gateTool(toolName, input, mcpServer);
     if (verdict === 'allow') return { behavior: 'allow', updatedInput: input };
     if (verdict === 'deny') return { behavior: 'deny', message: PLAN_MODE_DENIAL };
 
@@ -491,10 +678,10 @@ export class ClaudeAdapter implements HarnessAdapter {
         allowOther: true
       }))
     });
-    if (decision.optionId !== 'allow') return { behavior: 'deny', message: 'The user skipped the question.' };
+    if (decision.optionId !== 'allow') return { behavior: 'deny', message: decision.note?.trim() || 'The user skipped the question.' };
     const answers: Record<string, string> = {};
     qs.forEach((q, i) => {
-      const a = decision.answers?.[String(i)];
+      const a = questionAnswerWithNote(decision.answers?.[String(i)], decision.note);
       if (a !== undefined) answers[String(q.question ?? '')] = a;
     });
     return { behavior: 'allow', updatedInput: { ...input, answers } };
@@ -532,6 +719,16 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   private preToolUse: HookCallback = async (input) => {
     let managedInput: Record<string, unknown> | undefined;
+    let tierDecision: 'allow' | 'ask' | undefined;
+    if (input.hook_event_name === 'PreToolUse' && !this.ctx.session().mission && !SESSION_CONTROL_TOOLS.has(input.tool_name)) {
+      // The tier overrides Claude settings: an allow rule there would skip canUseTool, so every call
+      // is re-gated here first. The hook never prompts — 'ask' makes Claude Code route the call to
+      // canUseTool even past an allow rule, which shows the one approval card; 'allow' also lifts
+      // the CLI's plan-mode block for the built-in read-only tools. A settings deny rule still wins.
+      const { verdict } = await this.gateTool(input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>, input.mcp_server);
+      if (verdict === 'deny') return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: PLAN_MODE_DENIAL } };
+      tierDecision = verdict;
+    }
     if (input.hook_event_name === 'PreToolUse' && this.ctx.session().mission) {
       const reason = this.missionDenial(input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>, input.mcp_server);
       if (reason) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
@@ -556,7 +753,9 @@ export class ClaudeAdapter implements HarnessAdapter {
         }
       }
     }
-    return managedInput ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: managedInput } } : { continue: true };
+    if (managedInput) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: managedInput } };
+    if (tierDecision) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: tierDecision, ...(tierDecision === 'ask' ? { permissionDecisionReason: 'Vocs Code permission tier requires approval.' } : {}) } };
+    return { continue: true };
   };
 
   private postToolUse: HookCallback = async (input) => {
@@ -707,14 +906,20 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   private handle(msg: SDKMessage, q: Query): void {
+    // State is reported on init, status and result messages. A request is not proof of activation.
+    const fast = msg as { fast_mode_state?: string; fast_mode_disabled_reason?: string; parent_tool_use_id?: string | null };
+    if (!fast.parent_tool_use_id && this.fastMode && (fast.fast_mode_state || fast.fast_mode_disabled_reason)) {
+      const reason = fast.fast_mode_disabled_reason;
+      this.ctx.updateMeta({ fastModeStatus: {
+        state: fast.fast_mode_state === 'cooldown' ? 'cooldown' : reason ? reason === 'pending' ? 'requested' : 'unavailable' : fast.fast_mode_state === 'on' ? 'on' : 'off',
+        ...(reason ? { detail: reason } : {})
+      } });
+    }
     switch (msg.type) {
       case 'system': {
         const subtype = (msg as { subtype?: string }).subtype;
         if (msg.subtype === 'init') {
-          if (this.ctx.session().mission) this.missionObserved = {
-            ...(msg.model ? { model: { provider: this.providerId ?? 'anthropic', model: msg.model } } : {}),
-            ...(msg.effort ? { effort: msg.effort } : {}), tools: [...msg.tools],
-          };
+          if (this.ctx.session().mission) this.missionObservedTools = [...msg.tools];
           this.sessionId = msg.session_id;
           this.ctx.updateRef({ claudeSessionId: msg.session_id });
           if (msg.model) this.ctx.updateMeta({ activeModel: { provider: this.providerId ?? 'anthropic', model: msg.model } });
@@ -783,6 +988,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       }
       case 'assistant': {
         this.markTurnStarted();
+        if (this.ctx.session().mission && !msg.parent_tool_use_id) this.attestMissionModel(msg);
         const content = (msg.message.content ?? []) as ContentBlockLike[];
         // The child's own transcript lives in its run, never in the parent's: this message is one
         // the subagent produced, so every block belongs to the delegation, not to the answer.
@@ -880,6 +1086,11 @@ export class ClaudeAdapter implements HarnessAdapter {
         const turnCost = turnUsage?.costUsd ?? 0;
         const turnMsg = msg as { is_error?: boolean; terminal_reason?: string };
         const isError = turnMsg.is_error || msg.subtype !== 'success';
+        const errors = msg as { result?: string; errors?: string[]; fast_mode_state?: string; fast_mode_disabled_reason?: string };
+        const detail = [errors.result, ...(errors.errors ?? [])].filter(Boolean).join('; ');
+        if (this.fastMode && isError && !errors.fast_mode_state && !errors.fast_mode_disabled_reason && /fast.?mode|service.?tier|fast.*speed|rate.?limit/i.test(detail)) {
+          this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail } });
+        }
         const interrupted = turnMsg.terminal_reason === 'aborted_streaming' || turnMsg.terminal_reason === 'aborted_tools';
         const status = interrupted ? 'interrupted' : isError ? 'failed' : 'completed';
         // The turn is as long as the app watched it, the way every other harness reports it and the
@@ -987,6 +1198,10 @@ export class ClaudeAdapter implements HarnessAdapter {
       priority: input.mode === 'steer' ? 'now' : input.mode === 'queue' ? 'next' : undefined
     } as unknown as SDKUserMessage;
     if (!this._busy) {
+      if (this.fastMode) {
+        const support = fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+        this.ctx.updateMeta({ fastModeStatus: support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
+      }
       this._busy = true;
       this.usage.beginTurn();
       this.turnStartedAt = Date.now();
@@ -1003,6 +1218,16 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
   }
 
+  async setFastMode(enabled: boolean): Promise<void> {
+    if (enabled && this.ctx.session().mission) throw new Error('Fast mode is unavailable for Missions.');
+    const support = fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+    if (enabled && !support.supported) throw new Error(support.reason);
+    if (!this.q || typeof this.q.applyFlagSettings !== 'function') throw new Error('This Claude runtime cannot change Fast mode.');
+    await this.q.applyFlagSettings({ fastMode: enabled });
+    this.fastMode = enabled;
+    this.ctx.updateMeta({ fastModeStatus: { state: enabled ? 'requested' : 'off' } });
+  }
+
   async setModel(model: ModelRef): Promise<void> {
     if (this.ctx.session().mission) throw new Error('Mission presets are fixed for the attempt.');
     // The SDK process keeps one endpoint for its lifetime; a model from another provider would be
@@ -1010,8 +1235,13 @@ export class ClaudeAdapter implements HarnessAdapter {
     if (this.providerId && model.provider !== this.providerId) {
       throw new Error(`This session runs on the ${this.providerId} endpoint. Start a new session to use models from ${model.provider}.`);
     }
+    // Remove a paid flag before moving to an unsupported model, even if the account would ignore it.
+    const support = fastModeSupport(this.id, model, this.ctx.settings().providers);
+    if (this.fastMode && !support.supported) await this.q?.applyFlagSettings({ fastMode: false });
     await this.q?.setModel(model.model);
-    this.ctx.updateMeta({ activeModel: model });
+    this.fastModeModel = model;
+    if (this.fastMode && support.supported) await this.q?.applyFlagSettings({ fastMode: true });
+    this.ctx.updateMeta({ activeModel: model, fastModeStatus: !this.fastMode ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {
@@ -1024,13 +1254,11 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
     if (this.ctx.session().mission?.sourceAccess === 'read_only') mode = 'plan';
-    if (mode === 'full-auto') {
-      this.info('Full access requires restarting the Claude process; it will apply on the next session start.', 'warn');
-      return;
-    }
-    await this.q?.setPermissionMode(toSdkMode(mode));
-    // Per-tool session grants do not survive a mode change.
+    // Per-tool session grants do not survive a mode change. The app gate reads the new tier on the
+    // next call; the CLI mode only carries Plan's prompt and read-only workflow, so every tier,
+    // Full access included, applies live.
     this.sessionAllowed.clear();
+    await this.q?.setPermissionMode(toSdkMode(mode));
   }
 
   /**
@@ -1114,7 +1342,12 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   async dispose(): Promise<void> {
     this.missionReady = false;
-    this.missionObserved = null;
+    this.missionObservedTools = null;
+    this.missionAccount = undefined;
+    this.missionModel = undefined;
+    this.missionModelAttested = false;
+    this.missionModelUnavailable = false;
+    this.missionCredentialRejected = false;
     this.missionAllowed.clear();
     this.missionCoordination.clear();
     this.missionConnection?.close();
@@ -1131,6 +1364,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       /* ignore */
     }
     this.q = null;
+    if (this.closeMemoryMcp) await this.closeMemoryMcp();
+    this.closeMemoryMcp = undefined;
     if (this.ctx.session().mission && this.pump) await withTimeout(this.pump, 5_000, 'Managed Claude shutdown');
     // A run still open when the process goes away has no end record and no owner left to write one,
     // so close it as interrupted rather than leaving it spinning as `running` in an open app.
@@ -1155,6 +1390,7 @@ export function claudeProviderFor(settings: AppSettings, model: ModelRef | undef
 export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, apiKey: string | undefined): Record<string, string | undefined> {
   if (!provider) return {};
   const baseUrl = anthropicBaseUrlFor(provider);
+  if (baseUrl) assertEndpointUrl(baseUrl);
   if (baseUrl && baseUrl !== ANTHROPIC_DEFAULT_BASE_URL) {
     // Zen's Anthropic route reads x-api-key and answers a bearer token with "Missing API key".
     if (anthropicAuthFor(provider) === 'api-key') {
@@ -1174,6 +1410,11 @@ export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfi
  * credentials here, so the probe starts with the endpoint and key of the session it lists models for.
  */
 export async function resolveClaudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, getApiKey: (id: string) => Promise<string | undefined>): Promise<Record<string, string | undefined>> {
+  const baseUrl = provider && anthropicBaseUrlFor(provider);
+  if (baseUrl) assertEndpointUrl(baseUrl);
+  // The default route does not overlay the child's base URL. Before injecting an app key,
+  // validate the inherited endpoint too; external CLI-owned config remains the CLI's responsibility.
+  if (provider && settings.claude.useProviderKey && baseUrl === ANTHROPIC_DEFAULT_BASE_URL && process.env.ANTHROPIC_BASE_URL) assertEndpointUrl(process.env.ANTHROPIC_BASE_URL);
   const key = provider ? await resolveProviderApiKey(provider, getApiKey) : undefined;
   return claudeProviderEnv(settings, provider, key);
 }

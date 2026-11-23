@@ -1,14 +1,15 @@
 /** Sessions home: the desktop's current session first, then what needs a person, what is running,
  *  and the rest by folder; archived rows stay collapsed. */
 import { useMemo, useState } from 'react';
+import { SessionTitle } from '@renderer/components/SessionTitle';
 import { Button, Icon } from '@renderer/components/ui';
-import { basename, harnessShort, relTime } from '@renderer/format';
+import { basename, relTime } from '@renderer/format';
 import { sortSessionRows } from '@renderer/sessionOrder';
 import { useStore } from '@renderer/store';
 import type { SessionMeta } from '@shared/types';
 import { StatusChip } from '../components/StatusChip';
 
-export function SessionList({ focus, onNew, onOpen }: { focus: string | null; onNew: () => void; onOpen: (id: string) => void }) {
+export function SessionList({ focus, active = null, onNew, onOpen }: { focus: string | null; active?: string | null; onNew: () => void; onOpen: (id: string) => void }) {
   const sessions = useStore((s) => s.sessions);
   const [filter, setFilter] = useState('');
   const [archivedOpen, setArchivedOpen] = useState(false);
@@ -30,10 +31,10 @@ export function SessionList({ focus, onNew, onOpen }: { focus: string | null; on
 
   const row = (s: SessionMeta) => (
     <li key={s.id}>
-      <button type="button" className="w-session-row" data-testid="session-row" data-session-id={s.id} onClick={() => onOpen(s.id)}>
+      <button type="button" className={`w-session-row${s.id === active ? ' is-active' : ''}`} aria-current={s.id === active ? 'page' : undefined} data-testid="session-row" data-session-id={s.id} onClick={() => onOpen(s.id)}>
         <span className="w-session-row-main">
-          <span className="w-session-row-title">{s.title}</span>
-          <span className="w-session-row-meta">{harnessShort(s.config.harness)} · {relTime(s.updatedAt)}</span>
+          <SessionTitle session={s} className="w-session-row-title" />
+          <span className="w-session-row-meta">{relTime(s.updatedAt)}</span>
         </span>
         {s.status === 'awaiting' && s.statusDetail ? <span className="w-row-detail">{s.statusDetail}</span> : null}
         <StatusChip status={s.status} label={s.statusLabel} />
@@ -57,8 +58,8 @@ export function SessionList({ focus, onNew, onOpen }: { focus: string | null; on
           <h2>On your computer now</h2>
           <div className="w-continue-card">
             <div className="w-continue-main">
-              <span className="w-continue-title">{focused.title}</span>
-              <span className="w-continue-meta">{harnessShort(focused.config.harness)} · {relTime(focused.updatedAt)}</span>
+              <SessionTitle session={focused} className="w-continue-title" />
+              <span className="w-continue-meta">{relTime(focused.updatedAt)}</span>
             </div>
             <Button size="sm" variant="primary" icon="play" onClick={() => onOpen(focused.id)}>Continue</Button>
           </div>

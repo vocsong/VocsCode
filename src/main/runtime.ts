@@ -1,7 +1,10 @@
-import { promises as fs, statSync } from 'node:fs';
+import { promises as fs, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import type { AppSettings, HarnessAvailability, HarnessBinarySource, HarnessId, HarnessUpdate } from '../shared/types';
+import { ANTIGRAVITY_MIN_VERSION, type AntigravityQuota } from '../shared/harness-setup';
+import { antigravityAccountEnv, ANTIGRAVITY_QUOTA_ARGS, ANTIGRAVITY_SIGN_IN_MESSAGE, checkAntigravityAccount, parseAntigravityQuota } from './harness/antigravity';
 import { killTree, spawnTool } from './harness/spawn';
 import { exists } from './util/fs';
 
@@ -22,7 +25,7 @@ export interface RuntimePaths {
   appRoot: string;
 }
 
-export type ToolName = 'claude' | 'codex' | 'pi' | 'dsh' | 'npx' | 'gemini';
+export type ToolName = 'claude' | 'codex' | 'pi' | 'dsh' | 'npx' | 'gemini' | 'agy';
 
 /**
  * Resolved PATH scans are memoized per command: one boot performs dozens of lookups (every git/gh
@@ -34,6 +37,22 @@ const whichCache = new Map<string, string | null>();
 
 export function clearWhichCache(): void {
   whichCache.clear();
+}
+
+/**
+ * The native executable an npm cmd-shim launches (`"%dp0%\node_modules\…\claude.exe" %*`), when it
+ * exists. Claude Code's npm package ships a native binary behind its shim, so a global install is
+ * launchable without the shim; a shim that runs a script under Node has no such target.
+ */
+export function cmdShimExecutable(shim: string): string | null {
+  try {
+    const target = /"%dp0%\\([^"%]+\.exe)"/i.exec(readFileSync(shim, 'utf8'))?.[1];
+    if (!target) return null;
+    const exe = path.join(path.dirname(shim), target);
+    return statSync(exe).isFile() ? exe : null;
+  } catch {
+    return null;
+  }
 }
 
 export function which(cmd: string, extraDirs: string[] = []): string | null {
@@ -85,6 +104,15 @@ export const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 const probeCache = new Map<string, { at: number; result: CaptureResult }>();
 const probePending = new Map<string, Promise<CaptureResult>>();
 const PROBE_TTL_MS = 60_000;
+let probeGeneration = 0;
+
+/** Explicit setup refreshes must see installs/sign-ins now, not a cached result from boot. */
+export function clearRuntimeProbeCache(): void {
+  clearWhichCache();
+  probeGeneration++;
+  probeCache.clear();
+  probePending.clear();
+}
 
 async function probeOnce(cmd: string, args: string[], timeoutMs: number): Promise<CaptureResult> {
   const key = `${cmd}\u0000${args.join('\u0000')}`;
@@ -93,10 +121,11 @@ async function probeOnce(cmd: string, args: string[], timeoutMs: number): Promis
   // Concurrent callers share one probe; 'codex' and 'codex-exec' refresh together at boot.
   let pending = probePending.get(key);
   if (!pending) {
+    const generation = probeGeneration;
     pending = runCapture(cmd, args, { timeoutMs })
       .then((result) => {
-        probeCache.set(key, { at: Date.now(), result });
-        probePending.delete(key);
+        if (generation === probeGeneration) probeCache.set(key, { at: Date.now(), result });
+        if (probePending.get(key) === pending) probePending.delete(key);
         return result;
       });
     probePending.set(key, pending);
@@ -231,7 +260,58 @@ export function bundledCodexPath(appRoot: string): string | null {
       /* try next */
     }
   }
+  // Worktrees/monorepos may share ancestor dependencies. Match the SDK resolver rather than
+  // silently falling back to a PATH shim when the app's bundled dependency is available there.
+  try {
+    const req = createRequire(path.join(appRoot, 'package.json'));
+    const pkgJson = req.resolve(`${pkg}/package.json`);
+    const p = path.join(path.dirname(pkgJson), 'vendor', triple, 'bin', isWin ? 'codex.exe' : 'codex');
+    if (statSync(p).isFile()) return p;
+  } catch { /* not installed */ }
   return null;
+}
+
+/**
+ * The native binary an npm `codex.cmd` shim launches. Unlike Claude's shim, Codex's runs
+ * `node …\@openai\codex\bin\codex.js`, which spawns the platform package's binary; this resolves it
+ * the way that launcher does (the platform package beside the package, then its own vendor dir).
+ */
+export function codexShimExecutable(shim: string): string | null {
+  const triple = codexTargetTriple();
+  if (!triple) return null;
+  try {
+    const script = /"%dp0%\\([^"%]*@openai\\codex\\bin\\codex\.js)"/i.exec(readFileSync(shim, 'utf8'))?.[1];
+    if (!script) return null;
+    const pkgRoot = path.dirname(path.dirname(path.join(path.dirname(shim), ...script.split('\\'))));
+    const exe = isWin ? 'codex.exe' : 'codex';
+    const candidates: string[] = [];
+    try {
+      const req = createRequire(path.join(pkgRoot, 'package.json'));
+      candidates.push(path.join(path.dirname(req.resolve(`@openai/codex-${process.platform}-${process.arch}/package.json`)), 'vendor', triple, 'bin', exe));
+    } catch { /* platform package not installed beside it */ }
+    candidates.push(path.join(pkgRoot, 'vendor', triple, 'bin', exe));
+    for (const candidate of candidates) {
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch { /* try next */ }
+    }
+  } catch { /* unreadable shim */ }
+  return null;
+}
+
+/**
+ * The Codex executable a shell-less spawn can start. The exec SDK spawns `codexPathOverride`
+ * directly, which fails with EINVAL for a `.cmd`/`.bat` shim on Windows, so a shim is swapped for
+ * the native binary behind it, and the bundled binary stands in only when that cannot be found.
+ * Codex exec must list its models from this same binary: an app-runtime install is often newer
+ * than the bundled one and lists models the bundled binary does not know (the backend rejects them).
+ */
+export function spawnableCodex(bin: ResolvedBinary | null, appRoot: string | undefined): ResolvedBinary | null {
+  if (!bin || !/[.](cmd|bat)$/i.test(bin.path)) return bin;
+  const behind = codexShimExecutable(bin.path);
+  if (behind) return { path: behind, source: bin.source };
+  const bundled = appRoot ? bundledCodexPath(appRoot) : null;
+  return bundled ? { path: bundled, source: 'bundled' } : null;
 }
 
 function codexTargetTriple(): string | null {
@@ -302,13 +382,19 @@ export class RuntimeResolver {
 
     const bundled =
       tool === 'claude' ? bundledClaudePath(this.paths.appRoot) : tool === 'codex' ? bundledCodexPath(this.paths.appRoot) : null;
-    if (preferBundled && bundled) return { path: bundled, source: 'bundled' };
+    if (preferBundled) return bundled ? { path: bundled, source: 'bundled' } : null;
 
-    const sys = which(tool, this.appRuntimeBin());
+    const sys = which(tool, this.appRuntimeBin()) ?? (tool === 'agy' ? which(isWin
+      ? path.join(process.env.LOCALAPPDATA || path.join(homedir(), 'AppData', 'Local'), 'agy', 'bin', 'agy.exe')
+      : path.join(homedir(), '.local', 'bin', 'agy')) : null);
     // The Claude Agent SDK spawns the executable directly; an npm .cmd/.bat shim cannot be
     // spawned without a shell on Windows. Never report it as available, even if the bundled
     // binary has gone missing or the user requested system-only mode.
     if (tool === 'claude' && isWin && sys && /\.(cmd|bat)$/i.test(sys)) {
+      // An npm install of Claude Code (global, or in the app runtime dir) puts its native binary
+      // behind the shim. That is the install the user updates, so it wins over the bundled one.
+      const behind = cmdShimExecutable(sys);
+      if (behind) return { path: behind, source: sys.startsWith(this.paths.appRuntimeDir) ? 'app-runtime' : 'system' };
       if (!systemOnly && bundled) return { path: bundled, source: 'bundled' };
       // A shim earlier on PATH need not hide a real executable later on PATH.
       const native = which('claude.exe', this.appRuntimeBin());
@@ -333,14 +419,29 @@ export class RuntimeResolver {
           ? { available: false, detail: 'No launchable Claude Code runtime found (Windows .cmd/.bat shims cannot be started by the Agent SDK).', installHint: 'Reinstall Vocs Code (or run npm install --include=dev in a dev checkout), or select a native Claude executable.' }
           : { available: false, detail: 'No Claude Code runtime found.', installHint: 'npm install -g @anthropic-ai/claude-code' };
         const v = await probeOnce(bin.path, ['--version'], 20_000);
-        const authenticated = await claudeHasCredentials();
+        const login = v.code === 0 ? await probeOnce(bin.path, ['auth', 'status', '--json'], 20_000) : undefined;
+        let authenticated: HarnessAvailability['authenticated'] = 'unknown';
+        let authMethod: HarnessAvailability['authMethod'];
+        // A credential file can be empty, expired, or unused (macOS also uses the keychain).
+        // Ask the selected runtime. Never return its email, account id, tokens or raw auth output.
+        if (login && !login.timedOut && !login.truncated) {
+          try {
+            const auth = JSON.parse(login.stdout) as { loggedIn?: unknown; authMethod?: unknown };
+            if (auth?.loggedIn === false) authenticated = false;
+            if (auth?.loggedIn === true && login.code === 0) {
+              authenticated = true;
+              authMethod = auth.authMethod === 'claude.ai' ? 'subscription' : typeof auth.authMethod === 'string' && /api[_ -]?key|console/i.test(auth.authMethod) ? 'api-key' : 'other';
+            }
+          } catch { /* Older CLIs may not support auth status: unknown is not ready. */ }
+        }
         return {
           available: v.code === 0,
           version: v.stdout.trim() || undefined,
           binaryPath: bin.path,
           source: bin.source,
-          detail: `${bin.source} runtime`,
-          authenticated: authenticated ? true : 'unknown'
+          detail: v.code !== 0 ? 'Claude runtime could not start. Check its installation.' : authenticated === 'unknown' ? 'Runtime installed; sign-in could not be verified. Sign in or update the runtime, then check again.' : `${bin.source} runtime`,
+          authenticated,
+          authMethod
         };
       }
       case 'codex':
@@ -348,16 +449,21 @@ export class RuntimeResolver {
         const bin = this.resolve('codex');
         if (!bin) return { available: false, detail: 'Codex CLI not found.', installHint: 'npm install -g @openai/codex' };
         const v = await probeOnce(bin.path, ['--version'], 20_000);
-        const login = await probeOnce(bin.path, ['login', 'status'], 20_000);
-        const text = login.stdout + login.stderr;
-        const loggedIn = /logged in/i.test(text) && !/not logged in/i.test(text);
+        const login = v.code === 0 ? await probeOnce(bin.path, ['login', 'status'], 20_000) : undefined;
+        const text = login ? login.stdout + login.stderr : '';
+        const complete = login && !login.timedOut && !login.truncated;
+        const signedOut = complete && /not logged in/i.test(text);
+        const signedIn = complete && login.code === 0 && /logged in/i.test(text) && !signedOut;
+        const authenticated = signedIn ? true : signedOut ? false : 'unknown';
         return {
           available: v.code === 0,
           version: v.stdout.trim() || undefined,
           binaryPath: bin.path,
           source: bin.source,
-          detail: text.trim().split('\n')[0] || `${bin.source} runtime`,
-          authenticated: loggedIn
+          // `login status` can include a preview of an API key: don't copy its text into the UI/log.
+          detail: v.code !== 0 ? 'Codex runtime could not start. Check its installation.' : signedIn ? 'Codex sign-in detected.' : signedOut ? 'Sign in to Codex with ChatGPT or an API key.' : 'Runtime installed; sign-in could not be checked. Try again.',
+          authenticated,
+          authMethod: signedIn ? /api key/i.test(text) ? 'api-key' : /chatgpt/i.test(text) ? 'subscription' : 'other' : undefined
         };
       }
       case 'pi': {
@@ -373,11 +479,11 @@ export class RuntimeResolver {
         if (dsh) {
           const v = await probeOnce(dsh.path, ['--version'], 30_000);
           return {
-            available: true,
+            available: v.code === 0,
             version: v.stdout.trim() || undefined,
             binaryPath: dsh.path,
             source: dsh.source,
-            detail: 'DeepSeek Harness found',
+            detail: v.code === 0 ? 'DeepSeek Harness found' : 'DeepSeek Harness could not start. Check Node.js and its installation.',
             authenticated: 'unknown'
           };
         }
@@ -391,6 +497,26 @@ export class RuntimeResolver {
             installHint: 'npm install -g @deepseek-ai/dsh'
           };
         return { available: false, detail: 'Neither dsh nor npx found.', installHint: 'npm install -g @deepseek-ai/dsh' };
+      }
+      case 'antigravity': {
+        const bin = this.resolve('agy');
+        const installHint = `Install Google Antigravity CLI ${ANTIGRAVITY_MIN_VERSION} or newer.`;
+        if (!bin) return { available: false, detail: 'Antigravity CLI (agy) was not found.', installHint };
+        const probe = await probeOnce(bin.path, ['--version'], 8_000);
+        const version = probe.code === 0 ? parseVersion(probe.stdout) : null;
+        const binary = { binaryPath: bin.path, source: bin.source, version: version ?? undefined };
+        if (!version || compareVersions(version, ANTIGRAVITY_MIN_VERSION) < 0) {
+          return { ...binary, available: false, detail: version ? installHint : 'Antigravity CLI could not start. Check the agy executable path.', installHint };
+        }
+        let authenticated: HarnessAvailability['authenticated'] = 'unknown';
+        try {
+          await fs.mkdir(this.paths.appRuntimeDir, { recursive: true });
+          authenticated = await checkAntigravityAccount(bin.path, this.paths.appRuntimeDir);
+        } catch { /* A failed account probe does not make the CLI missing. */ }
+        return {
+          ...binary, available: true, authenticated,
+          detail: authenticated === true ? 'Google sign-in detected.' : authenticated === false ? ANTIGRAVITY_SIGN_IN_MESSAGE : 'Antigravity CLI is installed. Sign-in could not be verified.'
+        };
       }
       case 'cursor': {
         // The SDK ships with the app; only credentials are user-supplied. Cursor reads them from
@@ -409,21 +535,32 @@ export class RuntimeResolver {
     }
   }
 
+  /** Reads the vendor's account quota on demand. The fixed slash command never runs inference. */
+  async antigravityQuota(): Promise<AntigravityQuota> {
+    const status = await this.availability('antigravity');
+    if (!status.available || !status.binaryPath) throw new Error(status.detail);
+    if (status.authenticated === false) throw new Error(ANTIGRAVITY_SIGN_IN_MESSAGE);
+    const result = await runCapture(status.binaryPath, [...ANTIGRAVITY_QUOTA_ARGS], {
+      cwd: this.paths.appRuntimeDir, env: antigravityAccountEnv(), timeoutMs: 15_000
+    });
+    const quota = result.code === 0 && !result.truncated ? parseAntigravityQuota(result.stdout) : undefined;
+    if (!quota) throw new Error('Antigravity did not return account quota. Check your Google sign-in and retry.');
+    return quota;
+  }
+
   /** Installs a harness CLI into the app runtime dir with npm. */
   async install(id: InstallableHarness): Promise<{ ok: boolean; log: string }> {
+    if (typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(HARNESS_PACKAGES, id)) throw new Error('Unsupported harness installer');
     const pkg = HARNESS_PACKAGES[id];
     await fs.mkdir(this.paths.appRuntimeDir, { recursive: true });
     const npm = which('npm');
-    if (!npm) return { ok: false, log: 'npm not found on PATH.' };
+    if (!npm) return { ok: false, log: 'Node.js/npm is not available. Install Node.js from https://nodejs.org, restart Vocs Code, then retry. Bundled Claude/Codex runtimes do not require this installer.' };
     const r = await runCapture(npm, ['install', '-g', '--prefix', this.paths.appRuntimeDir, `${pkg}@latest`], {
       timeoutMs: 600_000
     });
     // The install put a new binary in the runtime dir; drop the memoized misses so it is found,
     // and the version probes so the next read reports what was just installed rather than the TTL.
-    if (r.code === 0) {
-      clearWhichCache();
-      probeCache.clear();
-    }
+    if (r.code === 0) clearRuntimeProbeCache();
     return { ok: r.code === 0, log: r.stdout + r.stderr };
   }
 

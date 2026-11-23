@@ -5,6 +5,8 @@
  * creation used to fail with "Worktrees require a git repository." A fork of a worktree session
  * used to share its source's directory, so archiving the source with its worktree removed deleted
  * the folder the fork was running in; the fork owns a worktree and branch of its own instead.
+ * The branch is `vocscode/<slug>` unless the session asks for another prefix (`feat/`, `fix/`, a
+ * team's own), which repositories with branch-naming rules require; forks keep that prefix.
  */
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -111,6 +113,78 @@ describe('worktree isolation at session creation', () => {
     expect(meta.cwd).toBe(path.join(projectRoot, '.vocs-code', 'worktrees', 'isolate-me'));
     expect(meta.config.useWorktree).toBe(true);
   });
+
+  it('starts the worktree on a branch under the requested prefix', async () => {
+    const projectRoot = await repoFolder();
+    const manager = await makeManager();
+
+    // A trailing slash, as a user types it, is the same prefix.
+    const meta = await manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true, branchPrefix: 'team/feat/' }, title: 'prefixed work' } as never);
+
+    expect(meta.worktreeBranch).toBe('team/feat/prefixed-work');
+    expect(meta.cwd).toBe(path.join(projectRoot, '.vocs-code', 'worktrees', 'prefixed-work'));
+    expect(meta.config.branchPrefix).toBe('team/feat');
+    // The branch git actually checked out in the worktree, not only what the session recorded.
+    const { spawnSync } = await import('node:child_process');
+    expect(spawnSync('git', ['branch', '--show-current'], { cwd: meta.cwd, encoding: 'utf8' }).stdout.trim()).toBe('team/feat/prefixed-work');
+    expect(spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/heads/vocscode/prefixed-work'], { cwd: projectRoot }).status).not.toBe(0);
+  });
+
+  it('names the branch as asked and starts it from the chosen base branch', async () => {
+    const projectRoot = await repoFolder();
+    await runGit(projectRoot, ['checkout', '-qb', 'develop']);
+    await fs.writeFile(path.join(projectRoot, 'develop.txt'), 'from develop\n');
+    await runGit(projectRoot, ['add', 'develop.txt']);
+    await runGit(projectRoot, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'develop work']);
+    // The main checkout is back on main, so only an explicit base reaches develop's commit.
+    await runGit(projectRoot, ['checkout', '-q', 'main']);
+    const manager = await makeManager();
+
+    const meta = await manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true, branchPrefix: 'feat' }, title: 'ignored title', worktreeName: 'Fix Login Redirect', worktreeBase: 'develop' } as never);
+
+    expect(meta.worktreeBranch).toBe('feat/fix-login-redirect');
+    expect(meta.cwd).toBe(path.join(projectRoot, '.vocs-code', 'worktrees', 'fix-login-redirect'));
+    expect((await fs.readFile(path.join(meta.cwd, 'develop.txt'), 'utf8')).replace(/\r\n/g, '\n')).toBe('from develop\n');
+  });
+
+  it('names the branch for what the first prompt asks, not its first characters', async () => {
+    const projectRoot = await repoFolder();
+    const manager = await makeManager();
+
+    // No name from the dialog (a quick session, a spawned agent): the prompt's intent, filler dropped.
+    const meta = await manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true }, initialPrompt: 'Can you please fix the login redirect when users sign in with Google' } as never);
+
+    expect(meta.worktreeBranch).toBe('vocscode/fix-login-redirect-users-sign');
+  });
+
+  it('suggests the prompt\'s own words as the branch name when no background model is usable', async () => {
+    const manager = await makeManager();
+
+    expect(await manager.suggestBranchName('I want to add a dark mode toggle to the settings page')).toEqual({ name: 'add-dark-mode-toggle-settings', source: 'prompt' });
+    expect(await manager.suggestBranchName('   ')).toEqual({ name: '', source: 'prompt' });
+  });
+
+  it('refuses a base branch that would reach git as an option', async () => {
+    const projectRoot = await repoFolder();
+    const manager = await makeManager();
+
+    await expect(manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true }, title: 'opt', worktreeBase: '--orphan' } as never)).rejects.toThrow('Invalid base branch');
+
+    expect(manager.list()).toHaveLength(0);
+    expect(await exists(path.join(projectRoot, '.vocs-code', 'worktrees', 'opt'))).toBe(false);
+  });
+
+  it('refuses a prefix git cannot take, creating no session, worktree or branch', async () => {
+    const projectRoot = await repoFolder();
+    const manager = await makeManager();
+
+    await expect(manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true, branchPrefix: 'bad..prefix' }, title: 'nope' } as never)).rejects.toThrow('Invalid branch prefix');
+
+    expect(manager.list()).toHaveLength(0);
+    expect(await exists(path.join(projectRoot, '.vocs-code', 'worktrees', 'nope'))).toBe(false);
+    const { spawnSync } = await import('node:child_process');
+    expect(spawnSync('git', ['for-each-ref', '--format=%(refname:short)', 'refs/heads'], { cwd: projectRoot, encoding: 'utf8' }).stdout.trim()).toBe('main');
+  });
 });
 
 describe('forking a worktree session', () => {
@@ -139,6 +213,19 @@ describe('forking a worktree session', () => {
     expect(await exists(fork.cwd)).toBe(true);
     expect(manager.get(fork.id)!.cwd).toBe(fork.cwd);
     expect(manager.get(fork.id)!.worktreeBranch).toBe('vocscode/fork-source-fork');
+  });
+
+  it('gives the fork a branch under its source session\'s prefix', async () => {
+    const projectRoot = await repoFolder();
+    const manager = await makeManager();
+    const src = await manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true, branchPrefix: 'fix' }, title: 'bug source' } as never);
+    expect(src.worktreeBranch).toBe('fix/bug-source');
+
+    const fork = (await manager.fork(src.id))!;
+
+    expect(fork.worktreeBranch).toBe('fix/bug-source-fork');
+    const { spawnSync } = await import('node:child_process');
+    expect(spawnSync('git', ['branch', '--show-current'], { cwd: fork.cwd, encoding: 'utf8' }).stdout.trim()).toBe('fix/bug-source-fork');
   });
 
   it('starts from the kept branch when the source worktree is already gone', async () => {

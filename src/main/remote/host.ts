@@ -3,17 +3,23 @@
  *  registry over an e2e-encrypted session. Off by default; device credentials and the
  *  identity keys live in the secret store, never in settings or logs. */
 import { createHash, randomBytes } from 'node:crypto';
+import { CONTROL_MAX_BYTES, controlErrorCode, controlHostRequestSchema } from '../../shared/control';
 import os from 'node:os';
 import { WebSocket } from 'ws';
 import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
 import { connectCheckCode, connectLink } from '../../shared/pairing';
-import { isRemoteChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
+import { assertEndpointUrl, credentialFetch, endpointSocketUrl } from '../../shared/endpoint-policy';
+import { isRemoteChannel, isRemoteHostChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
+import { REMOTE_TERMINAL_INPUT_MAX, type RemoteTerminalFrame } from '../../shared/remote-terminal';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';
 import { projectRemoteValue } from './project';
+import { RemoteTerminalStreams, type TerminalSource } from './terminal-streams';
+
+const relayRequest = credentialFetch();
 
 /** The remote channel manifest (docs/REMOTE-ACCESS.md §5) lives in src/shared/remote-channels.ts
  *  so the web shell imports the same allowlist it is held to. Re-exported because desktop callers
@@ -38,10 +44,34 @@ interface HostCredentials {
 /** Refresh the access token this long before it expires. */
 const ACCESS_REFRESH_MARGIN_MS = 60_000;
 const RECONNECT_MS = 3000;
-/** Connect with GitHub: how often to ask whether the owner added this computer, and for how long
+/** Owner-requested pairings have the same five-minute local decision window as minted codes. */
+const PAIRING_REQUEST_TIMEOUT_MS = 5 * 60_000;
+/** Connect with Vocs: how often to ask whether the owner added this computer, and for how long
  *  (the relay keeps an owner's grant ten minutes). */
 const SIGN_IN_POLL_MS = 2000;
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
+/** A mirror clear the relay did not confirm is retried after this, doubling up to the cap. */
+const MIRROR_CLEAR_RETRY_MS = 15_000;
+const MIRROR_CLEAR_RETRY_MAX_MS = 5 * 60_000;
+/** After a mirror upload failed in transit, a clear is repeated once after this delay, in case
+ *  the request still reaches the relay after the first clear. */
+const MIRROR_LATE_WRITE_MS = 5_000;
+
+/** A mirror upload whose publication went stale (mirroring off, re-keyed, host gone) before its
+ *  request left: it is dropped, not sent. */
+class MirrorWriteSuperseded extends Error {
+  constructor() {
+    super('mirror upload superseded');
+  }
+}
+
+interface PendingPairingRequest {
+  code: string;
+  name: string;
+  platform: string;
+  webPub: PublicIdentity;
+  expiresAt: number;
+}
 
 interface Session {
   key: CryptoKey;
@@ -54,7 +84,7 @@ interface Session {
 }
 
 interface WsMessage {
-  t: 'pair.request' | 'pair.result' | 'pair.error' | 'hs' | 'd' | 'client.gone' | 'device.revoked';
+  t: 'pair.request' | 'pair.result' | 'pair.error' | 'hs' | 'd' | 'client.gone' | 'device.revoked' | 'control.request';
   code?: string;
   error?: string;
   devices?: unknown;
@@ -82,8 +112,18 @@ export class RemoteHost {
   private status: RemoteState['status'] = 'off';
   private detail: string | undefined;
   private pairing: { code: string; expiresAt: number } | undefined;
-  private pendingRequest: { code: string; name: string; platform: string; webPub: PublicIdentity } | undefined;
-  /** Connect with GitHub, while the owner has not added this computer yet. */
+  private pendingRequest: PendingPairingRequest | undefined;
+  /** Relay correlation alone grants no trust: only this local, request-bound decision can. */
+  private pairingResponse: {
+    request: PendingPairingRequest;
+    webPub: PublicIdentity;
+    decision: 'approve' | 'deny';
+    socket: WebSocket;
+    creds: HostCredentials;
+    sent: boolean;
+  } | undefined;
+  private pairingAttempt = 0;
+  /** Connect with Vocs, while the owner has not added this computer yet. */
   private signingIn: { link: string; checkCode: string } | undefined;
   private readonly sessions = new Map<string, Session>();
   /** Serialize handshake and ciphertext delivery per peer, not across unrelated clients. */
@@ -93,6 +133,35 @@ export class RemoteHost {
   /** The short-lived relay access token (§6.2), in memory only. */
   private access: { token: string; expiresAt: number; deviceId: string } | null = null;
   private refreshing: Promise<string> | null = null;
+  /** Mirror uploads between their fence check and the relay's answer; a clear waits for them so
+   *  it always lands after them. */
+  private readonly mirrorWrites = new Set<Promise<unknown>>();
+  /** A mirror upload ended without an HTTP answer: its request may still reach the relay later,
+   *  so the next successful clear is repeated once after a short delay. */
+  private mirrorWriteUncertain = false;
+  /** Mirror clears asked for, and the newest one the relay confirmed. While they differ the relay
+   *  may still hold blobs that should be gone: uploads wait for the clear first, and a timer
+   *  retries it in the meantime. */
+  private mirrorClearsRequested = 0;
+  private mirrorClearedThrough = 0;
+  /** The one clear run in progress, if any: every retry and every waiting upload joins it rather
+   *  than sending a DELETE of its own. */
+  private mirrorClearing: Promise<boolean> | null = null;
+  /** A repeat clear for an upload that failed in transit is not sent before this time. */
+  private mirrorClearNotBefore = 0;
+  private mirrorClearFailing = false;
+  private mirrorRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private mirrorRetryDelay = 0;
+  /** A connect is between its start and opening its socket (it may be buying an access token). */
+  private connectInFlight = false;
+  private connectAttempt = 0;
+  private controlInFlight = 0;
+  private readonly controlRequests = new Map<string, number>();
+  /** Terminals streamed to paired browsers (P3.5), each to the browser that watches it. */
+  private readonly terminalStreams: RemoteTerminalStreams;
+  /** Terminals each connected browser has typed into, so the audit trail records the first
+   *  keystroke of a connection rather than every one. */
+  private readonly typedInto = new Map<string, Set<string>>();
 
   constructor(
     private readonly deps: {
@@ -108,8 +177,33 @@ export class RemoteHost {
       viewOnly?: () => boolean;
       /** The mirror key changed (a browser holding it lost its pairing): re-seal and re-upload. */
       onMirrorRotated?: () => void;
+      /** First retry delay for a mirror clear the relay did not confirm; tests shrink it. */
+      mirrorRetryMs?: number;
+      /** Delay before repeating a clear after an upload failed in transit; tests shrink it. */
+      mirrorLateWriteMs?: number;
+      /** P3.5: the terminals a browser may watch; absent when terminals are unavailable. */
+      terminals?: () => TerminalSource | null;
+      /** Separate delegated controller boundary; never a browser invoke or approval channel. */
+      control?: Pick<import('../control/service').ControlService, 'handle'>;
     }
-  ) {}
+  ) {
+    this.terminalStreams = new RemoteTerminalStreams({
+      source: () => this.deps.terminals?.() ?? null,
+      send: (clientId, frame: RemoteTerminalFrame) => this.sendTo(clientId, { type: 'push', channel: 'push:remoteTerminal', payload: frame }),
+      log: (level, message) => this.deps.log(level, message)
+    });
+  }
+
+  /** A browser's e2e session ended: stop everything streamed to it. */
+  private forgetClient(clientId: string): void {
+    this.terminalStreams.dropClient(clientId);
+    this.typedInto.delete(clientId);
+  }
+
+  private forgetAllClients(): void {
+    this.terminalStreams.dropAll();
+    this.typedInto.clear();
+  }
 
   state(): RemoteState {
     return {
@@ -150,7 +244,7 @@ export class RemoteHost {
     await this.connect();
   }
 
-  /** Connect with GitHub: register this computer through a signed-in browser instead of the
+  /** Connect with Vocs: register this computer through a signed-in browser instead of the
    *  enrollment secret. A one-time secret stays here; only its SHA-256 goes into the page `open`
    *  shows, where the owner signs in and adds this computer. Meanwhile this desktop polls the
    *  relay with the secret, and receives its credential sealed to its own key. An already
@@ -166,8 +260,8 @@ export class RemoteHost {
     const nonceHash = createHash('sha256').update(nonce).digest('hex');
     this.signingIn = { link: connectLink(relayUrl, nonceHash), checkCode: connectCheckCode(nonceHash) };
     this.status = 'connecting';
-    this.detail = 'finish in your browser: sign in with GitHub and add this computer';
-    this.deps.log('info', 'remote: waiting for this computer to be added in the browser (Connect with GitHub)');
+    this.detail = 'finish in your browser: sign in with your Vocs account and add this computer';
+    this.deps.log('info', 'remote: waiting for this computer to be added in the browser (Connect with Vocs)');
     this.deps.audit?.record('sign-in-start');
     this.push();
     await open(this.signingIn.link);
@@ -183,17 +277,21 @@ export class RemoteHost {
     this.ws?.close();
     this.ws = null;
     this.sessions.clear();
+    this.forgetAllClients();
     this.incoming.clear();
     this.status = 'off';
     this.detail = undefined;
-    this.pendingRequest = undefined;
-    this.pairing = undefined;
+    this.pairingAttempt++;
+    this.clearPairing();
     this.signingIn = undefined;
+    // A mirror clear still owed is retried on the next connect or upload, not while paused.
+    this.cancelMirrorClearRetry();
     this.push();
   }
 
   /** Loads or creates this computer's identity for `relayUrl`, without connecting. */
   private async prepare(relayUrl: string, enrollToken: string): Promise<void> {
+    const endpoint = assertEndpointUrl(relayUrl);
     this.generation++;
     await this.disable();
     const stored = await this.loadCreds();
@@ -205,8 +303,8 @@ export class RemoteHost {
     if (!this.creds.mirrorKey) this.creds.mirrorKey = randomKeyB64();
     await this.saveCreds();
     // The relay URL is configuration; tokens and keys stay out of the log.
-    this.deps.log('info', `remote: enabled for ${relayUrl} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
-    this.deps.audit?.record('enable', { detail: relayUrl });
+    this.deps.log('info', `remote: enabled for ${endpoint.origin} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
+    this.deps.audit?.record('enable', { detail: endpoint.origin });
   }
 
   /** Polls the relay until the owner adds this computer, the page's grant expires, or remote
@@ -217,7 +315,7 @@ export class RemoteHost {
       const creds = this.creds;
       if (!creds) return;
       try {
-        const res = await fetch(`${this.base()}/v1/enroll/redeem`, {
+        const res = await relayRequest(`${this.base()}/v1/enroll/redeem`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ nonce, hostPub: publicOf(creds.identity), name: hostName, platform: `${process.platform} ${process.arch}` })
@@ -251,10 +349,13 @@ export class RemoteHost {
   }
 
   /** Requests a pairing code. An enrolled desktop authenticates as itself; the shared enrollment
-   *  secret remains only for legacy `vocs-v1` manual enrollment. New accounts use Connect with GitHub. */
+   *  secret remains only for legacy `vocs-v1` manual enrollment. New accounts use Connect with Vocs. */
   async startPairing(hostName: string): Promise<{ code: string; expiresAt: number }> {
     const creds = this.creds;
     if (!creds) throw new Error('remote access is not enabled');
+    this.clearPairing();
+    const attempt = ++this.pairingAttempt;
+    this.push();
     const init = {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -263,9 +364,10 @@ export class RemoteHost {
     // An enrolled desktop pairs as itself. If the relay rejects its credential on the way, the
     // desktop is no longer enrolled and falls back to the enrollment secret.
     let res = this.enrolled() ? await this.relayFetch('/v1/pair/start', init).catch((e: unknown) => (this.enrolled() ? Promise.reject(e) : null)) : null;
-    res ??= await fetch(`${this.base()}/v1/pair/start`, { ...init, headers: { ...init.headers, authorization: `Bearer ${creds.enrollToken ?? ''}` } });
+    res ??= await relayRequest(`${this.base()}/v1/pair/start`, { ...init, headers: { ...init.headers, authorization: `Bearer ${creds.enrollToken ?? ''}` } });
     if (!res.ok) throw new Error(`pair/start failed: ${res.status}`);
     const body = (await res.json()) as { code: string; expiresAt: number };
+    if (this.creds !== creds || this.pairingAttempt !== attempt) throw new Error('pairing request cancelled');
     this.pairing = { code: body.code, expiresAt: body.expiresAt };
     this.deps.audit?.record('pair-start');
     this.push();
@@ -278,10 +380,28 @@ export class RemoteHost {
     const pending = this.pendingRequest;
     const socket = this.ws;
     const creds = this.creds;
-    if (!pending || !socket || !creds) return;
-    const signature = await sign(creds.identity, pairingDecisionPayload(pending.code, decision, pending.webPub));
-    if (this.ws === socket && this.creds === creds && this.pendingRequest === pending) {
+    if (!pending || !socket || !creds || socket.readyState !== WebSocket.OPEN) return;
+    if (Date.now() >= pending.expiresAt) {
+      this.clearPairing();
+      this.push();
+      return;
+    }
+    // First decision wins, except that Deny may cancel an Allow still being signed/sent.
+    // Record it before signing so a slower Allow cannot overtake that cancellation.
+    if (this.pairingResponse && (decision === 'approve' || this.pairingResponse.decision === 'deny')) return;
+    const response = { request: pending, webPub: structuredClone(pending.webPub), decision, socket, creds, sent: false };
+    this.pairingResponse = response;
+    try {
+      const signature = await sign(creds.identity, pairingDecisionPayload(pending.code, decision, response.webPub));
+      if (this.pairingResponse !== response || this.ws !== socket || this.creds !== creds ||
+          this.pendingRequest !== pending || socket.readyState !== WebSocket.OPEN || Date.now() >= pending.expiresAt) return;
+      // Arm BEFORE send: an honest relay can answer before this async method completes.
+      response.sent = true;
       socket.send(JSON.stringify({ t: 'pair.respond', code: pending.code, decision, signature }));
+    } catch (error) {
+      if (this.pairingResponse === response) this.clearPairing();
+      this.push();
+      throw error;
     }
   }
 
@@ -328,11 +448,14 @@ export class RemoteHost {
   async revokeAll(): Promise<void> {
     const creds = this.creds;
     if (!creds || !this.enrolled()) throw new Error('remote access is not enrolled with a relay');
+    this.pairingAttempt++;
+    this.clearPairing();
+    this.push();
     const res = await this.relayFetch('/v1/devices/revoke-all', { method: 'POST' });
     if (!res.ok) throw new Error(`revoke all failed: ${res.status}`);
     this.deps.audit?.record('revoke-all');
-    this.pendingRequest = undefined;
-    this.pairing = undefined;
+    this.pairingAttempt++;
+    this.clearPairing();
     await this.dropClients(creds, Object.keys(creds.clients), 'every other device revoked');
     this.push();
   }
@@ -361,33 +484,165 @@ export class RemoteHost {
     return this.creds?.mirrorKey ?? null;
   }
 
-  /** Publishes a sealed mirror blob to the relay. False when not enrolled or the relay refused it. */
-  async putMirror(kind: 'index' | 'session', sessionId: string | undefined, blob: SealedBlob): Promise<boolean> {
+  /** Publishes a sealed mirror blob to the relay. False when not enrolled, when a mirror clear the
+   *  relay has not confirmed still fails, when `current` reports the upload went stale (asked
+   *  after every wait, right before the request leaves), or when the relay refused it. */
+  async putMirror(kind: 'index' | 'session', sessionId: string | undefined, blob: SealedBlob, current: () => boolean = () => true): Promise<boolean> {
     if (!this.enrolled()) return false;
+    // Nothing new lands next to blobs a clear should have removed: wait until no clear is owed.
+    // The write below is registered synchronously after this loop, so any later clear waits for it.
+    while (this.mirrorClearing || this.mirrorClearPending()) {
+      if (!(await this.runOwedMirrorClear())) return false;
+    }
+    if (!current()) return false;
     const path = kind === 'index' ? '/v1/mirror' : `/v1/mirror/${encodeURIComponent(sessionId ?? '')}`;
-    const res = await this.relayFetch(path, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(blob)
-    }).catch(() => null);
+    const write = this.relayFetch(
+      path,
+      { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(blob) },
+      current
+    );
+    this.mirrorWrites.add(write);
+    let res: Response | null;
+    try {
+      res = await write;
+    } catch (e) {
+      if (e instanceof MirrorWriteSuperseded) return false;
+      // No HTTP answer: the request may still be delivered, after a clear that follows.
+      this.mirrorWriteUncertain = true;
+      res = null;
+    } finally {
+      this.mirrorWrites.delete(write);
+    }
     if (!res?.ok) this.deps.log('warn', `remote: mirror upload refused (${res?.status ?? 'network error'})`);
     return !!res?.ok;
   }
 
-  /** Drops the whole mirror at the relay (used when the user turns mirroring off). */
-  async clearMirror(): Promise<void> {
-    if (!this.enrolled()) return;
-    await this.relayFetch('/v1/mirror', { method: 'DELETE' }).catch(() => undefined);
+  /** Drops the whole mirror at the relay (mirroring turned off, or the key rotated). Waits for
+   *  uploads already on their way so the clear lands after them. False when the relay did not
+   *  confirm it: the failure is logged and audited, and the clear is retried (on a timer, on the
+   *  next connect, and before the next upload) until the relay confirms it. */
+  async clearMirror(): Promise<boolean> {
+    this.mirrorClearsRequested++;
+    return this.runOwedMirrorClear();
   }
 
   // --- internals ---
+
+  private mirrorClearPending(): boolean {
+    return this.mirrorClearedThrough < this.mirrorClearsRequested;
+  }
+
+  /** Runs the clear that is owed, or joins the run already in progress: retries never stack
+   *  DELETEs. True once nothing is owed; false when the relay did not confirm it. */
+  private runOwedMirrorClear(fromTimer = false): Promise<boolean> {
+    if (!this.mirrorClearing) {
+      const finish = (ok: boolean) => {
+        if (this.mirrorClearing === run) this.mirrorClearing = null;
+        return ok;
+      };
+      const run: Promise<boolean> = this.runMirrorClears(fromTimer).then(finish, (e: unknown) => {
+        this.deps.log('warn', `remote: mirror clear failed: ${e instanceof Error ? e.message : String(e)}`);
+        this.scheduleMirrorClearRetry(false);
+        return finish(false);
+      });
+      this.mirrorClearing = run;
+    }
+    return this.mirrorClearing;
+  }
+
+  private async runMirrorClears(fromTimer: boolean): Promise<boolean> {
+    while (this.mirrorClearPending()) {
+      if (!(await this.attemptMirrorClear(fromTimer))) return false;
+      fromTimer = false;
+    }
+    return true;
+  }
+
+  /** One DELETE covering every clear asked for before it is sent. */
+  private async attemptMirrorClear(fromTimer: boolean): Promise<boolean> {
+    this.cancelMirrorClearRetry();
+    // Not enrolled: nothing of this desktop's is reachable, and the relay drops a revoked
+    // desktop's mirror along with it.
+    if (!this.enrolled()) {
+      this.mirrorClearedThrough = this.mirrorClearsRequested;
+      this.mirrorClearNotBefore = 0;
+      this.mirrorClearSucceeded();
+      return true;
+    }
+    const repeat = this.mirrorClearNotBefore > 0;
+    const wait = this.mirrorClearNotBefore - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    await Promise.allSettled([...this.mirrorWrites]);
+    const uncertain = this.mirrorWriteUncertain;
+    this.mirrorWriteUncertain = false;
+    const target = this.mirrorClearsRequested;
+    try {
+      const res = await this.relayFetch('/v1/mirror', { method: 'DELETE' });
+      if (!res.ok) throw new Error(`relay answered ${res.status}`);
+    } catch (e) {
+      this.mirrorWriteUncertain ||= uncertain;
+      const why = e instanceof Error ? e.message : String(e);
+      this.deps.log('warn', `remote: mirror clear failed, will retry: ${why}`);
+      if (!this.mirrorClearFailing) this.deps.audit?.record('mirror-clear-failed', { detail: why });
+      this.mirrorClearFailing = true;
+      this.scheduleMirrorClearRetry(fromTimer);
+      return false;
+    }
+    this.mirrorClearedThrough = Math.max(this.mirrorClearedThrough, target);
+    this.mirrorClearNotBefore = 0;
+    if (uncertain && !repeat) {
+      // An upload that failed in transit may still land after this DELETE: owe one more clear,
+      // sent after a short delay (once; the repeat does not schedule another).
+      this.mirrorClearsRequested++;
+      this.mirrorClearNotBefore = Date.now() + (this.deps.mirrorLateWriteMs ?? MIRROR_LATE_WRITE_MS);
+    }
+    this.mirrorClearSucceeded();
+    return true;
+  }
+
+  private mirrorClearSucceeded(): void {
+    this.mirrorRetryDelay = 0;
+    if (this.mirrorClearFailing) {
+      this.mirrorClearFailing = false;
+      this.deps.log('info', 'remote: mirror clear succeeded on retry');
+      this.deps.audit?.record('mirror-clear-recovered');
+    }
+  }
+
+  /** Arms the retry timer for an owed clear. Only a failed timer attempt lengthens the delay; an
+   *  attempt an upload started re-arms it at the current delay. Nothing is armed while remote
+   *  access is paused: the next connect or upload retries instead. */
+  private scheduleMirrorClearRetry(backoff: boolean): void {
+    if (this.mirrorRetryTimer || this.status === 'off') return;
+    const first = this.deps.mirrorRetryMs ?? MIRROR_CLEAR_RETRY_MS;
+    if (!this.mirrorRetryDelay) this.mirrorRetryDelay = first;
+    else if (backoff) this.mirrorRetryDelay = Math.min(this.mirrorRetryDelay * 2, Math.max(first, MIRROR_CLEAR_RETRY_MAX_MS));
+    this.mirrorRetryTimer = setTimeout(() => {
+      this.mirrorRetryTimer = null;
+      if (this.mirrorClearPending()) void this.runOwedMirrorClear(true);
+    }, this.mirrorRetryDelay);
+    this.mirrorRetryTimer.unref?.();
+  }
+
+  private cancelMirrorClearRetry(): void {
+    if (this.mirrorRetryTimer) clearTimeout(this.mirrorRetryTimer);
+    this.mirrorRetryTimer = null;
+  }
+
+  private clearPairing(): void {
+    this.pendingRequest = undefined;
+    this.pairingResponse = undefined;
+    this.pairing = undefined;
+  }
 
   private push(): void {
     this.deps.pushState();
   }
 
   private base(): string {
-    return (this.creds?.relayUrl ?? '').replace(/\/$/, '');
+    const base = (this.creds?.relayUrl ?? '').replace(/\/$/, '');
+    assertEndpointUrl(base);
+    return base;
   }
 
   /** Registered with the relay: a device id and a refresh credential it still accepts. */
@@ -414,7 +669,7 @@ export class RemoteHost {
     const deviceId = creds.deviceId!;
     const refresh = creds.deviceToken!;
     const query = `?device=${encodeURIComponent(deviceId)}`;
-    const challengeRes = await fetch(`${this.base()}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${refresh}` } });
+    const challengeRes = await relayRequest(`${this.base()}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${refresh}` } });
     if (challengeRes.status === 401) {
       await this.forgetRegistration(creds, 'this computer is no longer registered with the relay; pair a browser to register it again', refresh);
       throw new Error('relay credential rejected');
@@ -423,7 +678,7 @@ export class RemoteHost {
     const { challenge } = (await challengeRes.json()) as { challenge?: unknown };
     if (typeof challenge !== 'string' || !challenge) throw new Error('relay returned no token challenge');
     const signature = await sign(creds.identity, tokenProofPayload(deviceId, challenge));
-    const tokenRes = await fetch(`${this.base()}/v1/token${query}`, {
+    const tokenRes = await relayRequest(`${this.base()}/v1/token${query}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${refresh}`, 'content-type': 'application/json' },
       body: JSON.stringify({ challenge, signature })
@@ -436,14 +691,17 @@ export class RemoteHost {
   }
 
   /** An authenticated relay REST call as this device. A 401 means the access token expired or was
-   *  dropped: prove possession once more and retry, then report whatever the relay says. */
-  private async relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
+   *  dropped: prove possession once more and retry, then report whatever the relay says.
+   *  `proceed` is asked right before each request leaves (after the token wait); when it says no,
+   *  nothing is sent and the call rejects with MirrorWriteSuperseded. */
+  private async relayFetch(path: string, init: RequestInit = {}, proceed?: () => boolean): Promise<Response> {
     const creds = this.creds;
     if (!creds?.deviceId) throw new Error('remote access is not enrolled');
     const url = `${this.base()}${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(creds.deviceId)}`;
     for (let attempt = 0; ; attempt++) {
       const token = await this.accessToken();
-      const res = await fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
+      if (proceed && !proceed()) throw new MirrorWriteSuperseded();
+      const res = await relayRequest(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
       if (res.status !== 401 || attempt > 0) return res;
       if (this.access?.token === token) this.access = null;
     }
@@ -456,6 +714,7 @@ export class RemoteHost {
   private async forgetRegistration(creds: HostCredentials, detail: string, rejected?: string): Promise<void> {
     if (this.creds !== creds || (rejected !== undefined && creds.deviceToken !== rejected) || !creds.deviceToken) return;
     delete creds.deviceToken;
+    this.clearPairing();
     this.access = null;
     await this.saveCreds();
     this.detail = detail;
@@ -469,7 +728,10 @@ export class RemoteHost {
   /** Forget paired browsers that lost their pairing, and re-key the mirror they could read. */
   private async dropClients(creds: HostCredentials, ids: string[], why: string): Promise<void> {
     const dropped = ids.filter((id) => creds.clients[id]);
-    for (const id of ids) this.sessions.delete(id);
+    for (const id of ids) {
+      this.sessions.delete(id);
+      this.forgetClient(id);
+    }
     if (!dropped.length) {
       this.push();
       return;
@@ -502,6 +764,8 @@ export class RemoteHost {
     creds.mirrorKey = randomKeyB64();
     await this.saveCreds();
     this.deps.audit?.record('mirror-rotate', { detail: why });
+    // Uploads still sealed under the old key are dropped by their fence; any already on the wire
+    // land first, then this clear removes them. A failed clear is retried before the re-upload.
     await this.clearMirror();
     this.deps.onMirrorRotated?.();
     for (const clientId of [...this.sessions.keys()]) await this.sendTo(clientId, { type: 'mirror.key', key: creds.mirrorKey });
@@ -510,7 +774,12 @@ export class RemoteHost {
   private scheduleReconnect(): void {
     const gen = this.generation;
     setTimeout(() => {
-      if (gen === this.generation) void this.connect();
+      // Something else may have reconnected meanwhile (enrollment reconnects at once, while the
+      // old socket's close still schedules this): a second connect would replace a healthy
+      // socket and strand every browser that just handshook over it.
+      if (gen !== this.generation || this.connectInFlight) return;
+      if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) return;
+      void this.connect();
     }, RECONNECT_MS);
   }
 
@@ -530,8 +799,20 @@ export class RemoteHost {
   }
 
   private async connect(): Promise<void> {
+    const attempt = ++this.connectAttempt;
+    this.connectInFlight = true;
+    try {
+      await this.openSocket();
+    } finally {
+      // A superseded attempt finishing late must not clear a newer one's flag.
+      if (attempt === this.connectAttempt) this.connectInFlight = false;
+    }
+  }
+
+  private async openSocket(): Promise<void> {
     const creds = this.creds;
     if (!creds) return;
+    const socketBase = endpointSocketUrl(this.base()).replace(/\/$/, '');
     const gen = this.generation;
     this.status = 'connecting';
     this.push();
@@ -564,9 +845,10 @@ export class RemoteHost {
       return;
     }
     const device = enrolled ? creds.deviceId! : 'enrolling';
-    const ws = new WebSocket(`${this.base()}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` } });
+    const ws = new WebSocket(`${socketBase}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` }, followRedirects: false });
     this.ws = ws;
     this.incoming.clear();
+    this.controlRequests.clear();
     let opened = false;
     ws.on('open', () => {
       opened = true;
@@ -576,6 +858,7 @@ export class RemoteHost {
       this.deps.log('info', `remote: relay connection open (${enrolled ? 'online' : 'awaiting enrollment'})`);
       this.push();
       if (enrolled) void this.reconcile();
+      if (enrolled && this.mirrorClearPending()) void this.runOwedMirrorClear();
     });
     ws.on('message', (data) => void this.onMessage(String(data), ws));
     ws.on('close', (code: number) => {
@@ -586,8 +869,12 @@ export class RemoteHost {
       // must not clobber the new connection or wipe live sessions.
       if (this.ws !== ws) return;
       this.ws = null;
+      // Decisions belong to this socket; a minted code remains claimable after reconnect.
+      this.pendingRequest = undefined;
+      this.pairingResponse = undefined;
       const dropped = [...this.sessions.keys()];
       this.sessions.clear();
+      this.forgetAllClients();
       this.incoming.clear();
       for (const client of dropped) this.deps.audit?.record('client-disconnect', { device: client });
       if (this.status !== 'off') {
@@ -606,6 +893,30 @@ export class RemoteHost {
     });
   }
 
+  private async onControlRequest(raw: string, socket: WebSocket): Promise<void> {
+    if (Buffer.byteLength(raw) > CONTROL_MAX_BYTES || this.ws !== socket || !this.enrolled()) return;
+    const parsed = controlHostRequestSchema.safeParse(JSON.parse(raw));
+    if (!parsed.success) return;
+    const frame = parsed.data;
+    const now = Date.now();
+    if (frame.hostId !== this.creds?.deviceId || frame.expiresAt <= now || frame.expiresAt > now + 30_000 ||
+        frame.principal.validUntil <= now || frame.principal.validUntil > now + 30_000) return;
+    const respond = (reply: unknown): void => {
+      if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+      let body = JSON.stringify({ t: 'control.response', id: frame.id, ...reply as object });
+      if (Buffer.byteLength(body) > CONTROL_MAX_BYTES) body = JSON.stringify({ t: 'control.response', id: frame.id, ok: false, error: 'unavailable' });
+      try { socket.send(body); } catch { /* A lost reply is recovered through the durable receipt, never replayed here. */ }
+    };
+    for (const [id, expiry] of this.controlRequests) if (expiry <= now) this.controlRequests.delete(id);
+    if (!this.deps.control || this.controlInFlight >= 16 || this.controlRequests.size >= 1024) { respond({ ok: false, error: 'unavailable' }); return; }
+    if (this.controlRequests.has(frame.id)) { respond({ ok: false, error: 'conflict' }); return; }
+    this.controlRequests.set(frame.id, frame.expiresAt);
+    this.controlInFlight++;
+    try { respond({ ok: true, result: await this.deps.control.handle(frame.principal, frame.request) }); }
+    catch (error) { respond({ ok: false, error: controlErrorCode(error) }); }
+    finally { this.controlInFlight--; }
+  }
+
   private async onMessage(raw: string, socket: WebSocket): Promise<void> {
     if (this.ws !== socket) return;
     let msg: WsMessage;
@@ -615,30 +926,51 @@ export class RemoteHost {
       this.deps.log('debug', 'remote: dropped a non-JSON relay message');
       return;
     }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+    if (msg.t === 'control.request') { await this.onControlRequest(raw, socket); return; }
     switch (msg.t) {
       case 'pair.request': {
         // Either a code this desktop minted was claimed, or a signed-in owner's browser asked this
         // registered computer by id. Both need the user's Allow here, signed with this key.
-        const minted = !!this.pairing && msg.code === this.pairing.code;
+        const minted = !!this.pairing && msg.code === this.pairing.code && Date.now() < this.pairing.expiresAt;
         const requested = msg.requested === true && this.enrolled();
         if (!this.creds || typeof msg.code !== 'string' || !(minted || requested) ||
             !msg.hostPub || !msg.webPub || stable(msg.hostPub) !== stable(publicOf(this.creds.identity))) return;
-        this.pendingRequest = { code: msg.code, name: String(msg.name ?? ''), platform: String(msg.platform ?? ''), webPub: msg.webPub };
+        this.pairingResponse = undefined;
+        this.pendingRequest = {
+          code: msg.code, name: String(msg.name ?? ''), platform: String(msg.platform ?? ''), webPub: msg.webPub,
+          expiresAt: Math.min(minted ? this.pairing!.expiresAt : Infinity, Date.now() + PAIRING_REQUEST_TIMEOUT_MS)
+        };
         this.deps.log('info', `remote: pairing request from "${this.pendingRequest.name}" (${this.pendingRequest.platform}); awaiting the user's decision`);
         this.deps.audit?.record('pair-request', { detail: `${this.pendingRequest.name} (${this.pendingRequest.platform})` });
         this.push();
         return;
       }
       case 'pair.result': {
-        if (!this.pendingRequest || msg.code !== this.pendingRequest.code) return;
-        this.pendingRequest = undefined;
-        this.pairing = undefined;
+        const response = this.pairingResponse;
+        const creds = this.creds;
+        if (!response?.sent || response.request !== this.pendingRequest || response.socket !== socket ||
+            response.creds !== creds || msg.code !== response.request.code || msg.decision !== response.decision ||
+            Date.now() >= response.request.expiresAt) return;
+        if (msg.decision === 'approve') {
+          if (!creds || typeof msg.hostDeviceId !== 'string' || !msg.hostDeviceId ||
+              typeof msg.webDeviceId !== 'string' || !msg.webDeviceId || !msg.webPub ||
+              stable(msg.webPub) !== stable(response.webPub)) return;
+          // A registered host cannot be moved to another device/account or have its credential
+          // replaced by a pairing result. Re-enrollment alone may supply a new host credential.
+          if (this.enrolled()
+            ? msg.hostDeviceId !== creds.deviceId || (msg.hostToken !== undefined && msg.hostToken !== creds.deviceToken)
+            : typeof msg.hostToken !== 'string' || !msg.hostToken) return;
+          const existing = creds.clients[msg.webDeviceId];
+          if (existing && stable(existing) !== stable(response.webPub)) return;
+        }
+        // Consume before awaiting persistence: duplicate results cannot reuse one human decision.
+        this.clearPairing();
         this.detail = undefined;
         this.deps.log('info', `remote: pairing ${msg.decision === 'approve' ? 'approved' : 'denied'}${msg.webDeviceId ? ` for device ${msg.webDeviceId}` : ''}`);
         this.deps.audit?.record(msg.decision === 'approve' ? 'pair-approve' : 'pair-deny', { device: msg.webDeviceId ? String(msg.webDeviceId) : undefined });
-        const creds = this.creds;
-        if (msg.decision === 'approve' && msg.hostDeviceId && msg.webDeviceId && msg.webPub && creds) {
-          creds.clients[msg.webDeviceId] = msg.webPub;
+        if (msg.decision === 'approve' && msg.hostDeviceId && msg.webDeviceId && creds) {
+          creds.clients[msg.webDeviceId] = response.webPub;
           // The relay mints a host device only when this approval enrolled the desktop; an
           // enrolled desktop keeps its id and token, so browsers paired before stay routable.
           const enrolledNow = !!msg.hostToken && (creds.deviceId !== msg.hostDeviceId || creds.deviceToken !== msg.hostToken);
@@ -647,6 +979,7 @@ export class RemoteHost {
             creds.deviceToken = msg.hostToken;
           }
           await this.saveCreds();
+          if (this.creds !== creds || this.ws !== socket) return;
           if (enrolledNow) {
             // Reconnect under the real device token.
             this.ws?.close();
@@ -659,8 +992,7 @@ export class RemoteHost {
       case 'pair.error': {
         // The relay refused the decision: the request is spent, so do not leave it on screen.
         if (!this.pendingRequest || (msg.code !== undefined && msg.code !== this.pendingRequest.code)) return;
-        this.pendingRequest = undefined;
-        this.pairing = undefined;
+        this.clearPairing();
         this.detail = msg.error === 'device-limit'
           ? 'pairing refused: this account already has the maximum number of paired devices; revoke one first'
           : 'pairing refused by the relay';
@@ -684,6 +1016,7 @@ export class RemoteHost {
       }
       case 'client.gone': {
         if (msg.client) this.enqueue(String(msg.client), socket, async () => {
+          this.forgetClient(String(msg.client));
           if (this.sessions.delete(String(msg.client))) {
             this.deps.log('info', `remote: client ${msg.client} disconnected (${this.sessions.size} online)`);
             this.deps.audit?.record('client-disconnect', { device: String(msg.client) });
@@ -721,6 +1054,8 @@ export class RemoteHost {
     try {
       const session = await hostAccept(this.creds.identity, payload as never, expected);
       if (!socket || this.ws !== socket || this.creds?.clients[from] !== expected) return;
+      // A fresh handshake is a reconnect: the browser re-watches what it still shows.
+      this.forgetClient(from);
       this.sessions.set(from, { key: session.key, salt: session.salt, out: 0, inSeq: -1, outgoing: Promise.resolve(), identity: expected });
       this.ws?.send(JSON.stringify({ t: 'hs', to: from, seq: 0, payload: session.reply }));
       this.deps.log('info', `remote: client ${from} connected (${this.sessions.size} online)`);
@@ -770,11 +1105,15 @@ export class RemoteHost {
         return;
       }
       try {
-        const value = projectRemoteValue(await this.deps.registry().invoke(inner.channel, inner.request));
+        const value = projectRemoteValue(isRemoteHostChannel(inner.channel)
+          ? await this.serveHostChannel(from, inner.channel, inner.request)
+          : await this.dispatch(from, inner.channel, inner.request));
         const outcome = await this.sendTo(from, { type: 'result', id: inner.id, ok: true, value });
         if (outcome === 'oversize') {
           // The relay would drop the frame silently and leave the client waiting out its timeout.
           this.deps.log('warn', `remote: ${inner.channel} response for ${from} exceeded the relay frame limit`);
+          // A watch whose snapshot never arrived must not keep streaming against it.
+          if (inner.channel === 'terminal:watch') this.terminalStreams.unwatch(from, (value as { terminalId?: string } | null)?.terminalId ?? '');
           await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'response too large' });
         }
       } catch (e) {
@@ -786,6 +1125,54 @@ export class RemoteHost {
       // Duplicate hello (client retry): re-run the handshake to refresh the session.
       await this.onHandshake(from, inner);
     }
+  }
+
+  /** Channels whose answer depends on the caller (P3.5 terminal streams). */
+  private async serveHostChannel(from: string, channel: string, request: unknown): Promise<unknown> {
+    const req = (request && typeof request === 'object' ? request : {}) as { terminalId?: unknown; chars?: unknown; snapshot?: unknown };
+    const terminalId = typeof req.terminalId === 'string' ? req.terminalId : '';
+    if (!terminalId) throw new Error('terminalId is required');
+    switch (channel) {
+      case 'terminal:watch':
+        return this.terminalStreams.watch(from, terminalId);
+      case 'terminal:unwatch':
+        this.terminalStreams.unwatch(from, terminalId);
+        return undefined;
+      case 'terminal:watchAck':
+        this.terminalStreams.ack(from, terminalId, typeof req.chars === 'number' ? req.chars : 0, typeof req.snapshot === 'number' ? req.snapshot : undefined);
+        return undefined;
+      default:
+        throw new Error('channel not available remotely');
+    }
+  }
+
+  /** A registry channel on behalf of a browser. Terminal writes are bounded and audited here: the
+   *  registry's own Mission terminal guards still decide whether they reach the shell. */
+  private async dispatch(from: string, channel: string, request: unknown): Promise<unknown> {
+    if (channel === 'terminal:input') {
+      const req = (request && typeof request === 'object' ? request : {}) as { terminalId?: unknown; data?: unknown };
+      if (typeof req.terminalId !== 'string' || typeof req.data !== 'string') throw new Error('terminalId and data are required');
+      if (req.data.length > REMOTE_TERMINAL_INPUT_MAX) throw new Error('input too large');
+      // Only a running shell takes remote keystrokes: a restored tab would queue them, unseen, until
+      // someone opens it on the desktop, and an unknown id must not grow the audit bookkeeping.
+      const info = this.deps.terminals?.()?.list().find((t) => t.id === req.terminalId);
+      if (!info) throw new Error('Terminal not found');
+      if (!info.pid) throw new Error(info.restored && !info.exit ? "This terminal's shell starts when it is opened on the computer" : "This terminal's shell has exited");
+      let typed = this.typedInto.get(from);
+      if (!typed) this.typedInto.set(from, (typed = new Set()));
+      if (!typed.has(req.terminalId)) {
+        typed.add(req.terminalId);
+        this.deps.log('info', `remote: ${from} is typing into terminal ${req.terminalId}`);
+        this.deps.audit?.record('terminal-input', { device: from, detail: req.terminalId });
+      }
+    }
+    const value = await this.deps.registry().invoke(channel, request);
+    if (channel === 'terminal:create') {
+      const id = (value as { id?: string } | null)?.id;
+      this.deps.log('info', `remote: ${from} opened terminal ${id ?? '?'}`);
+      this.deps.audit?.record('terminal-create', { device: from, detail: id });
+    }
+    return value;
   }
 
   /** One sealed frame's fate: 'oversize' means it was refused unsent because the relay would have

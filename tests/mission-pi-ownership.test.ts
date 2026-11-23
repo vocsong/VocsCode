@@ -100,7 +100,7 @@ beforeEach(async () => {
   deps = {
     store, settings: { get: () => settings, update: async () => settings } as unknown as SettingsStore,
     runtime: { resolve: () => ({ path: path.join(root, 'pi.exe'), source: 'installed' }), resource: (...parts: string[]) => path.resolve(helperAvailable ? 'resources' : path.join(root, 'missing-resources'), ...parts) } as never,
-    analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as never,
+    analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordUserInputs: vi.fn(), flush: vi.fn(async () => undefined), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as never,
     getSecret: async () => undefined, pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn(),
     ordinaryProcessOwnership: () => ordinaryOwnership,
   };
@@ -242,7 +242,7 @@ describe.runIf(process.platform === 'win32')('managed Pi ownership evidence', ()
     await manager.send(source.id, { text: 'Background work' });
     expect(processApi.owned).toHaveBeenCalledTimes(1); expect(processApi.spawnTool).not.toHaveBeenCalled();
     const child = controls[0].process;
-    (child.stdout as PassThrough).write(JSON.stringify({ type: 'agent_end' }) + '\n');
+    (child.stdout as PassThrough).write(JSON.stringify({ type: 'agent_settled' }) + '\n');
     await vi.waitFor(() => expect(manager.activity(source.id).turn).toBe(false));
     await manager.setPermissionMode(source.id, 'plan');
     const admission = new MissionWorkspaceAdmission({ sessions: () => manager.list(), activity: (id) => manager.activity(id), terminals: () => [] });
@@ -281,7 +281,7 @@ describe.runIf(process.platform === 'win32')('managed Pi ownership evidence', ()
     helperAvailable = false;
     const source = await manager.create({ title: 'Discussion', config: { harness: 'pi', permissionMode: 'plan', projectRoot: root } });
     await manager.send(source.id, { text: 'Read-only discussion' });
-    (processApi.spawnTool.mock.results[0].value.stdout as PassThrough).write(JSON.stringify({ type: 'agent_end' }) + '\n');
+    (processApi.spawnTool.mock.results[0].value.stdout as PassThrough).write(JSON.stringify({ type: 'agent_settled' }) + '\n');
     await vi.waitFor(() => expect(manager.activity(source.id).turn).toBe(false));
     const admission = new MissionWorkspaceAdmission({ sessions: () => manager.list(), activity: (id) => manager.activity(id), terminals: () => [] });
     const lease = await admission.acquire(root); expect(lease).toBeDefined(); await lease!.assertQuiescent(); await lease!.release(); admission.close();
@@ -318,7 +318,7 @@ describe('ordinary Pi without process ownership', () => {
     expect(controls).toHaveLength(0);
     expect(adapters.at(-1)!.workspaceWriterState()).toBeUndefined();
     expect(manager.get(source.id)?.workspaceWriterClaims).toBeUndefined();
-    (processApi.spawnTool.mock.results[0].value.stdout as PassThrough).write(JSON.stringify({ type: 'agent_end' }) + '\n');
+    (processApi.spawnTool.mock.results[0].value.stdout as PassThrough).write(JSON.stringify({ type: 'agent_settled' }) + '\n');
     await vi.waitFor(() => expect(manager.activity(source.id).turn).toBe(false));
     expect(manager.activity(source.id)).toMatchObject({ active: true, processes: false, uncertain: false, quiescent: true });
     await manager.stop(source.id);

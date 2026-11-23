@@ -1,13 +1,15 @@
 /** Maps a harness id to its adapter factory and to the model list that harness can reach. */
+import { promises as fs } from 'node:fs';
 import type { AppSettings, HarnessId, ModelInfo } from '../../shared/types';
 import { applyModelOverrides } from '../../shared/model-overrides';
 import { errorMessage } from '../util/async';
-import type { RuntimeResolver } from '../runtime';
+import { spawnableCodex, type RuntimeResolver } from '../runtime';
 import { CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
 import { claudeNativeModels, mergeClaudeCatalog, withSavedClaudeModels } from '../models/claude-catalog';
 import { mergeCodexCatalog } from '../models/codex-catalog';
 import { mergePiCatalog } from '../models/pi-catalog';
 import { AcpAdapter } from './acp';
+import { listAntigravityModels } from './antigravity';
 import { ClaudeAdapter, listClaudeModels, resolveClaudeProviderEnv } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
 import { CursorAdapter, listCursorModels } from './cursor';
@@ -30,6 +32,8 @@ export function createAdapter(id: HarnessId, ctx: HarnessContext): HarnessAdapte
       return new PiAdapter(ctx);
     case 'acp':
       return new AcpAdapter(ctx);
+    case 'antigravity':
+      return new AcpAdapter(ctx, 'antigravity');
     case 'native':
       return new NativeAdapter(ctx);
   }
@@ -74,7 +78,7 @@ async function listHarnessModelsRaw(opts: {
       }
       case 'codex':
       case 'codex-exec': {
-        const native = await codexNativeModels(runtime);
+        const native = await codexNativeModels(runtime, harness);
         // Only the app-server harness can register a custom provider, so only it lists their models.
         const models = harness === 'codex' ? mergeCodexCatalog(native.models, settings) : native.models;
         return { models, error: native.error };
@@ -102,6 +106,18 @@ async function listHarnessModelsRaw(opts: {
       }
       case 'acp':
         return { models: [], error: 'ACP agents advertise their models once the session starts; pick one from the header afterwards.' };
+      case 'antigravity': {
+        const bin = runtime.resolve('agy');
+        if (!bin) return { models: [], error: 'Antigravity CLI (agy) was not found; install it to list your Google account’s models.' };
+        const cwd = runtime.runtimePaths.appRuntimeDir;
+        await fs.mkdir(cwd, { recursive: true });
+        try {
+          const models = await listAntigravityModels(bin.path, cwd);
+          return models.length ? { models } : { models, error: 'Antigravity CLI reported no models; pick one from the session header after it starts.' };
+        } catch (e) {
+          return { models: [], error: `Antigravity model discovery failed (${errorMessage(e)}).` };
+        }
+      }
       case 'native': {
         const out: ModelInfo[] = [];
         for (const p of settings.providers.filter((p) => p.enabled)) {
@@ -116,9 +132,14 @@ async function listHarnessModelsRaw(opts: {
   }
 }
 
-/** Codex's own catalog, or the built-in fallback when the CLI is missing or `model/list` fails. */
-async function codexNativeModels(runtime: RuntimeResolver): Promise<{ models: ModelInfo[]; error?: string }> {
-  const bin = runtime.resolve('codex');
+/**
+ * Codex's own catalog, or the built-in fallback when the CLI is missing or `model/list` fails.
+ * Codex exec lists from the binary it will spawn, not the shim the app-server harness runs, so it
+ * never offers a model only a newer install knows.
+ */
+async function codexNativeModels(runtime: RuntimeResolver, harness: 'codex' | 'codex-exec'): Promise<{ models: ModelInfo[]; error?: string }> {
+  const resolved = runtime.resolve('codex');
+  const bin = harness === 'codex-exec' ? spawnableCodex(resolved, runtime.runtimePaths?.appRoot) : resolved;
   if (!bin) return { models: CODEX_STATIC_MODELS, error: 'Codex CLI not found; showing the built-in catalog.' };
   try {
     const models = await listCodexModels(bin.path);

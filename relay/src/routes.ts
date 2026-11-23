@@ -29,6 +29,7 @@ import {
   redeemEnrollment,
   requestPairing,
   resolvePairing,
+  revocationEpoch,
   revokeAllExcept,
   revokeDevice,
   startPairing,
@@ -38,7 +39,7 @@ import {
   type MirrorBlob,
   type RelayStore
 } from './core';
-import type { RateLimiter } from './rate';
+import { callerKey, type RateLimiter } from './rate';
 
 /** The slice of a websocket the router needs (the platform's `WebSocket` satisfies it). */
 export interface SocketLike {
@@ -59,8 +60,12 @@ export interface RouteContext {
   accountAuthenticated?: boolean;
   /** Relay-only key for MACed device routing hints; independent from the landing assertion key. */
   deviceRouteSecret?: string;
-  /** Directory pointer used to route a desktop's nonce-only enrollment redemption. */
-  bindEnrollment?: (input: { nonceHash: string; accountId: string; expiresAt: number }) => Promise<void>;
+  /** Directory pointer used to route a desktop's nonce-only enrollment redemption, bound under the
+   *  account's current revocation epoch. */
+  bindEnrollment?: (input: { nonceHash: string; accountId: string; expiresAt: number; epoch: number }) => Promise<void>;
+  /** For a redemption the enrollment directory forwarded: the revocation epoch its pointer was
+   *  bound under. Set only by the Hub's private directory subroute. */
+  enrollBindingEpoch?: number;
   now: number;
   /** Caller address for rate limiting; null when the edge sends none. */
   ip: string | null;
@@ -125,7 +130,7 @@ export const ROUTES: Route[] = [
   { method: 'GET', path: '/mirror/', prefix: true, auth: 'device', run: mirrorGetSession },
   { method: 'PUT', path: '/mirror/', prefix: true, auth: 'host', run: mirrorPutSession },
   { method: 'DELETE', path: '/mirror/', prefix: true, auth: 'host', run: mirrorDeleteSession },
-  // Owner actions: add a computer that clicked Connect with GitHub, list this account's computers,
+  // Owner actions: add a computer that clicked Connect with Vocs, list this account's computers,
   // and ask one to pair a browser. Both the verified account assertion and landing service credential
   // are required. The desktop still approves each pairing.
   { method: 'POST', path: '/owner/enroll-grant', auth: 'owner', rate: { bucket: 'enroll-grant', limit: 10, windowMs: 60_000 }, run: ownerEnrollGrant },
@@ -143,7 +148,7 @@ export async function handleHttp(request: Request, ctx: RouteContext): Promise<R
   if (matched.kind === 'method') return json({ error: 'method not allowed' }, 405, { allow: matched.methods.join(', ') });
   const { route, rest } = matched;
   try {
-    if (route.rate && !ctx.rate.hit(`${route.rate.bucket}:${ctx.ip ?? 'unknown'}`, route.rate.limit, route.rate.windowMs)) {
+    if (route.rate && !ctx.rate.hit(`${route.rate.bucket}:${callerKey(ctx.ip)}`, route.rate.limit, route.rate.windowMs)) {
       return json({ error: 'rate limited' }, 429);
     }
     const device = await authorize(route.auth, request, url, ctx);
@@ -353,8 +358,11 @@ async function ownerEnrollGrant({ ctx, request }: Call): Promise<Response> {
   const expiresAt = ctx.now + ENROLL_GRANT_TTL_MS;
   // Reserve the nonce globally before writing the tenant grant. If a later write fails, a retry
   // by this same account is idempotent; another account can never adopt the same connect link.
-  await ctx.bindEnrollment?.({ nonceHash, accountId: ctx.accountId, expiresAt });
-  const granted = await grantEnrollment(ctx.store, { accountId: ctx.accountId, nonceHash }, ctx.now);
+  // Pointer and grant both carry the revocation epoch read first: a revoke all landing in between
+  // leaves neither redeemable.
+  const epoch = await revocationEpoch(ctx.store, ctx.accountId);
+  await ctx.bindEnrollment?.({ nonceHash, accountId: ctx.accountId, expiresAt, epoch });
+  const granted = await grantEnrollment(ctx.store, { accountId: ctx.accountId, nonceHash, epoch }, ctx.now);
   return json(granted, 200, { 'cache-control': 'no-store' });
 }
 
@@ -394,7 +402,8 @@ async function enrollRedeem({ ctx, request }: Call): Promise<Response> {
     hostPub,
     name: label(body.name, 'desktop'),
     platform: label(body.platform, ''),
-    deviceRouteSecret: ctx.deviceRouteSecret
+    deviceRouteSecret: ctx.deviceRouteSecret,
+    bindingEpoch: ctx.enrollBindingEpoch
   }, ctx.now);
   return json(redemption, 200, { 'cache-control': 'no-store' });
 }

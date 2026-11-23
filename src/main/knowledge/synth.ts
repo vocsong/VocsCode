@@ -43,7 +43,7 @@ export interface KnowledgeSynthDeps {
   /** Bounded transcript lines for one session, newest last. */
   transcript?: (sessionId: string) => Promise<string[]>;
   /** Wired by the service so every write goes through the same rules. */
-  propose?: (input: KnowledgeProposalInput, origin: string, sessionId?: string) => Promise<{ promoted: boolean; rejected: boolean }>;
+  propose?: (input: KnowledgeProposalInput, origin: string, sessionId?: string) => Promise<{ promoted: boolean; rejected: boolean; protected?: 'kept' | 'refused' }>;
 }
 
 const MAX_EVIDENCE_CHARS = 40_000;
@@ -377,7 +377,8 @@ export async function distillKnowledge(scope: KnowledgeScope, deps: KnowledgeSyn
       reflect ? 'agent:reflect' : 'agent:distill',
       newest.sessionId
     );
-    if (result.rejected) continue;
+    // A tombstoned claim and a refused change to a human-reviewed page both wrote nothing.
+    if (result.rejected || result.protected === 'refused') continue;
     proposed++;
     if (pageId) updated++;
   }

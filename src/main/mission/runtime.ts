@@ -56,6 +56,7 @@ export function missionCapabilities(sessions: SessionManager, settings: Pick<Set
       source: 'runtime', runtime: { available: true, authenticated: readiness.connectionAvailable ?? 'unknown' },
       connectionAvailable: provider?.enabled === false ? false : readiness.connectionAvailable,
       modelAvailable: readiness.modelAvailable,
+      ...(readiness.modelAttestation ? { modelAttestation: readiness.modelAttestation } : {}),
       modelInfo: models.find((m) => m.provider === preset.model.provider && m.id === preset.model.model),
       harnessCapabilities: HARNESS_BY_ID[preset.harnessId].capabilities,
       controlProtocol: true, worktreeCwd: true, completionObservation: true, cancellationObservation: true,

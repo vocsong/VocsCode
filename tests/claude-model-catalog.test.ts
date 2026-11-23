@@ -188,6 +188,44 @@ describe('Claude model catalog', () => {
     ]);
   });
 
+  it('names models from the display name when the runtime sends a tagline as the description', async () => {
+    // Claude Code 2.1.322's shape: the versioned name moved to displayName and the description became
+    // a tagline. Reading the tagline as the name labelled the composer pill "For complex work…".
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      { value: 'default', resolvedModel: 'claude-fable-5-2', displayName: 'Default (recommended)', description: 'Fable 5.2' },
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5', description: 'For complex work and everyday tasks' },
+      { value: 'fable', resolvedModel: 'claude-fable-5-2', displayName: 'Fable 5.2', description: 'For your toughest challenges' },
+      { value: 'claude-haiku-4-5-20251001', resolvedModel: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5', description: 'Fastest for quick answers' }
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
+
+    expect(r.error).toBeUndefined();
+    expect(r.models.slice(0, 3).map((m) => [m.id, m.displayName, m.description])).toEqual([
+      ['claude-fable-5-2', 'Fable 5.2 (recommended)', 'Fable 5.2'],
+      ['claude-opus-5-5', 'Opus 5.5', 'For complex work and everyday tasks'],
+      ['claude-haiku-4-5-20251001', 'Haiku 4.5', 'Fastest for quick answers']
+    ]);
+  });
+
+  it('names the recommendation after the model it points at when the runtime describes it as a sentence', async () => {
+    // The bundled runtime, in some account states, describes the default row this way; the pill
+    // showed "anthropic/Use the default model (currently Opus 5.5) (recommended)".
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      { value: 'default', resolvedModel: 'claude-opus-5-5', displayName: 'Default (recommended)', description: 'Use the default model (currently Opus 5.5) · Best for everyday, complex tasks' },
+      { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5', displayName: 'Sonnet 5.5', description: 'Most efficient for simpler tasks' }
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
+
+    expect(r.models.slice(0, 2).map((m) => [m.id, m.displayName])).toEqual([
+      ['claude-opus-5-5', 'Opus 5.5 (recommended)'],
+      ['claude-sonnet-5-5', 'Sonnet 5.5']
+    ]);
+  });
+
   it('does not offer Opus Plan Mode, even when the runtime lists opusplan before the model it resolves to', async () => {
     // Claude Code 0.3.280 lists opusplan only when the user's model setting is opusplan, and resolves
     // it to the execution model. Pinned, it would become a "Opus Plan Mode" row that runs plain Sonnet.

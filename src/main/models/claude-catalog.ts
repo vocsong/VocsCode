@@ -79,7 +79,7 @@ export function claudeModelToInfo(m: ClaudeSdkModelInfo, reportsEffort = false):
   // such as `sonnet`, and a later start or resume never follows a changed recommendation.
   const id = m.resolvedModel || m.value;
   const recommended = m.value === 'default' && id !== 'default';
-  const name = m.description?.split(' · ')[0]?.trim() || (recommended ? id : m.displayName || m.value);
+  const name = claudeRowName(m, recommended) || id;
   const supportsEffort = m.supportsEffort === true;
   return {
     id,
@@ -92,6 +92,26 @@ export function claudeModelToInfo(m: ClaudeSdkModelInfo, reportsEffort = false):
     supportedEfforts: claudeEfforts(m, reportsEffort),
     isDefault: recommended
   };
+}
+
+/**
+ * A row's human name. Claude Code has shipped two shapes: older builds put the versioned name in the
+ * description's lead ("Opus 5.5 · Best for…") or the whole description ("Sonnet 5") beside a bare
+ * alias display name ("Sonnet"); newer builds (2.1.3xx) put it in the display name ("Opus 5.5") and
+ * a tagline in the description ("For complex work…"). The recommended row's display name is always
+ * "Default (recommended)", so its description carries the name in both shapes — either as the
+ * name itself or, in some account states, as "Use the default model (currently Opus 5.5)".
+ */
+function claudeRowName(m: ClaudeSdkModelInfo, recommended: boolean): string | undefined {
+  const description = m.description?.trim() ?? '';
+  const currently = recommended ? /\(currently ([^)]+)\)/.exec(description)?.[1]?.trim() : undefined;
+  if (currently) return currently;
+  const [lead, ...tagline] = description.split(' · ');
+  if (tagline.length) return lead.trim() || undefined;
+  const display = m.displayName?.trim();
+  if (recommended) return description || undefined;
+  const bareAlias = !display || display.toLowerCase() === m.value.toLowerCase();
+  return bareAlias ? description || display || m.value : display;
 }
 
 /** A row's effort levels: `[]` for a model that takes none, `undefined` while that is unknown. */

@@ -3,6 +3,7 @@
  *  connection and the active computer change. */
 import { useEffect, useRef, useState } from 'react';
 import { TranscriptCapabilitiesProvider } from '@renderer/capabilities';
+import { SessionTitle } from '@renderer/components/SessionTitle';
 import { Button, ConfirmHost, Icon, Spinner, Toggle } from '@renderer/components/ui';
 import { useStore } from '@renderer/store';
 import type { RelayClient } from '../../../relay/src/web-client';
@@ -62,6 +63,8 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
   const host = useRef<string | null>(null);
   const defaulted = useRef(false);
   const seenAwaiting = useRef<Set<string>>(new Set());
+  /** A background session that started waiting for a person: one tap opens it. */
+  const [nudge, setNudge] = useState<{ id: string; title: string } | null>(null);
   const follow = useFollow(hostDeviceId, focus, (id) => navigate({ name: 'session', host: hostDeviceId ?? '', session: id }));
 
   useEffect(() => {
@@ -191,9 +194,17 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
     for (const session of sessions) {
       if (session.status !== 'awaiting' || session.id === activeId || seenAwaiting.current.has(session.id)) continue;
       seenAwaiting.current.add(session.id);
-      useStore.getState().toast(`${session.title} needs approval`, 'info');
+      setNudge({ id: session.id, title: session.title });
     }
+    // Answered, or opened: the nudge has done its job.
+    setNudge((current) => (current && (current.id === activeId || !awaiting.has(current.id)) ? null : current));
   }, [sessions, activeId]);
+
+  useEffect(() => {
+    if (!nudge) return;
+    const timer = setTimeout(() => setNudge(null), 12_000);
+    return () => clearTimeout(timer);
+  }, [nudge]);
 
   // The iOS keyboard: keep the composer above it without a style attribute (CSP forbids those).
   useEffect(() => {
@@ -279,26 +290,54 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
   }
 
   const hostId = credentials.hostDeviceId;
+  const nudgedSession = nudge && sessions.find((session) => session.id === nudge.id);
+  const followSessionId = follow.snackbar?.sessionId;
+  const followedSession = followSessionId && sessions.find((session) => session.id === followSessionId);
   return (
     <TranscriptCapabilitiesProvider value={WEB_CAPABILITIES}>
       <div className="w-app" ref={appRef} data-connection={connection}>
         <ConnectionBanner state={connection} viewOnly={viewOnly} onRetry={() => void transport.connect(true)} />
         <header className="w-topbar">
-          <button type="button" className="w-computer" onClick={() => setSheet('computers')} data-testid="computers">
+          <span className="w-brand">Vocs Code</span>
+          <button type="button" className="w-computer" onClick={() => setSheet('computers')} data-testid="computers" aria-label={`Computer: ${credentials.hostName ?? 'Computer'}. Switch computers`}>
             <span className={`w-dot is-${connection}`} aria-hidden />
             <span className="w-computer-name">{credentials.hostName ?? 'Computer'}</span>
             {online.get(hostId) === false && <span className="w-computer-off">offline</span>}
           </button>
+          <span className="w-topbar-spacer" />
           <Button variant="ghost" size="sm" icon="more" aria-label="Menu" onClick={() => setSheet('menu')} />
         </header>
+        {nudge && (
+          <div className="w-nudge" role="status" data-testid="approval-nudge">
+            <button type="button" className="w-nudge-main" onClick={() => { setNudge(null); navigate({ name: 'session', host: hostId, session: nudge.id }); }}>
+              <span className="w-nudge-dot" aria-hidden />
+              <span className="w-nudge-text">
+                {nudgedSession ? <SessionTitle session={nudgedSession} className="w-nudge-title" /> : <strong className="w-nudge-title">{nudge.title}</strong>}{' '}
+                <span className="w-nudge-message">needs you</span>
+              </span>
+              <span className="w-nudge-cta">Review</span>
+            </button>
+            <button type="button" className="w-icon-btn" aria-label="Dismiss" onClick={() => setNudge(null)}><Icon name="x" size={14} /></button>
+          </div>
+        )}
 
         <div className="w-main" data-has-session={route.name === 'session' ? '1' : undefined}>
           <SessionList
             focus={focus?.sessionId ?? null}
+            active={route.name === 'session' ? route.session : null}
             onNew={() => setSheet('new')}
             onOpen={(id) => navigate({ name: 'session', host: hostId, session: id })}
           />
-          {route.name === 'session' && <SessionView sessionId={route.session} connection={connection} onBack={() => navigate({ name: 'home' })} />}
+          {route.name === 'session' ? (
+            <SessionView sessionId={route.session} connection={connection} onBack={() => navigate({ name: 'home' })} />
+          ) : (
+            <section className="w-placeholder" data-testid="session-placeholder">
+              <p className="w-label">{credentials.hostName ?? 'Your computer'}</p>
+              <h2>Pick a session</h2>
+              <p>Open one from the list to follow it live, answer approvals and send the next message — or start a new one on this computer.</p>
+              <Button variant="primary" icon="sessionPlus" onClick={() => setSheet('new')}>New session</Button>
+            </section>
+          )}
         </div>
 
         {sheet === 'computers' && (
@@ -324,18 +363,20 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
         {sheet === 'menu' && (
           <BottomSheet title="Menu" onClose={() => setSheet('none')}>
             <div className="w-menu">
-              <div className="w-field-row">
-                <span>Follow my computer</span>
+              <div className="w-field-row w-follow-row">
                 <Toggle checked={follow.following} onChange={() => follow.toggle()} label="Follow my computer" />
               </div>
-              <Button variant="ghost" icon="terminal" onClick={() => { setSheet('devices'); }}>Devices</Button>
+              <p className="w-hint w-menu-hint">Open whatever session your computer switches to.</p>
+              <Button variant="ghost" icon="shield" onClick={() => { setSheet('devices'); }}>Devices</Button>
               <Button variant="ghost" icon="plus" onClick={() => { setSheet('none'); navigate({ name: 'pair' }); }}>Add a computer</Button>
               <Button variant="ghost" icon="x" onClick={() => { setSheet('none'); void client.unpair(); }}>Unpair this browser</Button>
               {account.status === 'signed-in' && (
-                <form method="post" action="/logout" className="account-signout">
-                  <span className="account-name">@{account.account.login}</span>
-                  <button type="submit" className="btn btn-ghost btn-sm">Sign out of GitHub</button>
-                </form>
+                <div className="w-account">
+                  <span className="account-name">Signed in as {account.account.login}</span>
+                  <form method="post" action="/logout" className="account-signout">
+                    <button type="submit" className="btn btn-ghost btn-sm">Sign out</button>
+                  </form>
+                </div>
               )}
             </div>
           </BottomSheet>
@@ -343,7 +384,10 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
 
         {follow.snackbar && (
           <div className="w-snackbar" role="status" data-testid="follow-snackbar">
-            <span>Your computer moved to “{follow.snackbar.title}”</span>
+            <span className="w-snackbar-text">
+              <span>Your computer moved to</span>{' '}
+              {followedSession ? <SessionTitle session={followedSession} /> : <span>“{follow.snackbar.title}”</span>}
+            </span>
             <Button size="sm" variant="primary" onClick={follow.followNow}>Follow</Button>
             <Button size="sm" variant="ghost" onClick={follow.dismiss}>Dismiss</Button>
           </div>

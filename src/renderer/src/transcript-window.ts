@@ -7,8 +7,9 @@ import type { TranscriptItem } from '../../shared/types';
 import type { MissionRecord } from '../../shared/mission';
 
 /**
- * Rows the transcript renders. A run of shell commands collapses into one group chunk, and a
- * turn's intermediate work collapses into one `work` chunk; everything else renders alone.
+ * Rows the transcript renders. A run of shell commands collapses into one group chunk, and each
+ * stretch of work between two messages collapses into one `work` chunk; everything else, every
+ * assistant message included, renders alone.
  */
 export type RenderChunk =
   /** Host projection, never a synthetic assistant item in a harness transcript. */
@@ -19,7 +20,7 @@ export type RenderChunk =
       kind: 'work';
       id: string;
       entries: TranscriptItem[];
-      /** The turn this work belongs to, attached when its turn row arrives. */
+      /** The turn this work stands for, attached when its turn row arrives and it is the turn's only stretch of work. */
       turn?: { status: 'completed' | 'interrupted' | 'failed'; durationMs?: number };
     };
 

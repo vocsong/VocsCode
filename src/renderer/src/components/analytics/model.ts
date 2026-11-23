@@ -72,6 +72,8 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
   if (range === 0) {
     const totals = emptyCounters();
     for (const d of days) addCounters(totals, d.usage);
+    // User receipts must include every recorded day, not just the capped chart calendar.
+    totals.userInputTokens = recorded.reduce((sum, d) => sum + (d.usage.userInputTokens ?? 0), 0);
     // The all-time token, cost and turn totals also cover sessions whose deltas never reached a day bucket.
     for (const f of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns'] as const) totals[f] = summary.totals[f];
     return {
@@ -164,7 +166,7 @@ export const METRICS: Record<Metric, MetricDef> = {
 };
 
 /** Fixed colour slot per harness, so a harness keeps its colour whichever others are on screen. */
-export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native'];
+export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'antigravity', 'acp', 'native'];
 
 /** Rank of a harness in the shared slot order; an unknown one sorts last, onto the fallback slot. */
 export function harnessIndex(id: string): number {

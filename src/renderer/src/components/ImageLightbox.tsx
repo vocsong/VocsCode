@@ -1,6 +1,8 @@
 // Fullscreen image viewer: clicking a transcript image opens it at full size.
 // Esc / backdrop click closes; ArrowLeft / ArrowRight move between images of one message.
-import React, { memo, useCallback, useEffect, useState } from 'react';
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { closeContextMenu } from './ContextMenu';
+import { showImageContextMenu } from './image-context-menu';
 import { Icon } from './ui';
 
 export interface LightboxImage {
@@ -25,8 +27,24 @@ export const ImageLightbox = memo(function ImageLightbox({
 }) {
   const count = images.length;
   const [current, setCurrent] = useState(() => navigateLightbox(index, count, 0));
+  const dialog = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const message = previous?.closest('[data-item-id]');
+    const source = previous?.querySelector('img')?.getAttribute('src');
+    dialog.current?.querySelector('button')?.focus({ preventScroll: true });
+    return () => {
+      // Streaming can replace the opener while the viewer is open; return to its new button.
+      const replacement = message?.isConnected && source
+        ? Array.from(message.querySelectorAll<HTMLButtonElement>('.msg-image-btn')).find((button) => button.querySelector('img')?.getAttribute('src') === source)
+        : null;
+      (previous?.isConnected ? previous : replacement)?.focus({ preventScroll: true });
+    };
+  }, []);
 
   const step = useCallback((delta: number) => {
+    closeContextMenu();
     setCurrent((i) => navigateLightbox(i, count, delta));
   }, [count]);
 
@@ -42,6 +60,15 @@ export const ImageLightbox = memo(function ImageLightbox({
       } else if (count > 1 && e.key === 'ArrowRight') {
         e.preventDefault();
         step(1);
+      } else if (e.key === 'Tab') {
+        const buttons = dialog.current?.querySelectorAll('button');
+        const first = buttons?.[0];
+        const last = buttons?.[buttons.length - 1];
+        if (!first || !last) return;
+        if (!dialog.current?.contains(document.activeElement) || document.activeElement === (e.shiftKey ? first : last)) {
+          e.preventDefault();
+          (e.shiftKey ? last : first).focus();
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -52,12 +79,15 @@ export const ImageLightbox = memo(function ImageLightbox({
   if (!image) return null;
 
   return (
-    <div className="lightbox" role="dialog" aria-modal="true" aria-label="Image preview" onClick={onClose}>
+    <div ref={dialog} className="lightbox" role="dialog" aria-modal="true" aria-label="Image preview" onClick={onClose}>
       <button
         type="button"
         className="lightbox-btn lightbox-close"
         aria-label="Close image preview"
-        onClick={onClose}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
       >
         <Icon name="x" size={18} />
       </button>
@@ -79,6 +109,7 @@ export const ImageLightbox = memo(function ImageLightbox({
         src={image.src}
         alt={image.name ?? 'attachment'}
         onClick={(e) => e.stopPropagation()}
+        onContextMenu={showImageContextMenu}
         draggable={false}
       />
       {count > 1 && (

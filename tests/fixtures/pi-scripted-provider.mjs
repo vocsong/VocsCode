@@ -47,7 +47,10 @@ export default function (pi) {
           }
           // IMAGES_OK proves the attached image survived the whole Pi pipeline; the tool flows and
           // tool-result turns keep replying COMPAT_OK.
-          message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: images ? 'IMAGES_OK' : 'COMPAT_OK' }];
+          // Echo the actual next provider request's tool result so question tests can prove that
+          // both the selected answer and context reached the model, not merely the UI transcript.
+          const reply = last?.role === 'toolResult' && last.toolName === 'ask_user' ? `QUESTION_SEEN:${content}` : images ? 'IMAGES_OK' : 'COMPAT_OK';
+          message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: reply }];
           message.stopReason = calls.length ? 'toolUse' : 'stop';
           stream.push({ type: 'start', partial: message });
           for (const [contentIndex, part] of message.content.entries()) {

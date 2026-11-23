@@ -2,7 +2,7 @@
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { enrollTokenContext, generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity } from '../src/shared/crypto';
-import { ACCESS_TTL_MS, CHALLENGE_TTL_MS, claimPairing, ENROLL_GRANT_TTL_MS, enrollmentStatus, grantEnrollment, redeemEnrollment, requestPairing, consumeSocketTicket, deleteMirrorSession, deviceInfos, hashToken, issueAccessToken, issueChallenge, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MIRROR_MAX_BLOB_CHARS, MirrorError, PAIRING_TTL_MS, revokeAllExcept, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyAccessToken, verifyRefreshToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
+import { ACCESS_TTL_MS, CHALLENGE_TTL_MS, claimPairing, ENROLL_GRANT_TTL_MS, enrollmentStatus, grantEnrollment, redeemEnrollment, requestPairing, revocationEpoch, consumeSocketTicket, deleteMirrorSession, deviceInfos, hashToken, issueAccessToken, issueChallenge, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MIRROR_MAX_BLOB_CHARS, MirrorError, PAIRING_TTL_MS, revokeAllExcept, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyAccessToken, verifyRefreshToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
 import { accessFor, testDevice } from './support/relay-auth';
 import type { PublicIdentity } from '../src/shared/crypto';
 
@@ -39,6 +39,31 @@ function memStore(failWrite?: (key: string) => boolean): RelayStore {
         release();
       }
     }
+  };
+}
+
+/** Holds the next transaction at its start until `resume`: everything an admission does before its
+ *  commit (reads, signature checks, sealing) has run, and another request may land in between. */
+function pauseNextTransaction(store: RelayStore): { store: RelayStore; reached: Promise<void>; resume: () => void } {
+  let armed = true;
+  let reachedResolve!: () => void;
+  let resume!: () => void;
+  const reached = new Promise<void>((resolve) => { reachedResolve = resolve; });
+  const released = new Promise<void>((resolve) => { resume = resolve; });
+  return {
+    store: {
+      ...store,
+      transaction: async (work) => {
+        if (armed) {
+          armed = false;
+          reachedResolve();
+          await released;
+        }
+        return store.transaction(work);
+      }
+    },
+    reached,
+    resume
   };
 }
 
@@ -414,6 +439,137 @@ describe('revoke all (the kill switch)', () => {
     expect(await getMirrorIndex(store, 'a', other.deviceId, T0)).toBeUndefined();
     await expect(resolvePairing(store, await approval(code, 'approve'), T0 + 1)).rejects.toBeInstanceOf(PairError);
   });
+
+  const newNonce = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+
+  it('also retires enrollment grants the owner approved but no desktop redeemed yet', async () => {
+    const store = memStore();
+    const me = await testDevice(store, 'host', { now: T0 });
+    const nonce = newNonce();
+    const nonceHash = await hashToken(nonce);
+    await grantEnrollment(store, { accountId: 'a', nonceHash }, T0);
+
+    await revokeAllExcept(store, 'a', me.deviceId);
+    const redeemed = await redeemEnrollment(store, { accountId: 'a', nonce, hostPub: publicOf(await generateIdentity()), name: 'Late PC', platform: '' }, T0 + 2);
+    expect(redeemed).toEqual({ status: 'pending' });
+    expect((await listDevices(store, 'a')).map((d) => d.deviceId)).toEqual([me.deviceId]);
+    expect(await enrollmentStatus(store, { accountId: 'a', nonceHash }, T0 + 3)).toEqual({ status: 'missing' });
+    expect(await store.list('enroll:')).toEqual([]);
+  });
+
+  it('refuses an enrollment redemption that commits after revoke all, even though its grant was read before', async () => {
+    const base = memStore();
+    const me = await testDevice(base, 'host', { now: T0 });
+    const nonce = newNonce();
+    await grantEnrollment(base, { accountId: 'a', nonceHash: await hashToken(nonce) }, T0);
+    const paused = pauseNextTransaction(base);
+    const redeeming = redeemEnrollment(paused.store, { accountId: 'a', nonce, hostPub: publicOf(await generateIdentity()), name: 'Late PC', platform: '' }, T0 + 1);
+    await paused.reached;
+    await revokeAllExcept(base, 'a', me.deviceId);
+    paused.resume();
+
+    expect(await redeeming).toEqual({ status: 'pending' });
+    expect((await listDevices(base, 'a')).map((d) => d.deviceId)).toEqual([me.deviceId]);
+  });
+
+  it('refuses an enrollment redemption whose directory binding predates the last revoke all', async () => {
+    const store = memStore();
+    const me = await testDevice(store, 'host', { now: T0 });
+    const nonce = newNonce();
+    const nonceHash = await hashToken(nonce);
+    const before = await revocationEpoch(store, 'a');
+    await revokeAllExcept(store, 'a', me.deviceId);
+    // The owner grants the same hash again under the new epoch, but the binding the redemption
+    // arrived through still carries the old one.
+    await grantEnrollment(store, { accountId: 'a', nonceHash }, T0 + 1);
+    const hostPub = publicOf(await generateIdentity());
+    expect(await redeemEnrollment(store, { accountId: 'a', nonce, hostPub, name: 'PC', platform: '', bindingEpoch: before }, T0 + 2)).toEqual({ status: 'pending' });
+    expect((await listDevices(store, 'a')).map((d) => d.deviceId)).toEqual([me.deviceId]);
+    expect(await redeemEnrollment(store, { accountId: 'a', nonce, hostPub, name: 'PC', platform: '', bindingEpoch: await revocationEpoch(store, 'a') }, T0 + 3)).toMatchObject({ status: 'registered' });
+  });
+
+  it.each([
+    ['an enrolled desktop', true],
+    ['a desktop pairing with the enrollment secret', false]
+  ])('mints nothing from %s\'s approval that commits after revoke all', async (_label, enrolled) => {
+    const base = memStore();
+    const me = await testDevice(base, 'host', { now: T0, identity: hostIdentity });
+    const started = enrolled
+      ? await requestPairing(base, { accountId: 'a', hostDeviceId: me.deviceId, webName: 'late', webPlatform: '', webPub: WEB_PUB }, T0)
+      : await startPairing(base, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0).then(async ({ code }) => ({ code, ...(await claimPairing(base, { code, webName: 'late', webPlatform: '', webPub: WEB_PUB }, T0)) }));
+    const signed = await approval(started.code, 'approve');
+    const paused = pauseNextTransaction(base);
+    const approving = resolvePairing(paused.store, signed, T0 + 1).then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+    await paused.reached;
+    expect(await revokeAllExcept(base, 'a', me.deviceId)).toEqual([]);
+    paused.resume();
+
+    const outcome = await approving;
+    expect(outcome.ok).toBe(false);
+    expect((outcome as { error: unknown }).error).toBeInstanceOf(PairError);
+    expect((await listDevices(base, 'a')).map((d) => d.deviceId)).toEqual([me.deviceId]);
+    expect(await base.list('pair:')).toEqual([]);
+    await expect(pollPairing(base, started.code, started.pollToken, T0 + 2)).rejects.toMatchObject({ code: 'forbidden' });
+  });
+
+  it('mints nothing when the claimed pairing record was replaced before the approval committed', async () => {
+    const base = memStore();
+    const { code } = await startPairing(base, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    await claimPairing(base, { code, webName: 'first', webPlatform: '', webPub: WEB_PUB }, T0);
+    const signed = await approval(code, 'approve');
+    const paused = pauseNextTransaction(base);
+    const approving = resolvePairing(paused.store, signed, T0 + 1);
+    await paused.reached;
+    // Same code, a different claim: the signed decision was for the first claimant's key only.
+    const replaced = await base.get<Record<string, unknown>>(`pair:${code}`);
+    await base.put(`pair:${code}`, { ...replaced, webName: 'other', webPub: publicOf(await generateIdentity()), pollTokenHash: await hashToken('another-claim') });
+    paused.resume();
+
+    await expect(approving).rejects.toBeInstanceOf(PairError);
+    expect(await listDevices(base, 'a')).toEqual([]);
+    expect(await base.get(`pair:${code}:done`)).toBeUndefined();
+  });
+
+  it('pairs and enrolls normally after revoke all, and a repeated approval or redemption mints nothing more', async () => {
+    const store = memStore();
+    const me = await testDevice(store, 'host', { now: T0 });
+    await revokeAllExcept(store, 'a', me.deviceId);
+
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0 + 1);
+    const { pollToken } = await claimPairing(store, { code, webName: 'web', webPlatform: '', webPub: WEB_PUB }, T0 + 1);
+    const signed = await approval(code, 'approve');
+    const approved = await resolvePairing(store, signed, T0 + 2);
+    if ('denied' in approved) throw new Error('expected approval');
+    // The desktop retries a decision whose result it never saw: refused, nothing minted twice.
+    await expect(resolvePairing(store, signed, T0 + 3)).rejects.toBeInstanceOf(PairError);
+    expect(await pollPairing(store, code, pollToken, T0 + 3)).toMatchObject({ status: 'approved', webDeviceId: approved.webDeviceId, hostDeviceId: approved.hostDeviceId });
+    expect((await listDevices(store, 'a')).map((d) => d.deviceId).sort()).toEqual([me.deviceId, approved.hostDeviceId, approved.webDeviceId].sort());
+
+    const nonce = newNonce();
+    await grantEnrollment(store, { accountId: 'a', nonceHash: await hashToken(nonce) }, T0 + 4);
+    const hostPub = publicOf(await generateIdentity());
+    const first = await redeemEnrollment(store, { accountId: 'a', nonce, hostPub, name: 'New PC', platform: '' }, T0 + 5);
+    expect(first).toMatchObject({ status: 'registered' });
+    // A desktop whose response was lost redeems again: the same sealed credential, no second device.
+    expect(await redeemEnrollment(store, { accountId: 'a', nonce, hostPub, name: 'New PC', platform: '' }, T0 + 6)).toEqual(first);
+    expect((await listDevices(store, 'a')).filter((d) => d.kind === 'host')).toHaveLength(3);
+  });
+
+  it('keeps pairing and enrollment records stored before revocation epochs existed working', async () => {
+    const store = memStore();
+    const nonce = newNonce();
+    const nonceHash = await hashToken(nonce);
+    await store.put(`enroll:a:${nonceHash}`, { nonceHash, status: 'granted', expiresAt: T0 + ENROLL_GRANT_TTL_MS });
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    await claimPairing(store, { code, webName: 'web', webPlatform: '', webPub: WEB_PUB }, T0);
+    const { epoch: _epoch, ...legacy } = (await store.get<Record<string, unknown>>(`pair:${code}`))!;
+    await store.put(`pair:${code}`, legacy);
+
+    const approved = await resolvePairing(store, await approval(code, 'approve'), T0 + 1);
+    expect('denied' in approved).toBe(false);
+    expect(await redeemEnrollment(store, { accountId: 'a', nonce, hostPub: publicOf(await generateIdentity()), name: 'PC', platform: '' }, T0 + 2)).toMatchObject({ status: 'registered' });
+    expect((await listDevices(store, 'a')).map((d) => d.kind).sort()).toEqual(['host', 'host', 'web']);
+  });
 });
 
 describe('access tokens (proof of possession)', () => {
@@ -689,7 +845,7 @@ describe('relay offline mirror (opaque sealed blobs)', () => {
   });
 });
 
-describe('owner actions: Connect with GitHub and pairing from a signed-in browser', () => {
+describe('owner actions: Connect with Vocs and pairing from a signed-in browser', () => {
   const newNonce = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
 
   it('registers a desktop only after the owner grants its hash, sealing the credential to its key, once', async () => {

@@ -37,12 +37,18 @@ it('recovers a lost approval poll only with the claimant capability and identity
     // the privately captured claim capability and the claim identity, not saved credentials.
     expect((await fetch(`${origin}/v1/pair/poll?code=${code}`)).status).toBe(401);
     expect(await recoverApprovedClaim(origin, code, 'wrong-capability', identity)).toBeNull();
-    await expect(recoverApprovedClaim(origin, code, pollToken, await generateIdentity())).rejects.toThrow();
-    let recovered: Awaited<ReturnType<typeof recoverApprovedClaim>> = null;
-    for (let i = 0; i < 40 && !recovered; i++) {
-      recovered = await recoverApprovedClaim(origin, code, pollToken, identity);
-      if (!recovered) await new Promise((r) => setTimeout(r, 50));
+    // respondPairing() returns once the signed decision is on the socket; the relay applies it
+    // asynchronously. Wait until the claim reads as approved, so the identity check below meets an
+    // approved, sealed credential rather than a claim that is still pending (which yields null).
+    let status: string | undefined;
+    for (let i = 0; i < 40 && status !== 'approved'; i++) {
+      const poll = await fetch(`${origin}/v1/pair/poll?code=${code}`, { headers: { authorization: `Bearer ${pollToken}` } });
+      status = poll.ok ? ((await poll.json()) as { status?: string }).status : undefined;
+      if (status !== 'approved') await new Promise((r) => setTimeout(r, 50));
     }
+    expect(status).toBe('approved');
+    await expect(recoverApprovedClaim(origin, code, pollToken, await generateIdentity())).rejects.toThrow();
+    const recovered = await recoverApprovedClaim(origin, code, pollToken, identity);
     expect(recovered).not.toBeNull();
     expect((await listDevices(relay.store, 'a')).map((device) => device.deviceId).sort())
       .toEqual([recovered!.hostDeviceId, recovered!.webDeviceId].sort());

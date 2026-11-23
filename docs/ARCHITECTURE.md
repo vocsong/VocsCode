@@ -5,22 +5,31 @@ Technical reference moved out of the README. For the friendly overview, read the
 ## Source layout
 
 ```
-src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps);
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette, interface modes (no runtime deps);
                   mission*.ts hold the Mission record, preset/config and command contracts
 src/main
-  harness/        one adapter per harness → normalized SessionEvent stream
+  harness/        adapters → normalized SessionEvent stream
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
     codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
     codex-exec.ts SDK fallback
     cursor.ts     @cursor/sdk, local runtime; sandbox + plan-mode allowlist instead of approvals
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
-    acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
+    acp.ts        Agent Client Protocol client (Google Antigravity and generic ACP agents)
+    antigravity.ts  Antigravity CLI settings, account probe and quota decoding
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
   mission/        durable Mission coordination (service/state/store), scoped tools, scheduling,
                   workspaces, verification, delivery and restart recovery (docs/MISSIONS.md)
   owned-windows-job.ts + terminal-process.ts   Windows Job Object supervisor that proves a process
                   tree has ended (resources/mission/windows-check-job.ps1)
+  process-tracker.ts + process-snapshot.ts + process-context.ts   the Processes panel: every process
+                  the app started (sampled tree under main, saved for the next run), who it works for, and ending it;
+                  the Windows table reader (and per-session Job Objects) is resources/processes/windows-process-snapshot.ps1
   models/         provider clients and model discovery, with offline catalogs and pricing
+  model-catalog-cache.ts   <userData>/model-catalog-cache.json: each harness's last clean
+                  `harness:models` discovery, reused for 7 days while its settings/runtime fingerprint
+                  matches; Recheck passes `refresh`, and a sign-in, install or key change clears it
+  dictation/      composer voice to text: a provider's transcription endpoint (cloud.ts), or whisper.cpp's
+                  server downloaded into <userData>/dictation and run on loopback while in use (local.ts)
   util/           fs and async helpers shared by the adapters (no Electron imports)
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
   knowledge/      Layer 2 project knowledge: markdown wiki store, scored retrieval, synthesis and
@@ -35,22 +44,81 @@ src/main
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
+    SessionTitle.tsx  shared desktop and web session label with a harness pill and project | session name
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
     mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
+  ui-mode.ts      the interface mode (Standard or Zen) as React reads it; theme.ts applies it as <html data-ui>
+  ui-zen.css      the Zen layout: CSS over the standard component tree, so a switch never remounts anything (docs/INTERFACE-MODES.md)
   store.ts        session state; api.ts wraps the preload bridge
+  panes.ts        the split view's session pane model and the separate, transient file drawer target; components/SessionPanes.tsx renders the split
+  file-open.ts    where a session's files are read from (Mission workspaces) and how outside paths are only revealed; components/FilePreviewPane.tsx previews
 src/web           the browser shell at code.vocs.io/app (plain Vite build into relay/public/app)
   transport/      RelayTransport (window.harness over the e2e session, local `can` gate) + mirror backend + IndexedDB vault
   shell/          WebApp root, connection state, account probe, viewport keyboard inset
-  screens/        pairing, Connect with GitHub, sessions home, one session
-  sheets/         bottom sheets: computers, devices, new session, read-only terminal
+  screens/        pairing, Connect with Vocs, sessions home, one session
+  sheets/         bottom sheets: computers, devices, new session, terminal
+  terminal/       the live terminal: stream controller, headless-xterm screen model, key mapping, view
   components/     web composer, session header, status chip, connection banner
 resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents, the MCP bridge and,
                   for Mission-managed sessions only, vocs-code-mission.ts
 resources/mission the Windows Job Object helper (windows-check-job.ps1) shared by Mission checks and owned processes
+resources/processes the read-only Windows process-table reader (Toolhelp snapshot) behind the Processes panel
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
 ```
+
+## Transcript collapse
+
+`Transcript.tsx` (`groupTranscript`) keeps everything written for the reader on screen and collapses
+only machinery. Every assistant row that carries prose is a message and is never collapsed,
+whatever `phase` its harness gave it and whether or not a tool call follows. The steps between two
+messages — tool calls, approvals, plans, with the thinking and info-level notices among them —
+collapse into one **Worked** header per stretch, so a turn reads message, work, message, work,
+answer. User rows, turn footers and warnings/errors always stay visible.
+
+The adapters differ in what they emit, and the renderer is where that is evened out, so a turn
+looks the same on every harness and when a saved transcript is reopened:
+
+- **Phase.** Codex app-server labels prose `commentary` or `final`, Codex exec labels all of it
+  `final`, the other adapters label nothing. Phase does not decide visibility; only `plan` is
+  styled.
+- **Thinking.** Claude, Cursor, Pi, ACP and native put reasoning on the row of the prose it
+  precedes; the Codex adapters emit it as a row of its own. Either way it is one collapsed
+  "Thinking" toggle, open only while it streams: reasoning that leads into a message sits directly
+  above that message, reasoning among steps collapses with them.
+- **Empty rows.** A row with no prose and no visible thinking (Pi leaves one for a tool-only
+  message; any row with thinking hidden) makes no row.
+
+A header needs a step behind it: thinking or a notice with no step beside it stays a row of its
+own, never a "Worked" over nothing. Work in flight stays open until the next message starts. The
+turn's duration is shown on a header only when the turn worked in a single stretch; otherwise it
+stays on the turn footer.
+
+## Transcript file references
+
+Chat file links open in Files within the session's `cwd` (the worktree checkout, not the
+original project root). `fs:resolve` checks the exact relative file first, then searches for
+whole-component suffix matches: `tools.ts` can resolve to `src/app/api/mcp/tools.ts`, and
+`api/mcp/tools.ts` retains its directory context. One match opens automatically; multiple
+matches require the user to choose a full path. Line numbers survive both paths.
+
+Fallback discovery skips dependency/generated directories (`node_modules`, `.git`, `dist`,
+`out`, `build`, `.next`, `.venv`, `venv`, `target`, `.vocs-code`) and does not follow symlinks.
+Exact contained paths there still open. Scans are bounded to 50,000 entries and fewer than
+100 matches; incomplete or unreadable scans ask for a full path instead of guessing.
+Absolute paths outside the session are never remapped into it. Mission resolution and reads
+use the same selected workspace; no sibling checkout or project-root fallback is allowed.
+Transports without `fs:resolve` retain exact-path opening.
+
+## Transcript pull request links
+
+In a desktop session with the Git panel, a GitHub PR overview link opens Git → PR and shows the
+linked request's description and conversation. `git:pullRequest` validates the URL in the main
+process and uses `gh pr view` with the canonical URL, independent of the session's checkout and
+its 100-item PR list. The link preview offers **Open on GitHub** and leaves merge actions with
+the repo's own PR rows. Pending results are discarded when the preview closes or its session
+loses the Git panel.
 
 ## Harness matrix
 
@@ -61,8 +129,22 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | all pages of Codex's dynamic `model/list` via a short-lived app-server probe (static fallback only) | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |
 | **Pi** | `pi --mode rpc` + bundled approvals and MCP-bridge extensions | interactive | pi's registry plus the app's bundled catalogs for every provider pi already lists (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, OpenCode Go, Ollama, custom) | injected — the bridge extension registers each MCP tool with pi |
+| **Google Antigravity** | Google's `agy acp` over stdio, using the saved Google sign-in | every mode: the CLI's strict tool policy routes each tool call to the ACP client policy; Plan also sets the vendor `plan` mode | account-advertised Gemini models and thinking levels after connection | stdio servers injected through `session/new.mcpServers` |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
+
+Ordinary **Pi Steer interrupts the active run**, waits for cancellation and turn bookkeeping to
+settle, then admits the directive as a fresh prompt. Queue remains non-interrupting and FIFO;
+`PiAdapter` retains full follow-up payloads (including images) outside Pi until dispatch. This is
+intentional: Pi's native steering waits for a whole tool batch, and Pi 0.85.1 can consume queued
+input under an already-aborted signal. Admission is serialized, not model responses, so rapid
+steers are each submitted once without dropping earlier directives. Pending old-run approvals are
+denied; late old-run dialogs cannot acquire a new grant. Cancellation failure refuses the new
+prompt rather than running it beside unproven old work. Normalized turn completion uses
+`agent_settled`, not intermediate `agent_end`; delayed stats cannot overwrite a newer run. Managed
+Mission input retains its broker-owned continuation policy. The Pi MCP bridge propagates per-call
+cancellation without closing shared connections; remote cancellation is advisory, not proof that a
+remote mutation or its side effects stopped.
 
 Claude catalogs map every SDK row to the canonical wire id it resolves to, the recommended `default`
 included: that row leads as `<model> (recommended)` and is the New Session preselection, so a saved
@@ -74,8 +156,8 @@ and saved-catalog fallback. Distinct providers and explicit context variants rem
 catalog refresh does not rewrite a session's pinned selection.
 
 A model's `supportedEfforts` has three states, and adapters must keep them apart: a list offers
-exactly those levels; `[]` means the model takes no effort, so the New Session select and header pill
-are disabled, `/effort` is refused, and the dialog neither submits nor remembers an effort level.
+exactly those levels; `[]` means the model takes no effort, so the New Session select and the
+composer's effort control are disabled, `/effort` is refused, and the dialog neither submits nor remembers an effort level.
 It persists `SessionConfig.effort: null` to explicitly omit effort at the adapter boundary, including
 after restart, without clearing the app/folder preference. An absent config effort still inherits the
 app preference; a later explicit session effort replaces the omission. `supportedEfforts: undefined`
@@ -85,6 +167,36 @@ so a Claude row without them becomes `[]` only when another row in the same `sup
 answer carries them; a runtime that reports them on no row leaves every model unknown. An ACP effort
 option with no level the app models stays unknown too.
 
+The desktop composer footer stays on one row, including narrow split panes. Its model pill uses
+catalog display text (or the model id), with the full `provider/model` identity in its accessible
+label, tooltip and menu. The menu shows Favourite models, the available Reasoning Effort levels,
+and Fast Mode On/Off together; More models opens the searchable catalog. Model and permission
+buttons fit their labels. Their popups align to the button's left edge unless the edge of the
+composer leaves too little room. Steer is primary while running, with Queue in its adjacent menu;
+queue-only harnesses get one Queue button. Composer options holds dictation's Cloud/Local selector,
+attachments, cost/context details and queued-message counts. Narrow widths rely on that menu for
+secondary controls, but the context meter stays visible while Usage is selected so it can close the
+panel again.
+
+**Fast mode is a separate, per-session premium-speed preference**, not a reasoning level. The
+New Session dialog and composer's model menu expose `SessionConfig.fastMode` (off by default), with a
+cost warning before opt-in. `shared/fast-mode.ts` limits candidates to first-party OpenAI GPT-5/6
+(excluding Spark) and supported Anthropic Opus models; gateways, Cursor, ACP and Mission presets
+are not supported. Account entitlement is still the provider's decision. Idle-session changes go
+through `sessions:setFastMode`; the manager refuses busy transitions and rolls back failed writes.
+A model switch to an incompatible route requires turning Fast mode off first. Same-harness forks
+retain the preference; cross-harness forks start at standard speed.
+
+Adapters translate the preference at their own boundary: Codex uses `serviceTier`/`service_tier`,
+Claude explicitly opts in through SDK settings/flag settings, the native loop sends the provider's
+speed field, and Pi's bundled fast-mode extension modifies provider payloads and Anthropic beta
+headers. `SessionMeta.fastModeStatus` is observational: `requested` is not `on`. Only provider/runtime
+evidence may report `on`, `cooldown` or `unavailable`; restart and fork reset stale observations.
+No adapter changes reasoning effort or silently retries a failed premium request at another tier.
+Pi estimates completed Fast requests using published rates where possible. Where those rates are
+unavailable, analytics uses 2x Pi's standard cost estimate for that request and shows a warning.
+Neither estimate confirms the provider's actual charges.
+
 Both Codex harnesses discover their pre-session models through a short-lived app-server probe,
 following every `model/list` page rather than treating the bundled catalog as authoritative. The
 active app-server uses the same paginated discovery, and exec SDK model listing uses the one-shot
@@ -92,11 +204,33 @@ probe too. Static Codex models are only a fallback when live discovery is unavai
 
 **Pi's tool set is Vocs Code's, on Pi's implementations.** `resources/pi/vocs-code-tools.ts`
 registers Pi's own `grep`, `find` and `ls` definitions under the names `rg`, `glob` and `ls`, so a Pi
-session starts with `read, bash, edit, write, rg, glob, ls` active and never needs a shell to search
+session starts with `read, bash, edit, write, rg, glob, ls, ask_user` active and never needs a shell to search
 or list. They are extension tools, which is what makes them active by default while still honouring
 `--tools`, `--exclude-tools` and `--no-tools`; a `--tools` allowlist could not express that default
 because it also filters MCP and subagent tools. Pi's built-in `grep`/`find` stay inactive, and
 delegated Pi subagents — separate in-process sessions with per-agent tool lists — keep them.
+
+**Structured questions are distinct from tool permissions.** Ordinary Pi sessions expose the
+app-owned `ask_user` tool through `vocs-code-tools.ts` / `question-tool.ts`. It asks one question at
+a time with optional described choices, a typed alternative and additional context. Pi's built-in
+tool set has no question tool, and its example TUI `custom()` dialogs do not work in RPC mode; the
+app uses a bounded, versioned, nonce-bound `VCODE_QUESTION::` select envelope instead. The adapter
+normalizes it into the same question card as Claude's `AskUserQuestion` and Codex's
+`requestUserInput`, then returns answer and context separately in a JSON RPC value. Cancellation,
+malformed/stale replies and unavailable UI never become fabricated user choices. A question is not
+a permission grant, including in Full access. Managed Mission sessions retain their broker-only
+question channel, and subagent/Vesta runtimes do not gain this tool.
+
+Question cards show option descriptions upfront, keep optional context separate from choosing or
+typing an answer, and retain the submitted choice/context in compact history. Empty structured
+answers cannot be submitted. Pi's serialized response budget is validated in the card and by
+SessionManager before the pending dialog is consumed, so an oversized pasted response remains
+editable and can be corrected instead of becoming an irreversible tool error. `ApprovalDecision`
+continues to store raw `answers` plus `note`; Claude and Codex append the note as explicitly labeled
+model-facing context at their adapter boundary. Skip never forwards a stale selected choice. Raw
+third-party Pi dialogs can require exact scalar values, so their normalized requests set
+`supportsQuestionComment: false` instead of offering a comment field that would be discarded or
+corrupt an extension's response. Ordinary tool-permission note semantics are unchanged.
 
 Delegated agents differ too. A Claude session's subagents run on the **session's own model**: the
 adapter sets `CLAUDE_CODE_SUBAGENT_MODEL` to it and, while the project pins no model of its own,
@@ -106,6 +240,10 @@ is refused with a `401 ... model sent to the API`. A project definition in `.cla
 names a model wins instead, which is why `_FORCE` is withheld the moment one does; the Subagents
 tab's **Models** view lists every type with the model it will run on, edits that one field, and
 writes the definition that overrides a built-in the user chooses to replace.
+
+Codex app-server can stream subagent threads on the same connection as their parent. The adapter
+uses the owning thread ID for turn status, transcript items, and token usage. Activity about a
+subagent belongs in the parent transcript when Codex emits the item on the parent thread.
 
 Context reduction differs the same way. Most engines take an app-requested `compact()` at an idle
 boundary between turns. Claude's CLI instead reduces context from inside the turn that needs it, so
@@ -118,13 +256,16 @@ commands its CLI accepts (`supportedCommands()` on init, refreshed on `commands_
 that list — or, before the harness has started, a `goal` skill on disk — names `goal`, the composer
 forwards `/goal …` to the harness and the app sets no goal of its own. Every other session keeps the
 app's goal engine. Settings → Goal defaults (`preferHarness`) forces the app driver everywhere.
+App-driven kickoff and check-in prompts keep the verbatim objective in `<goal>` and host guidance in
+`<execution_instructions>`. Check-ins prioritize execution rather than repeated review; the completion
+audit is requested only once the goal is achieved and verified.
 
 ## Layering rules
 
 Layering is enforced by convention and by `tsconfig` project boundaries:
 
 - `src/shared` — types, IPC contract, harness metadata, diff parser. **No runtime deps, no Electron imports**; importable from every process.
-- `src/main` — all privileged work. `harness/` holds one adapter per harness; `models/` provider clients; `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
+- `src/main` — all privileged work. `harness/` holds the adapters, `models/` holds provider clients, and `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
 - `src/preload` — the only bridge. Renderer calls go through `window.harness`; channels and payloads are defined once in `src/shared/ipc.ts`.
 - `src/renderer` — React 19 + zustand. **Never touches Node or Electron directly.** `terminal/host.ts` keeps xterm.js instances alive outside React.
 - `src/web` — the browser shell. It may import `src/renderer/src`, `src/shared` and `relay/src/web-client.ts`; it must **never** import `src/main`, Electron or `terminal/host` (xterm). It binds its own `window.harness` before any renderer module loads (`install-transport.ts`).
@@ -134,18 +275,24 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - Adapters implement `HarnessAdapter` (`src/main/harness/types.ts`) and receive a `HarnessContext`. Adapters must not import Electron.
 - Project instructions are read once per harness. `AGENTS.md`, `CLAUDE.md` and `.vocs-code/INSTRUCTIONS.md` are the app's instruction files (`src/main/harness/project-instructions.ts`); an engine that discovers one itself keeps it, and the adapter adds only what that engine does not read. The Claude adapter, whose CLI reads `CLAUDE.md` alone, appends `AGENTS.md` (only where the directory has no Claude document) and `.vocs-code/INSTRUCTIONS.md` to its system prompt, so no file is ever handed over twice.
 - The app's own instruction layer is user-scoped and additive (`src/main/app-instructions.ts`, one file per scope under `<userData>/instructions/`): `global.md` is added to every session and a harness family's file (`pi.md`, `claude.md`, `codex.md`, …) after it, never instead of it. It is *not* a harness's global file — `APPEND_SYSTEM.md`, `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` stay untouched and keep applying through their own engine, and this layer can only add to the engine's prompt, never override it. Delivery follows the capability: the three harnesses with `systemPrompt: true` (pi, claude, native) get it through `sessionAppendPrompt`, and the rest through `SessionManager.withSessionPreamble` on their first message (`pendingAppInstructions`), because their engines own the prompt.
+- Split view: panes are views, not sessions. `store.layout` names a session per pane; transcripts, drafts, streaming and the agent process stay keyed by session, so a session on screen twice, or a pane that starts a process, cannot exist. `activeId` is always the active pane's session (a store subscription enforces it), which is how the global panels — Changes, Files, Git, Goal, Usage, Terminal — follow the active pane without knowing panes exist. Window-wide keys (Ctrl+F, terminal-to-composer inserts, composer focus) act on the active pane only. A split is remembered in the renderer's `localStorage`; a single pane leaves nothing behind, so the one-pane boot is unchanged.
+- File previews extend left from the Files panel, over the conversation without reflowing the split. Transcript mentions, Files rows, and Markdown links use `store.revealFile` to open the same transient `layout.filePreview` target, which is never persisted and closes when its session leaves the split. Text opens in a lazy-loaded CodeMirror editor, with syntax highlighting selected from the filename and a plain text fallback; Markdown has a rendered toggle. On desktop, explicit Save compares the file's current bytes to the editor's baseline before writing through the session-scoped `fs:writeText` handler. Images, binary, and truncated previews aren't editable. Folders open in the Files browser; paths outside the session folder are only revealed in the system file manager (`file-open.ts`), never previewed or edited.
+- A coloured transcript link always opens something. The transcript distinguishes the browser, in-app GitHub PRs, text/file previews, image-file previews, inline image lightboxes, folders, and the system file manager by their destination. Capability and session checks determine the action, not a model-supplied style attribute. Markdown links render as `http(s)` links, as `data-file` references (`file-refs.ts` reads `file://`, percent-encoded, Codex `/G:/…:12` and `#L10-L20` targets), or as plain text when nothing here can open the target.
 - The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
-- API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo.
+- Local images in assistant Markdown resolve against that session's checkout (`cwd`, not the main project root or renderer URL). Sanitized HTML carries inert references; the desktop loads bounded image bytes through the existing session-scoped `fs:readImage` handler, which also rejects symlink escapes. Never loosen the Markdown URI allowlist or CSP to expose filesystem paths. Missing, oversized and denied images show an unavailable caption; web Markdown continues to omit images.
+- Every process the app starts is tracked for the Processes panel without the spawning code knowing about it. `SessionManager` wraps each adapter in `ownedAdapter`, so a ChildProcess created during any adapter call (an SDK's CLI, MCP servers, tool shells) is claimed for that session through Node's `child_process` diagnostics channel; terminals come from `TerminalManager.activity()`; descendants inherit the owner. An app-wide process that a session's call may start lazily must be spawned under `withProcessOwner({ label })` (as the shared GitNexus server and Vesta are), or it is attributed to whichever session asked first. On Windows each session's processes also join a per-session Job Object (no limits, breakaway allowed, never kills), so a process started through a launcher that exits at once (`Start-Process` from a tool shell) is still listed under its session, flagged detached; Mission sessions and Job-owned shells are never put into one, so Mission's own Job ownership is untouched. Processes are named by PID *and* creation time everywhere; ending one re-checks a fresh sample, and the panel is desktop-only (not a remote channel).
+- API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo. Without OS encryption, API keys fall back to obfuscated storage with a warning, but the remote-access identity and enrollment secrets (`remote-host`, `remote-enroll`) stay in memory for that run only: remote access must be paired again after a restart.
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
 - A session forked from one in an app-managed worktree gets a worktree and branch of its own, branched from the source checkout's HEAD; a fork never shares the source's directory, so archiving the source with its worktree cannot delete the fork's. A provider resume id belongs to the directory it ran in, so a same-harness fork that moved is handed the conversation as text instead (`pendingForkContext`).
+- Dictation never hands the renderer a key or a model: the renderer records and encodes a 16 kHz WAV, and main transcribes it with the engine in settings (`dictation:transcribe`, desktop only, not a remote channel). The local engine runs only what it downloaded from the pinned whisper.cpp release (`WHISPER_RELEASE`, `WHISPER_BUILDS`, `LOCAL_MODELS` in `shared/dictation.ts`), and a file gets its final name only after its size and sha256 match; bumping the release means re-pinning every asset's size and digest. Its server holds GPU memory only while in use — the idle timeout, a switch to the cloud engine and quit all stop it.
 - A session's usage counts only the money it spent itself. Turn rows are the itemized ledger and `SessionMeta.usage` is the counter over it; a fork carries the conversation, never the ledger.
 
 ## Mission ownership
 
 [Mission guide](MISSIONS.md) · [status and support matrix](MISSION-STATUS.md) · [specification](MISSION-SPEC-v0.2.md)
 
-Missions are experimental and run only with Pi presets on Windows. The harness matrix above
+Missions are experimental and run only with Pi and Claude Agent SDK presets on Windows. The harness matrix above
 describes ordinary sessions and says nothing about Mission support.
 
 `mission/runtime.ts` composes the privileged coordinator at desktop startup. `MissionService`
@@ -184,24 +331,74 @@ Touch all of these: add an adapter in `src/main/harness/<id>.ts`, register the c
 descriptor/capabilities in `src/shared/harness-meta.ts`, and wire detection/install/doctor in
 `src/main/runtime.ts`. Permission modes must map through the shared model (see the table below).
 
-## Permission mode mapping
+Antigravity and the generic ACP choice share one adapter. Antigravity uses the CLI's strict tool
+policy and sets the vendor session mode explicitly. Plan uses `plan` and denies mutations through
+the ACP callback. Every other mode uses `default`, so each tool call reaches the ACP client policy
+and Ask, Accept edits, Auto and Full access are enforced there. Antigravity only ever receives
+one-time grants (`allow_once`): its "always" options would persist into the CLI's own settings and
+outlive the app's mode. Google permits auto-approval in a session a person drives; what consumer
+sign-in rules out is automated prompting (see below). The app keeps the
+ACP session identifier for resume and receives context usage through `usage_update`.
+The account route only accepts human-driven turns. The app goal loop, Missions and external
+controllers cannot dispatch Antigravity prompts. [Google ACP guidance](https://antigravity.google/docs/ide/extensions/acp/) · [Interactive use and quota](https://github.com/google-antigravity/antigravity-cli/issues/1493#issuecomment-6814901159)
 
-| Mode | Claude | Codex | Pi (extension) | ACP client policy | Native |
+## Permission tiers
+
+Vocs Code owns the meaning of its five tiers; every harness is driven to match them. The contract
+(✅ runs, ❓ asks, ⛔ denied):
+
+| Action | Plan | Ask | Accept edits | Auto | Full access |
 | --- | --- | --- | --- | --- | --- |
-| Ask | `default` + prompt | `untrusted` (every non-read-only command asks), workspace-write | confirm bash/edit/write | prompt | prompt |
-| Accept edits | `acceptEdits` | `untrusted`, auto-accept in-workspace file changes | confirm bash only | allow in-workspace edits | allow edits |
-| Plan | `plan` | read-only sandbox, decline writes | block mutations | reject mutations | read-only tools |
-| Auto | `default` + auto-allow safe | `on-request`, workspace-write with network | confirm dangerous only | allow unless dangerous | allow unless dangerous |
-| Full access | `bypassPermissions` | `never` + danger-full-access | never ask | allow always | allow |
+| Read, search, web read | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Edits inside the project | ⛔ | ❓ | ✅ | ✅ | ✅ |
+| Shell, ordinary | ⛔ | ❓ | ❓ | ✅ | ✅ |
+| Shell, dangerous (`isDangerousCommand`) | ⛔ | ❓ | ❓ | ❓ | ✅ |
+| Anything outside the project (real path, links followed) | ⛔ | ❓ | ❓ | ❓ | ✅ |
+| Third-party MCP tools | ⛔ | ❓ | ❓ | ✅ | ✅ |
+| Vocs Code's own read-only tools (`BUILTIN_READ_ONLY_TOOLS`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping curl into a shell, …) and any write outside the project directory always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`.
+- **The tier wins over vendor settings.** An allow rule in a vendor's own settings cannot skip a
+  tier, and "Allow for session" is kept by the app: keyed per tool name, never covering a dangerous
+  command or anything outside the project, cleared on every tier change, and never handed to the
+  vendor as an "always" or "for session" rule.
+- **Vocs Code's own tools.** `src/shared/builtin-tools.ts` lists the read-only tools of the servers
+  the app ships (vocs-memory, GitNexus, CUA). Trust keys on the server's app-set provenance or its
+  reserved built-in id, never on a name or annotation a server supplies. A tool not on the list
+  follows the tier. Add a new built-in server there and every harness picks it up.
+- **One decision function.** `gateAction` and `requiresPathApproval` in
+  `src/main/harness/permissions.ts`; Pi's extension runs inside Pi and keeps pinned mirrors in
+  `resources/pi/`.
+- **Only offered tiers run.** A harness only ever runs a tier it offers
+  (`capabilities.permissionModes`). The main process refuses an explicit choice it does not offer —
+  on create, on a mode switch and from remote control — and gives an inherited one (saved defaults,
+  a cross-harness fork, a session saved before this rule) the closest stricter tier it does offer,
+  never a looser one (`closestPermissionMode` in `src/shared/harness-meta.ts`). Where a harness can
+  only approximate a tier, `capabilities.permissionModeNotes` says how, beside the tier in the picker.
+
+How each harness is driven (✓ exact, ≈ closest match, — not offered):
+
+| Harness | Plan | Ask | Accept edits | Auto | Full access |
+| --- | --- | --- | --- | --- | --- |
+| Claude | ✓ CLI `plan` + app gate | ✓ app gate on every call (`PreToolUse`, so settings allow rules cannot skip it) | ✓ | ✓ app gate | ✓ app gate allows everything; the CLI stays in `default`, so switching is live |
+| Codex app-server | ✓ read-only sandbox, every request declined | ✓ `untrusted` + app gate | ✓ | ✓ `untrusted` + app gate, workspace-write sandbox with network underneath | ✓ `never` + danger-full-access |
+| Codex exec | ✓ read-only sandbox | — | — | ≈ workspace-write sandbox; cannot ask | ✓ danger-full-access |
+| Cursor | ✓ `plan` + read-only tool allowlist | — | — | ≈ Cursor sandbox; cannot ask | ✓ sandbox off |
+| Pi | ✓ extension gate | ✓ | ✓ | ✓ | ✓ |
+| Native | ✓ mutating tools hidden | ✓ | ✓ | ✓ | ✓ |
+| Antigravity | ✓ vendor `plan` + client policy | ✓ client policy, one-time grants | ✓ | ✓ | ✓ |
+| Generic ACP | ✓ client policy | ≈ the app only sees calls the agent asks about | ≈ | ≈ | ✓ one-time grants |
+
+Known gaps: under ACP the permission request does not name the MCP tool, so Plan cannot tell
+Vocs Code's read-only tools from others and rejects both. Cursor and Codex exec have no approval
+channel, so their Auto is the vendor sandbox, where a dangerous command that stays inside the
+sandbox runs without asking.
 
 ## Security notes
 
 - API keys are encrypted with Electron `safeStorage` and never leave the machine except to the provider you configured.
 - The renderer runs sandboxed with context isolation; all privileged work happens in the main process behind a typed IPC contract.
 - ACP read requests intentionally allow the agent's `readTextFile` callback to open absolute paths, matching the read policy of the other harnesses; approvals gate writes and commands, not reads. Use ACP with an agent you trust if the machine contains sensitive files outside the project.
-- "Full access" disables every prompt and sandbox. Use it only in disposable environments.
+- "Full access" disables permission prompts and sandboxing, not genuine clarification questions. Use it only in disposable environments.
 
 ## Usage analytics
 
@@ -210,6 +407,29 @@ Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping c
 A session counts only what it spent itself, and the transcript is the ledger it is checked against. `fork()` copies its source's turn rows for context but rewrites them as `{ costUsd: 0, carried: true }` and starts the new session at `emptyUsage()`, so one session's dollars are never on two sessions and summed twice by the dashboard. History written before that rule is corrected once on boot: `reconcileForkInheritance` (`src/main/index.ts`) reads each transcript, splits the recorded totals against the rows at or after `createdAt` — the cut is safe because `fork()` is the only path that writes another session's rows and it stamps a fresh `createdAt` — zeroes the carried rows and takes the inherited part back off `meta.usage`, the session snapshot, `recorded[id]` and the day slices that carried it. It **lowers only**: a total that trails its own rows (a provider counter reset) is left alone rather than raised. The sweep is gated by `AnalyticsFile.version` 2 → 3, and the version is written only when the whole pass succeeds, so an interrupted run retries next boot.
 
 The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a time and scopes every tab to it. All-time views come from the session records; bounded ranges (7, 30, 90 days) come from the day slices through the shared `src/shared/usage-rollup.ts`, and the summary also carries the preceding window so tiles can show period-over-period change. Days recorded before slices existed are reconstructed once on load from the sessions last active that day, in proportion to their lifetime usage (per-tool and per-file counts are shared out from the all-time maps by call volume); those days are flagged `estimated` and the dashboard says so. A legacy day with no matching session keeps its usage in the totals only and is labelled "unattributed" until it ages out of the bounded ranges. Series colours come from `CHART_SERIES` in `src/shared/themes.ts`, a categorical palette validated for colour-vision separation on every theme surface (the theme hues themselves are UI accents and fail those checks); single-series charts use the theme accent.
+
+### User-entered input tokens
+
+Tokens → **User input (est.)** measures ordinary-session message text before file instructions,
+app instructions, knowledge or fork context are appended. It counts typed/pasted text once per
+submission (including queued, steering and edited/resubmitted messages), using a rough estimate of
+one token per four Unicode code points, rounded up per message. It is not a model tokenizer or a
+billing measurement; language and code affect accuracy. Images, attached files, goal configuration,
+generated goal/Mission/subagent prompts, Mission mailbox input and per-subagent panel steering are
+not measured. Existing **Input** remains the provider's uncached input counter; cache tokens are
+reported separately.
+
+The host stamps an owner/session id, submission id, timestamp and estimate on the transcript item.
+`AnalyticsStore` persists the receipt ids atomically with UTC day counters. Replaying a receipt or
+copying it into a fork never counts it twice; an explicit edit/resend gets a new receipt. Receipt-only
+recovery and strict analytics flushing before a transcript rewind, clear or deletion protect earlier
+submission counts even while startup replay is still pending. After startup,
+transcripts are checked asynchronously for receipts whose analytics write was lost; this scan
+cannot use session timestamps as a watermark because the transcript may outlive an unflushed index.
+Legacy unmarked messages are not guessed to be human-authored: tracking starts with this update.
+The metric is summed from day buckets for every date range, including all recorded days for all time
+(regardless of chart sampling limits), and never enters `UsageTotals`, `totalTokens`, prices, cache
+rates or provider-token mix charts.
 
 ## Known limitations
 
@@ -221,3 +441,54 @@ The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a
 - ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
 - The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.
 - The Subagents panel covers pi and Claude runs; `subagentSupport` in `src/shared/subagents.ts` is the one answer for what each harness offers. Claude's per-call dollars are estimated from the shared pricing table (its SDK reports tokens, not cost), and its SDK can interrupt a turn but not one child, so the panel offers it no per-run stop/steer and no Agents view — that view edits `.pi/agents`, which a Claude session does not run with. Its **Models** view instead lists the agent types with the model each will run on, and edits the model of a definition the project already has; it never writes one, because a definition named after a built-in replaces that built-in rather than adjusting it.
+
+### Vocs account and Hub catalog
+
+`main/vocs-account.ts` owns an explicit account flow independently of harnesses. Its realm is
+production (`auth.vocs.io` issuer, `mcp.vocs.io` catalog) unless main is launched with
+`VOCS_CODE_ACCOUNT_REALM=staging`; the renderer never chooses an issuer or catalog, and a
+catalog that names the other realm is rejected.
+It configures the native OAuth controller with a static public client and fixed loopback callback,
+keeps five-minute access tokens only in main-process memory, and validates the exact Hub catalog
+contract before returning descriptive state. Each cancellation/sign-out/expiry invalidates its
+generation and clears catalog data; refreshing never treats stale metadata as authorization.
+
+**Kept sign-in.** A realm offers "Keep me signed in on this computer" only when its config has a
+`deviceClientId`: staging does; production does not until the owner turns
+`NATIVE_DEVICE_GRANTS_ENABLED` on there, and enabling it then means setting `deviceClientId` for
+production in `VOCS_REALMS` (`main/vocs-account.ts`). Where it is offered the box is on by
+default and signs in with `vocs-code-device` and a platform-only `device_name`; off or unoffered
+it is the temporary `vocs-code` flow. Without a real keychain (including Linux
+`basic_text`/`unknown`) the device is still enrolled (owner decision 10), its refresh token stays in
+memory and rotates there for this run, and the device is revoked when the app quits; the UI says
+the sign-in ends when Vocs Code closes. An `enc:` record the weak backend cannot decrypt (keyring
+not up yet) is left on disk untouched. The device's rotating refresh token is the
+only thing kept, in `SecretStore` under `vocs-account:<realm>` as
+`{v:1,issuer,clientId,resource,deviceId,refreshToken,deviceExpiresAt}`. Those ids are
+`keychainOnly`: read back only as `enc:` (a planted plain or `b64:` value is removed at load) and
+never reachable as a provider id (`secrets:*`, `providers:save`/`providers:delete`, and every
+provider-keyed secret getter, refuse `vocs-account:*`, `remote-host`, `remote-enroll`). On load the record must match the pinned realm
+exactly; it never chooses where a token is sent, and anything else is removed unused. The OAuth
+controller strips refresh and device fields before the MCP SDK parses a token response, so the
+SDK's own refresh logic never sees a refresh token, and it never re-sends a consumed authorization
+code, so the issuer's first answer (e.g. `fresh_sign_in_required`) is the one shown. A device
+exchange cancelled while it answers (or after it answered, before the grant was handed over) still
+has its grant revoked; its body is read bounded to 64 KB. Startup restore runs after the
+window opens; restore, Retry and Refresh share one flight per session, so concurrent clicks send
+one refresh grant. The rotated token is written to the vault before the new access token is used;
+a failed write keeps it in memory, says so, and revokes the device when the app quits (bounded,
+2 s), as for a machine without a keychain. A Hub 401 renews once before the sign-in is shown connected. `invalid_grant`, or any unknown
+outcome after the request may have been sent, ends the sign-in and clears the vault (a replayed
+token revokes the device server-side). Rolling the server flag back makes refresh answer
+`invalid_request`, which likewise ends the device on the desktop. A failure before sending
+(offline, DNS, refused, TLS) or `temporarily_unavailable` (429 rate limit, 503 storage) keeps the
+vault and shows `offline` with Retry. Sign-out clears the vault first, then revokes the refresh
+token; a rotation that answers after sign-out is revoked, never stored. Quitting keeps the vault.
+
+The five `vocsAccount:*` requests accept no URLs, credentials or arbitrary configuration; sign-in
+takes only `{ persist: boolean }`. Both the transport-agnostic registry and Electron
+owner-main-frame boundary reject remote/agent callers. Main owns expiry and request cancellation;
+renderer revisions/generations prevent stale UI results. Registry shutdown disposes the broker
+(memory only, plus the bounded revoke above). This does not mutate MCP configuration, grant tool access or require login for
+local editing. Settings presents the
+catalog read-only; live desktop acceptance is documented in `ACCOUNT-STAGING-TEST.md`.

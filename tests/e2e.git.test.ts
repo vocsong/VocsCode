@@ -4,12 +4,14 @@
  * markdown body and metadata; the issue dialog keeps working, comment counts included. Both previews
  * pull the conversation's comments on open and render them below the description. The PR
  * table keeps the number in its own column at the default panel width and when the panel is wide.
+ * A transcript link opens the Git panel in Standard and Zen and shows a merged PR outside the recent list.
  * The row's New session action confirms first in a dialog carrying the review template, editable
  * before the session starts on the repo; the issue row does the same with the fix template. That
  * turn is not asserted, since no provider key is configured.
  * The Branches view runs against a real bare remote: a branch pushed and then deleted server-side
  * reads as live until Refresh re-syncs remote-tracking refs, and says "Deleted on origin" after.
- * The session is seeded on disk so no harness and no provider key is involved. Requires
+ * Switching sessions keeps loaded Git rows visible and tracks the current linked worktree.
+ * Sessions are seeded on disk so no harness and no provider key is involved in switching. Requires
  * `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
@@ -20,6 +22,7 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { UiModeId } from '../src/shared/ui-modes';
 import { expectQuietWindow, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -46,9 +49,24 @@ const PR_VIEW_JSON =
 const ISSUE_VIEW_JSON =
   '{"comments":[{"author":{"login":"octocat"},"body":"Me **too**.","createdAt":"2024-02-03T04:05:06Z",' +
   '"url":"https://example.com/acme/repo/issues/12#issuecomment-1"}]}';
+const LINKED_PR_URL = 'https://github.com/acme/repo/pull/560';
+const LINKED_ISSUE_URL = 'https://github.com/acme/repo/issues/12';
+const LINKED_PR_VIEW_JSON = JSON.stringify({
+  number: 560,
+  title: 'Ship the usage toggle',
+  state: 'MERGED',
+  url: LINKED_PR_URL,
+  headRefName: 'feature/usage-toggle',
+  baseRefName: 'develop',
+  body: 'Adds the **usage toggle**.',
+  comments: [{ author: { login: 'reviewer' }, body: 'Verified in Electron.' }]
+});
 
 const GH_SH = [
   '#!/bin/sh',
+  'case "$1 $2 $3" in',
+  `  'pr view ${LINKED_PR_URL}'|'pr view 560') echo '${LINKED_PR_VIEW_JSON}'; exit 0 ;;`,
+  'esac',
   'case "$1 $2" in',
   `  'pr list') echo '${PR_JSON}' ;;`,
   `  'pr view') echo '${PR_VIEW_JSON}' ;;`,
@@ -61,21 +79,32 @@ const GH_SH = [
 
 const GH_CMD = [
   '@echo off',
+  `if /i "%~1 %~2 %~3"=="pr view ${LINKED_PR_URL}" goto linked_pr`,
+  'if /i "%~1 %~2 %~3"=="pr view 560" goto linked_pr',
   `if /i "%~1"=="pr" if /i "%~2"=="list" echo ${PR_JSON}`,
   `if /i "%~1"=="pr" if /i "%~2"=="view" echo ${PR_VIEW_JSON}`,
   `if /i "%~1"=="issue" if /i "%~2"=="list" echo ${ISSUE_JSON}`,
   `if /i "%~1"=="issue" if /i "%~2"=="view" echo ${ISSUE_VIEW_JSON}`,
   'if /i "%~1"=="auth" if /i "%~2"=="status" echo Logged in to github.com account octocat (keyring)',
+  'exit /b 0',
+  ':linked_pr',
+  `echo ${LINKED_PR_VIEW_JSON}`,
   'exit /b 0'
 ].join('\r\n');
 
 /**
  * Seeds a repository and session with the fake gh, launches the app and lands on the Git tab.
- * `seedRepo` runs after the initial commit, still before the app starts, so a test can add a remote
- * and branches for the panel to read.
+ * `seedRepo` runs after the initial commit so a test can add remotes, branches, and sessions.
  */
 async function seedAndLaunch(
-  { tag, panelWidth, seedRepo }: { tag: string; panelWidth: number; seedRepo?: (project: string, git: (...args: string[]) => void) => void }
+  { tag, panelWidth, assistantText = 'Hi', uiMode, seedRepo, windowBounds }: {
+    tag: string;
+    panelWidth: number;
+    windowBounds?: { x: number; y: number; width: number; height: number };
+    assistantText?: string;
+    uiMode?: UiModeId;
+    seedRepo?: (project: string, git: (...args: string[]) => void) => Pick<SessionMeta, 'title' | 'cwd' | 'worktreeBranch'>[] | void;
+  }
 ): Promise<{ app: ElectronApplication; win: Page }> {
   const tmp = path.join(os.tmpdir(), `vocs-code-git-${Date.now()}-${tag}`);
   const userData = path.join(tmp, 'userData');
@@ -93,10 +122,10 @@ async function seedAndLaunch(
   git('init', '-q');
   git('add', '-A');
   git('-c', 'user.email=e2e@example.com', '-c', 'user.name=e2e', 'commit', '-qm', 'init');
-  seedRepo?.(project, git);
+  const additionalSessions = seedRepo?.(project, git) ?? [];
 
   // A dismissed setup banner keeps the panel to its tables.
-  await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { gitSetupSkipped: [project], panelWidth }));
+  await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { gitSetupSkipped: [project], panelWidth, uiMode, ...(windowBounds ? { windowBounds } : {}) }));
 
   const sid = 's_git_e2e';
   const session = {
@@ -113,9 +142,12 @@ async function seedAndLaunch(
   } as SessionMeta;
   const items: TranscriptItem[] = [
     { id: 'u1', kind: 'user', ts: Date.now(), text: 'Hello' },
-    { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'Hi' }
+    { id: 'a1', kind: 'assistant', ts: Date.now(), text: assistantText }
   ];
-  await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+  const sessions = [session, ...additionalSessions.map((meta, i) => ({
+    ...session, ...meta, id: `${sid}-${i}`, updatedAt: session.updatedAt - i - 1
+  }))];
+  await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
   await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
   await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
 
@@ -126,7 +158,8 @@ async function seedAndLaunch(
     if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|OPENCODE|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
     env[k] = v;
   }
-  env.PATH = `${bin}${path.delimiter}${env.PATH ?? ''}`;
+  const pathKey = isWin ? Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'PATH' : 'PATH';
+  env[pathKey] = `${bin}${path.delimiter}${env[pathKey] ?? ''}`;
   env.VOCS_CODE_USER_DATA = userData;
 
   const packaged = process.env.HARNESS_E2E_EXE;
@@ -137,13 +170,20 @@ async function seedAndLaunch(
   // The suite runs off-screen and inactive so it does not disturb the desktop; assert the window itself.
   await expectQuietWindow(app);
 
-  await win.locator('.panel-tab', { hasText: 'Git' }).click();
+  const gitTab = uiMode === 'zen' ? win.locator('.panel-tab[title="Git"]') : win.locator('.panel-tab', { hasText: 'Git' });
+  await gitTab.click();
   return { app, win };
 }
 
 /** Lands on the PR view of a seeded repo. */
-async function launchGitPanel(panelWidth: number): Promise<{ app: ElectronApplication; win: Page }> {
-  const { app, win } = await seedAndLaunch({ tag: `pr-${panelWidth}`, panelWidth });
+/**
+ * The window GitHub's Windows runners can show: their 1024x768 screen. Beside the sidebar and an
+ * open Git panel the session pane is then about 320px wide, which squeezes the header title.
+ */
+const RUNNER_WINDOW = { x: 0, y: 0, width: 1024, height: 728 };
+
+async function launchGitPanel(panelWidth: number, windowBounds?: typeof RUNNER_WINDOW): Promise<{ app: ElectronApplication; win: Page }> {
+  const { app, win } = await seedAndLaunch({ tag: `pr-${panelWidth}`, panelWidth, windowBounds });
   await fs.mkdir(shots, { recursive: true });
   await win.getByTitle('Pull requests on GitHub (via gh)').click();
   await win.getByRole('button', { name: 'Read pull request #7: Ship the widget' }).waitFor({ timeout: 30_000 });
@@ -179,6 +219,50 @@ async function launchBranchesPanel(): Promise<{ app: ElectronApplication; win: P
 }
 
 describe.runIf(enabled)('git panel PR details', () => {
+  it.each(['standard', 'zen'] as const)('opens the linked pull request from a transcript with the Git panel closed in %s mode', async (uiMode) => {
+    const { app, win } = await seedAndLaunch({
+      tag: `pr-link-${uiMode}`,
+      panelWidth: 420,
+      uiMode,
+      assistantText: `Merged [#560](${LINKED_PR_URL}) into develop. See [issue #12](${LINKED_ISSUE_URL}).`,
+      seedRepo: (_project, git) => git('remote', 'add', 'origin', 'https://github.com/acme/repo.git')
+    });
+    await app.evaluate(({ shell }) => {
+      const opened: string[] = [];
+      (globalThis as unknown as { __openedGitLinks: string[] }).__openedGitLinks = opened;
+      shell.openExternal = async (url: string) => void opened.push(url);
+    });
+    const opened = () => app.evaluate(() => (globalThis as unknown as { __openedGitLinks: string[] }).__openedGitLinks);
+
+    expect(await win.locator('html').getAttribute('data-ui')).toBe(uiMode);
+    if (uiMode === 'zen') {
+      const panel = win.locator('aside.panel');
+      if (await panel.getAttribute('data-pinned') !== null) await win.getByRole('button', { name: 'Unpin side panel' }).click();
+      await win.getByText('Hello', { exact: true }).click();
+      await expect.poll(async () => (await panel.boundingBox())?.width ?? Infinity).toBeLessThan(100);
+    } else {
+      const closePanel = win.getByRole('button', { name: 'Close panel' });
+      await closePanel.click();
+      await closePanel.waitFor({ state: 'hidden' });
+    }
+    await win.getByRole('link', { name: 'issue #12', exact: true }).click();
+    await expect.poll(opened, { timeout: 10_000 }).toEqual([LINKED_ISSUE_URL]);
+
+    await win.getByRole('link', { name: '#560', exact: true }).click();
+    const dialog = win.getByRole('dialog', { name: '#560 Ship the usage toggle', exact: true });
+    await dialog.waitFor({ timeout: 10_000 });
+    expect(await dialog.getByText('Merged', { exact: true }).isVisible()).toBe(true);
+    expect(await dialog.locator('.pr-dialog-body strong').innerText()).toBe('usage toggle');
+    await dialog.getByText('Verified in Electron.').waitFor({ timeout: 10_000 });
+    expect(await opened()).toEqual([LINKED_ISSUE_URL]);
+
+    await dialog.getByRole('button', { name: 'Open on GitHub' }).click();
+    await expect.poll(opened, { timeout: 10_000 }).toEqual([LINKED_ISSUE_URL, LINKED_PR_URL]);
+    await dialog.waitFor({ state: 'hidden', timeout: 10_000 });
+    await win.getByRole('button', { name: 'Read pull request #7: Ship the widget' }).waitFor({ timeout: 10_000 });
+    await app.close();
+  }, 180_000);
+
   it('opens a pull request dialog from its row and keeps the issue dialog working', async () => {
     const { app, win } = await launchGitPanel(420);
 
@@ -241,7 +325,8 @@ describe.runIf(enabled)('git panel PR details', () => {
 
 describe.runIf(enabled)('git panel PR review session', () => {
   it('confirms the review prompt in a dialog, then starts the session on the repo', async () => {
-    const { app, win } = await launchGitPanel(420);
+    // A runner-sized window: the new session's name must stay visible in a squeezed header.
+    const { app, win } = await launchGitPanel(420, RUNNER_WINDOW);
 
     // The ⋯ menu is gone: the row keeps the GitHub link and gains the New session action.
     expect(await win.locator('.pr-row .branch-actions .btn').count()).toBe(2);
@@ -281,6 +366,43 @@ describe.runIf(enabled)('git panel PR review session', () => {
 });
 
 describe.runIf(enabled)('git panel branch state', () => {
+  it.each<UiModeId>(['standard', 'zen'])('keeps loaded branches visible while switching sessions in %s', async (uiMode) => {
+    const worktreeBranch = 'feature/session-switch';
+    const { app, win } = await seedAndLaunch({
+      tag: `switch-${uiMode}`,
+      panelWidth: 420,
+      uiMode,
+      seedRepo: (project, git) => {
+        const cwd = path.join(path.dirname(project), 'linked-worktree');
+        git('worktree', 'add', '-q', '-b', worktreeBranch, cwd);
+        return [{ title: 'Same checkout', cwd: project }, { title: 'Linked worktree', cwd, worktreeBranch }];
+      }
+    });
+    const switchTo = async (title: string) => {
+      const row = win.getByTestId('session-row').filter({ hasText: title });
+      await (uiMode === 'zen' ? row.locator('.session-pin') : row).click();
+      await expect.poll(() => win.getByTestId('session-title').getAttribute('title')).toBe(title);
+    };
+    const table = win.locator('.panel-top .branches-table');
+    const currentBranch = table.locator('.branch-row').filter({ has: win.getByText('Current', { exact: true }) }).locator('.branch-name > .mono');
+    const initialBranch = await currentBranch.innerText({ timeout: 30_000 });
+    const initialTable = await table.elementHandle();
+
+    await switchTo('Same checkout');
+    expect(await initialTable.evaluate((node) => node.isConnected)).toBe(true);
+    expect(await currentBranch.innerText()).toBe(initialBranch);
+
+    await switchTo('Linked worktree');
+    await expect.poll(() => currentBranch.innerText({ timeout: 1_000 }), { timeout: 30_000 }).toBe(worktreeBranch);
+    const worktreeTable = await table.elementHandle();
+
+    await switchTo('Git panel');
+    expect(await worktreeTable.evaluate((node) => node.isConnected)).toBe(true);
+    expect(await currentBranch.innerText()).toBe(initialBranch);
+
+    await app.close();
+  }, 180_000);
+
   it('re-syncs on refresh and marks a branch deleted on the server', async () => {
     const { app, win } = await launchBranchesPanel();
     const ghostRow = win.locator('.branch-row', { hasText: 'feature/ghost' });
@@ -288,6 +410,7 @@ describe.runIf(enabled)('git panel branch state', () => {
     // The report's symptom: the local ref outlives the server's branch, so the stale row reads as live.
     expect(await ghostRow.innerText()).toContain('synced');
     expect(await ghostRow.innerText()).not.toContain('Deleted on origin');
+    expect(await ghostRow.locator('.ahead').innerText()).toBe('↑1');
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'git-panel-05-branches-stale.png') });
 
@@ -296,6 +419,7 @@ describe.runIf(enabled)('git panel branch state', () => {
     // The branch is still there — only its server copy is gone, and the panel says so instead of hiding it.
     expect(await win.locator('.branch-row', { hasText: 'feature/ghost' }).count()).toBe(1);
     expect(await ghostRow.innerText()).not.toContain('synced');
+    expect(await ghostRow.locator('.ahead').innerText()).toBe('↑1');
     await win.screenshot({ path: path.join(shots, 'git-panel-06-branches-gone.png') });
 
     await app.close();
@@ -304,7 +428,7 @@ describe.runIf(enabled)('git panel branch state', () => {
 
 describe.runIf(enabled)('git panel issue session', () => {
   it('confirms the fix prompt in a dialog, then starts the session on the repo', async () => {
-    const { app, win } = await launchGitPanel(420);
+    const { app, win } = await launchGitPanel(420, RUNNER_WINDOW);
 
     await win.getByTitle('Issues on GitHub (via gh)').click();
     const issueRow = win.getByRole('button', { name: 'Read issue #12: Widget is wobbly' });

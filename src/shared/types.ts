@@ -3,9 +3,13 @@
  * Keep this file free of Node/Electron/DOM imports.
  */
 import type { TerminalSettings } from './terminal';
-import type { ThemeId } from './themes';
+import type { PaletteId, ThemeMode } from './themes';
+import type { TypographySettings } from './typography';
+import type { UiModeId } from './ui-modes';
 import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
+import type { IntelligenceSettings } from './intelligence';
+import type { DictationSettings } from './dictation';
 import type { ReliabilityReport } from './analytics/reliability';
 import type { CodeOutputReport } from './analytics/code-output';
 import type { MissionOwnership } from './mission';
@@ -30,12 +34,18 @@ export interface SubagentRunUpdate {
   error?: string;
 }
 
-export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
+export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'antigravity' | 'native';
 
 /** App-level permission modes, mapped per harness (see harness-meta.ts). */
 export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** Provider-observed speed, distinct from the user's requested preference. */
+export interface FastModeStatus {
+  state: 'off' | 'requested' | 'on' | 'unavailable' | 'cooldown';
+  detail?: string;
+}
 
 export type AutoCompactionThreshold = '50%' | '75%' | '90%' | '100k' | '250k' | '500k' | '750k' | '1m';
 
@@ -175,6 +185,13 @@ export interface McpServerDef {
   description?: string;
   /** A master switch independent of the per-repo ones. Built-ins use it for opt-in (Cua). */
   disabled?: boolean;
+  /**
+   * Provenance: which of the app's own servers this definition is. Set only where the app builds
+   * its built-in definitions; every reader of a user or repository definition constructs a fresh
+   * object and never copies it, so no id, label or tool annotation can supply it. Trust that only a
+   * built-in may have (the memory server's read-only tools) keys on this, never on `id`.
+   */
+  builtin?: string;
 }
 
 /** Ids of the MCP servers this app ships itself. A same-named user entry is not theirs to edit, so it is ignored everywhere. */
@@ -267,7 +284,8 @@ export type McpScope = 'global' | 'repo' | 'builtin';
 export type McpSupport = 'none' | 'inject' | 'client' | 'inherit';
 
 /** Why a defined server is not part of a session's effective set. */
-export type McpSkipReason = 'disabled' | 'not-enabled' | 'shadowed' | 'harness-filtered' | 'not-injected';
+/** `reserved`: the name folds onto a built-in's. `duplicate`: it folds onto another server's in the same scope. */
+export type McpSkipReason = 'disabled' | 'not-enabled' | 'shadowed' | 'harness-filtered' | 'not-injected' | 'reserved' | 'duplicate';
 
 /** One row of the effective set for a session. */
 export interface McpEffectiveEntry {
@@ -325,8 +343,17 @@ export interface McpProjectInfo {
   builtin: McpBuiltinInfo[];
   detected: McpStoreInfo[];
   effective: McpEffectiveEntry[];
+  /** User and repository servers that are never loaded because of their name, with the reason to show. */
+  rejected: McpRejectedServer[];
   harness: HarnessId;
   support: McpSupport;
+}
+
+/** A defined server refused for its name: it folds onto a built-in's, or onto another server's. */
+export interface McpRejectedServer {
+  id: string;
+  scope: 'global' | 'repo';
+  reason: string;
 }
 
 /** Result of probing one server with the app's own MCP client ("Test connection"). */
@@ -345,9 +372,16 @@ export interface SessionConfig {
   model?: ModelRef;
   /** null explicitly omits effort; undefined inherits the app preference. Survives restart. */
   effort?: EffortLevel | null;
+  /** Opt-in premium inference speed; never changes reasoning effort. Absent means standard. */
+  fastMode?: boolean;
   permissionMode: PermissionMode;
   /** Run in an isolated git worktree under .vocs-code/worktrees. */
   useWorktree?: boolean;
+  /**
+   * Prefix of the branch a new worktree starts on (`feat` → `feat/<slug>`), stored without the
+   * trailing slash; absent means `vocscode`. Forks of the session reuse it. See shared/branch-prefix.ts.
+   */
+  branchPrefix?: string;
   /** ACP agent preset id (for harness 'acp'). */
   acpAgent?: string;
   /** Free-form system prompt addition where supported. */
@@ -551,6 +585,8 @@ export interface UsageTotals {
 
 /** The numeric usage counters shared by day buckets and their per-dimension slices. */
 export interface UsageCounters {
+  /** Estimated tokens of newly submitted user text, counted once; never part of billed totals. */
+  userInputTokens: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -778,15 +814,13 @@ export interface GoalState {
 
 export interface SessionMeta {
   id: string;
+  /** Stable provenance for local chat imports; also prevents importing the same conversation twice. */
+  importedFrom?: { source: 'claude' | 'codex'; sessionId: string };
   title: string;
-  /**
-   * The title is still the truncated-prompt stand-in, so the one-shot title model may replace it.
-   * A session created from a dialog prompt or a goal is named before its first message is sent, so
-   * the title alone cannot say whether anyone chose it: without this flag such a session keeps its
-   * six-word cut of the prompt forever. Cleared by a real title, by a rename, or by `title` given
-   * at creation. Absent on sessions written before it existed.
-   */
+  /** The title is a temporary stand-in, eligible for opening-prompt naming. */
   titleIsPlaceholder?: boolean;
+  /** Whether the app owns the title. Absent for older titles of unknown origin. */
+  titleIsAutomatic?: boolean;
   createdAt: number;
   updatedAt: number;
   /**
@@ -803,6 +837,8 @@ export interface SessionMeta {
    * the fork starts its counters at zero.
    */
   forkedFrom?: string;
+  /** Host-allocated controller creation receipt; never accepted from ordinary create/patch. */
+  controlCreation?: { operationId: string; requestHash: string };
   /** Host-managed Mission identity; absent for ordinary sessions. Children are not sidebar rows. */
   mission?: MissionOwnership;
   /** Effective working directory (worktree path if isolated), never the Mission integration view. */
@@ -816,6 +852,15 @@ export interface SessionMeta {
   statusDetail?: string;
   /** User-picked display label for the status badge; shown instead of the status name until cleared. */
   statusLabel?: string;
+  /**
+   * Epoch ms a turn ended while nobody was looking at this session (not on screen in the focused
+   * window). Present means "done · not viewed"; cleared once the session is viewed or the user sends.
+   */
+  unseenAt?: number;
+  /** The unviewed turn behind `unseenAt` failed; the session itself is usually back to idle by then. */
+  unseenFailed?: boolean;
+  /** Epoch ms this session last counted as viewed; the activity tray's Recent list orders by it. */
+  lastViewedAt?: number;
   harnessRef: HarnessRef;
   /**
    * Set when the harness has to be handed the conversation on its next message: a fork into another
@@ -845,6 +890,8 @@ export interface SessionMeta {
   /** Current model as reported by the harness (may differ from config after live switch). */
   activeModel?: ModelRef;
   activeEffort?: EffortLevel;
+  /** Reset on restart/fork; a saved preference is not proof of an active provider tier. */
+  fastModeStatus?: FastModeStatus;
   /**
    * Commands the running harness accepts itself — Claude's slash command names and their aliases, as
    * advertised by the CLI. Reported by the adapter at startup and on every later change, so `/goal`
@@ -918,6 +965,9 @@ export type TranscriptItem =
        *  budget; the count is what the bubble reports as not shown. */
       imagesOmitted?: number;
       queuedAs?: SendMode;
+      /** Host-measured original message text, before prompt assembly. Absent on legacy/automated input.
+       * The receipt survives replay; its owner prevents copied fork history being counted again. */
+      userInput?: { id: string; sessionId: string; ts: number; tokens: number };
     }
   | {
       id: string;
@@ -1025,6 +1075,10 @@ export interface ApprovalRequest {
   changes?: FileChange[];
   options: ApprovalOption[];
   questions?: ApprovalQuestion[];
+  /** Raw extension dialogs may need an exact scalar response and cannot carry extra context. */
+  supportsQuestionComment?: boolean;
+  /** Optional serialized response budget for a single-question RPC envelope. */
+  maxQuestionResponseLength?: number;
   createdAt: number;
   /** Related transcript tool item id, when known. */
   toolItemId?: string;
@@ -1063,6 +1117,8 @@ export interface SessionEventEnvelope {
   sessionId: string;
   event: SessionEvent;
   ts: number;
+  /** Host-only binding for an exclusively admitted controller turn; not a completion receipt. */
+  control?: { operationId: string; inputId: string; runtimeId: string; turnId?: string };
   /** Monotonic across every event this desktop pushes. A remote client takes a transcript snapshot
    *  together with the counter it reflects (`sessions:transcriptPage`'s `seq`) and applies only
    *  later events, so a follow-up stream cannot double text the snapshot already has. Absent on
@@ -1070,12 +1126,8 @@ export interface SessionEventEnvelope {
   seq?: number;
 }
 
-/** Subagent spend attributed to the model that produced it. */
-export interface SubagentCost {
-  provider: string;
-  model: string;
-  costUsd: number;
-}
+/** Subagent spend to move off the parent model; a null pair explicitly means unknown identity. */
+export type SubagentCost = { costUsd: number } & (ModelRef | { provider: null; model: null });
 
 /** A finished pi-subagents run, reported to the app so its work is counted and attributed. */
 export interface SubagentCompletion {
@@ -1083,8 +1135,8 @@ export interface SubagentCompletion {
   description?: string;
   /** Terminal pi-subagents status: completed, error, stopped, aborted. */
   status: string;
-  /** The model the run actually used, when it could be resolved. */
-  model?: ModelRef;
+  /** The model the run actually used; null explicitly means unknown, never the parent's model. */
+  model?: ModelRef | null;
   /** Internal tool calls the run made; these never enter the parent transcript. */
   toolUses: number;
   costUsd?: number;
@@ -1109,8 +1161,10 @@ export interface HarnessAvailability {
   version?: string;
   binaryPath?: string;
   detail?: string;
-  /** Whether the harness appears to be authenticated / has credentials. */
+  /** Whether the runtime reports a sign-in / has credentials; not a paid model-access check. */
   authenticated?: boolean | 'unknown';
+  /** Reported login method or configured app API credentials; not proof of billing or key validity. */
+  authMethod?: 'subscription' | 'api-key' | 'other';
   installHint?: string;
   /** Set when a binary resolved; `bundled` and `settings` are the sources an app install cannot replace. */
   source?: HarnessBinarySource;
@@ -1175,6 +1229,11 @@ export interface HarnessCapabilities {
   systemPrompt: boolean;
   /** Which app-level permission modes are meaningful. */
   permissionModes: PermissionMode[];
+  /**
+   * Where this harness can only approximate a tier, what differs from the tier's Vocs Code meaning.
+   * Shown beside the tier wherever it is picked.
+   */
+  permissionModeNotes?: Partial<Record<PermissionMode, string>>;
   /** Whether model selection is provider-scoped (native) or harness-provided list. */
   modelSource: 'harness' | 'providers' | 'acp-config';
 }
@@ -1216,16 +1275,31 @@ export interface FolderSessionDefaults {
   effort?: EffortLevel;
   permissionMode?: PermissionMode;
   useWorktree?: boolean;
+  /** Branch prefix for the folder's worktrees, without the trailing slash. */
+  branchPrefix?: string;
   /** ACP agent id, for harness `acp`. */
   acpAgent?: string;
 }
+
+/** Sidebar session list layout: `folders` groups rows under project folders; `recent` is one flat list, most recent first. */
+export type SidebarView = 'folders' | 'recent';
 
 export interface AppSettings {
   /** User-approved execution presets. Missing on older settings means Mission is unconfigured. */
   mission?: MissionConfig;
   missionProjects?: Record<string, MissionProjectOverride>;
   version: 1;
-  theme: ThemeId;
+  /**
+   * Light/dark mode: System, Light or Dark (shared/themes.ts). Kept under the `theme` key so
+   * settings.json stays readable by older builds; a legacy palette id here is migrated on load.
+   */
+  theme: ThemeMode;
+  /** Color palette, applied in the mode above. Absent means Default. */
+  palette?: PaletteId;
+  /** Text & fonts: interface size, font roles, text sizes, line spacing, transcript width (shared/typography.ts). */
+  typography?: TypographySettings;
+  /** Interface layout, independent of the color theme (shared/ui-modes.ts). Absent means Standard. */
+  uiMode?: UiModeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   /** Remote access (docs/REMOTE-ACCESS.md): outbound relay connection, off by default. */
@@ -1233,6 +1307,8 @@ export interface AppSettings {
   defaultEffort?: EffortLevel;
   /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
   autoCompactionThreshold?: AutoCompactionThreshold;
+  /** Days of recent-use protection for /housekeep; 0 disables only the age guard. */
+  housekeepRecentDays?: number;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
   /**
    * New-session choices remembered per project folder; a folder with no record starts on the
@@ -1251,6 +1327,7 @@ export interface AppSettings {
     dsh?: string;
     npx?: string;
     gemini?: string;
+    agy?: string;
     editor?: string;
     /** Explicit `cua-driver` path (empty = auto-detect on PATH or in Cua's install dirs). */
     cua?: string;
@@ -1292,10 +1369,14 @@ export interface AppSettings {
   folderStyles?: Record<string, FolderStyle>;
   /** User-added labels offered in the status-label picker alongside the built-in statuses. */
   customLabels?: string[];
+  /** User-added worktree branch prefixes (no trailing slash), offered in every folder after the built-in ones. */
+  customBranchPrefixes?: string[];
   /** Manual sidebar order for project folders; roots not listed sort alphabetically after. */
   folderOrder?: string[];
   /** Project roots whose sidebar folder block is collapsed. */
   collapsedFolders?: string[];
+  /** How the sidebar lists sessions: grouped under their folders, or one list across folders by recency. */
+  sidebarView?: SidebarView;
   /** Extra keyboard shortcuts keyed by canonical accelerator (e.g. 'Ctrl+Alt+A'); see shared/shortcuts.ts. */
   customShortcuts?: Record<string, ShortcutCommand>;
   /**
@@ -1317,6 +1398,10 @@ export interface AppSettings {
   gitSetupSkipped?: string[];
   /** Layer 2 project knowledge: always-on digest priming and automatic distillation after git events. */
   knowledge?: KnowledgeSettings;
+  /** Memory lifecycle, the tool gateway, project collections and the optional graph provider. */
+  intelligence?: IntelligenceSettings;
+  /** Voice to text in the composer: cloud transcription or whisper.cpp on this machine. */
+  dictation?: DictationSettings;
 }
 
 export interface GitFileStatus {
@@ -1410,7 +1495,7 @@ export interface GitPrInfo {
   title?: string;
 }
 
-/** One pull request of the session's GitHub repo, as `gh pr list` reports it (PR view of the Git panel). */
+/** One GitHub pull request shown in the Git panel. */
 export interface GitPullRequest {
   number: number;
   title: string;
@@ -1442,6 +1527,11 @@ export interface GitPullRequestList {
   ghMissing?: boolean;
   error?: string;
 }
+
+/** The PR and conversation loaded on demand when a transcript links to it. */
+export type GitPullRequestDetail =
+  | { pr: GitPullRequest; comments: GitComment[]; error?: never }
+  | { pr?: never; comments?: never; error: string };
 
 /** One issue of the session's GitHub repo, as `gh issue list` reports it (Issues view of the Git panel). */
 export interface GitIssue {
@@ -1534,7 +1624,7 @@ export interface RemoteState {
   onlineClients: string[];
   /** Mirrors the view-only policy so both shells can hide write controls without a round trip. */
   viewOnly: boolean;
-  /** Connect with GitHub in progress: the page opened in the browser, and the code it must show. */
+  /** Connect with Vocs in progress: the page opened in the browser, and the code it must show. */
   signIn?: { link: string; checkCode: string };
   /** This computer holds its own relay credential, live with every state push (remote:get also
    *  answers it from storage before remote access was ever enabled). */
@@ -1555,18 +1645,25 @@ export type RemoteAuditAction =
   | 'revoke-all'
   /** The relay stopped accepting this desktop's credential (it was revoked). */
   | 'host-revoked'
-  /** Connect with GitHub: the browser was opened to add this computer, and when it was added. */
+  /** Connect with Vocs: the browser was opened to add this computer, and when it was added. */
   | 'sign-in-start'
   | 'sign-in-registered'
   /** The offline mirror was re-keyed because a browser that could read it lost its pairing. */
   | 'mirror-rotate'
   | 'mirror-enable'
   | 'mirror-disable'
+  /** The relay did not confirm a mirror clear; it is retried until it does (then 'mirror-clear-recovered'). */
+  | 'mirror-clear-failed'
+  | 'mirror-clear-recovered'
   | 'client-connect'
   | 'client-disconnect'
   | 'handshake-failed'
   | 'channel-refused'
-  | 'view-only-blocked';
+  | 'view-only-blocked'
+  /** A browser's first keystroke into a terminal during one connection (P3.5), not every one. */
+  | 'terminal-input'
+  /** A browser opened a new terminal for a session. */
+  | 'terminal-create';
 
 /** One audit-trail line; `device` is the id the event concerns, when there is one. */
 export interface RemoteAuditEntry {
@@ -1629,5 +1726,9 @@ export interface CreateSessionRequest {
   goal?: string;
   /** Start the session in a worktree on this existing branch (reusing one when it exists). */
   checkoutBranch?: string;
+  /** With `config.useWorktree`: the name after the branch prefix (slugified); absent derives it from the title or prompt. */
+  worktreeName?: string;
+  /** With `config.useWorktree`: the local branch the new branch starts from; absent is the repository's HEAD. */
+  worktreeBase?: string;
 }
 

@@ -4,14 +4,21 @@
 import type { RelayStorage, RelayStore } from './core';
 import { ENROLL_GRANT_TTL_MS, hashToken, PairError } from './core';
 import { accountIdFromDeviceId, ACCOUNT_ASSERTION_HEADER, INTERNAL_ACCOUNT_AUTH_HEADER, INTERNAL_ACCOUNT_ID_HEADER, isAccountId, LEGACY_ACCOUNT_ID, verifyAccountAssertion } from './account';
-import { forwardToHub } from './edge';
-import { HubRouter } from './hub';
+import { admit, edgeLimited, forwardAdmitted } from './edge';
+import { HubRouter, type SocketRegistry } from './hub';
+import { CONTROL_INTERNAL_PATH, CONTROL_PATH, CONTROLLER_ASSERTION_HEADER, controlHttpError, controlJson, readControlBytes, verifyControllerAssertion } from './control-auth';
+import { ControlHostBridge } from './control-host';
+import { ControlMcpGateway } from './control-mcp';
 import { FixedWindowLimiter } from './rate';
 import { authorizeSocket, BROADCAST_TAG, handleHttp, json, type RouteContext } from './routes';
 
 const ACCOUNT_STORAGE_KEY = '__vocs_account_id__';
 const DIRECTORY_NAME = 'connect-enrollment-v1';
 const DIRECTORY_KEY_PREFIX = 'nonce:';
+/** Directory → Hub only: the revocation epoch a forwarded redemption's pointer was bound under. The
+ *  public Worker strips every `x-vocs-internal-*` header, so no caller can set it. */
+const INTERNAL_ENROLL_EPOCH_HEADER = 'x-vocs-internal-enroll-epoch';
+const EPOCH = /^(0|[1-9][0-9]{0,14})$/;
 const NONCE_HASH = /^[0-9a-f]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{43}$/;
 const encoder = new TextEncoder();
@@ -29,12 +36,16 @@ export interface Env {
   ENROLL_TOKEN: string;
   /** Shared only by the landing and relay Workers; verifies the landing's signed account assertions. */
   ACCOUNT_ASSERTION_SECRET?: string;
+  /** Opt-in only after security + real-client qualification; unset in production config. */
+  CONTROL_MCP_ENABLED?: string;
   /** Relay-only HMAC key for device-id route hints. Keep stable until a device-id migration. */
   DEVICE_ROUTE_SECRET?: string;
   /** Edge rate limits (wrangler.jsonc `ratelimits`); absent from configs that predate them. */
   PAIR_LIMIT?: RateLimit;
   POLL_LIMIT?: RateLimit;
   TOKEN_LIMIT?: RateLimit;
+  DEVICE_LIMIT?: RateLimit;
+  ADDRESS_LIMIT?: RateLimit;
 }
 
 function storageAdapter(storage: DurableObjectStorage | DurableObjectTransaction): RelayStorage {
@@ -67,11 +78,25 @@ function relayStore(state: DurableObjectState): RelayStore {
 export class Hub {
   private readonly store: RelayStore;
   private readonly rate = new FixedWindowLimiter();
+  private readonly controlHosts: ControlHostBridge<WebSocket>;
+  private readonly control: ControlMcpGateway<WebSocket>;
   private accountId: string | null = null;
   private accountInit: Promise<boolean> | null = null;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.store = relayStore(state);
+    this.controlHosts = new ControlHostBridge({ store: this.store, sockets: this.sockets() });
+    this.control = new ControlMcpGateway(this.store, this.controlHosts);
+  }
+
+  private sockets(): SocketRegistry<WebSocket> {
+    return {
+      byTag: (tag) => this.state.getWebSockets(tag),
+      tags: (ws) => this.state.getTags(ws),
+      attachment: (ws) => ws.deserializeAttachment(),
+      attach: (ws, value) => ws.serializeAttachment(value),
+      isOpen: (ws) => ws.readyState === WebSocket.OPEN
+    };
   }
 
   private async pinAccount(accountId: string): Promise<boolean> {
@@ -101,23 +126,21 @@ export class Hub {
       accountId,
       deviceRouteSecret: this.env.DEVICE_ROUTE_SECRET,
       now: Date.now,
-      sockets: {
-        byTag: (tag) => this.state.getWebSockets(tag),
-        tags: (ws) => this.state.getTags(ws),
-        attachment: (ws) => ws.deserializeAttachment(),
-        attach: (ws, value) => ws.serializeAttachment(value),
-        isOpen: (ws) => ws.readyState === WebSocket.OPEN
-      }
+      sockets: this.sockets(),
+      controlResponse: this.env.CONTROL_MCP_ENABLED === '1'
+        ? (ws, hostId, raw) => this.controlHosts.response(ws, hostId, accountId, raw).catch(() => this.controlHosts.closed(ws))
+        : undefined
     });
   }
 
-  private context(request: Request, accountId: string): RouteContext {
+  private context(request: Request, accountId: string, enrollBindingEpoch?: number): RouteContext {
     return {
       store: this.store,
       accountId,
       enrollToken: this.env.ENROLL_TOKEN,
       accountAuthenticated: request.headers.get(INTERNAL_ACCOUNT_AUTH_HEADER) === '1',
       deviceRouteSecret: this.env.DEVICE_ROUTE_SECRET,
+      ...(enrollBindingEpoch === undefined ? {} : { enrollBindingEpoch }),
       bindEnrollment: async (input) => {
         const directory = this.env.ENROLLMENTS.get(this.env.ENROLLMENTS.idFromName(DIRECTORY_NAME));
         const response = await directory.fetch(new Request('https://enrollments/bind', {
@@ -139,8 +162,13 @@ export class Hub {
 
   async fetch(request: Request): Promise<Response> {
     const accountId = request.headers.get(INTERNAL_ACCOUNT_ID_HEADER) ?? '';
-    if (!(await this.pinAccount(accountId))) return json({ error: 'invalid account' }, 403);
     const url = new URL(request.url);
+    if (url.pathname === CONTROL_INTERNAL_PATH) {
+      if (this.env.CONTROL_MCP_ENABLED !== '1') return controlJson({ error: 'not found' }, 404);
+      if (!(await this.pinAccount(accountId))) return controlJson({ error: 'invalid account' }, 403);
+      return this.control.handle(request, accountId, this.env.ACCOUNT_ASSERTION_SECRET);
+    }
+    if (!(await this.pinAccount(accountId))) return json({ error: 'invalid account' }, 403);
     // Only the bound EnrollmentDirectory may reach this private subroute. The public Worker refuses
     // /v1/__internal/* before it can select a Hub and strips all internal headers on normal routes.
     if (url.pathname.startsWith('/__internal/')) {
@@ -148,7 +176,10 @@ export class Hub {
       url.pathname = '/enroll/redeem';
       const headers = new Headers(request.headers);
       const body = await request.arrayBuffer();
-      return handleHttp(new Request(url.toString(), { method: 'POST', headers, body }), this.context(request, accountId));
+      // A malformed epoch never matches the account's, so the redemption stays pending.
+      const epoch = request.headers.get(INTERNAL_ENROLL_EPOCH_HEADER);
+      const bindingEpoch = epoch === null ? undefined : EPOCH.test(epoch) ? Number(epoch) : -1;
+      return handleHttp(new Request(url.toString(), { method: 'POST', headers, body }), this.context(request, accountId, bindingEpoch));
     }
     if (url.pathname === '/ws/host' || url.pathname === '/ws/client') {
       // Do not burn a single-use ticket for a plain GET or malformed upgrade.
@@ -162,6 +193,7 @@ export class Hub {
       const pair = new WebSocketPair();
       // Tags are Hub-local: distinct account Durable Objects cannot fan out across tenants.
       this.state.acceptWebSocket(pair[1], [`${kind}:${auth.deviceId}`, BROADCAST_TAG[kind]]);
+      if (kind === 'host' && this.env.CONTROL_MCP_ENABLED === '1') this.controlHosts.opened(pair[1], auth.deviceId);
       // Revocation may commit after ticket consumption but before acceptance; re-check before drain.
       if (kind === 'client') await this.router(accountId).clientOpened(pair[1], auth.deviceId);
       return new Response(null, { status: 101, webSocket: pair[0] });
@@ -174,7 +206,12 @@ export class Hub {
     if (accountId) await this.router(accountId).message(ws, message);
   }
 
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.controlHosts.closed(ws);
+  }
+
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    this.controlHosts.closed(ws);
     const accountId = await this.storedAccount();
     if (accountId) this.router(accountId).closed(ws);
     // This Worker's compatibility date predates automatic close-frame replies. 1005/1006 are
@@ -190,6 +227,9 @@ export class Hub {
 interface EnrollmentBinding {
   accountId: string;
   expiresAt: number;
+  /** The account's revocation epoch when the owner granted it (absent on older pointers: 0). The
+   *  tenant Hub refuses a pointer from before its last revoke all. */
+  epoch?: number;
 }
 
 /** Short-lived global nonce-hash → account pointer for the desktop's nonce-only redemption poll.
@@ -215,14 +255,16 @@ export class EnrollmentDirectory {
       const accountId = input.accountId;
       const expiresAt = input.expiresAt;
       const nonceHash = input.nonceHash;
+      const epoch = input.epoch ?? 0;
       if (typeof nonceHash !== 'string' || !NONCE_HASH.test(nonceHash) || !isAccountId(accountId) ||
           typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt <= now ||
-          expiresAt > now + ENROLL_GRANT_TTL_MS + 60_000) return json({ error: 'invalid' }, 400);
+          expiresAt > now + ENROLL_GRANT_TTL_MS + 60_000 ||
+          typeof epoch !== 'number' || !Number.isSafeInteger(epoch) || epoch < 0) return json({ error: 'invalid' }, 400);
       const key = `${DIRECTORY_KEY_PREFIX}${nonceHash}`;
       await this.store.transaction(async (tx) => {
         const current = await tx.get<EnrollmentBinding>(key);
         if (current && current.expiresAt > now && current.accountId !== accountId) throw new PairError('used');
-        await tx.put(key, { accountId, expiresAt } satisfies EnrollmentBinding);
+        await tx.put(key, { accountId, expiresAt, epoch } satisfies EnrollmentBinding);
         for (const [stale, record] of await tx.list<EnrollmentBinding>(DIRECTORY_KEY_PREFIX)) {
           if (now >= record.expiresAt) await tx.delete(stale);
         }
@@ -251,7 +293,11 @@ export class EnrollmentDirectory {
     const hub = this.env.HUB.get(this.env.HUB.idFromName(binding.accountId));
     const internal = new Request('https://hub/__internal/enroll/redeem', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', [INTERNAL_ACCOUNT_ID_HEADER]: binding.accountId },
+      headers: {
+        'content-type': 'application/json',
+        [INTERNAL_ACCOUNT_ID_HEADER]: binding.accountId,
+        [INTERNAL_ENROLL_EPOCH_HEADER]: String(typeof binding.epoch === 'number' && Number.isSafeInteger(binding.epoch) && binding.epoch >= 0 ? binding.epoch : 0)
+      },
       body: JSON.stringify(body)
     });
     return hub.fetch(internal);
@@ -291,24 +337,54 @@ export default {
     const url = new URL(request.url);
     if (!url.pathname.startsWith('/v1/')) return json({ error: 'not found' }, 404);
     // This RPC is reachable only through the directory's DO binding, never through public /v1.
-    if (url.pathname.startsWith('/v1/__internal/')) return json({ error: 'not found' }, 404);
+    if (url.pathname.startsWith('/v1/__internal')) return controlJson({ error: 'not found' }, 404);
+    // Deliberately before routeAccount: browser cookies/assertions/device tokens confer ZERO
+    // controller authority. Forward only a fresh allowlist of headers, never public internals.
+    if (url.pathname === CONTROL_PATH) {
+      if (env.CONTROL_MCP_ENABLED !== '1') return controlJson({ error: 'not found' }, 404);
+      if (request.method !== 'POST' || url.search) return controlJson({ error: 'invalid_request' }, 400);
+      const limited = await edgeLimited(request, env);
+      if (limited) return limited;
+      try {
+        const body = await readControlBytes(request);
+        const assertion = await verifyControllerAssertion(request, body, env.ACCOUNT_ASSERTION_SECRET);
+        if (!assertion) return controlJson({ error: 'invalid_controller_assertion' }, 401);
+        const headers = new Headers({
+          [INTERNAL_ACCOUNT_ID_HEADER]: assertion.principal.accountId,
+          [CONTROLLER_ASSERTION_HEADER]: request.headers.get(CONTROLLER_ASSERTION_HEADER)!
+        });
+        for (const name of ['accept', 'content-type', 'mcp-protocol-version']) {
+          const value = request.headers.get(name);
+          if (value) headers.set(name, value);
+        }
+        const namespace = env.HUB.get(env.HUB.idFromName(assertion.principal.accountId));
+        return await namespace.fetch(new Request(`https://hub${CONTROL_INTERNAL_PATH}`, { method: 'POST', headers, body, signal: request.signal }));
+      } catch (error) { return controlHttpError(error); }
+    }
     const stripInternal = (source: Request, accountId?: string, authenticated = false): Request => {
       const headers = new Headers(source.headers);
       headers.delete(ACCOUNT_ASSERTION_HEADER);
-      headers.delete(INTERNAL_ACCOUNT_ID_HEADER);
-      headers.delete(INTERNAL_ACCOUNT_AUTH_HEADER);
+      headers.delete(CONTROLLER_ASSERTION_HEADER);
+      for (const name of [...headers.keys()]) if (name.startsWith('x-vocs-internal-')) headers.delete(name);
       if (accountId) headers.set(INTERNAL_ACCOUNT_ID_HEADER, accountId);
       if (authenticated) headers.set(INTERNAL_ACCOUNT_AUTH_HEADER, '1');
       return new Request(source, { headers });
     };
+    // Rate limit, body budget and credential shape before account routing, body reads or any
+    // Durable Object: a route that will need authentication has not had it yet.
+    const admitted = await admit(request, env);
+    if (admitted instanceof Response) return admitted;
     if (url.pathname === '/v1/enroll/redeem') {
       const request_ = stripInternal(request);
-      return forwardToHub(request_, env, () => env.ENROLLMENTS.get(env.ENROLLMENTS.idFromName(DIRECTORY_NAME)));
+      return forwardAdmitted(request_, admitted, () => env.ENROLLMENTS.get(env.ENROLLMENTS.idFromName(DIRECTORY_NAME)));
     }
     const selected = await routeAccount(request, env);
-    if (selected instanceof Response) return selected;
+    if (selected instanceof Response) {
+      await request.body?.cancel().catch(() => undefined);
+      return selected;
+    }
     const routed = stripInternal(request, selected.accountId, selected.authenticated);
     const namespace = env.HUB.get(env.HUB.idFromName(selected.accountId));
-    return forwardToHub(routed, env, () => namespace);
+    return forwardAdmitted(routed, admitted, () => namespace);
   }
 } as ExportedHandler<Env>;

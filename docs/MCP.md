@@ -204,6 +204,12 @@ edits apply mid-session without a restart (P1).
 status request (`mcpServerStatus/list` or similar) to feed §7.2; if not, the tab shows
 "configured" only.
 
+Both Codex adapters suppress app-owned MCP names not injected into the session. Codex
+validates the transport even for a disabled entry and merges overrides with its native
+config. Read the merged native MCP config for the session cwd first; use `enabled = false`
+alone for inherited entries, and pair it with `command = ""` for absent names. The empty
+command is never run, and no native config files are written.
+
 **Codex exec** — `new Codex({ codexPathOverride, env, config: { mcp_servers } })`. The SDK
 flattens it to `--config` flags; secrets therefore go through `env_vars` and
 `env_http_headers`, never inline (§8). Verified live: Codex loads the servers, but this
@@ -234,8 +240,12 @@ invisible to the model — and the built-in code graph also carries a `promptGui
 graph is reached for before grep. The approvals extension gates every `mcp__*` tool, since a server
 tool's blast radius is unknown; only full-auto lets it through unprompted — with one exception: the
 app's own memory server marks its read-only tools (`annotations.readOnlyHint`) and those run
-unprompted and survive plan mode, in the parent and in every subagent child. Trust is by server
-identity (`vocs_memory`), so a server the app does not own can never inherit it. The bridge is
+unprompted and survive plan mode, in the parent and in every subagent child. Trust is by
+provenance: the app sets `builtin` on the definitions it builds for its own servers, every reader of
+a user or repository definition rebuilds it without that field, and the bridge trusts a read-only
+annotation only from the definition marked `vocs-memory`. A server's name, label or annotations never
+confer it, and the bridge refuses to load a server whose name folds onto a built-in's without that
+marker, or whose tool names would collide with an earlier server's. The bridge is
 process-wide, and a subagent child registers the same tools over the parent's connections instead of
 spawning its own copy of every server.
 
@@ -321,11 +331,18 @@ harness in the way that keeps it out of command lines — `env` for stdio, `env`
 which is visible in the process list), `headers` inside the JSON-RPC payload for Claude
 and ACP. Log lines redact resolved values.
 
+**Memory gateway.** The `vocs-memory` capability is bound to the running session and checkout,
+not to a project name supplied in a tool call. With the gateway on, the stdio process forwards
+only to the app's loopback listener and cannot fall back to a disk reader. Stop revokes the
+capability; switching the gateway off restores legacy mode for new ordinary wiki sessions only.
+Membership, promotion approvals and Forget are desktop-owner operations. See [Local Knowledge
+and Memory](INTELLIGENCE.md) for tool availability and data scope.
+
 **Tool calls stay behind the existing gates.** Claude's `canUseTool` already treats
 `mcp__*` as mutating (it is not in `READ_ONLY_TOOLS`), so MCP tools prompt below Full
 access — keep that. The native loop does the same, with one exception: the app's own
-memory server may mark its read-only tools (`readOnlyHint`), and only that server is
-trusted to do so — a tool from a server the app does not own always asks below Full
+memory server may mark its read-only tools (`readOnlyHint`), and only the definition the app
+built for it (its `builtin` provenance, never its name) is trusted to do so — a tool from a server the app does not own always asks below Full
 access, even in Auto mode, and is hidden in plan mode. Codex runs MCP tool calls inside its own sandbox/approval model;
 note in the UI that Vocs Code does not add a prompt there. Elicitation requests (Codex
 app-server today, native client in P2) become `'elicitation'` approvals instead of
@@ -489,6 +506,13 @@ Rules:
 - The built-in always wins over a same-id global or `.mcp.json` entry (the user's old manual
   `gitnexus` server is shadowed, not injected twice). Such an entry is dropped from the settings
   store on load, and the MCP page neither lists it nor offers a same-id id to the add form.
+- Built-in names are reserved in every spelling a harness folds into the same tool names: case,
+  and any run of `-`, `_` or `.` (`src/shared/mcp-ids.ts`), so `vocs_memory`, `Vocs.Memory` or
+  `GitNexus` name a built-in too. Two user servers in one scope may not fold together either, and a
+  repo entry shadows a global one with the same folded name. Saving such a definition (the MCP
+  page, the repo tab, import, Vesta's tools) is refused with the reason; one already on disk stays
+  listed as *not loaded* with the reason, is never selected for a session, and does not block an
+  unrelated save.
 - It injects into every harness whose `mcp` support is `inject` or `client`, on by default. The
   MCP page's built-in row switches it off everywhere (`mcpDisabledBuiltins`); a repo keeps itself
   out of the shared server with `disabledBuiltin` — the switch above the share toggle on the
@@ -504,9 +528,8 @@ Rules:
   unindexed project.
 - Codex loads its own `~/.codex/config.toml` underneath whatever a session is handed, so a
   `[mcp_servers.gitnexus]` left there would start a second, unscoped copy beside the shared one.
-  Both Codex adapters pass `ownedMcpIds()` to `toCodex`, which writes
-  `mcp_servers.gitnexus = { enabled: false }` for any owned name the session is not receiving:
-  the name is switched off, and a real entry of the same name is never replaced. Both Codex
+  Both Codex adapters apply a session-only disable override for owned names the session does not
+  receive, using the native transport when present (see §6). Injected entries are left alone. Both Codex
   harnesses belong to the set whose config the app writes, so the built-in row on the MCP tab
   says this (`claimed`); a harness whose config the app does not write is injected and left alone.
 - A worktree session shares the main checkout's switches (`projectRoot`), but its `cwd` also
@@ -573,3 +596,59 @@ afterwards. Vocs Code never bundles the driver or updates it on its own.
 Not yet shipped (see the design doc): one app-owned runtime shared by concurrent sessions,
 in-transcript screenshots of driver actions on tool cards, a window picker in the preview, the
 guidance skill, and the Computer History audit view.
+
+### Native OAuth foundation (opt-in, main process only)
+
+`createNativeMcpOAuth` in `src/main/mcp/oauth.ts` implements an explicit native
+public-client authorization-code flow using the existing MCP SDK. A trusted
+main-process broker supplies the exact HTTPS resource, trusted issuer, approved
+scopes and system-browser opener. Call `authorize()` only after a user sign-in
+request, then pass the controller as `InspectOptions.oauth` to `inspectServer`
+or `connectServer`. HTTP and SSE transports receive the SDK provider and guarded
+fetch. OAuth cannot be combined with configured request headers, preventing the
+SDK from forwarding resource cookies or API keys during issuer discovery; stdio and external harness configurations remain unchanged.
+
+The flow uses an ephemeral IPv4 loopback listener, random callback path and state,
+S256 PKCE, exact resource/issuer checks, no client secret, no HTTP redirects,
+explicit scopes, bounded lifetime and cancellation. Fixed query parameters on the
+trusted authorization endpoint are preserved and checked before opening the browser.
+A sign-out cancels an in-flight login and removes local tokens. Cancellation and
+timeout release sign-in even if an injected fetch or response parser ignores abort;
+late SDK continuations cannot read or mutate a subsequent attempt. Token expiry
+must produce a safely representable millisecond deadline. Background tool calls
+cannot launch browser login.
+Remote revocation is not implied by local clear. Caller-owned live connections
+must also be closed when switching accounts or signing out. Bearer requests are
+restricted to the exact resource URL. Legacy SSE servers that redirect messages to
+a different path are rejected, rather than silently forwarding credentials there;
+qualifying a separately authorized endpoint contract is future work.
+
+This is a backend foundation, **not a shipped sign-in UI or universal Vocs account
+login**. Tokens are isolated per controller and memory-only; refresh tokens are
+discarded. Each explicit login registers a fresh public client with its ephemeral
+callback. No master account session, provider key, token or verifier is copied into
+the renderer, server definitions or subprocess configuration. It does not use the
+existing API-key store's obfuscated fallback. Durable renewal and secure OS-vault
+persistence require the account/device revocation contract and are deliberately
+not enabled yet. Browser-only Hub catalog endpoints must not be accessed by
+copying browser cookies into this client.
+
+The SDK integration fixture exercises real discovery, registration, PKCE, loopback
+callback, exchange, HTTP initialization and tool discovery with synthetic tokens.
+It also covers fixed endpoint queries and tampering, expiry overflow, and logout,
+caller cancellation and timeout during stalled discovery or token-body parsing,
+including late-response isolation while a fresh sign-in is active and a successful
+authenticated connection afterward. `tests/mcp-oauth.test.ts` is in the no-skip
+develop PR allowlist so these boundaries run in CI, not only the release suite.
+No live identity, provider request or production deployment is part of that test.
+Actual desktop browser UX, account switching, SSE OAuth interoperability and
+revocation across devices remain rollout gates.
+
+
+SDK transports must use the controller's `transport()` context, not its mutable
+controller provider. Each context is bound to one authorization generation and
+lifetime. It permits token reads/invalidation and requests to the exact MCP
+resource only; it cannot discover an issuer, mutate PKCE/client state or launch
+browser authorization. A new sign-in or logout invalidates old contexts, including
+401 continuations whose response body completes after the connection is closed.
+Connection creation during explicit sign-in is rejected until that sign-in ends.

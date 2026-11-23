@@ -5,12 +5,13 @@
  * PONG and asserts the adapter produced an assistant item containing it plus a turn item.
  * HARNESS_SMOKE_ONLY=mcp drives one harness (HARNESS_SMOKE_MCP_HARNESS, default claude) with an
  * injected MCP server and asserts it actually called a tool from it.
+ * HARNESS_SMOKE_ANTIGRAVITY_BIN can point to an absolute path to the official Antigravity CLI.
  */
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import type { ApprovalDecision, HarnessId, HarnessRef, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import { MCP_BUILTIN_IDS, type ApprovalDecision, type HarnessId, type HarnessRef, type SessionEvent, type SessionMeta, type TranscriptItem } from '../src/shared/types';
 import type { ResolvedServer } from '../src/main/mcp/effective';
 import { createAdapter } from '../src/main/harness/registry';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
@@ -23,6 +24,11 @@ const only = (process.env.HARNESS_SMOKE_ONLY ?? '').split(',').map((s) => s.trim
 const want = (id: string) => enabled && (only.length === 0 || only.includes(id));
 // Resume round-trips cost a second turn per harness, so they stay behind their own flag.
 const wantResume = (id: string) => want(id) && process.env.HARNESS_SMOKE_RESUME === '1';
+const smokeModelProviders: Partial<Record<HarnessId, string>> = {
+  antigravity: 'antigravity',
+  claude: 'anthropic',
+  pi: 'openai-codex',
+};
 
 const appRoot = path.resolve(__dirname, '..');
 const tmpRoot = path.join(os.tmpdir(), `vocs-code-smoke-${Date.now()}`);
@@ -38,13 +44,25 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
   await fs.mkdir(cwd, { recursive: true });
   await fs.writeFile(path.join(cwd, 'README.md'), '# smoke\n');
   const settings = defaultSettings();
+  const antigravityBin = process.env.HARNESS_SMOKE_ANTIGRAVITY_BIN;
+  if (harness === 'antigravity' && antigravityBin) {
+    if (!path.isAbsolute(antigravityBin)) throw new Error('HARNESS_SMOKE_ANTIGRAVITY_BIN must be an absolute path.');
+    settings.binaries.agy = antigravityBin;
+  }
   const runtime = new RuntimeResolver({ appRuntimeDir: path.join(tmpRoot, 'runtime'), resourcesDir: path.join(appRoot, 'resources'), appRoot }, () => settings);
   const meta: SessionMeta = {
     id: `smoke_${harness}`,
     title: 'smoke',
     createdAt: Date.now(),
     updatedAt: Date.now(),
-    config: { harness, projectRoot: cwd, permissionMode: 'auto', ...extra },
+    config: {
+      harness, projectRoot: cwd, permissionMode: 'auto', ...extra,
+      ...(process.env.HARNESS_SMOKE_FAST_MODE === '1' ? { fastMode: true } : {}),
+      ...(process.env.HARNESS_SMOKE_MODEL ? { model: {
+        provider: extra.model?.provider ?? smokeModelProviders[harness] ?? 'openai',
+        model: process.env.HARNESS_SMOKE_MODEL,
+      } } : {}),
+    },
     cwd,
     status: 'idle',
     harnessRef: {},
@@ -64,7 +82,7 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
     effort: () => meta.config.effort ?? undefined,
     getApiKey: async () => undefined,
     mcpServers: async () => mcp,
-    ownedMcpIds: () => [],
+    ownedMcpIds: () => harness === 'codex' || harness === 'codex-exec' ? [...MCP_BUILTIN_IDS] : [],
     emit: (event) => {
       events.push(event);
       if (event.type === 'item.upsert') items.set(event.item.id, event.item);
@@ -96,6 +114,12 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
         clearTimeout(t);
         resolve();
       };
+    }).then(() => {
+      if (meta.config.fastMode) {
+        // A successful standard-speed fallback is not a passing Fast request. Requested means
+        // the runtime cannot expose actual service; never promote it to confirmed "on" here.
+        expect(['requested', 'on'], meta.fastModeStatus?.detail).toContain(meta.fastModeStatus?.state);
+      }
     });
   return { ctx, meta, events, items, waitTurn };
 }
@@ -180,6 +204,20 @@ describe('live harness smoke', () => {
     assertSuccessfulTurn(items, events, 'PONG');
   });
 
+  it.runIf(want('codex'))('codex app-server Auto runs an ordinary project command without asking', async () => {
+    const { ctx, events, waitTurn, meta } = await makeCtx('codex');
+    expect(meta.config.permissionMode).toBe('auto');
+    const adapter = createAdapter('codex', ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    await adapter.send({ text: 'Run exactly this shell command in the current directory and nothing else: node -e "require(\'fs\').writeFileSync(\'auto-marker.txt\', \'ok\')". Then reply DONE.' });
+    await waitTurn(170_000);
+    // Codex asks for every command not on its known-safe list (`untrusted`); the app's Auto gate
+    // must answer that without showing the user an approval.
+    expect(await fs.readFile(path.join(meta.cwd, 'auto-marker.txt'), 'utf8')).toBe('ok');
+    expect(events.filter((e) => e.type === 'log' && e.message.startsWith('auto-approving'))).toEqual([]);
+  });
+
   it.runIf(want('codex-exec'))('codex exec SDK answers a prompt', async () => {
     const { ctx, items, events, waitTurn } = await makeCtx('codex-exec');
     const adapter = createAdapter('codex-exec', ctx);
@@ -220,6 +258,29 @@ describe('live harness smoke', () => {
     expect(usage.at(-1)?.totals.turns).toBe(1);
   });
 
+  it.runIf(want('pi') && process.env.HARNESS_SMOKE_QUESTIONS === '1')('pi asks a structured question and receives selection plus context', async () => {
+    const { ctx, events, items, waitTurn } = await makeCtx('pi');
+    const drafts: ApprovalDraft[] = [];
+    ctx.requestApproval = async (draft) => {
+      drafts.push(draft);
+      if (draft.kind !== 'question' || draft.toolName !== 'ask_user' || draft.questions?.length !== 1) throw new Error('Expected one structured question, not a tool permission.');
+      return { optionId: 'allow', answers: { [draft.questions[0].id]: 'staging' }, note: 'Wait for Friday.' };
+    };
+    const adapter = createAdapter('pi', ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    await adapter.send({ text: 'Before proceeding, ask me one question using the app structured-question tool, not plain prose: which deployment environment, staging or production? Provide a short description for each option. After my answer, reply exactly STAGING_FRIDAY if I chose staging with context to wait for Friday. Do not deploy anything or call any other tools.' });
+    await waitTurn(170_000);
+    assertSuccessfulTurn(items, events, 'STAGING_FRIDAY');
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].questions?.[0].options?.map((option) => option.label.toLowerCase())).toEqual(['staging', 'production']);
+    expect(drafts[0].questions?.[0].options?.every((option) => Boolean(option.description))).toBe(true);
+    const tools = [...items.values()].filter((item) => item.kind === 'tool');
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ name: 'ask_user', status: 'done' });
+    expect(tools[0].kind === 'tool' && tools[0].output).toContain('Wait for Friday.');
+  });
+
   it.runIf(want('claude'))('claude agent sdk answers a prompt', async () => {
     const { ctx, items, events, waitTurn, meta } = await makeCtx('claude');
     const adapter = createAdapter('claude', ctx);
@@ -232,6 +293,28 @@ describe('live harness smoke', () => {
     await waitTurn(170_000);
     assertSuccessfulTurn(items, events, 'PONG');
     expect(meta.harnessRef.claudeSessionId).toBeTruthy();
+  });
+
+  it.runIf(want('claude'))('claude Auto runs an ordinary command without asking and Plan blocks a write', async () => {
+    const auto = await makeCtx('claude');
+    const runner = createAdapter('claude', auto.ctx);
+    cleanups.push(() => runner.dispose());
+    await runner.start();
+    await runner.send({ text: 'Use the Bash tool to run exactly: node -e "require(\'fs\').writeFileSync(\'auto-marker.txt\', \'ok\')". Then reply DONE.' });
+    await auto.waitTurn(170_000);
+    // The PreToolUse tier check answers Auto itself; no approval reaches the user.
+    expect(await fs.readFile(path.join(auto.meta.cwd, 'auto-marker.txt'), 'utf8')).toBe('ok');
+    expect(auto.events.filter((e) => e.type === 'log' && e.message.startsWith('auto-approving'))).toEqual([]);
+    await runner.dispose();
+
+    const plan = await makeCtx('claude', { permissionMode: 'plan' });
+    const planner = createAdapter('claude', plan.ctx);
+    cleanups.push(() => planner.dispose());
+    await planner.start();
+    await planner.send({ text: 'Use the Write tool to create plan-marker.txt containing ok. If you cannot, reply BLOCKED.' });
+    await plan.waitTurn(170_000);
+    await expect(fs.stat(path.join(plan.meta.cwd, 'plan-marker.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(plan.events.filter((e) => e.type === 'log' && e.message.startsWith('auto-approving'))).toEqual([]);
   });
 
   // Proves the injection path end to end rather than only at the dialect converter: the harness
@@ -268,6 +351,28 @@ describe('live harness smoke', () => {
     cleanups.push(() => adapter.dispose());
     await adapter.start();
     expect(meta.harnessRef.acpSessionId).toBeTruthy();
+    await adapter.send({ text: PROMPT });
+    await waitTurn(170_000);
+    assertSuccessfulTurn(items, events, 'PONG');
+  });
+
+  it.runIf(want('antigravity'))('Antigravity reads quota through the signed-in CLI', async () => {
+    const { ctx } = await makeCtx('antigravity');
+    const quota = await ctx.runtime.antigravityQuota();
+    expect(quota.groups.length).toBeGreaterThan(0);
+    expect(quota.groups[0].buckets[0]).toMatchObject({ name: expect.any(String), remainingFraction: expect.any(Number) });
+  });
+
+  it.runIf(want('antigravity'))('Antigravity lists Gemini models and answers a prompt', async () => {
+    const { ctx, items, events, waitTurn, meta } = await makeCtx('antigravity', { permissionMode: 'ask' });
+    const adapter = createAdapter('antigravity', ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    expect(meta.harnessRef.acpSessionId).toBeTruthy();
+    const models = await adapter.listModels!();
+    expect(models).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: 'antigravity', id: expect.stringMatching(/\S/), displayName: expect.stringMatching(/\bGemini\b/i) }),
+    ]));
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
     assertSuccessfulTurn(items, events, 'PONG');
@@ -330,6 +435,10 @@ describe('live harness smoke', () => {
 
   it.runIf(wantResume('acp'))('acp resumes after dispose', async () => {
     await resumeRoundTrip('acp', 'acpSessionId', { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' });
+  });
+
+  it.runIf(wantResume('antigravity'))('Antigravity resumes after dispose', async () => {
+    await resumeRoundTrip('antigravity', 'acpSessionId', { permissionMode: 'ask' });
   });
 
   it.runIf(wantResume('native'))('native resumes after dispose', async () => {

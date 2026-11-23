@@ -152,9 +152,9 @@ interface Transport {
 - `RemoteTransport` = WebSocket, JSON frames `{ id, channel, payload }` with response
   correlation; push channels arrive as server-initiated frames — only the remote push surface
   (`push:sessionEvent`, `push:sessionsChanged`, `push:settingsChanged`, `push:remotePolicy`,
-  `push:desktopFocus`); PTY
-  output, the assistant panel and the desktop's own remote state (which carries the live pairing
-  code) never leave the machine.
+  `push:desktopFocus`); raw PTY output, the assistant panel and the desktop's own remote state
+  (which carries the live pairing code) never leave the machine. A terminal a browser watches
+  reaches that browser alone, as `push:remoteTerminal` frames sealed to it (P3.5, below).
 - **Addressing:** relay frames carry a target host id — an account may pair several
   desktops, and the web client names the host it wants per connection/session. Hosts
   connect outbound and stay addressable by their device id; one host offline does not
@@ -169,12 +169,46 @@ interface Transport {
   guessed at.
 
 **Filtered surface.** Remote gets: `sessions:*`, `approvals:respond`, read-mostly
-`git:*`, `fs:list/search/read`, `analytics:*`, `skills:list/read`,
+`git:*`, `fs:list/search/read/readImage`, `analytics:*`, `skills:list/read`,
 `harness:availability/models`, `desktop:focus` (which session the desktop window is on, read-only),
-and the read-only terminal view `terminal:list/screen` (P3.5,
-step one: plain text, never attached, resized or typed into). Excluded or remapped: `window:*`,
-`app:pickFolder`, `app:openPath`, `app:openInEditor`, `secrets:*`, `dialog` flows, terminal
-input. The web client never touches or needs API keys.
+and the terminal (P3.5): `terminal:list/screen` and `terminal:watch/unwatch/watchAck` on the read
+half, `terminal:input` and `terminal:create` on the write half, so view-only mode lets a browser
+watch but not type. Excluded or remapped: `window:*`, `app:pickFolder`, `app:openPath`,
+`app:showInFolder`, `app:openInEditor`, `secrets:*`, `dialog` flows, and terminal resize, attach, kill, close, restart,
+clear and rename — the desktop owns its terminals' geometry and lifetime. The web client never
+touches or needs API keys.
+
+**Terminal over the relay (P3.5).** The remote host serves `terminal:watch/unwatch/watchAck` itself,
+not the handler registry, because the answer depends on which browser asked
+(`src/main/remote/terminal-streams.ts`, constants in `src/shared/remote-terminal.ts`):
+
+- **Watching is not attaching.** A watch registers a viewer on the desktop's headless screen mirror
+  and answers a serialized snapshot at the desktop's geometry, with the seq of the last chunk in it.
+  The viewer never touches the desktop renderer's attach or flow control, and never resizes: the
+  browser renders at the desktop's columns and rows (with a "Fit width" zoom).
+- **Exactly once across the snapshot.** The viewer is registered before the snapshot is taken, and
+  the snapshot is serialized inside the callback of an empty write, so it holds chunks `1..seq`
+  exactly; output fed in between follows as `data` frames above that floor.
+- **Coalescing and a window, never back-pressure.** Output is coalesced for 25 ms into frames of at
+  most 32 K characters. A viewer may hold 256 K characters unacknowledged (it acks every 32 K or
+  250 ms); past that the desktop stops streaming to it — it never pauses the shell, so a slow phone
+  cannot stall the terminal the desktop is using — and sends one fresh `reset` snapshot once the
+  viewer has acknowledged everything. A desktop clear also resyncs; a closed tab sends `closed`.
+- **Reconnect mid-PTY = snapshot.** Streams die with the browser's e2e session (left, re-handshook,
+  revoked, relay socket closed, remote access disabled). The browser re-watches when it is back
+  online and gets the whole screen again instead of a guessed-at backlog.
+- **Bounded snapshots.** History steps down (1000, 300, 100, 0 lines) until the JSON-encoded
+  snapshot fits 600 KiB, inside the relay's 1 MiB frame once sealed.
+- **Input** is batched by the browser (16 ms) and sent in order through the registry's
+  `terminal:input`, so the Mission terminal guards apply exactly as to desktop keystrokes. The host
+  refuses anything over 64 KiB and audits a browser's first keystroke into a terminal per connection
+  (`terminal-input`) and every terminal it opens (`terminal-create`).
+- **Rendering under the CSP.** The app's `style-src 'self'` rules out xterm's DOM renderer (it
+  injects `<style>` elements). The browser parses output with `@xterm/headless` and draws rows of
+  spans whose colors are CSSOM style properties, which the policy allows. Keys map to xterm
+  sequences (application cursor mode, bracketed paste); phones get a line field and a key strip
+  (Esc, Tab, ^C, ^D, arrows). A restored tab whose shell has not started yet buffers input until it
+  is opened on the desktop.
 
 **Sizing and projection.** Every pushed event carries a monotonic `seq`; a transcript window
 reports the floor it reflects, so a client takes a snapshot and then applies only later events.
@@ -271,16 +305,24 @@ returns public metadata only), and the **offline encrypted transcript mirror** �
 the desktop, which seals an index plus per-session snapshots with a shared mirror key
 (handed to each browser sealed inside the e2e session) and uploads them as opaque, bounded,
 30-day-TTL blobs; the web client opens them locally and renders a read-only sidebar and
-transcript while the desktop is unreachable. The relay's HTTP surface is now a
+transcript while the desktop is unreachable. Each upload is fenced against the mirror's
+generation, the host and the key it sealed with, re-checked after every await and right before
+the request leaves, so turning the mirror off, stopping it or re-keying it drops an upload still
+in progress instead of publishing it; a clear waits for uploads already on the wire, and is
+repeated once after a short delay when one of them failed in transit (its request may still
+arrive). A clear the relay does not confirm is audited (`mirror-clear-failed`) and retried as one
+owed clear (uploads wait for it, reconnect retries it, and a backoff timer retries it while
+remote access is on). The relay's HTTP surface is now a
 **deny-by-default route table** (`relay/src/routes.ts`): every route declares the auth it needs
 (`public`/`account`/`owner`/`enroll`/`device`/`web`/`host`), the dispatcher authorizes before the
 handler runs, and the whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead
 of relying on review. The public pairing endpoints also carry in-memory fixed-window rate limits.
 **Deployed.** The relay and landing Worker share the `code.vocs.io` origin through a service
 binding (vocs.io PR #18); the landing forwards `/app` and `/v1` including REST and `/v1/ws/*`
-WebSockets, with no CORS hop or second DNS record. The GitHub login gate is live on the landing:
-`/app` redirects signed-out visitors to GitHub OAuth, and the landing's allowlist controls who may
-sign in. **Live since 2026-09-26** (v0.7.0): the relay and the landing run per-account Hubs,
+WebSockets, with no CORS hop or second DNS record. The login gate is live on the landing: since
+2026-11-16 `/app` redirects signed-out visitors to **Vocs Login** (`auth.vocs.io`, the shared Vocs
+identity), and the landing's operator-managed `VOCS_ACCOUNTS` map controls who may sign in (it
+replaced the GitHub OAuth gate and its `ALLOWED_LOGINS` allowlist). **Live since 2026-09-26** (v0.7.0): the relay and the landing run per-account Hubs,
 account assertions, account-bound enrollment and pairing, and the relay's direct `workers.dev`
 endpoint is disabled so browser traffic must pass through the gate. The incumbent login stays mapped
 to `vocs-v1`. Do not enable another login until the two-account live check passes.
@@ -297,7 +339,8 @@ are not live until a release ships them.
 smoke passed against `code.vocs.io`): the proof-of-possession token model; non-extractable browser
 keys; per-account device caps; the kill switch; mirror re-keying on revocation; QR pairing; the
 multi-computer web client; tail-first transcripts; a read-only terminal view (P3.5, step one); edge
-rate limits; and the landing's GitHub login gate.
+rate limits; and the landing's GitHub login gate. The read/write terminal (P3.5, step two) went
+live with v0.8.0 on 2026-10-12.
 
 **Live since 2026-09-26** (v0.7.0; the relay deployed by the approved `deploy-relay` run
 36263306950, the landing promoted to production right after): the React web shell that replaced the
@@ -319,7 +362,7 @@ mirror (§6.5).
 
 The `ENROLL_TOKEN` remains a legacy/manual capability for the incumbent `vocs-v1` account and a
 service credential the landing Worker uses for owner actions. New accounts are enrolled through the
-signed-in **Connect with GitHub** grant, which binds the one-time desktop nonce to the account; the
+signed-in **Connect with Vocs** grant, which binds the one-time desktop nonce to the account; the
 nonce-only desktop poll resolves through a short-lived enrollment directory. The shared secret is
 never used as an account selector. Once enrolled, a desktop uses its own device credential, so
 rotating the legacy secret never strands it.
@@ -345,7 +388,12 @@ Web (browser)                Relay                      Desktop (host)
    the enrollment secret; once registered it connects (and resumes after a restart) with its own
    credential, and the field is hidden. The relay is not a setting: desktops always use
    `https://code.vocs.io` (`VOCS_CODE_RELAY_URL` points a development build or a test at another
-   relay). Desktop generates its device keypair, stores the private half in the secrets store,
+   relay). Both this override and the browser's `?relay=` override require HTTPS/WSS outside
+   literal loopback (`localhost`, IPv4 `127.0.0.0/8`, IPv6 `::1`); private LAN HTTP/WS has no
+   insecure override. Restored desktop/browser credentials are subject to the same policy at
+   request/socket dispatch, not just when choosing a relay. Credential-bearing HTTP calls never
+   follow redirects: configure the final HTTPS relay URL directly. Desktop generates its device
+   keypair, stores the private half in the secrets store,
    connects outbound WSS to the relay and, while no browser is paired, requests a pairing code
    straight away so the QR code is on screen without another click.
 2. **Code.** Relay returns a single-use 8-character code (e.g. `MVBTK7Q2`, ~2^40 space, no
@@ -378,13 +426,15 @@ Web (browser)                Relay                      Desktop (host)
 | Tokens bound to signing keys | An access token is issued only for a signature by the device key; the refresh credential alone authorizes nothing |
 | E2E under the relay | Established session payloads are opaque; a compromised relay can still deny service, misroute and manipulate pairing metadata |
 
-#### 6.3.1 Connect with GitHub: no secret, no code
+#### 6.3.1 Connect with Vocs: no secret, no code
 
-The landing's GitHub gate maps the stable numeric GitHub subject to an account. The incumbent subject
-maps to `vocs-v1`; all other allowlisted subjects map to `github:<id>`. `/v1/me` returns that account
+The landing's Vocs Login gate maps each admitted Vocs subject to its relay account through the
+operator-managed `VOCS_ACCOUNTS` map: the incumbent owner maps to `vocs-v1`, and accounts created in
+the GitHub era keep their `github:<id>` ids, so no Hub, device id or mirror moves. (Until 2026-11-16
+the gate was GitHub OAuth, mapping the stable numeric GitHub subject the same way.) `/v1/me` returns that account
 id to the web client, which partitions its IndexedDB vault by account. Pre-account session cookies
 lack a subject and are rejected once; the user signs in again. The desktop offers
-**Connect with GitHub** for new-account enrollment.
+**Connect with Vocs** for new-account enrollment.
 
 - **Account assertion.** For each signed-in `/v1/*` request, including browser API calls and WebSocket
   upgrades, the landing strips caller-supplied identity headers and signs
@@ -397,7 +447,7 @@ lack a subject and are rejected once; the user signs in again. The desktop offer
 - **Owner routes.** `/v1/owner/*` still require the landing's `RELAY_ENROLL_TOKEN` plus the verified
   account assertion. The Worker replaces any browser Authorization, strips its session cookie, and
   refuses writes whose `Origin` is not `https://code.vocs.io`.
-- **Adding a computer.** Connect with GitHub makes the desktop generate a one-time secret (32 random
+- **Adding a computer.** Connect with Vocs makes the desktop generate a one-time secret (32 random
   bytes) and open `code.vocs.io/app?connect=<its SHA-256>`; the secret itself never leaves the
   desktop. After sign-in (the link survives the OAuth redirect in signed state), the page shows a
   check code derived from the hash, which the desktop shows too, and asks before it grants anything.
@@ -406,7 +456,7 @@ lack a subject and are rejected once; the user signs in again. The desktop offer
   its nonce through the directory and receives its refresh credential sealed to its own key
   (`enrollTokenContext`). Re-granting the same live hash to a different account is refused. A key
   already registered to that account keeps its host id, and the computer cap applies. Unknown,
-  expired and not-yet-granted secrets all answer `pending`.
+  expired, revoked and not-yet-granted secrets all answer `pending`.
 - **Pairing.** A signed-in browser lists only that account's computers (`GET /v1/owner/hosts`) and
   may ask one to pair (`POST /v1/owner/pair-request`). Code-based claims and their polls also require
   the same account assertion; a code never transfers a desktop between accounts. The relay sends a
@@ -451,8 +501,14 @@ proves the device.
   reconcile their paired-browser lists against the relay's registry, and re-key the mirror a
   revoked browser could read.
 - **Revoke all (the kill switch).** Settings → Remote access revokes every other device of the
-  account — browsers and other computers — cancels pending pairing codes, drops revoked hosts'
-  mirrors and re-keys this desktop's. The desktop keeps its identity and stays connected.
+  account — browsers and other computers — cancels pending pairing codes and outstanding
+  enrollment grants, drops revoked hosts' mirrors and re-keys this desktop's. The desktop keeps its
+  identity and stays connected. It also raises the account's **revocation epoch** in the same
+  commit. Pairing records, enrollment grants and enrollment-directory pointers carry the epoch they
+  were issued under (records written before the epoch existed read as 0), and device admission
+  rechecks it inside the transaction that mints the device: a pairing approval re-reads and consumes
+  the exact claim it verified, and an enrollment redemption the exact grant, so authority issued
+  before a revoke all mints nothing after it.
 - **Pause remote access.** The toggle closes the desktop socket and drops live sessions; it does
   **not** invalidate relay tokens or delete a previously uploaded mirror (use Revoke all).
 - **A revoked desktop** (its refresh credential rejected) keeps its identity and paired list and
@@ -487,8 +543,8 @@ proves the device.
 - **Confirm dialog:** account, device name, browser/OS, Allow / Deny — mirrors the
   existing approval-prompt styling (§5 of the approval flow, same pattern).
 - **Web:** the landing's GitHub login precedes `/app`; today code entry, waiting-for-approval, a computer switcher
-  with online state, Add a computer, device management and a read-only terminal view are in the
-  web client.
+  with online state, Add a computer, device management and a live terminal (watch, type, open a
+  new one) are in the web client.
 
 ### 6.8 Approvals ride signed, encrypted frames
 
@@ -525,9 +581,13 @@ security bar must go up, not sideways:
   does not revoke tokens or delete a stored mirror.
 - **Transport.** TLS + e2e payload encryption; replayed ciphertext is rejected, and API access
   needs short-lived proof-of-possession tokens.
-- **A Connect with GitHub link someone else sent (§6.3.1).** Signing in and clicking **Add this
+- **Load on the public relay.** Every `/v1` route, authenticated or not, passes an edge rate limit,
+  a route-sized body budget (16 KiB; 2.5 MB for mirror uploads) with a read deadline, and a
+  credential-shape check before the Worker reads a body or wakes a Hub (`relay/src/edge.ts`,
+  [relay/README.md](../relay/README.md#request-budgets)). Edge counters are per Cloudflare location.
+- **A Connect with Vocs link someone else sent (§6.3.1).** Signing in and clicking **Add this
   computer** on it would register the sender's desktop into the account. Mitigations: the page asks
-  first and names the risk ("continue only if you just clicked Connect with GitHub"), it shows a check
+  first and names the risk ("continue only if you just clicked Connect with Vocs"), it shows a check
   code the real desktop displays next to the button that opened it, owner writes are same-origin
   only, and a browser still reaches a computer only after that computer's Allow. Registered
   computers are listed in Settings and can be revoked (or all at once).
@@ -541,9 +601,9 @@ security bar must go up, not sideways:
 3. **Desktop offline.** Interactive features die gracefully; to make the web useful
    while offline, mirror encrypted transcripts to relay storage (opt-in) for read-only
    browsing. This is the main "make it feel always-on" investment.
-4. **Terminal over WAN** (deferred to P3.5 — chat-first launch, §11). String frames +
-   seq + ack flow control exist, but WAN latency and reconnect-mid-PTY need tuning
-   (coalescing, larger ack windows, snapshot-on-reconnect).
+4. **Terminal over WAN** (P3.5, done): per-browser streams with 25 ms coalescing, a 256 K
+   character ack window that resyncs with a snapshot instead of pausing the shell, and a fresh
+   snapshot on every reconnect (§5, Terminal over the relay).
 5. **Transcript replay size.** The web client loads transcripts tail-first
    (`sessions:transcriptPage`, newest 200 items, Load earlier on demand), serves each page
    trimmed to a byte budget that fits the relay frame, and follows a streaming turn by applying
@@ -584,11 +644,12 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 **Relay MVP → beta: roughly 8–11 weeks (chat-first; terminal lands in P3.5 after).**
 Cloud workspaces: separate track afterward.
 
-**Status:** P0–P4 and P3.5 read-only are implemented, and the P2 account routing boundary is live
+**Status:** P0–P4 and P3.5 (read-only, then read/write) are implemented, and the P2 account routing boundary is live
 (v0.7.0, 2026-09-26): allowlisted GitHub subjects get separate Hub DOs, enrollment grants resolve to
 the signed-in account, browser claims/polls require that account, and the web vault is partitioned.
 The remaining P2 work is operational: run the live smoke and the two-account check before other
-logins are added. Read/write terminal remains the next remote-access feature.
+logins are added. With the read/write terminal in, the remaining remote-access work is
+operational (the two-account check, then onboarding) and the productization track.
 
 ## 11. Decisions and open questions
 
@@ -659,7 +720,7 @@ Pairing-level questions from §6.9:
   at productization.
 
 **Open today:** the coordinated production rollout of this per-account relay release and landing
-assertion secret, the multi-account deployed smoke, and interactive terminal read/write. The OAuth
+assertion secret and the multi-account deployed smoke. The OAuth
 gate itself is live. See [the roadmap](./REMOTE-ACCESS-ROADMAP.md) for release order; the original
 P0 sketch (§12) is historical.
 

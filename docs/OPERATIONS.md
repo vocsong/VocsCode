@@ -39,8 +39,24 @@ Worth grepping for when a feature misbehaves:
 - `<harness> failed to start after <n>ms` and the `spawning <harness>: <path> (<source> runtime)` line above it — which binary was used and why it did not come up.
 - `is not valid JSON` / `skipped <n> unparsable line(s)` — a store or transcript was damaged and quarantined.
 - `could not decrypt the stored API key for <provider>` — the OS keychain no longer opens the stored key; re-enter it.
+- `Antigravity stopped sending updates without confirming the turn ended` — the CLI sent reply text but did not return a turn result after three quiet minutes with no known running tool or pending approval. Vocs Code keeps the reply and stops the CLI instead of marking the turn complete. Interrupt also stops an unresponsive CLI if the prompt has not ended after five seconds. Check the workspace for any changes before resending; queued messages are not replayed after this recovery.
 - `git … timed out` / `gh … timed out` — why the Changes or Branches panel is missing data.
 - `log file … is not writable` (console only) — the log itself could not be opened; this run is console-only.
+
+## Credential endpoint transport
+
+App-managed provider URLs (catalogs, native chat, background titles/knowledge and cloud dictation)
+and relay overrides require HTTPS/WSS outside literal loopback: `localhost`, normalized IPv4
+`127.0.0.0/8`, or IPv6 `::1`. HTTP/WS on private LAN addresses is refused; there is no insecure
+LAN override. Unsupported schemes, malformed URLs and URL user information are refused without
+including the supplied URL in the error. Put provider keys in the secret store, not URL userinfo.
+
+Provider endpoint edits are validated before settings are written. Legacy unsafe settings still
+load and permit unrelated saves, but the endpoint is refused at use; repair it in Settings →
+Providers & keys. App-owned SDK requests also validate their actual URL (including SDK environment
+defaults). Credential-bearing fetches do not follow redirects: configure the final HTTPS endpoint.
+Configured Claude/Codex routes are validated before app keys are handed to the external runtime;
+CLI-owned configuration and MCP transports are separate policies, not covered by this check.
 
 ## Remote relay operations
 
@@ -66,7 +82,7 @@ longer registered with the relay` (its credential was rejected — revoked, or a
 falls back to enrolling and keeps its identity), `remote: forgot N browser pairing(s)` (reconciled
 against the relay's registry; the offline mirror was re-keyed), `remote: pairing refused by the relay`
 and `…maximum number of paired devices` (the per-account cap: ten browsers, five computers),
-`remote: waiting for this computer to be added in the browser (Connect with GitHub)` and
+`remote: waiting for this computer to be added in the browser (Connect with Vocs)` and
 `remote: this computer was added in the browser (device …)` (the signed-in path; it gives up after
 ten minutes with `the sign-in page expired`).
 
@@ -78,9 +94,10 @@ None of these are required to run the app; they exist for headless runs and the 
 | --- | --- | --- |
 | `VOCS_CODE_USER_DATA` | main process | Overrides Electron's userData directory, so a run gets isolated settings, sessions and keychain entries. |
 | `VOCS_CODE_DEBUG` | main process | `1` keeps debug-level lines (harness stderr, MCP resolution, git probes, renderer `console.log`) in a packaged build. Renderer warnings and errors are logged regardless. |
+| `VOCS_CODE_ACCOUNT_REALM` | main process | `staging` points Settings → Vocs account at the staging identity and Hub services (`vocs-login-staging`, `vocs-mcp-staging`). Anything else, or unset, uses production (`auth.vocs.io`, `mcp.vocs.io`). |
 | `VOCS_CODE_WEB` | main process | `1` starts the localhost web client: serves the built renderer (`npm run build` first) at `http://localhost:5177/?token=…` and bridges the same handler registry to a browser tab. See docs/REMOTE-ACCESS.md. |
 | `VOCS_CODE_WEB_PORT` | main process | Port for the web client. Defaults to `5177`. |
-| `VOCS_CODE_RELAY_URL` | main process | Relay for remote access instead of `https://code.vocs.io`, e.g. `http://localhost:8787` for a local `wrangler dev`. There is no setting for it; `e2e.remote` uses it to reach the test relay. |
+| `VOCS_CODE_RELAY_URL` | main process | Relay for remote access instead of `https://code.vocs.io`; requires HTTPS except literal loopback, e.g. `http://localhost:8787` for a local `wrangler dev`. There is no insecure LAN override or setting for it; `e2e.remote` uses it to reach the test relay. |
 | `VOCS_CODE_SCREENSHOT` | main process | Writes a PNG of the window to this path once the UI has settled, then continues running. |
 | `VOCS_CODE_SCREENSHOT_DELAY` | main process | Milliseconds to wait before that screenshot. Defaults to `2500`. |
 | `VOCS_CODE_AUTOQUIT` | main process | Quits the app after this many milliseconds. Used to bound headless runs. |
@@ -100,5 +117,8 @@ None of these are required to run the app; they exist for headless runs and the 
 | `HARNESS_E2E_HARNESS` | Which harness the e2e session uses, for example `native`. |
 | `VOCS_CODE_E2E_UI=1` | Opts into `tests/e2e.vision.test.ts`. Runs with every provider key stripped from the environment, so it never reaches a provider. |
 | `HARNESS_E2E_EXE` | Path to a packaged binary (`dist/win-unpacked/Vocs Code.exe`); the terminal e2e drives it instead of `out/`. |
+| `VOCS_CODE_WHISPER_INTEGRATION=1` | Opts into `tests/dictation-whisper.integration.test.ts`, which downloads the pinned whisper.cpp build and a model and transcribes a real clip. |
+| `VOCS_CODE_WHISPER_COMPUTE=gpu` | Runs that test on the CUDA build instead of the CPU one; it fails rather than accept a CPU fallback. |
+| `VOCS_CODE_WHISPER_CACHE` | Directory that test downloads into, so repeated runs reuse the files. |
 
 The live suites need the corresponding runtime installed and logged in, and they spend real API credit.

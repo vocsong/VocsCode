@@ -12,6 +12,26 @@ export function relTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
+const startOfDay = (ts: number): number => new Date(ts).setHours(0, 0, 0, 0);
+
+/**
+ * When a transcript item happened, as short as it can be while still unambiguous: the time alone
+ * today, the weekday within the last week, the date before that, and the year once it differs.
+ */
+export function fmtStamp(ts: number, now = Date.now()): string {
+  const time: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+  const days = Math.round((startOfDay(now) - startOfDay(ts)) / 86_400_000);
+  if (days === 0) return new Date(ts).toLocaleTimeString(undefined, time);
+  if (days > 0 && days < 7) return new Date(ts).toLocaleString(undefined, { weekday: 'short', ...time });
+  const year = new Date(ts).getFullYear() === new Date(now).getFullYear() ? {} : { year: 'numeric' as const };
+  return new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', ...year, ...time });
+}
+
+/** The full date and time to the second, for a timestamp's tooltip. */
+export function fmtStampFull(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'medium' });
+}
+
 export function fmtCost(usd: number | undefined): string {
   if (!usd) return '$0.00';
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
@@ -57,31 +77,27 @@ export function speedOfTurns(turns: { status: string; durationMs?: number; usage
   return acc;
 }
 
-/** Last path segment for both Windows and POSIX separators. */
-export function basename(p: string): string {
-  const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
-  return parts[parts.length - 1] || p;
-}
+export { basename, harnessShort } from '../../shared/session-title';
 
 export function clamp(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
-/** Short display name for a harness id (sidebar badges, menus, analytics). */
-export function harnessShort(id: string): string {
-  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', cursor: 'Cursor', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
+/** A byte count as `512 KB`, `48 MB` or `1.2 GB`. */
+export function fmtBytes(n: number | undefined): string {
+  if (!n || n < 0) return '0 MB';
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  if (n < 1024 ** 3) return `${Math.round(n / 1024 ** 2)} MB`;
+  return `${(n / 1024 ** 3).toFixed(1)} GB`;
 }
 
-/** Badge tone per harness, so the header label matches the sidebar session row. */
-export function harnessTone(id: string): 'neutral' | 'green' | 'amber' | 'red' | 'blue' | 'purple' {
-  const tones: Record<string, 'neutral' | 'green' | 'amber' | 'red' | 'blue' | 'purple'> = {
-    claude: 'amber',
-    codex: 'green',
-    'codex-exec': 'green',
-    cursor: 'blue',
-    pi: 'purple',
-    acp: 'blue',
-    native: 'neutral'
-  };
-  return tones[id] ?? 'neutral';
+/** How long something has been running, coarsely: `45s`, `12m`, `3h 5m`, `2d 4h`. */
+export function fmtUptime(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
 }

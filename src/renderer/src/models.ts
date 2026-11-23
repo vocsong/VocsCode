@@ -1,6 +1,7 @@
-/** One session's model list: the harness's own list once it reports one, its harness catalog before that. */
-import { useEffect } from 'react';
-import type { ModelInfo, SessionMeta } from '../../shared/types';
+/** Session model pickers combine process-reported metadata with newly discovered catalog entries. */
+import { useEffect, useMemo } from 'react';
+import { HARNESS_BY_ID } from '../../shared/harness-meta';
+import type { HarnessId, ModelInfo, SessionMeta } from '../../shared/types';
 import { useStore, type ModelCatalogEntry } from './store';
 
 /** Stable fallback so the returned array is never a fresh reference (React #185 infinite loop). */
@@ -13,12 +14,21 @@ export interface SessionModels {
 }
 
 /**
- * A harness reports its models over its own process, which is only spawned on the first message, so
- * a brand-new session has nothing to show. The catalog stands in until then; an absent catalog entry
- * means the fetch has not resolved yet, which reads as loading rather than as an empty list.
+ * A process reports a snapshot on startup. Keep its metadata for matching models, but append newly
+ * discovered models so an old session does not hide models already available in New Session.
+ * Before the first message, the shared catalog supplies the entire list.
  */
-export function pickSessionModels(reported: ModelInfo[] | undefined, catalog: ModelCatalogEntry | undefined): SessionModels {
-  if (reported?.length) return { models: reported, loading: false };
+export function pickSessionModels(reported: ModelInfo[] | undefined, catalog: ModelCatalogEntry | undefined, harness?: HarnessId): SessionModels {
+  if (reported?.length) {
+    // Claude/Codex are endpoint-pinned; Pi retains launch-time provider credentials. A global
+    // probe may discover providers usable only in NEW sessions, not this process.
+    if (harness && HARNESS_BY_ID[harness].capabilities.modelSource === 'acp-config') return { models: reported, loading: false };
+    const pinned = harness === 'claude' || harness === 'codex' || harness === 'codex-exec' || harness === 'pi';
+    const providers = new Set(reported.map((m) => m.provider));
+    const known = new Set(reported.map((m) => JSON.stringify([m.provider, m.id])));
+    const added = catalog?.models.filter((m) => (!pinned || providers.has(m.provider)) && !known.has(JSON.stringify([m.provider, m.id]))) ?? EMPTY;
+    return { models: added.length ? [...reported, ...added] : reported, loading: false, ...(catalog?.error ? { error: catalog.error } : {}) };
+  }
   return { models: catalog?.models ?? EMPTY, loading: catalog?.loading ?? true, error: catalog?.error };
 }
 
@@ -32,5 +42,5 @@ export function useSessionModels(session: SessionMeta): SessionModels {
     if (!catalog) void ensureModelCatalog(harness);
   }, [catalog, ensureModelCatalog, harness]);
 
-  return pickSessionModels(reported, catalog);
+  return useMemo(() => pickSessionModels(reported, catalog, harness), [reported, catalog, harness]);
 }

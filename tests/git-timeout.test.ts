@@ -36,7 +36,7 @@ const NUMSTAT = ['diff', '--numstat', 'HEAD'];
 const UPSTREAM = ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'];
 const DIFF_HEAD = ['diff', 'HEAD'];
 const UNTRACKED = ['ls-files', '--others', '--exclude-standard'];
-const REFS = ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)'];
+const REFS = ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)%09%(objectname)'];
 
 let root: string;
 
@@ -96,6 +96,20 @@ describe('gitSummary', () => {
     expect(s.error).toBeUndefined();
     expect(s.files.find((f) => f.path === 'small.txt')?.additions).toBe(3);
     expect(s.files.find((f) => f.path === 'big.bin')?.additions).toBeUndefined();
+  });
+
+  it('counts an untracked file’s lines the way git does once it is added', async () => {
+    // A final newline ends the last line; it must not count as one more (2 lines read as +3 before).
+    await fs.writeFile(path.join(root, 'two.ts'), 'export const a = 1;\nexport const b = 2;\n', 'utf8');
+    await fs.writeFile(path.join(root, 'crlf.ts'), 'one\r\ntwo\r\n', 'utf8');
+    await fs.writeFile(path.join(root, 'empty.ts'), '', 'utf8');
+    gitReply(REV_PARSE_HEAD, { code: 0, stdout: 'main\n' });
+    gitReply(STATUS, { code: 0, stdout: '?? two.ts\n?? crlf.ts\n?? empty.ts\n' });
+    gitReply(NUMSTAT, { code: 1 });
+    gitReply(UPSTREAM, { code: 1 });
+
+    const s = await gitSummary(root);
+    expect(Object.fromEntries(s.files.map((f) => [f.path, f.additions]))).toEqual({ 'two.ts': 2, 'crlf.ts': 2, 'empty.ts': 0 });
   });
 });
 

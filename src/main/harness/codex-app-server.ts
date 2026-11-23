@@ -2,6 +2,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
+import { fastModeSupport } from '../../shared/fast-mode';
+import { assertEndpointUrl } from '../../shared/endpoint-policy';
 import { isCodexBuiltinProvider, isOpenAiWireProvider } from '../../shared/providers';
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -9,8 +11,11 @@ import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/sta
 import { codexProviderModels } from '../models/codex-catalog';
 import { toCodex } from '../mcp/effective';
 import { JsonRpcStdioClient } from './jsonrpc';
-import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
+import { applyCodexMcpSuppression, getCodexMcpServers } from './codex-mcp-config';
+import { gateAction, OPTIONS_ALLOW_DENY, requiresPathApproval } from './permissions';
+import { questionAnswerWithNote } from './question-answers';
 import { spawnTool } from './spawn';
+import { fastModePricing } from './native/fast-mode-pricing';
 import type { HarnessAdapter, HarnessContext } from './types';
 
 /* ---- Minimal protocol shapes (from `codex app-server generate-ts`) ---- */
@@ -30,6 +35,8 @@ interface CodexModel {
   defaultReasoningEffort: string;
   inputModalities: string[];
   isDefault: boolean;
+  serviceTiers?: { id: string }[];
+  additionalSpeedTiers?: string[];
 }
 
 type ThreadItem =
@@ -57,19 +64,28 @@ type ThreadItem =
   | { type: string; id: string; [k: string]: unknown };
 
 /**
- * Codex approval policies: `untrusted` asks for every command except known read-only ones
- * (what our Ask / Accept-edits modes promise), `on-request` asks only when the sandboxed run
- * needs escalation (our Auto), `never` for full access.
+ * Codex approval policies. Below Full every tier uses `untrusted`: Codex runs only its known-safe
+ * read-only commands unasked and sends an approval request for every other command and every
+ * patch, so the app's tier gate (`gateAction`) decides each one. `on-request` is never used: under
+ * it Codex runs any command that stays inside the sandbox without asking, which would let a
+ * dangerous command run silently in Auto. `never` is Full access.
  */
 function approvalPolicyFor(mode: PermissionMode): AskForApproval {
-  switch (mode) {
-    case 'full-auto':
-      return 'never';
-    case 'auto':
-      return 'on-request';
-    default:
-      return 'untrusted';
-  }
+  return mode === 'full-auto' ? 'never' : 'untrusted';
+}
+
+/** Session grants are keyed per tool, never per command line: one for shell, one for patches. */
+type SessionGrant = 'command' | 'file_change';
+
+/**
+ * True when a command approval asks to run outside the sandbox. Codex attaches a reason only to
+ * those: the model's `justification` is accepted only with `sandbox_permissions:
+ * "require_escalated"`, and a sandbox-denied run is retried with "Command failed; retry without
+ * sandbox?". A managed-network approval carries its own context and stays an ordinary command.
+ * Escaping the sandbox reaches beyond the project, so the gate treats it as an outside action.
+ */
+function requestsUnsandboxedRun(n: { reason?: string | null; networkApprovalContext?: unknown }): boolean {
+  return !n.networkApprovalContext && !!n.reason?.trim();
 }
 
 function sandboxPolicyFor(mode: PermissionMode, cwd: string): SandboxPolicy {
@@ -98,10 +114,18 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private model: string | undefined;
   private modelProvider: string | undefined;
   private effort: EffortLevel | undefined;
+  private fastMode = false;
+  private fastModeModel: ModelRef | undefined;
+  private speedTiers = new Map<string, string[]>();
+  private serviceTier = 'default';
+  private unknownFastCostReported = false;
   private items = new Map<string, TranscriptItem>();
   private fileChangeItems = new Map<string, FileChange[]>();
-  /** Exact command lines the user approved "for session"; Codex keeps its own per-command memory too. */
-  private sessionAllowedCommands = new Set<string>();
+  /**
+   * Tools the user allowed "for session". Kept only here: Codex is always sent a one-time accept,
+   * so no grant outlives a tier change inside Codex's own approval memory.
+   */
+  private sessionGrants = new Set<SessionGrant>();
   private queue: UserInput[] = [];
   private turnStartedAt = 0;
   private readonly usage: TurnUsageTracker;
@@ -135,21 +159,29 @@ export class CodexAppServerAdapter implements HarnessAdapter {
 
   async start(): Promise<void> {
     const meta = this.ctx.session();
+    const provider = this.resolveCodexProvider();
+    if (provider) assertEndpointUrl(provider.baseUrl);
     const bin = this.ctx.runtime.resolve('codex');
     if (!bin) throw new Error('Codex CLI not found. Install it with `npm install -g @openai/codex` or set the path in Settings.');
     const env: NodeJS.ProcessEnv = { ...process.env };
     const key = await this.ctx.getApiKey('openai');
     if (key && !env.OPENAI_API_KEY && !env.CODEX_API_KEY) env.OPENAI_API_KEY = key;
-    const provider = this.resolveCodexProvider();
     if (provider?.envKey) {
       const custom = await this.ctx.getApiKey(provider.id);
       if (custom) env[provider.envKey] = custom;
     }
     this.ctx.log('info', `spawning codex app-server: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
-    const child = spawnTool(bin.path, ['app-server'], { cwd: meta.cwd, env });
+    // Enable the protocol feature, not paid service: each thread/turn explicitly chooses its tier.
+    const child = spawnTool(bin.path, ['app-server', '-c', 'features.fast_mode=true'], { cwd: meta.cwd, env });
     this.rpc = new JsonRpcStdioClient(child);
     try {
-      this.rpc.onStderr = (l) => this.ctx.log('debug', `[codex] ${l}`);
+      this.rpc.onStderr = (l) => {
+        this.ctx.log('debug', `[codex] ${l}`);
+        if (this.fastMode && /configured tier.*not advertised|fast.*(?:disabled|unavailable)|service.tier.*(?:ignored|unsupported)/i.test(l)) {
+          this.serviceTier = 'default';
+          this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: l } });
+        }
+      };
       this.rpc.onClose = (code) => {
         this.compactionWaiter?.reject(new Error(`Codex stopped during context compaction (${code}).`));
         this._busy = false;
@@ -170,15 +202,28 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.model = meta.config.model?.model || meta.activeModel?.model;
       this.modelProvider = provider?.id;
       this.effort = this.ctx.effort();
+      this.fastModeModel = meta.config.model ?? meta.activeModel;
+      this.fastMode = meta.config.fastMode === true && !meta.mission;
+      // Prefer the runtime's exact advertised capabilities over our conservative model candidates.
+      if (this.fastMode && !provider) {
+        await this.listModels();
+        if (!this.model) {
+          this.model = this.models.find((entry) => entry.isDefault)?.id;
+          if (this.model) this.fastModeModel = { provider: 'openai', model: this.model };
+        }
+      }
+      this.reportFastMode();
+      const fast = this.fastMode && this.fastModeCapability().supported;
       const mode = this.ctx.permissionMode();
       const common: Record<string, unknown> = {
         model: this.model ?? null,
         modelProvider: this.modelProvider ?? null,
+        serviceTier: fast ? this.fastServiceTier() : 'default',
         cwd: meta.cwd,
         approvalPolicy: approvalPolicyFor(mode),
         sandbox: sandboxModeFor(mode)
       };
-      const config: Record<string, unknown> = {};
+      const config: Record<string, unknown> = { features: { fast_mode: true }, service_tier: fast ? this.fastServiceTier() : 'default' };
       if (provider) {
         config.model_providers = {
           [provider.id]: { name: provider.name, base_url: provider.baseUrl, env_key: provider.envKey, wire_api: provider.wireApi }
@@ -189,17 +234,18 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
         return [];
       });
-      // Codex loads its own ~/.codex/config.toml under whatever this hands over, so a server this
-      // app defines has to be claimed either way: the shared endpoint when the repo has an index,
-      // otherwise switched off, so that config cannot start a second copy in the session.
-      const mcpServers = toCodex(mcp, 'inline', { owned: this.ctx.ownedMcpIds() }).config;
+      const mcpServers = toCodex(mcp, 'inline').config;
+      await applyCodexMcpSuppression(mcpServers, this.ctx.ownedMcpIds(), () => getCodexMcpServers(this.rpc!, meta.cwd));
       if (Object.keys(mcpServers).length) config.mcp_servers = mcpServers;
       if (Object.keys(config).length) common.config = config;
-      let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null };
+      let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null; serviceTier?: string | null };
       if (meta.harnessRef.codexThreadId) {
+        // Restored usage can arrive in the same stdout chunk as the resume response.
+        this.threadId = meta.harnessRef.codexThreadId;
         try {
-          res = await withTimeout(this.rpc.request('thread/resume', { threadId: meta.harnessRef.codexThreadId, ...common }), 30_000, 'thread/resume');
+          res = await withTimeout(this.rpc.request('thread/resume', { threadId: this.threadId, ...common }), 30_000, 'thread/resume');
         } catch (e) {
+          this.threadId = null;
           this.info(`Could not resume Codex thread (${errorMessage(e)}); starting a new one.`, 'warn');
           res = await withTimeout(this.rpc.request('thread/start', { ...common, sessionStartSource: null }), 30_000, 'thread/start');
         }
@@ -207,6 +253,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         res = await withTimeout(this.rpc.request('thread/start', common), 30_000, 'thread/start');
       }
       this.threadId = res.thread.id;
+      this.serviceTier = res.serviceTier ?? (fast ? this.fastServiceTier() : 'default');
+      this.fastModeModel = { provider: res.modelProvider || 'openai', model: res.model };
+      this.reportFastMode();
+      if (fast && res.serviceTier !== undefined && res.serviceTier !== 'fast' && res.serviceTier !== 'priority') {
+        this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: 'Codex did not accept a Fast service tier.' } });
+      }
       this.ctx.updateRef({ codexThreadId: this.threadId });
       this.ctx.updateMeta({
         activeModel: { provider: res.modelProvider || 'openai', model: res.model },
@@ -225,7 +277,23 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   private wireNotifications(rpc: JsonRpcStdioClient): void {
-    rpc.onNotification('turn/started', (p) => {
+    // Codex also streams spawned threads on this connection. Only this session's thread
+    // owns its turn, transcript and usage. Parent-thread subagent activity still arrives here.
+    const onThreadNotification = (method: string, handle: (params: unknown) => void): void => {
+      rpc.onNotification(method, (params) => {
+        if (this.threadId && (params as { threadId?: string } | undefined)?.threadId === this.threadId) handle(params);
+      });
+    };
+    // Settings acknowledge the configured tier, not the tier actually served by the API.
+    onThreadNotification('thread/settings/updated', (p) => {
+      const tier = (p as { threadSettings?: { serviceTier?: string | null } }).threadSettings?.serviceTier;
+      if (tier === undefined) return;
+      this.serviceTier = tier ?? 'default';
+      if (this.fastMode && tier !== 'fast' && tier !== 'priority') {
+        this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: `Codex selected service tier: ${this.serviceTier}` } });
+      }
+    });
+    onThreadNotification('turn/started', (p) => {
       const n = p as { turn: { id: string } };
       this.turnId = n.turn.id;
       this._busy = true;
@@ -233,9 +301,14 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.turnStartedAt = this.turnStartedAt || Date.now();
       this.ctx.emit({ type: 'status', status: 'running' });
     });
-    rpc.onNotification('item/started', (p) => this.upsertItem((p as { item: ThreadItem }).item, false));
-    rpc.onNotification('item/completed', (p) => this.upsertItem((p as { item: ThreadItem }).item, true));
-    rpc.onNotification('item/agentMessage/delta', (p) => {
+    rpc.onNotification('item/started', (p) => {
+      const { threadId, item } = p as { threadId: string; item: ThreadItem };
+      if (threadId === this.threadId) this.upsertItem(item, false);
+      // Child approvals can still reach this client. The approval request refers to this item's patch.
+      else if (item.type === 'fileChange') this.rememberFileChanges(item as Extract<ThreadItem, { type: 'fileChange' }>);
+    });
+    onThreadNotification('item/completed', (p) => this.upsertItem((p as { item: ThreadItem }).item, true));
+    onThreadNotification('item/agentMessage/delta', (p) => {
       const n = p as { itemId: string; delta: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'assistant') {
@@ -243,7 +316,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, textDelta: n.delta });
       }
     });
-    rpc.onNotification('item/plan/delta', (p) => {
+    onThreadNotification('item/plan/delta', (p) => {
       const n = p as { itemId: string; delta: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'assistant') {
@@ -263,9 +336,9 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, thinkingDelta: n.delta });
       }
     };
-    rpc.onNotification('item/reasoning/summaryTextDelta', reasoningDelta);
-    rpc.onNotification('item/reasoning/textDelta', reasoningDelta);
-    rpc.onNotification('item/reasoning/summaryPartAdded', (p) => {
+    onThreadNotification('item/reasoning/summaryTextDelta', reasoningDelta);
+    onThreadNotification('item/reasoning/textDelta', reasoningDelta);
+    onThreadNotification('item/reasoning/summaryPartAdded', (p) => {
       const n = p as { itemId: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'assistant' && item.thinking) {
@@ -273,7 +346,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, thinkingDelta: '\n\n' });
       }
     });
-    rpc.onNotification('item/commandExecution/outputDelta', (p) => {
+    onThreadNotification('item/commandExecution/outputDelta', (p) => {
       const n = p as { itemId: string; delta: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'tool') {
@@ -281,7 +354,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, outputDelta: n.delta });
       }
     });
-    rpc.onNotification('item/fileChange/outputDelta', (p) => {
+    onThreadNotification('item/fileChange/outputDelta', (p) => {
       const n = p as { itemId: string; delta: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'tool') {
@@ -289,12 +362,13 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, outputDelta: n.delta });
       }
     });
-    rpc.onNotification('turn/completed', (p) => {
+    onThreadNotification('turn/completed', (p) => {
       const n = p as { turn: { id: string; status: 'completed' | 'interrupted' | 'failed' | 'inProgress'; error: { message: string } | null; durationMs: number | null } };
       this._busy = false;
       this.turnId = null;
       for (const item of this.items.values()) if (item.kind === 'assistant' && item.streaming) this.ctx.emit({ type: 'item.upsert', item: { ...item, streaming: false } });
       const status = n.turn.status === 'failed' ? 'failed' : n.turn.status === 'interrupted' ? 'interrupted' : 'completed';
+      if (this.fastMode && status === 'failed') this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: n.turn.error?.message ?? 'Codex turn failed.' } });
       const completed = this.usage.finishTurn();
       this.ctx.emit({ type: 'usage', totals: completed.totals });
       const usage = completed.usage;
@@ -309,7 +383,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.ctx.updateMeta({ queued: this.queue.length });
       if (next) void this.send({ ...next, mode: 'now' }).catch((e) => this.info(errorMessage(e), 'error'));
     });
-    rpc.onNotification('thread/tokenUsage/updated', (p) => {
+    onThreadNotification('thread/tokenUsage/updated', (p) => {
       const n = p as { tokenUsage: { total: { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }; last: { totalTokens: number }; modelContextWindow: number | null } };
       const t = n.tokenUsage.total;
       const before = this.usage.snapshot();
@@ -339,69 +413,62 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       };
       // Spend is additive and never reconciled: Codex reports no cost to reconcile it against, and
       // money spent at an earlier model's rate stays spent.
-      this.usage.addUsage({ costUsd: estimateCostUsd(findPricing(this.modelProvider ?? 'openai', this.model ?? '', this.models), added) });
+      const fast = this.fastMode && (this.serviceTier === 'fast' || this.serviceTier === 'priority');
+      const model = this.model ?? this.fastModeModel?.model ?? '';
+      const pricing = fast ? fastModePricing(model, added.inputTokens + added.cacheReadTokens + added.cacheWriteTokens) : findPricing(this.modelProvider ?? 'openai', model, this.models);
+      if (fast && !pricing && !this.unknownFastCostReported) {
+        this.unknownFastCostReported = true;
+        this.info('Fast-mode pricing is unavailable for this model/context. Reported spend excludes these requests; check the provider bill for the full cost.', 'warn');
+      }
+      this.usage.addUsage({ costUsd: estimateCostUsd(pricing, added) });
       this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
     });
-    rpc.onNotification('error', (p) => {
+    onThreadNotification('error', (p) => {
       const n = p as { error: { message: string }; willRetry: boolean };
+      if (this.fastMode && !n.willRetry) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: n.error.message } });
       this.info(`${n.error.message}${n.willRetry ? ' (retrying)' : ''}`, n.willRetry ? 'warn' : 'error');
     });
     rpc.onNotification('warning', (p) => this.ctx.log('warn', `[codex] ${JSON.stringify(p)}`));
     rpc.onNotification('configWarning', (p) => this.ctx.log('warn', `[codex config] ${JSON.stringify(p)}`));
-    rpc.onNotification('thread/name/updated', (p) => {
+    onThreadNotification('thread/name/updated', (p) => {
       const n = p as { name?: string | null };
       if (n.name && /^New session|^Untitled/i.test(this.ctx.session().title)) this.ctx.updateMeta({ title: n.name });
     });
-    rpc.onNotification('thread/compacted', () => {
+    onThreadNotification('thread/compacted', () => {
       this.info('Codex compacted the conversation context.');
       this.compactionWaiter?.resolve();
     });
-    rpc.onNotification('model/rerouted', (p) => this.info(`Model rerouted: ${JSON.stringify(p)}`, 'warn'));
+    onThreadNotification('model/rerouted', (p) => this.info(`Model rerouted: ${JSON.stringify(p)}`, 'warn'));
     rpc.onNotification('account/rateLimits/updated', (p) => this.ctx.log('debug', `[codex rate limits] ${JSON.stringify(p)}`));
   }
 
   private wireServerRequests(rpc: JsonRpcStdioClient): void {
+    // Every grant goes back to Codex as a one-time accept; "allow for session" lives in sessionGrants.
     rpc.onServerRequest('item/commandExecution/requestApproval', async (p) => {
-      const n = p as { itemId: string; command?: string | null; cwd?: string | null; reason?: string | null; proposedExecpolicyAmendment?: unknown };
-      const command = n.command ?? '(command)';
-      const mode = this.ctx.permissionMode();
-      const verdict = gateAction(mode, { mutating: true, isEdit: false, command, sessionAllowed: this.sessionAllowedCommands.has(command) });
-      if (mode === 'plan') return { decision: 'decline' };
-      if (verdict === 'allow') return { decision: 'accept' };
-      const decision = await this.ctx.requestApproval({
-        kind: 'command',
-        title: 'Codex wants to run a command',
-        description: n.reason ?? undefined,
-        command,
-        cwd: n.cwd ?? this.ctx.session().cwd,
-        toolItemId: n.itemId,
-        options: OPTIONS_ALLOW_DENY
+      const n = p as { itemId: string; command?: string | null; cwd?: string | null; reason?: string | null; networkApprovalContext?: unknown };
+      const verdict = await this.approveCommand({
+        command: n.command ?? '(command)',
+        cwd: n.cwd ?? undefined,
+        reason: n.reason ?? undefined,
+        unsandboxed: requestsUnsandboxedRun(n),
+        toolItemId: n.itemId
       });
-      if (decision.optionId === 'allow') return { decision: 'accept' };
-      if (decision.optionId === 'allow_session') {
-        this.sessionAllowedCommands.add(command);
-        return { decision: 'acceptForSession' };
-      }
-      return { decision: 'decline' };
+      return { decision: verdict.allowed ? 'accept' : 'decline' };
     });
     rpc.onServerRequest('item/fileChange/requestApproval', async (p) => {
       const n = p as { itemId: string; reason?: string | null; grantRoot?: string | null };
-      const mode = this.ctx.permissionMode();
-      if (mode === 'plan') return { decision: 'decline' };
-      // A grantRoot request means the patch writes outside the sandboxed workspace: always ask below full access.
-      if (mode === 'full-auto' || ((mode === 'accept-edits' || mode === 'auto') && !n.grantRoot)) return { decision: 'accept' };
       const changes = this.fileChangeItems.get(n.itemId);
-      const decision = await this.ctx.requestApproval({
-        kind: 'file_change',
+      // The item/started notification names the patch's paths; without it the paths are unknown,
+      // and an unknown target is treated as outside the project.
+      const verdict = await this.approveFileChange({
+        paths: changes ? changes.flatMap((c) => [c.path, c.oldPath]) : undefined,
+        grantRoot: n.grantRoot ?? undefined,
         title: changes?.length ? `Apply changes to ${changes.length} file${changes.length === 1 ? '' : 's'}?` : 'Apply file changes?',
         description: n.reason ?? (n.grantRoot ? `Requests write access under ${n.grantRoot}` : undefined),
         changes,
-        toolItemId: n.itemId,
-        options: OPTIONS_ALLOW_DENY
+        toolItemId: n.itemId
       });
-      if (decision.optionId === 'allow') return { decision: 'accept' };
-      if (decision.optionId === 'allow_session') return { decision: 'acceptForSession' };
-      return { decision: 'decline' };
+      return { decision: verdict.allowed ? 'accept' : 'decline' };
     });
     rpc.onServerRequest('item/tool/requestUserInput', async (p) => {
       const n = p as { questions: { id: string; header: string; question: string; isOther: boolean; isSecret: boolean; options: { label: string; description: string }[] | null }[] };
@@ -415,54 +482,102 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         questions: n.questions.map((q) => ({ id: q.id, header: q.header, question: q.question, options: q.options ?? undefined, allowOther: q.isOther, secret: q.isSecret }))
       });
       const answers: Record<string, { answers: string[] }> = {};
+      const note = decision.note?.trim();
       for (const q of n.questions) {
-        const a = decision.answers?.[q.id];
+        // Skip must never leak stale selections; this protocol has no separate denial-note field.
+        const a = decision.optionId === 'allow'
+          ? questionAnswerWithNote(decision.answers?.[q.id], note)
+          : note ? questionAnswerWithNote('The user skipped the question.', note) : undefined;
         answers[q.id] = { answers: a ? [a] : [] };
       }
       return { answers };
     });
     rpc.onServerRequest('mcpServer/elicitation/request', async () => ({ action: 'decline', content: null, _meta: null }));
     rpc.onServerRequest('execCommandApproval', async (p) => {
-      const n = p as { command?: string[] | string; cwd?: string; reason?: string };
-      const command = Array.isArray(n.command) ? n.command.join(' ') : (n.command ?? '(command)');
-      const mode = this.ctx.permissionMode();
-      if (mode === 'plan') return { decision: { denied: { rejection: 'Plan mode' } } };
-      if (gateAction(mode, { mutating: true, isEdit: false, command, sessionAllowed: this.sessionAllowedCommands.has(command) }) === 'allow') return { decision: 'approved' };
-      const d = await this.ctx.requestApproval({ kind: 'command', title: 'Codex wants to run a command', command, cwd: n.cwd, description: n.reason, options: OPTIONS_ALLOW_DENY });
-      if (d.optionId === 'allow') return { decision: 'approved' };
-      if (d.optionId === 'allow_session') {
-        this.sessionAllowedCommands.add(command);
-        return { decision: 'approved_for_session' };
-      }
-      return { decision: { denied: { rejection: d.note || 'User declined' } } };
+      const n = p as { command?: string[] | string; cwd?: string; reason?: string | null };
+      const verdict = await this.approveCommand({
+        command: Array.isArray(n.command) ? n.command.join(' ') : (n.command ?? '(command)'),
+        cwd: n.cwd,
+        reason: n.reason ?? undefined,
+        unsandboxed: requestsUnsandboxedRun(n)
+      });
+      return { decision: verdict.allowed ? 'approved' : { denied: { rejection: verdict.rejection } } };
     });
     rpc.onServerRequest('applyPatchApproval', async (p) => {
       const n = p as { reason?: string; fileChanges?: Record<string, unknown>; grantRoot?: string | null };
-      const mode = this.ctx.permissionMode();
-      if (mode === 'plan') return { decision: { denied: { rejection: 'Plan mode' } } };
       const files = Object.keys(n.fileChanges ?? {});
       // This legacy request carries no item id, so resolve the affected paths here: the keys are
-      // the written paths and an update may also move a file to a new path. Like the fileChange
-      // handler, a patch that leaves the workspace always asks below full access.
-      const cwd = this.ctx.session().cwd;
-      const outsideWorkspace =
-        !!n.grantRoot ||
-        Object.entries(n.fileChanges ?? {}).some(([file, change]) => {
-          const move = (change as { move_path?: string | null } | null)?.move_path;
-          return isOutsideWorkspace(cwd, file, path) || (typeof move === 'string' && isOutsideWorkspace(cwd, move, path));
-        });
-      if (gateAction(mode, { mutating: true, isEdit: true, outsideWorkspace }) === 'allow') return { decision: 'approved' };
-      const d = await this.ctx.requestApproval({
-        kind: 'file_change',
+      // the written paths and an update may also move a file to a new path.
+      const moves = Object.values(n.fileChanges ?? {}).map((change) => (change as { move_path?: unknown } | null)?.move_path);
+      const verdict = await this.approveFileChange({
+        paths: [...files, ...moves.filter((m): m is string => typeof m === 'string')],
+        grantRoot: n.grantRoot ?? undefined,
         title: 'Apply file changes?',
         description: n.reason ?? (n.grantRoot ? `Requests write access under ${n.grantRoot}` : files.join(', ')),
-        changes: files.map((f) => ({ path: f, kind: 'update' as const })),
-        options: OPTIONS_ALLOW_DENY
+        changes: files.map((f) => ({ path: f, kind: 'update' as const }))
       });
-      if (d.optionId === 'allow') return { decision: 'approved' };
-      if (d.optionId === 'allow_session') return { decision: 'approved_for_session' };
-      return { decision: { denied: { rejection: d.note || 'User declined' } } };
+      return { decision: verdict.allowed ? 'approved' : { denied: { rejection: verdict.rejection } } };
     });
+  }
+
+  /** True when any target resolves outside the project once symlinks and junctions are followed. */
+  private async leavesProject(targets: (string | undefined)[]): Promise<boolean> {
+    const cwd = this.ctx.session().cwd;
+    const checks = targets.filter((t): t is string => !!t).map((t) => requiresPathApproval(cwd, t));
+    return (await Promise.all(checks)).some(Boolean);
+  }
+
+  /** The Vocs Code tier gate for one Codex shell approval; prompts only when the tier says ask. */
+  private async approveCommand(req: { command: string; cwd?: string; reason?: string; unsandboxed: boolean; toolItemId?: string }): Promise<{ allowed: boolean; rejection: string }> {
+    const mode = this.ctx.permissionMode();
+    if (mode === 'plan') return { allowed: false, rejection: 'Plan mode' };
+    const outsideWorkspace = mode !== 'full-auto' && (req.unsandboxed || (await this.leavesProject([req.cwd])));
+    const verdict = gateAction(mode, { mutating: true, isEdit: false, command: req.command, sessionAllowed: this.sessionGrants.has('command'), outsideWorkspace });
+    if (verdict === 'allow') return { allowed: true, rejection: '' };
+    if (verdict === 'deny') return { allowed: false, rejection: 'Denied by the permission mode' };
+    const decision = await this.ctx.requestApproval({
+      kind: 'command',
+      title: 'Codex wants to run a command',
+      description: req.reason,
+      command: req.command,
+      cwd: req.cwd ?? this.ctx.session().cwd,
+      toolItemId: req.toolItemId,
+      options: OPTIONS_ALLOW_DENY
+    });
+    if (decision.optionId === 'allow_session') this.sessionGrants.add('command');
+    if (decision.optionId === 'allow' || decision.optionId === 'allow_session') return { allowed: true, rejection: '' };
+    return { allowed: false, rejection: decision.note || 'User declined' };
+  }
+
+  /**
+   * The tier gate for one Codex patch. `paths` undefined means the targets are unknown, which
+   * counts as outside the project; so does a grantRoot that leaves it.
+   */
+  private async approveFileChange(req: {
+    paths: (string | undefined)[] | undefined;
+    grantRoot?: string;
+    title: string;
+    description?: string;
+    changes?: FileChange[];
+    toolItemId?: string;
+  }): Promise<{ allowed: boolean; rejection: string }> {
+    const mode = this.ctx.permissionMode();
+    if (mode === 'plan') return { allowed: false, rejection: 'Plan mode' };
+    const outsideWorkspace = mode !== 'full-auto' && (!req.paths || (await this.leavesProject([...req.paths, req.grantRoot])));
+    const verdict = gateAction(mode, { mutating: true, isEdit: true, sessionAllowed: this.sessionGrants.has('file_change'), outsideWorkspace });
+    if (verdict === 'allow') return { allowed: true, rejection: '' };
+    if (verdict === 'deny') return { allowed: false, rejection: 'Denied by the permission mode' };
+    const decision = await this.ctx.requestApproval({
+      kind: 'file_change',
+      title: req.title,
+      description: req.description,
+      changes: req.changes,
+      toolItemId: req.toolItemId,
+      options: OPTIONS_ALLOW_DENY
+    });
+    if (decision.optionId === 'allow_session') this.sessionGrants.add('file_change');
+    if (decision.optionId === 'allow' || decision.optionId === 'allow_session') return { allowed: true, rejection: '' };
+    return { allowed: false, rejection: decision.note || 'User declined' };
   }
 
   private upsertItem(item: ThreadItem, completed: boolean): void {
@@ -513,13 +628,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       }
       case 'fileChange': {
         const it = item as Extract<ThreadItem, { type: 'fileChange' }>;
-        const changes: FileChange[] = it.changes.map((c) => ({
-          path: c.path,
-          kind: c.kind.type === 'update' && c.kind.move_path ? 'rename' : c.kind.type,
-          diff: c.diff,
-          oldPath: c.kind.type === 'update' ? c.kind.move_path ?? undefined : undefined
-        }));
-        this.fileChangeItems.set(it.id, changes);
+        const changes = this.rememberFileChanges(it);
         out = {
           id: it.id,
           kind: 'tool',
@@ -593,6 +702,17 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     if (out) this.upsert(out);
   }
 
+  private rememberFileChanges(item: Extract<ThreadItem, { type: 'fileChange' }>): FileChange[] {
+    const changes: FileChange[] = item.changes.map((c) => ({
+      path: c.path,
+      kind: c.kind.type === 'update' && c.kind.move_path ? 'rename' : c.kind.type,
+      diff: c.diff,
+      oldPath: c.kind.type === 'update' ? c.kind.move_path ?? undefined : undefined
+    }));
+    this.fileChangeItems.set(item.id, changes);
+    return changes;
+  }
+
   /**
    * Keep the adapter's live item locally and emit a snapshot of it. The session manager owns the
    * emitted item and mutates it as deltas stream, so handing it this map's object would apply
@@ -636,8 +756,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       approvalPolicy: approvalPolicyFor(mode),
       sandboxPolicy: sandboxPolicyFor(mode, this.ctx.session().cwd),
       model: this.model ?? null,
-      effort: this.effort ?? null
+      effort: this.effort ?? null,
+      serviceTier: this.fastMode && this.fastModeCapability().supported ? this.fastServiceTier() : 'default'
     };
+    this.reportFastMode();
+    this.serviceTier = String(params.serviceTier);
+    this.unknownFastCostReported = false;
     this._busy = true;
     this.turnStartedAt = Date.now();
     this.usage.beginTurn();
@@ -651,6 +775,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       if (this._busy) this.turnId = res.turn.id;
     } catch (e) {
       this._busy = false;
+      if (this.fastMode) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: errorMessage(e) } });
       this.ctx.emit({ type: 'status', status: 'idle' });
       throw e;
     }
@@ -665,10 +790,45 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
   }
 
+  private fastModeCapability() {
+    if (this.resolveCodexProvider()) return { supported: false, reason: 'Fast mode is unavailable on custom Codex provider routes.' };
+    const model = this.fastModeModel?.model ?? this.models.find((entry) => entry.isDefault)?.id;
+    if (model && this.speedTiers.size && !this.models.some((entry) => entry.id === model)) return { supported: false, reason: 'The selected model is not in this Codex runtime’s available model catalog.' };
+    const tiers = model ? this.speedTiers.get(model) : undefined;
+    if (tiers && !tiers.includes('fast') && !tiers.includes('priority')) return { supported: false, reason: 'This Codex runtime does not advertise a Fast service tier for the selected model.' };
+    return fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+  }
+
+  private fastServiceTier(): string {
+    const model = this.fastModeModel?.model ?? this.models.find((entry) => entry.isDefault)?.id;
+    return model && this.speedTiers.get(model)?.includes('priority') ? 'priority' : 'fast';
+  }
+
+  private reportFastMode(): void {
+    if (!this.fastMode) {
+      this.ctx.updateMeta({ fastModeStatus: { state: 'off' } });
+      return;
+    }
+    const support = this.fastModeCapability();
+    this.ctx.updateMeta({ fastModeStatus: !this.fastMode ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
+  }
+
+  async setFastMode(enabled: boolean): Promise<void> {
+    if (enabled && this.ctx.session().mission) throw new Error('Fast mode is unavailable for Missions.');
+    if (enabled) await this.listModels();
+    const support = this.fastModeCapability();
+    if (enabled && !support.supported) throw new Error(support.reason);
+    if (!this.rpc || !this.threadId) throw new Error('Codex thread is not ready.');
+    this.fastMode = enabled;
+    this.ctx.updateMeta({ fastModeStatus: { state: enabled ? 'requested' : 'off' } });
+  }
+
   async setModel(model: ModelRef): Promise<void> {
     this.model = model.model;
     if (model.provider && model.provider !== 'openai' && model.provider !== 'codex') this.modelProvider = model.provider;
+    this.fastModeModel = model;
     this.ctx.updateMeta({ activeModel: model });
+    this.reportFastMode();
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {
@@ -678,7 +838,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
     // Session grants made under a looser mode must not carry into a stricter one.
-    this.sessionAllowedCommands.clear();
+    this.sessionGrants.clear();
     if (this._busy) this.info(`Permission mode "${mode}" applies to Codex from the next turn; the running turn keeps its current sandbox.`, 'warn');
   }
 
@@ -706,7 +866,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
     if (!this.rpc) return CODEX_STATIC_MODELS;
     try {
-      this.models = await readCodexModelCatalog(this.rpc);
+      this.models = await readCodexModelCatalog(this.rpc, (model) => {
+        const tiers = model.serviceTiers?.map((tier) => tier.id) ?? model.additionalSpeedTiers;
+        if (tiers) this.speedTiers.set(model.model, tiers);
+      });
       return this.models.length ? this.models : CODEX_STATIC_MODELS;
     } catch (e) {
       this.ctx.log('warn', `model/list failed: ${errorMessage(e)}`);
@@ -746,7 +909,7 @@ export function codexModelToInfo(m: CodexModel, provider = 'openai'): ModelInfo 
 }
 
 /** Read every visible-model page, within one deadline; never serve a silently truncated catalog. */
-async function readCodexModelCatalog(rpc: JsonRpcStdioClient): Promise<ModelInfo[]> {
+async function readCodexModelCatalog(rpc: JsonRpcStdioClient, observe?: (model: CodexModel) => void): Promise<ModelInfo[]> {
   const deadline = Date.now() + 20_000;
   const seen = new Set<string>();
   const models = new Map<string, ModelInfo>();
@@ -759,7 +922,10 @@ async function readCodexModelCatalog(rpc: JsonRpcStdioClient): Promise<ModelInfo
       remaining,
       'model/list'
     );
-    for (const model of page.data) models.set(model.model, codexModelToInfo(model));
+    for (const model of page.data) {
+      observe?.(model);
+      models.set(model.model, codexModelToInfo(model));
+    }
     cursor = page.nextCursor ?? undefined;
     if (cursor) {
       if (seen.has(cursor)) throw new Error('model/list repeated a pagination cursor');
@@ -772,12 +938,12 @@ async function readCodexModelCatalog(rpc: JsonRpcStdioClient): Promise<ModelInfo
 /**
  * One-shot model listing without a session: spawn app-server, initialize, model/list, exit.
  */
-export async function listCodexModels(codexPath: string): Promise<ModelInfo[]> {
+export async function listCodexModels(codexPath: string, observe?: (model: CodexModel) => void): Promise<ModelInfo[]> {
   const child = spawnTool(codexPath, ['app-server']);
   const rpc = new JsonRpcStdioClient(child);
   try {
     await withTimeout(rpc.request('initialize', { clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }, capabilities: { experimentalApi: false, requestAttestation: false } }), 20_000, 'initialize');
-    return await readCodexModelCatalog(rpc);
+    return await readCodexModelCatalog(rpc, observe);
   } finally {
     await rpc.close();
   }

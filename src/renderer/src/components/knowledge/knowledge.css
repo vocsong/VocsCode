@@ -1,0 +1,170 @@
+.knowledge-workspace {
+  min-width: 0;
+}
+.knowledge-workspace [hidden] {
+  display: none;
+}
+.knowledge-view-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 8px 12px 0;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+.knowledge-view-tabs button {
+  flex: 1 0 auto;
+  padding: 4px 5px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.knowledge-view-tabs button:hover {
+  background: var(--bg-hover);
+}
+.knowledge-view-tabs button[aria-selected='true'] {
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-weight: 600;
+}
+.knowledge-workspace :is(button, summary, [role='tabpanel']):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.knowledge-workspace :is(.knowledge-card-head, .knowledge-card-actions) {
+  flex-wrap: wrap;
+}
+.knowledge-workspace .knowledge-detail {
+  overflow-wrap: anywhere;
+}
+
+.intelligence-panel,
+.intelligence-view,
+.intelligence-fields,
+.intelligence-card,
+.intelligence-inline {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+.intelligence-panel {
+  padding: 10px 12px 28px;
+}
+.intelligence-view {
+  gap: 12px;
+}
+.intelligence-view :is(h3, h4, p, ul, pre),
+.intelligence-inline p {
+  margin: 0;
+}
+.intelligence-view h3 {
+  font-size: 13px;
+}
+.intelligence-view h4 {
+  font-size: 12px;
+}
+.intelligence-view ul {
+  padding-inline-start: 16px;
+}
+.intelligence-card,
+.intelligence-inline {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.intelligence-inline {
+  flex: 1 1 100%;
+  background: var(--bg-sunken);
+}
+.intelligence-row,
+.intelligence-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.intelligence-actions .btn {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+}
+.intelligence-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 12px;
+}
+.intelligence-field select {
+  text-overflow: ellipsis;
+}
+.intelligence-members {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+}
+.intelligence-view .intelligence-members {
+  padding: 0;
+}
+.intelligence-members li {
+  align-items: flex-end;
+}
+.intelligence-members .intelligence-field {
+  flex: 1 1 145px;
+}
+.intelligence-switch {
+  align-self: flex-start;
+  cursor: pointer;
+}
+.intelligence-switch input {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.intelligence-switch input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.intelligence-card summary {
+  cursor: pointer;
+}
+.intelligence-text,
+.intelligence-view pre {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.intelligence-clamped {
+  max-height: 4.5em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.intelligence-view pre {
+  padding: 8px;
+  background: var(--bg-sunken);
+  border-radius: var(--radius-sm);
+}
+.intelligence-error,
+.intelligence-warning {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--red);
+  background: var(--red-soft);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.intelligence-warning {
+  color: var(--amber);
+  background: var(--amber-soft);
+}

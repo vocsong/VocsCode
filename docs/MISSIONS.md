@@ -2,18 +2,18 @@
 
 A Mission is a durable engineering objective with one principal engineer and generated specialists. It uses the normal session transcript, permissions, provider connections and panels; it is not another chat application or an OS sandbox.
 
-> **Experimental.** Missions run today only with **Pi presets on Windows**. No live end-to-end Mission (plan → implement → review → verify → deliver) has completed yet, and PR/merge delivery has never run against real GitHub. What was tested, on what, and the open gaps are in [MISSION-STATUS.md](MISSION-STATUS.md). Ordinary sessions do not depend on any of this.
+> **Experimental.** Missions run today only with **Pi and Claude Agent SDK presets on Windows**. No live end-to-end Mission (plan → implement → review → verify → deliver) has completed yet, and PR/merge delivery has never run against real GitHub. What was tested, on what, and the open gaps are in [MISSION-STATUS.md](MISSION-STATUS.md). Ordinary sessions do not depend on any of this.
 
 ## Before you start
 
-- **Windows** and the **Pi** harness, signed in to the provider you will use. Claude, Codex, Cursor, ACP and native presets cannot run a Mission yet; macOS and Linux cannot run one at all.
+- **Windows** and the **Pi** or **Claude Agent SDK** harness, signed in to the provider you will use. Codex, Cursor, ACP and native presets cannot run a Mission yet; macOS and Linux cannot run one at all. A Claude Mission interrupted by an app restart stays blocked (see [MISSION-STATUS.md](MISSION-STATUS.md#support-matrix)).
 - A **Git repository with a clean baseline**. Planning may read a dirty checkout, but execution waits until you commit or stash your own changes. Mission never stashes, resets or commits your work for you.
 - For PR or merge delivery, the `gh` CLI signed in to the repository's host. Local commit needs nothing extra.
 - Start with a **throwaway repository**. Mission branches (`mission/*`) and worktrees are retained until you clean them up explicitly.
 
 ## Quick start
 
-1. **Settings → Mission**: add a preset (Pi, the exact provider/model, and a reasoning effort or the runtime's Default), put it in the **T5** pool and make it the default principal engineer.
+1. **Settings → Mission**: add a preset (Pi or Claude Agent SDK, the exact provider/model, and a reasoning effort or the runtime's Default), put it in the **T5** pool and make it the default principal engineer.
 2. Open the repository and choose **New Session → Mission**, or type `/mission plan <objective>` in any session to plan together (`/mission <objective>` runs autonomously).
 3. Answer the principal engineer's questions one at a time, then review the plan and click **Proceed** (or `/mission execute`).
 4. Follow progress in the **Mission panel**: tasks, specialists, evidence, blockers and delivery. Pause, Resume and Stop are in the header.
@@ -150,4 +150,4 @@ Usage comes from owned session cumulative ledgers, with durable high-water check
 
 **Account capacity** is a separate app-wide setting: up to 64 explicit connection IDs, each with 1–128 turn slots. The key is the preset's connection ID, or provider ID when it has no separate connection. Production scheduler startup and settings updates use that map for all Missions, leads and workers; existing leases drain normally when capacity is tightened. A full account queues work without changing the account, model, effort or billing path. Project overrides cannot replace these app-wide account limits. The map is only a concurrency limit, not account provisioning or provider-quota detection.
 
-Current verification evidence, the support matrix and unresolved requirements live in [MISSION-STATUS.md](MISSION-STATUS.md). Claude's prompt-free API cannot yet establish all required effective model/effort/connection observations, so its Mission driver remains unverified. Ordinary Claude sessions are unaffected. Cross-harness, macOS/Linux, and live-provider Mission support must be demonstrated independently, not inferred from the Windows/scripted Pi tests.
+Current verification evidence, the support matrix and unresolved requirements live in [MISSION-STATUS.md](MISSION-STATUS.md). Claude reports its applied model and effort, and its credential, without a prompt, but not whether the API will serve that model. Its model availability is therefore attested by the first reply: a reply from any other model stops the runtime, and a refused model or credential blocks later dispatch. Ordinary Claude sessions are unaffected. Cross-harness, macOS/Linux, and live-provider Mission support must be demonstrated independently, not inferred from the Windows/scripted Pi tests.

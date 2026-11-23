@@ -15,11 +15,35 @@ Grab the latest installer from [Releases](https://github.com/vocsong/VocsCode/re
 | macOS (Intel) | `Vocs-Code-<version>-mac-x64.dmg` |
 | Linux | `Vocs-Code-<version>-linux-x86_64.AppImage` |
 
-Installers are currently unsigned, so expect one first-run prompt: Windows SmartScreen → **More info → Run anyway**; macOS → right-click the app → **Open** the first time.
+Installers are not yet signed with a publisher certificate, so expect one first-run prompt:
+
+- **Windows** — SmartScreen → **More info → Run anyway**.
+- **macOS** — Apple has not verified the app, so the first open takes a trip through System Settings. Right-click → **Open** no longer gets past this on macOS 15 and later.
+  1. Opening the app shows **"Vocs Code.app" Not Opened** with only **Move to Trash** and **Done**. Click **Done**.
+
+     <img src="docs/images/macos-not-opened.png" alt="macOS dialog: &quot;Vocs Code.app&quot; Not Opened, with Move to Trash and Done buttons" width="260">
+  2. Open **System Settings → Privacy & Security** and scroll down to **Security**. Next to **"Vocs Code.app" was blocked to protect your Mac**, click **Open Anyway**. The button stays there for about an hour after the blocked open.
+
+     <img src="docs/images/macos-privacy-security-open-anyway.png" alt="System Settings, Privacy &amp; Security: &quot;Vocs Code.app&quot; was blocked to protect your Mac, with an Open Anyway button" width="520">
+  3. macOS asks once more. Click **Open Anyway** — not the highlighted **Move to Trash** — and enter your password if asked. Later opens go straight in.
+
+     <img src="docs/images/macos-open-anyway-confirm.png" alt="macOS dialog: Open &quot;Vocs Code.app&quot;?, with Move to Trash, Open Anyway and Done buttons" width="260">
+
+  If **Open Anyway** never appears, clear the download quarantine flag from Terminal instead — this skips Apple's malware check, so only do it for a build downloaded from this repository's Releases page:
+
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/Vocs Code.app"
+  ```
 
 On first launch the app starts with no agent configured — open **Settings → Harnesses** to see which runtimes were detected, install missing ones in one click, and add an API key. Keys are stored in your OS keychain, never in this repository.
 
-The app updates itself: a packaged build checks GitHub Releases on startup (you can also check from **Settings → About**), shows a pill in the title bar when an update is available, and offers restart-to-install once the download is done — the prompt waits until no session is running a turn. Downloading the newer installer from [Releases](https://github.com/vocsong/VocsCode/releases/latest) still works. See [Releasing](docs/RELEASING.md) for how the update feed is produced.
+Already using Claude Code or Codex? Choose **Import chats** during setup, or open **Settings → Import chats** later. Scan a source, select conversations, then import them into their original project folders in the sidebar. Imported chats are copied into Vocs Code; the original histories stay intact, and repeated imports skip conversations already represented in Vocs Code, including its ordinary Claude and Codex sessions. If the chat was saved but project-folder registration failed, scan again (even after reopening the picker) and choose **Repair registration** on the saved chat. This repairs the folder settings without copying or rewriting the conversation.
+
+Claude parent-linked histories and partial-compaction preservation metadata are resolved before importing conversation text, so retained messages keep their logical order and rewound branches do not reappear in the transcript or continuation context. Empty `/clear` command artifacts are removed without dropping non-empty accepted conversation around a clear. Codex rollback events are applied before import, so discarded turns are excluded from both the displayed history and the context used to continue or fork the chat. Codex histories that inherit another rollout through `history_base` are explicitly skipped as unsupported rather than imported with missing context; standalone legacy and paginated histories remain supported. A refused linked history also prevents falling back to an older file for the same thread.
+
+The desktop importer reads Claude Code's `~/.claude/projects` and Codex's `~/.codex/sessions` and `archived_sessions` (including `CLAUDE_CONFIG_DIR` / `CODEX_HOME` overrides). It copies user and assistant text with titles and timestamps; tool activity, attachments, analysis, subagents, configuration and credentials are excluded. Continuing starts a fresh agent session with a bounded text handoff of the conversation, using Ask permissions. Project directories must still be accessible; an import does not copy the project's files. Scans are bounded and report skipped files by reason: empty/no conversation text, subagent history, missing project metadata, invalid/unrecognized history, unsupported linked Codex history, size limits, remaining scan budget or unreadable files. Directory scan failures are reported separately. Only recognized local JSONL formats are supported.
+
+The desktop app checks GitHub Releases at startup and every hour while open. It downloads updates in the background and shows progress beside **Settings** in the sidebar. Once the download is ready and your sessions are idle, choose **Install update** there to restart Vocs Code. On Windows and Linux, downloaded updates also install when you quit. To check immediately, open **Settings → About & doctor → Check for updates**. See [Releasing](docs/RELEASING.md#in-app-auto-update) for platform support or get an installer from [Releases](https://github.com/vocsong/VocsCode/releases/latest).
 
 **Prefer to run it from source?** You'll need Node 22+ and npm:
 
@@ -27,13 +51,15 @@ The app updates itself: a packaged build checks GitHub Releases on startup (you 
 git clone -b master https://github.com/vocsong/VocsCode.git && cd VocsCode && npm run setup
 ```
 
-That installs everything (including dev dependencies, even if your environment sets `NODE_ENV=production`) and launches the app in dev mode. `npm run update` later pulls, rebuilds, and relaunches.
+That installs everything (including dev dependencies, even if your environment sets `NODE_ENV=production`) and launches the app in dev mode. `npm run update` later pulls, rebuilds, and relaunches, downloading the Electron runtime if it is missing.
 
 ## What you get
 
-**Run every agent in one app.** Claude, Codex, Pi, DeepSeek, Gemini CLI, or any OpenAI-compatible model — switch per session, and everything works the same way through one unified interface.
+**Run every agent in one app.** Switch per session between Claude, Codex, Google Antigravity, Pi, DeepSeek, Gemini CLI, or any OpenAI-compatible model.
 
-**Your agents can work hands-off.** Pick a permission mode per session — Ask, Accept edits, Plan, Auto, or Full access — and every harness respects it the same way. Dangerous commands always ask first.
+**Use your Antigravity quota.** Install the Antigravity CLI and open **Settings → Providers & keys → Harness logins → Google Antigravity** to sign in with Google or check your remaining quota. Select **Google Antigravity** in New Session, pick one of your account’s Gemini models, and send a prompt. [Setup instructions](docs/ONBOARDING.md#subscription-and-api-routes)
+
+**Choose permissions per session.** Each harness offers the modes it supports. Antigravity offers every mode for Gemini sessions you drive yourself; goal loops and Missions cannot prompt it.
 
 **Nothing gets lost.** Threads grouped by project, isolated git worktrees per session, diff review with per-file revert and commit, steer a running turn or queue your next message, `/goal` with an iteration guard. Each project remembers how you start it — harness, model, permission mode and whether sessions isolate in a worktree.
 
@@ -41,7 +67,11 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Built for long days.** Live model and effort switching, cost and context tracking, a real terminal in the side panel, slash commands and `@file` mentions, and notifications when a turn needs you.
 
+**No forgotten processes.** The side panel's Processes tab lists everything the app has started — agent CLIs, `npm run dev`, batch scripts, terminal shells and the processes those start — grouped by session, with CPU and memory — including what a session started in a window of its own, which stays listed under that session as *detached*. A process left behind by a session that stopped, or by an earlier run that quit or crashed, is flagged on the tab, and you can end it, its whole tree, or a whole group from there.
+
 **MCP where you want it.** Add a server once — globally, or in a repo's `.mcp.json` — and Claude, both Codex adapters, ACP agents and Pi pick it up. Test a server before you rely on it; secrets stay in your keychain, never in the repo. GitNexus ships built in, scoped to each repo's code graph: one shared server serves every session, and each one sees only its own repo's graph. A same-named entry in Codex’s own config is switched off for the session, so the shared server is the only one that runs.
+
+**Housekeep sessions.** Run `/housekeep` to review older sessions, confirm one batch, and archive finished work with clean worktrees. Recent activity is protected for 7 days by default. Use `/housekeep 3` to protect the last 3 days for one review, or change the default in [Settings → Housekeep](docs/SETTINGS.md#find-the-right-page).
 
 **Private by default.** Keys in your keychain, encrypted at rest. Sessions resume after restart, whatever agent you used.
 
@@ -57,7 +87,7 @@ Vocs Code is developed agent-first — most changes land via coding agents. Prer
 git clone https://github.com/vocsong/VocsCode.git && cd VocsCode && npm run setup
 ```
 
-The default branch is `develop`; all PRs land there. Before opening one, read [AGENTS.md](AGENTS.md) — it sets the working agreements: every change must pass `npm run typecheck`, `npm run test:changed`, and `npm run build` (the full `npm test` and E2E tier run before each release to `master`); behavior changes need a test that fails before the fix; adapters, permissions, and persistence carry extra coverage rules.
+Feature PRs land on `develop`. Before opening one, read [AGENTS.md](AGENTS.md) and the [verification guide](docs/TESTING.md#verification-tiers): run the relevant regression tests, typecheck and build for code changes, and verify the Electron flows you change. The full offline and E2E gates run before release to `master`.
 
 PRs are squash-merged, and titles follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:`, `docs:`, …) — the squash commit's message is what the release bot parses to write the changelog and pick version bumps. How a merged PR becomes an installer on the Releases page is documented in [Releasing](docs/RELEASING.md).
 
@@ -68,7 +98,7 @@ PRs are squash-merged, and titles follow [Conventional Commits](https://www.conv
 | [Architecture & harness reference](docs/ARCHITECTURE.md) | Source layout, harness engines, permission modes, security model |
 | [Terminal reference](docs/TERMINAL.md) | PTY handling, shells, tabs, shortcuts, packaging notes |
 | [Missions](docs/MISSIONS.md) | Principal engineer, approved presets, planning, workspaces, verification, delivery and support limits |
-| [Themes](docs/THEMES.md) | All 23 themes and how they're built |
+| [Themes](docs/THEMES.md) | Light/dark mode, the twenty palettes and how they're built |
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Tool reliability](docs/TOOL-RELIABILITY.md) | Harness/tool analytics, Pi compatibility, native file safeguards and verification |
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |

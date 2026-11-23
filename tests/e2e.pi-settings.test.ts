@@ -58,43 +58,96 @@ describe.runIf(enabled)('pi settings UI', () => {
     // The page must be explicit that it edits the real global pi config.
     await win.locator('.info-line.info-warn', { hasText: 'global pi settings' }).first().waitFor();
 
-    // Discovery: the extension, the skill (by its frontmatter name), the theme, the local package
-    // with its manifest resource, and the on-disk pi-subagents agent are all listed.
+    const categories = win.getByRole('group', { name: 'Pi settings categories' });
+    expect(await categories.getByRole('button', { name: 'Preferences', exact: true }).getAttribute('aria-pressed')).toBe('true');
+    expect(await win.getByRole('combobox', { name: /Startup thinking level/ }).isVisible()).toBe(true);
+    expect(await win.locator('.pi-prompt-editor').isVisible()).toBe(false);
+
+    // Discovery: each category exposes its own resources without a page-long scroll.
+    await categories.getByRole('button', { name: 'Resources', exact: true }).click();
     await win.locator('.pi-resource', { hasText: 'goal.ts' }).waitFor();
     await win.locator('.pi-resource', { hasText: 'demo-skill' }).waitFor();
     await win.locator('.pi-resource', { hasText: 'custom-theme' }).waitFor();
+    await categories.getByRole('button', { name: 'Packages', exact: true }).click();
     await win.locator('.pi-package', { hasText: 'e2e-pkg' }).waitFor();
     await win.locator('.pi-package .pi-resource', { hasText: 'src/index.ts' }).waitFor();
+    await categories.getByRole('button', { name: 'Subagents', exact: true }).click();
     await win.locator('.pi-resource', { hasText: 'e2e-explore' }).waitFor();
 
     const settingsPath = path.join(agentDir, 'settings.json');
     const readSettings = async (): Promise<Record<string, unknown>> => JSON.parse(await fs.readFile(settingsPath, 'utf8'));
 
     // Toggling a resource writes pi's own `-path` pattern.
+    await categories.getByRole('button', { name: 'Resources', exact: true }).click();
     const skillRow = win.locator('.pi-resource', { hasText: 'demo-skill' });
-    await skillRow.locator('.toggle').click();
+    await skillRow.getByRole('checkbox', { name: /demo-skill/ }).press('Space');
     await expect.poll(async () => (await readSettings()).skills).toEqual(['-skills/demo/SKILL.md']);
     await expect.poll(async () => (await skillRow.getAttribute('class')) ?? '').toContain('disabled');
 
     // A preference lands under its pi settings key, preserving the theme.
+    await categories.getByRole('button', { name: 'Preferences', exact: true }).click();
     await win.getByRole('combobox', { name: /Startup thinking level/ }).selectOption('low');
     await expect.poll(async () => (await readSettings()).defaultThinkingLevel).toBe('low');
     expect((await readSettings()).theme).toBe('dark');
 
-    // The prompt editor creates the file on save; AGENTS.md is the third tab in the System,
-    // Append, Agent sequence.
-    await win.locator('.pi-tab:has-text("AGENTS.md")').click();
-    await win.locator('.pi-prompt-editor').fill('# house rules\nBe brief.\n');
-    await win.locator('.pi-prompt-actions button:has-text("Save")').click();
+    // Empty numeric fields remove overrides, and a valid zero remains visible after reopening.
+    const reserve = win.getByRole('spinbutton', { name: /Reserve tokens/ });
+    await reserve.fill('8192');
+    await reserve.press('Tab');
+    await expect.poll(async () => ((await readSettings()).compaction as { reserveTokens?: number })?.reserveTokens).toBe(8192);
+    await reserve.fill('');
+    await reserve.press('1');
+    await reserve.press('e');
+    expect(await reserve.evaluate((element: HTMLInputElement) => element.validity.badInput)).toBe(true);
+    await reserve.press('Tab');
+    const retries = win.getByRole('spinbutton', { name: 'Max retries', exact: true });
+    await retries.fill('0');
+    await retries.press('Tab');
+    // This later write is a barrier: invalid numeric text must not have queued a deletion before it.
+    await expect.poll(async () => ((await readSettings()).retry as { maxRetries?: number })?.maxRetries).toBe(0);
+    expect(((await readSettings()).compaction as { reserveTokens?: number })?.reserveTokens).toBe(8192);
+    expect(await reserve.inputValue()).toBe('8192');
+    await reserve.fill('');
+    await reserve.press('Tab');
+    await expect.poll(async () => ((await readSettings()).compaction as { reserveTokens?: number })?.reserveTokens).toBeUndefined();
+    const sections = win.getByRole('navigation', { name: 'Settings sections' });
+    await sections.getByRole('button', { name: 'General', exact: true }).click();
+    await sections.getByRole('button', { name: 'Pi', exact: true }).click();
+    await expect.poll(() => retries.inputValue()).toBe('0');
+    expect(await reserve.inputValue()).toBe('');
+
+    // Drafts survive visiting another category before saving the selected prompt file.
+    await categories.getByRole('button', { name: 'Prompts', exact: true }).click();
+    await win.getByRole('group', { name: 'System prompt files' }).getByRole('button', { name: /AGENTS\.md/ }).click();
+    const editor = win.getByRole('textbox', { name: 'AGENTS.md', exact: true });
+    await editor.fill('# house rules\nBe brief.\n');
+    await categories.getByRole('button', { name: 'Resources', exact: true }).click();
+    expect(await win.locator('.pi-prompt-editor').count()).toBe(1);
+    expect(await win.locator('.pi-prompt-editor').isVisible()).toBe(false);
+    await categories.getByRole('button', { name: 'Prompts', exact: true }).click();
+    expect(await editor.inputValue()).toBe('# house rules\nBe brief.\n');
+    expect(await win.getByRole('button', { name: 'Save', exact: true }).isEnabled()).toBe(true);
+    await win.getByRole('button', { name: 'Save', exact: true }).click();
     await expect.poll(async () => fs.readFile(path.join(agentDir, 'AGENTS.md'), 'utf8').catch(() => '')).toBe('# house rules\nBe brief.\n');
 
     // A package resource toggle writes the package object filter pi itself uses.
+    await categories.getByRole('button', { name: 'Packages', exact: true }).click();
     const pkgRow = win.locator('.pi-package .pi-resource', { hasText: 'src/index.ts' });
-    await pkgRow.locator('.toggle').click();
+    expect(await pkgRow.getByRole('button').isDisabled()).toBe(true);
+    await pkgRow.getByRole('checkbox', { name: /index\.ts/ }).press('Space');
     await expect.poll(async () => (await readSettings()).packages).toEqual([{ source: pkgRoot, extensions: ['-src/index.ts'] }]);
 
     // pi-subagents settings land in subagents.json.
+    await categories.getByRole('button', { name: 'Subagents', exact: true }).click();
     await win.locator('.toggle', { hasText: 'Report subagent spend' }).click();
-    await expect.poll(async () => JSON.parse(await fs.readFile(path.join(agentDir, 'subagents.json'), 'utf8'))).toEqual({ reportUsage: true });
+    const readSubagents = async (): Promise<Record<string, unknown>> => JSON.parse(await fs.readFile(path.join(agentDir, 'subagents.json'), 'utf8'));
+    await expect.poll(readSubagents).toEqual({ reportUsage: true });
+    const concurrent = win.getByRole('spinbutton', { name: /Max concurrent agents/ });
+    await concurrent.fill('5');
+    await concurrent.press('Tab');
+    await expect.poll(readSubagents).toEqual({ reportUsage: true, maxConcurrent: 5 });
+    await concurrent.fill('');
+    await concurrent.press('Tab');
+    await expect.poll(readSubagents).toEqual({ reportUsage: true });
   }, 120_000);
 });

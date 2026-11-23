@@ -38,7 +38,7 @@ export class AppInstructions {
   async write(scope: AppInstructionScope, content: string): Promise<AppInstructionFile[]> {
     this.requireScope(scope);
     if (content.length > APP_INSTRUCTION_MAX_CHARS) {
-      throw new Error(`Instructions are limited to ${Math.round(APP_INSTRUCTION_MAX_CHARS / 1000)} KB per file`);
+      throw new Error(`Instructions are limited to ${APP_INSTRUCTION_MAX_CHARS} characters per file`);
     }
     const file = this.fileFor(scope);
     if (!content.trim()) {
@@ -73,10 +73,12 @@ export class AppInstructions {
   private async readOne(scope: AppInstructionScope): Promise<AppInstructionFile> {
     const file = this.fileFor(scope);
     try {
-      const buf = await fs.readFile(file);
-      const truncated = buf.length > APP_INSTRUCTION_MAX_CHARS;
+      const text = await fs.readFile(file, 'utf8');
+      const truncated = text.length > APP_INSTRUCTION_MAX_CHARS;
+      // Use the same UTF-16 character budget as write(), without leaving half a surrogate pair.
       // A truncated read is shown but never saved back: the editor offers the file itself instead.
-      return { scope, path: file, exists: true, content: buf.subarray(0, APP_INSTRUCTION_MAX_CHARS).toString('utf8'), ...(truncated ? { truncated: true } : {}) };
+      const content = truncated ? text.slice(0, APP_INSTRUCTION_MAX_CHARS).replace(/[\uD800-\uDBFF]$/, '') : text;
+      return { scope, path: file, exists: true, content, ...(truncated ? { truncated: true } : {}) };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') this.log('warn', `could not read ${file}: ${errorMessage(e)}`);
       return { scope, path: file, exists: false, content: '' };

@@ -18,6 +18,8 @@ export interface PiMcpServerConfig {
   url?: string;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  /** App-owned provenance: which built-in this is. Only the host sets it (see vocs-code-mcp.ts). */
+  builtin?: string;
 }
 
 export interface PiMcpTool {
@@ -27,8 +29,9 @@ export interface PiMcpTool {
   readOnly?: boolean;
 }
 
+/** Pi's model-facing tool result content: text or base64 image blocks. */
 export interface PiMcpCallResult {
-  content: { type: string; text?: string }[];
+  content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string; text?: never })[];
   isError?: boolean;
 }
 
@@ -48,7 +51,7 @@ interface JsonRpcMessage {
 
 interface Pending {
   method: string;
-  timer: NodeJS.Timeout;
+  cleanup: () => void;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
 }
@@ -56,7 +59,7 @@ interface Pending {
 type MessageHandler = (message: unknown) => void;
 
 interface PiTransport {
-  send(message: JsonRpcMessage): void;
+  send(message: JsonRpcMessage, signal?: AbortSignal): void;
   close(): void;
   diagnostics(): string;
 }
@@ -73,6 +76,12 @@ function errorText(error: unknown): string {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(errorText(error));
+}
+
+function abortError(): Error {
+  const error = new Error('MCP request cancelled');
+  error.name = 'AbortError';
+  return error;
 }
 
 /** Newline-delimited JSON-RPC 2.0 over a child process's stdin/stdout. */
@@ -153,6 +162,23 @@ class StdioTransport implements PiTransport {
   }
 }
 
+/** The configured URL, which must be http(s); every request goes to exactly this URL. */
+function httpUrl(cfg: PiMcpServerConfig): URL {
+  const url = new URL(cfg.url ?? '');
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`MCP server "${cfg.id}" URL must use http or https, not ${url.protocol}`);
+  }
+  return url;
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** A response that points somewhere else; a 304 or a bare 300 is an answer, not a redirect. */
+function isRedirect(response: Response): boolean {
+  if (response.type === 'opaqueredirect' || REDIRECT_STATUSES.has(response.status)) return true;
+  return response.status >= 300 && response.status < 400 && response.headers.has('location');
+}
+
 /** JSON-RPC 2.0 over HTTP POST, accepting a plain JSON or SSE-framed response. */
 class HttpTransport implements PiTransport {
   private closed = false;
@@ -163,10 +189,10 @@ class HttpTransport implements PiTransport {
     private readonly onFailure: (id: number | undefined, error: Error) => void
   ) {}
 
-  send(message: JsonRpcMessage): void {
+  send(message: JsonRpcMessage, signal?: AbortSignal): void {
     const id = typeof message.id === 'number' ? message.id : undefined;
     // post() is async by construction, so the catch is the only place a rejection can land.
-    void this.post(message).catch((error) => this.onFailure(id, asError(error)));
+    void this.post(message, signal).catch((error) => this.onFailure(id, asError(error)));
   }
 
   close(): void {
@@ -177,18 +203,26 @@ class HttpTransport implements PiTransport {
     return '';
   }
 
-  private async post(message: JsonRpcMessage): Promise<void> {
+  private async post(message: JsonRpcMessage, signal?: AbortSignal): Promise<void> {
     if (this.closed) throw new Error(`MCP http transport for "${this.cfg.id}" is closed`);
     if (!this.cfg.url) throw new Error(`MCP server "${this.cfg.id}" has no url`);
-    const response = await fetch(this.cfg.url, {
+    const url = httpUrl(this.cfg);
+    // Configured headers are for the configured server only: never follow a redirect elsewhere.
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         accept: 'application/json, text/event-stream',
         ...(this.cfg.headers ?? {})
       },
-      body: JSON.stringify(message)
+      body: JSON.stringify(message),
+      redirect: 'manual',
+      signal
     });
+    if (isRedirect(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`MCP server "${this.cfg.id}" redirected (HTTP ${response.status}); update its URL in the server settings`);
+    }
     if (!response.ok) throw new Error(`MCP server "${this.cfg.id}" returned HTTP ${response.status}`);
     const body = await response.text();
     if (!body.trim()) return;
@@ -232,6 +266,7 @@ export class PiMcpConnection {
     }
     if (cfg.transport === 'stdio' && !cfg.command) throw new Error(`MCP server "${cfg.id}" has no command`);
     if (cfg.transport === 'http' && !cfg.url) throw new Error(`MCP server "${cfg.id}" has no url`);
+    if (cfg.transport === 'http') httpUrl(cfg);
 
     let connection: PiMcpConnection | undefined;
     try {
@@ -271,13 +306,19 @@ export class PiMcpConnection {
     return this.tools.map((tool) => ({ ...tool }));
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<PiMcpCallResult> {
-    const result = (await this.request('tools/call', { name, arguments: args ?? {} })) as { content?: unknown; isError?: unknown } | undefined;
+  async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<PiMcpCallResult> {
+    const result = (await this.request('tools/call', { name, arguments: args ?? {} }, signal)) as { content?: unknown; isError?: unknown } | undefined;
     const raw = Array.isArray(result?.content) ? result.content : [];
-    const content = raw.flatMap((entry): { type: string; text?: string }[] => {
-      if (!entry || typeof entry !== 'object') return [];
-      const item = entry as { type?: unknown; text?: unknown };
-      return [{ type: typeof item.type === 'string' ? item.type : 'text', text: typeof item.text === 'string' ? item.text : undefined }];
+    const content = raw.map((entry): PiMcpCallResult['content'][number] => {
+      const source = `MCP tool "${name}" from "${this.cfg.id}"`;
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${source} returned an invalid content block`);
+      const item = entry as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown };
+      if (item.type === 'text' && typeof item.text === 'string') return { type: 'text', text: item.text };
+      if (item.type === 'image' && typeof item.data === 'string' && typeof item.mimeType === 'string') {
+        return { type: 'image', data: item.data, mimeType: item.mimeType };
+      }
+      if (item.type === 'text' || item.type === 'image') throw new Error(`${source} returned a malformed ${item.type} content block`);
+      throw new Error(`${source} returned unsupported content type "${String(item.type)}"; the pi MCP bridge supports only text and image blocks`);
     });
     return { content, isError: !!result?.isError };
   }
@@ -287,7 +328,7 @@ export class PiMcpConnection {
     this.disposed = true;
     this.closed = true;
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      pending.cleanup();
       pending.reject(new Error(`MCP connection to "${this.cfg.id}" closed`));
     }
     this.pending.clear();
@@ -298,31 +339,49 @@ export class PiMcpConnection {
     }
   }
 
-  private notify(method: string): void {
+  private notify(method: string, params?: unknown): void {
     try {
-      this.transport.send({ jsonrpc: '2.0', method });
+      // Notifications must not hold cancellation open, even when an HTTP server never answers.
+      this.transport.send({ jsonrpc: '2.0', method, ...(params === undefined ? {} : { params }) }, AbortSignal.timeout(DEFAULT_TIMEOUT_MS));
     } catch {
       /* notifications are best-effort */
     }
   }
 
-  private request(method: string, params?: unknown): Promise<unknown> {
+  private request(method: string, params?: unknown, signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted) return Promise.reject(abortError());
     if (this.closed || this.disposed) return Promise.reject(new Error(`MCP connection to "${this.cfg.id}" is closed`));
     const id = this.nextId++;
     const timeoutMs = typeof this.cfg.timeoutMs === 'number' && this.cfg.timeoutMs > 0 ? this.cfg.timeoutMs : DEFAULT_TIMEOUT_MS;
     const promise = new Promise<unknown>((resolve, reject) => {
+      // One controller per request: aborting a parent/child call never closes their shared transport.
+      const controller = new AbortController();
+      let dispatched = false;
+      const onAbort = () => {
+        const pending = this.takePending(id);
+        if (!pending) return;
+        pending.reject(abortError());
+        // Remote cancellation is advisory; a mutation may already have committed.
+        if (dispatched) this.notify('notifications/cancelled', { requestId: id, reason: 'Caller cancelled the request' });
+      };
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`MCP request "${method}" to "${this.cfg.id}" timed out after ${timeoutMs}ms${this.diagnostics()}`));
+        this.failRequest(id, new Error(`MCP request "${method}" to "${this.cfg.id}" timed out after ${timeoutMs}ms${this.diagnostics()}`));
       }, timeoutMs);
       timer.unref();
-      this.pending.set(id, { method, timer, resolve, reject });
-      try {
-        this.transport.send({ jsonrpc: '2.0', id, method, params });
-      } catch (error) {
+      const cleanup = () => {
         clearTimeout(timer);
-        this.pending.delete(id);
-        reject(asError(error));
+        signal?.removeEventListener('abort', onAbort);
+        // Releases this HTTP fetch/body on cancellation, timeout or close; stdio ignores the signal.
+        controller.abort();
+      };
+      this.pending.set(id, { method, cleanup, resolve, reject });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) { onAbort(); return; }
+      try {
+        dispatched = true;
+        this.transport.send({ jsonrpc: '2.0', id, method, params }, controller.signal);
+      } catch (error) {
+        this.failRequest(id, asError(error));
       }
     });
     // Every caller still sees the rejection, but a rejection nobody awaits must not crash the host.
@@ -336,10 +395,8 @@ export class PiMcpConnection {
     if (response.id === undefined || response.id === null) return;
     const id = typeof response.id === 'number' ? response.id : Number(response.id);
     if (!Number.isFinite(id)) return;
-    const pending = this.pending.get(id);
+    const pending = this.takePending(id);
     if (!pending) return;
-    this.pending.delete(id);
-    clearTimeout(pending.timer);
     if (response.error) {
       const detail = response.error.message ?? errorText(response.error);
       pending.reject(new Error(`MCP request "${pending.method}" to "${this.cfg.id}" failed: ${detail}`));
@@ -351,7 +408,7 @@ export class PiMcpConnection {
   private failAll(error: Error): void {
     this.closed = true;
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      pending.cleanup();
       pending.reject(error);
     }
     this.pending.clear();
@@ -359,11 +416,15 @@ export class PiMcpConnection {
 
   private failRequest(id: number | undefined, error: Error): void {
     if (id === undefined) return;
+    this.takePending(id)?.reject(error);
+  }
+
+  private takePending(id: number): Pending | undefined {
     const pending = this.pending.get(id);
     if (!pending) return;
     this.pending.delete(id);
-    clearTimeout(pending.timer);
-    pending.reject(error);
+    pending.cleanup();
+    return pending;
   }
 
   private diagnostics(): string {

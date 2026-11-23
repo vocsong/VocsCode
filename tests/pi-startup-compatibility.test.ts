@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PiAdapter } from '../src/main/harness/pi';
 import type { HarnessContext } from '../src/main/harness/types';
+import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, vocsMemoryBaseDef } from '../src/main/mcp/memory';
+import type { ResolvedServer } from '../src/main/mcp/effective';
 import type { SessionEvent } from '../src/shared/types';
 // Include the shipped resource in normal strict typechecking without requiring Pi as a desktop dependency.
 import type vocsCodeTools from '../resources/pi/vocs-code-tools';
@@ -17,13 +19,15 @@ const spawn = vi.hoisted(() => ({
   usesWindowsCommandShim: (file: string) => /\.(cmd|bat)$/i.test(file)
 }));
 vi.mock('../src/main/harness/spawn', () => spawn);
+vi.mock('../src/main/pi-agents', () => ({ installPiAgentOverrides: vi.fn() }));
 const roots: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   vi.clearAllMocks();
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-async function setup(capabilities: string[], extensionError = false, options: { appendSystemPrompt?: string; piPath?: string; appInstructions?: string } = {}) {
+async function setup(capabilities: string[], extensionError = false, options: { appendSystemPrompt?: string; piPath?: string; appInstructions?: string; mcpServers?: ResolvedServer[] } = {}) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'vocs-pi-startup-'));
   roots.push(root);
   const events: SessionEvent[] = [];
@@ -60,12 +64,50 @@ async function setup(capabilities: string[], extensionError = false, options: { 
     session: () => ({ cwd: root, usage: {}, harnessRef: {}, config: { appendSystemPrompt: options.appendSystemPrompt ?? 'Keep my custom instructions.' } }),
     settings: () => ({ pi: { extraArgs: ['--no-skills'] } }),
     runtime: { resolve: () => ({ path: options.piPath ?? '/fake/pi' }), resource: (...segments: string[]) => path.join(root, 'resources', ...segments) },
-    sessionDir: root, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined, mcpServers: async () => [], ownedMcpIds: () => [],
+    sessionDir: root, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined, mcpServers: async () => options.mcpServers ?? [], ownedMcpIds: () => [],
     ...(options.appInstructions ? { appInstructions: async () => options.appInstructions } : {}),
     emit: (event: SessionEvent) => events.push(event), log: () => {}, updateRef: () => {}, updateMeta: () => {},
   } as unknown as HarnessContext;
   return { adapter: new PiAdapter(ctx), events, commands, children, root };
 }
+
+describe('Pi MCP credential handoff', () => {
+  const gatewayEnv = { [MEMORY_GATEWAY_URL_ENV]: 'http://127.0.0.1:9/tools', [MEMORY_GATEWAY_TOKEN_ENV]: 'test-pi-gateway-capability' };
+  const memory = { ...vocsMemoryBaseDef(), env: { VOCS_MEMORY_ROOT: 'test-wiki' } };
+  const gatewayMemory = { ...memory, env: { ...memory.env, ...gatewayEnv } };
+  const other = { id: 'other', transport: 'http' as const, url: 'https://mcp.example.test' };
+
+  it.each([
+    { label: 'mixed', defs: [gatewayMemory, other], persisted: [other], ephemeral: [gatewayMemory] },
+    { label: 'gateway only', defs: [gatewayMemory], persisted: [], ephemeral: [gatewayMemory] },
+    { label: 'standalone memory', defs: [memory], persisted: [memory], ephemeral: [] },
+    { label: 'no servers', defs: [], persisted: [], ephemeral: [] }
+  ])('keeps only gateway memory off disk and argv ($label)', async ({ defs, persisted, ephemeral }) => {
+    vi.stubEnv('VOCS_CODE_MCP_EPHEMERAL', 'stale-other-session');
+    vi.stubEnv('VOCS_CODE_MCP_CONFIG', 'stale-other-path');
+    vi.stubEnv(MEMORY_GATEWAY_TOKEN_ENV, 'stale-ambient-token');
+    const { adapter, root } = await setup(['approvals', 'tools', 'subagents'], false, {
+      mcpServers: defs.map((def) => ({ def, missing: [], secretEnvKeys: [MEMORY_GATEWAY_TOKEN_ENV], secretHeaderKeys: [] }))
+    });
+    const file = path.join(root, 'pi', 'mcp.json');
+    // A resumed or now-disabled session can still have the older adapter's plaintext artifact.
+    await fs.mkdir(path.dirname(file));
+    await fs.writeFile(file, JSON.stringify({ servers: [gatewayMemory] }));
+    try {
+      await adapter.start();
+      const [bin, args, { env }] = spawn.spawnTool.mock.calls[0];
+      expect(JSON.stringify([bin, args])).not.toContain(gatewayEnv[MEMORY_GATEWAY_TOKEN_ENV]);
+      expect((args as string[]).some((arg) => arg.endsWith('vocs-code-mcp.ts'))).toBe(defs.length > 0);
+      expect(env[MEMORY_GATEWAY_TOKEN_ENV]).toBeUndefined();
+      expect(env.VOCS_CODE_MCP_EPHEMERAL).toBe(ephemeral.length ? JSON.stringify({ servers: ephemeral }) : undefined);
+      expect(env.VOCS_CODE_MCP_CONFIG).toBe(persisted.length ? file : undefined);
+      if (persisted.length) expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ servers: persisted });
+      else await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await adapter.dispose();
+    }
+  });
+});
 
 describe('Pi adapter startup capability boundary', () => {
   it.each([[], ['tools'], ['approvals'], ['approvals', 'tools']])('sends no prompt and never reports idle without every capability: %j', async (...caps) => {

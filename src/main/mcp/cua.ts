@@ -106,7 +106,8 @@ export function cuaBaseDef(settings: AppSettings, lookup: typeof which = which):
     args: ['mcp'],
     env: cuaEnv(state.mode, settings.cua?.manifestPath).env,
     description: 'Cua Driver — drive native desktop apps and browsers on this machine',
-    disabled: !state.ready || !state.enabled
+    disabled: !state.ready || !state.enabled,
+    builtin: CUA_SERVER_ID
   };
 }
 

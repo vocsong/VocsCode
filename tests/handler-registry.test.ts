@@ -7,12 +7,15 @@ import fsSync from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from '../src/main/handlers';
-import { PUSH_CHANNELS } from '../src/shared/ipc';
+import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry, type HandlerDeps } from '../src/main/handlers';
+import { FILE_PREVIEW_MAX_BYTES, PUSH_CHANNELS } from '../src/shared/ipc';
 import { agentChannels } from '../src/shared/agent-manifest';
+import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-channels';
 import type { AnalyticsStore } from '../src/main/analytics';
+import * as runtime from '../src/main/runtime';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
+import { providerSecrets } from '../src/main/secret-ids';
 import type { SessionManager } from '../src/main/session-manager';
 import type { RemoteConfig, HarnessId, SessionMeta, TranscriptItem, AppInstructionFile } from '../src/shared/types';
 import type { RemoteHost } from '../src/main/remote/host';
@@ -20,8 +23,16 @@ import { signInProbe } from '../src/main/remote/relay-url';
 import { SettingsStore } from '../src/main/settings';
 import { PiConfigStore } from '../src/main/pi-config';
 import { AppInstructions } from '../src/main/app-instructions';
+import { openHarnessLogin, readHarnessSetup } from '../src/main/harness-setup';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
+import { discoverChatImports } from '../src/main/chat-import';
+import { listHarnessModels } from '../src/main/harness/registry';
+import type { ChatImportPreview } from '../src/shared/chat-import';
+
+vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
+vi.mock('../src/main/harness/registry', async (original) => ({ ...await original<typeof import('../src/main/harness/registry')>(), listHarnessModels: vi.fn() }));
+vi.mock('../src/main/harness-setup', async (original) => ({ ...await original<typeof import('../src/main/harness-setup')>(), openHarnessLogin: vi.fn(), readHarnessSetup: vi.fn() }));
 
 const dirs: string[] = [];
 let ws: string;
@@ -48,6 +59,7 @@ function bridgeStub() {
     electronVersion: () => 'unknown',
     openExternal: async (url) => void calls.push(`openExternal:${url}`),
     openPath: async (p) => void calls.push(`openPath:${p}`),
+    showItemInFolder: (p) => void calls.push(`showItemInFolder:${p}`),
     showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
     showSaveDialog: async () => ({ canceled: true, filePath: '' }),
     notify: async (title) => void calls.push(`notify:${title}`),
@@ -109,7 +121,262 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
   return { registry: createHandlerRegistry(deps), deps, calls, pushes, logs };
 }
 
+async function fileResolveRig() {
+  const dir = tmpDir('resolve');
+  const cwd = path.join(dir, 'current');
+  const projectRoot = path.join(dir, 'project');
+  const sibling = path.join(dir, 'sibling');
+  await Promise.all([cwd, projectRoot, sibling].map((p) => fs.mkdir(p)));
+  const { registry, deps } = stubDeps();
+  const meta = deps.sessions.get('s_test')!;
+  meta.cwd = cwd;
+  meta.config.projectRoot = projectRoot;
+  const other: SessionMeta = { ...meta, id: 's_sibling', cwd: sibling };
+  deps.sessions.get = (id) => id === meta.id ? meta : id === other.id ? other : undefined;
+  return { registry, cwd, projectRoot, sibling };
+}
+
 describe('handler registry', () => {
+  it('restricts Housekeep and its excerpts to the desktop and refuses forged batches before session dispatch', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list');
+    for (const channel of ['housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory']) {
+      expect(registry.channels()).toContain(channel);
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels()).not.toContain(channel);
+      await expect(registry.invoke(channel, {}, 'agent')).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke(channel, {}, 'user')).rejects.toThrow(/desktop owner/);
+    }
+    const previewId = '56756756-e138-4775-8652-44316fa0203b';
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['s_test'], protectedIds: [], force: true }, 'desktop')).rejects.toThrow();
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['../s_test'], protectedIds: [] }, 'desktop')).rejects.toThrow();
+    await expect(registry.invoke('housekeep:apply', { previewId, ids: ['s_test'], protectedIds: [] }, 'desktop')).rejects.toThrow(/preview expired/);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('scopes inventory to the desktop profile without accepting paths or starting normal session Git polling', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list').mockReturnValue([]);
+    await expect(registry.invoke('housekeep:inventory', { folders: [ws] }, 'desktop')).rejects.toThrow();
+    expect(list).not.toHaveBeenCalled();
+    const [first, second] = await Promise.all([
+      registry.invoke('housekeep:inventory', undefined, 'desktop'),
+      registry.invoke('housekeep:inventory', undefined, 'desktop')
+    ]);
+    expect(first).toEqual({ repositories: 0, rows: [], warnings: [], limited: false });
+    expect(second).toEqual(first);
+    expect(list).toHaveBeenCalledExactlyOnceWith({ refreshGit: false });
+  });
+
+  it('validates the Housekeep override before scanning and accepts it only with a new preview', async () => {
+    const { registry, deps } = stubDeps();
+    const list = vi.spyOn(deps.sessions, 'list').mockReturnValue([]);
+    for (const recentDaysOverride of [null, '3', -1, 1.5, 3651]) {
+      await expect(registry.invoke('housekeep:preview', { protectedIds: [], recentDaysOverride }, 'desktop')).rejects.toThrow();
+    }
+    expect(list).not.toHaveBeenCalled();
+    const preview = await registry.invoke('housekeep:preview', { protectedIds: [], recentDaysOverride: 3 }, 'desktop') as { id: string; recentDays: number };
+    expect(preview.recentDays).toBe(3);
+    for (const [channel, payload] of [
+      ['housekeep:assess', { previewId: preview.id }],
+      ['housekeep:apply', { previewId: preview.id, ids: ['s_test'], protectedIds: [] }]
+    ] as const) {
+      await expect(registry.invoke(channel, { ...payload, recentDaysOverride: 0 }, 'desktop')).rejects.toThrow(/Unrecognized key/);
+    }
+    expect(deps.settings.get().housekeepRecentDays).toBe(7);
+  });
+
+  it('keeps intelligence grants on the desktop and derives the project from the held session', async () => {
+    const view = vi.fn(async () => ({ available: true }));
+    const forget = vi.fn(async () => ({ forgotten: true }));
+    const { registry, deps } = stubDeps({ intelligence: { view, forget } as unknown as HandlerDeps['intelligence'] });
+    const settingsUpdate = vi.spyOn(deps.settings, 'update');
+    for (const actor of ['user', 'agent'] as const) {
+      await expect(registry.invoke('intelligence:view', { sessionId: 's_test' }, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: 'mem_abcdef' }, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('settings:update', { intelligence: { gateway: false, personalMemory: true } }, actor)).rejects.toThrow(/desktop owner/);
+    }
+    expect(settingsUpdate).not.toHaveBeenCalled();
+    await expect(registry.invoke('intelligence:view', { sessionId: '../s_test' }, 'desktop')).rejects.toThrow(/Invalid Mission\/session identifier/);
+    await expect(registry.invoke('intelligence:view', { sessionId: 's_unknown' }, 'desktop')).rejects.toThrow('Session not found');
+    await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: '../../another' }, 'desktop')).rejects.toThrow('A memory record id is required');
+    expect(view).not.toHaveBeenCalled();
+    expect(forget).not.toHaveBeenCalled();
+    const channels = registry.channels().filter((channel) => channel.startsWith('intelligence:'));
+    expect(channels).toContain('intelligence:view');
+    expect(channels.every((channel) => !isRemoteChannel(channel) && !agentChannels().includes(channel))).toBe(true);
+    const session = deps.sessions.get('s_test')!;
+    session.cwd = path.join(ws, 'worktree');
+    session.worktreeBranch = 'vocs/test';
+    await expect(registry.invoke('intelligence:view', { sessionId: 's_test', projectRoot: 'attacker', cwd: 'attacker', branch: 'other' }, 'desktop')).resolves.toEqual({ available: true });
+    expect(view).toHaveBeenCalledExactlyOnceWith({ sessionId: 's_test', projectRoot: ws, cwd: session.cwd, branch: session.worktreeBranch });
+  });
+
+  it('keeps all account channels local-only and accepts no endpoint/credential configuration', async () => {
+    const snapshot = { realm: 'staging', status: 'signed_out', refreshing: false, revision: 0, connections: [] } as const;
+    const account = { get: vi.fn(() => snapshot), signIn: vi.fn(async () => snapshot), cancel: vi.fn(() => snapshot), signOut: vi.fn(async () => snapshot), refresh: vi.fn(async () => snapshot), dispose: vi.fn() };
+    const { registry } = stubDeps({ vocsAccount: account as unknown as NonNullable<HandlerDeps['vocsAccount']> });
+    for (const action of ['get', 'signIn', 'cancel', 'signOut', 'refresh'] as const) {
+      const channel = `vocsAccount:${action}`;
+      for (const actor of ['user', 'agent'] as const) await expect(registry.invoke(channel, undefined, actor)).rejects.toThrow(/desktop owner/);
+      for (const input of [{}, { issuer: 'https://evil.invalid' }, { token: 'secret' }, null]) await expect(registry.invoke(channel, input, 'desktop')).rejects.toThrow(/do not accept configuration/);
+      expect(account[action]).not.toHaveBeenCalled();
+      await expect(registry.invoke(channel, undefined, 'desktop')).resolves.toEqual(snapshot);
+      expect(account[action]).toHaveBeenCalledTimes(1);
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels().includes(channel as never)).toBe(false);
+    }
+    // Sign-in takes exactly one renderer choice, whether to keep the sign-in; nothing else.
+    for (const input of [{ persist: 'yes' }, { persist: true, clientId: 'vocs-code-device' }, { persist: true, deviceName: 'evil' }]) await expect(registry.invoke('vocsAccount:signIn', input, 'desktop')).rejects.toThrow(/do not accept configuration/);
+    await expect(registry.invoke('vocsAccount:signIn', { persist: true }, 'desktop')).resolves.toEqual(snapshot);
+    expect(account.signIn).toHaveBeenLastCalledWith({ persist: true });
+    await expect(registry.invoke('vocsAccount:signIn', { persist: true }, 'agent')).rejects.toThrow(/desktop owner/);
+    await registry.shutdown(); expect(account.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows bounded sign-in only for the desktop owner and refuses forged launch arguments before execution', async () => {
+    const { registry } = stubDeps();
+    const login = vi.mocked(openHarnessLogin).mockReset().mockResolvedValue({ ok: true });
+    for (const actor of ['agent', 'user'] as const) await expect(registry.invoke('harness:login', { harness: 'claude' }, actor)).rejects.toThrow(/desktop owner/);
+    for (const input of [{ harness: 'cursor' }, { harness: 'claude', args: ['--dangerous'] }, { harness: 'codex', device: 'true' }, { harness: 'pi', cwd: '/project' }]) {
+      await expect(registry.invoke('harness:login', input, 'desktop')).rejects.toThrow();
+    }
+    expect(login).not.toHaveBeenCalled();
+    await expect(registry.invoke('harness:login', { harness: 'codex', device: true }, 'desktop')).resolves.toEqual({ ok: true });
+    expect(login).toHaveBeenCalledOnce();
+    expect(login.mock.calls[0]!.slice(1)).toEqual(['codex', true]);
+    expect(isRemoteChannel('harness:login')).toBe(false);
+    expect(agentChannels().includes('harness:login' as never)).toBe(false);
+  });
+
+  it('rejects invalid setup and install ids before their privileged dependencies', async () => {
+    const { registry, deps } = stubDeps();
+    const setup = vi.mocked(readHarnessSetup).mockReset();
+    const install = vi.spyOn(deps.runtime, 'install');
+    await expect(registry.invoke('harness:setup', { harness: 'unknown' }, 'desktop')).rejects.toThrow('Unknown harness');
+    for (const id of ['__proto__', ['pi'], null, 1]) await expect(registry.invoke('harness:install', { id }, 'desktop')).rejects.toThrow('Unsupported');
+    expect(setup).not.toHaveBeenCalled(); expect(install).not.toHaveBeenCalled();
+  });
+
+  it('an explicit readiness refresh bypasses the cached signed-out result', async () => {
+    const { registry, deps } = stubDeps();
+    const probe = vi.spyOn(deps.runtime, 'availability').mockResolvedValue({ available: true, authenticated: false });
+    await registry.invoke('harness:availability', undefined);
+    const initialCalls = probe.mock.calls.length;
+    probe.mockResolvedValue({ available: true, authenticated: true });
+    const cached = await registry.invoke('harness:availability', undefined) as Record<string, { authenticated: boolean }>;
+    expect(cached.claude!.authenticated).toBe(false); expect(probe).toHaveBeenCalledTimes(initialCalls);
+    const fresh = await registry.invoke('harness:availability', { refresh: true }) as Record<string, { authenticated: boolean }>;
+    expect(fresh.claude!.authenticated).toBe(true); expect(probe).toHaveBeenCalledTimes(initialCalls * 2);
+  });
+
+  it('validates import sources, opaque identifiers and selection before privileged operations', async () => {
+    const { registry, deps } = stubDeps();
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    const importChats = vi.fn();
+    deps.sessions.importChats = importChats;
+    for (const request of [{ source: 'other' }, { source: 'claude', path: '/private/file' }]) {
+      await expect(registry.invoke('sessions:importList', request)).rejects.toThrow();
+    }
+    for (const request of [{ source: 'claude', ids: [] }, { source: 'claude', ids: ['../../file'] }, { source: 'codex', ids: Array(201).fill('id') }, { source: 'claude', ids: ['id'], repairOnly: 'true' }, { source: 'claude', ids: ['id'], repairOnly: 1 }, { source: 'claude', ids: ['id'], repairOnly: true, projectRoot: '/private/file' }]) {
+      await expect(registry.invoke('sessions:import', request)).rejects.toThrow();
+    }
+    expect(discover).not.toHaveBeenCalled();
+    expect(importChats).not.toHaveBeenCalled();
+    discover.mockResolvedValue({ sessions: [], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['unlisted'] })).rejects.toThrow('Scan again');
+    expect(importChats).not.toHaveBeenCalled();
+    for (const channel of ['sessions:importList', 'sessions:import']) {
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels().includes(channel as never)).toBe(false);
+    }
+  });
+
+  it('forwards only aggregate import skip diagnostics from discovery to the desktop preview', async () => {
+    const { registry } = stubDeps();
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [], skippedFiles: 4, skippedReasons: { empty: 2, invalidHistory: 1, unreadable: 1 }, scanErrors: 1, malformedLines: 3, truncated: false });
+    await expect(registry.invoke('sessions:importList', { source: 'claude' })).resolves.toEqual({
+      candidates: [], skipped: 4, skippedReasons: { empty: 2, invalidHistory: 1, unreadable: 1 }, scanErrors: 1, malformedLines: 3, truncated: false
+    });
+    expect(discover).toHaveBeenCalledExactlyOnceWith('claude');
+  });
+
+  it.each(['claude', 'codex', 'codex-exec'] as const)('marks an existing %s provider conversation as already represented in the import preview', async (harness) => {
+    const { registry, deps } = stubDeps();
+    const source = harness === 'claude' ? 'claude' : 'codex';
+    const existing = deps.sessions.get('s_test')!;
+    deps.sessions.list = () => [{ ...existing, config: { ...existing.config, harness }, harnessRef: source === 'claude' ? { claudeSessionId: 'provider-owned' } : { codexThreadId: 'provider-owned' } }];
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: `${source}_owned`, source, sourceSessionId: 'provider-owned', title: 'Existing conversation', projectRoot: ws, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [{ id: 'q', kind: 'user', text: 'Original question', ts: 1 }] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const result = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]!.imported).toBe(true);
+  });
+
+  it.each(['imported', 'claude', 'codex', 'codex-exec'] as const)('reports missing registration for a saved %s chat without mutating settings on scan', async (identity) => {
+    const { registry, deps } = stubDeps();
+    const source = identity === 'codex' || identity === 'codex-exec' ? 'codex' : 'claude';
+    const storedRoot = path.join(ws, 'stored-project');
+    const externalRoot = path.join(ws, 'moved-source-project');
+    const existing: SessionMeta = { ...deps.sessions.get('s_test')!, config: { harness: identity === 'imported' ? 'claude' : identity, permissionMode: 'ask', projectRoot: storedRoot },
+      ...(identity === 'imported' ? { importedFrom: { source, sessionId: 'provider-owned' } } : {}),
+      harnessRef: identity === 'imported' ? {} : source === 'claude' ? { claudeSessionId: 'provider-owned' } : { codexThreadId: 'provider-owned' } };
+    deps.sessions.list = () => [existing];
+    const update = vi.spyOn(deps.settings, 'update');
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: `${source}_owned`, source, sourceSessionId: 'provider-owned', title: 'Saved chat', projectRoot: externalRoot, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const preview = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(preview.candidates).toHaveLength(1);
+    expect(preview.candidates[0]).toMatchObject({ imported: true, registrationPending: true, projectRoot: storedRoot });
+    expect(update).not.toHaveBeenCalled();
+    expect(deps.settings.get().folders).not.toContain(storedRoot);
+    await deps.settings.update({ folders: [storedRoot] });
+    update.mockClear();
+    const repaired = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(repaired.candidates[0]!.imported).toBe(true);
+    expect(repaired.candidates[0]!.registrationPending).toBeFalsy();
+    expect(update).not.toHaveBeenCalled();
+    update.mockRestore();
+  });
+
+  it('forwards repair-only intent only after opaque selection validation', async () => {
+    const { registry, deps, pushes } = stubDeps();
+    const parsed = { candidate: { id: 'claude_saved', source: 'claude' as const, sourceSessionId: 'saved', title: 'Saved chat', projectRoot: ws, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [] };
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [parsed], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const repair = vi.fn(async () => ({ imported: [], skipped: 1 }));
+    deps.sessions.importChats = repair;
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['unlisted'], repairOnly: true })).rejects.toThrow('Scan again');
+    expect(repair).not.toHaveBeenCalled();
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['claude_saved'], repairOnly: true })).resolves.toEqual({ imported: [], skipped: 1 });
+    expect(repair).toHaveBeenCalledExactlyOnceWith([parsed], { repairOnly: true });
+    expect(pushes).toEqual([[PUSH_CHANNELS.settingsChanged, deps.settings.get()]]);
+  });
+
+  it.each([false, true])('publishes authoritative import settings after the operation (partial failure: %s)', async (fails) => {
+    const { registry, deps, pushes } = stubDeps();
+    const root = path.join(ws, 'imported-project');
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: 'claude_new', source: 'claude', sourceSessionId: 'new-provider', title: 'Imported conversation', projectRoot: root, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [{ id: 'q', kind: 'user', text: 'Imported question', ts: 1 }] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    deps.sessions.importChats = async () => {
+      await deps.settings.update({ folders: [root], recentProjects: [root] });
+      if (fails) throw new Error('later selected chat failed');
+      return { imported: [], skipped: 0 };
+    };
+    const result = registry.invoke('sessions:import', { source: 'claude', ids: ['claude_new'] });
+    if (fails) await expect(result).rejects.toThrow('later selected chat failed');
+    else await expect(result).resolves.toEqual({ imported: [], skipped: 0 });
+    expect(pushes).toEqual([[PUSH_CHANNELS.settingsChanged, deps.settings.get()]]);
+    expect((pushes[0]![1] as { folders: string[] }).folders).toEqual([root]);
+  });
+
   beforeAll(() => {
     ws = tmpDir('ws');
     fsSync.writeFileSync(path.join(ws, 'a.txt'), 'hello', 'utf8');
@@ -133,9 +400,55 @@ describe('handler registry', () => {
   it('serves a representative set of channels', () => {
     const { registry } = stubDeps();
     const channels = registry.channels();
-    for (const c of ['sessions:list', 'settings:get', 'terminal:input', 'git:summary', 'fs:read', 'approvals:respond', 'analytics:summary', 'window:zoom']) {
+    for (const c of ['sessions:list', 'settings:get', 'terminal:input', 'git:summary', 'fs:read', 'fs:resolve', 'approvals:respond', 'analytics:summary', 'window:zoom']) {
       expect(channels).toContain(c);
     }
+  });
+
+  it('reads a linked PR by its GitHub URL after the session worktree was removed', async () => {
+    const { registry, deps } = stubDeps();
+    const removedCheckout = path.join(ws, 'removed-worktree');
+    const archived = { ...deps.sessions.get('s_test')!, id: '_archived', archived: true, cwd: removedCheckout };
+    const getSession = vi.spyOn(deps.sessions, 'get').mockImplementation((id) => id === archived.id ? archived : undefined);
+    const channel = 'git:pullRequest';
+    const url = 'https://github.com/other/project/pull/42';
+    const comment = { body: 'Ready to ship' };
+    const pr = { number: 42, title: 'Ship it', state: 'MERGED', url };
+    const which = vi.spyOn(runtime, 'which').mockReturnValue('fake-gh');
+    const capture = vi.spyOn(runtime, 'runCapture').mockImplementation(async (_cmd, _args, opts) => (
+      opts?.cwd === removedCheckout
+        ? { code: null, stdout: '', stderr: 'spawn gh ENOENT' }
+        : { code: 0, stdout: JSON.stringify({ ...pr, comments: [comment] }), stderr: '' }
+    ));
+    try {
+      await expect(registry.invoke(channel, { sessionId: 's_missing', url }, 'desktop')).rejects.toThrow('Session not found');
+      await expect(registry.invoke(channel, { sessionId: archived.id, url, cwd: 'caller-supplied' }, 'desktop')).rejects.toThrow();
+      for (const invalidUrl of ['https://github.com.invalid/other/project/pull/42', `${url}/files`, 'https://github.com/other/project/pull/0']) {
+        await expect(registry.invoke(channel, { sessionId: archived.id, url: invalidUrl }, 'desktop')).resolves.toEqual({ error: 'Invalid GitHub pull request link.' });
+      }
+      expect(capture).not.toHaveBeenCalled();
+
+      await expect(registry.invoke(channel, { sessionId: archived.id, url: `${url}?source=chat#issuecomment-1` }, 'desktop'))
+        .resolves.toEqual({ pr: { ...pr, comments: 1 }, comments: [comment] });
+      expect(capture).toHaveBeenCalledExactlyOnceWith('fake-gh', ['pr', 'view', url, '--json', expect.stringContaining('comments')], expect.objectContaining({ cwd: undefined }));
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels()).not.toContain(channel);
+    } finally {
+      capture.mockRestore();
+      which.mockRestore();
+      getSession.mockRestore();
+    }
+  });
+
+  it('validates Fast mode requests before dispatch and refuses unknown sessions', async () => {
+    const setFastMode = vi.fn(async () => ({ id: 's_test' }));
+    const { registry } = stubDeps({ sessions: { list: () => [], get: (id: string) => id === 's_test' ? { id } : undefined, setFastMode } as unknown as SessionManager });
+    for (const request of [{ id: '../escape', enabled: true }, { id: 's_test', enabled: 'yes' }, { id: 's_test', enabled: true, extra: 1 }, { id: 'missing', enabled: true }]) {
+      await expect(registry.invoke('sessions:setFastMode', request)).rejects.toThrow();
+    }
+    expect(setFastMode).not.toHaveBeenCalled();
+    await expect(registry.invoke('sessions:setFastMode', { id: 's_test', enabled: true })).resolves.toEqual({ id: 's_test' });
+    expect(setFastMode.mock.calls).toEqual([['s_test', true]]);
   });
 
   it('returns the transcript page with its event floor, and rejects an unknown session', async () => {
@@ -175,6 +488,23 @@ describe('handler registry', () => {
     const { registry } = stubDeps();
     const channels = registry.channels();
     for (const c of agentChannels()) expect(channels, `${c} is on the agent allowlist but not registered`).toContain(c);
+  });
+
+  it('serves the Processes panel to the desktop only, and hands the tracker only well-formed targets', async () => {
+    const end = vi.fn(async () => ({ ended: 1, failed: [] }));
+    const list = vi.fn(async () => ({ sampledAt: 1, processes: [] }));
+    const { registry } = stubDeps({ processes: { list, end } });
+    expect(await registry.invoke('processes:list', undefined)).toEqual({ sampledAt: 1, processes: [] });
+    await registry.invoke('processes:end', { targets: [{ pid: 42, startedAt: 7 }, { pid: -1, startedAt: 7 }, { pid: 1.5, startedAt: 7 }, { pid: 43 }, null] });
+    expect(end).toHaveBeenCalledWith([{ pid: 42, startedAt: 7 }]);
+    // Ending processes is a local action: a paired browser can neither list nor end them.
+    expect(isRemoteChannel('processes:list')).toBe(false);
+    expect(isRemoteChannel('processes:end')).toBe(false);
+    expect(isRemotePushChannel(PUSH_CHANNELS.processSummary)).toBe(false);
+    expect(agentChannels()).not.toContain('processes:end');
+    // Without a tracker (tests, a host that does not sample) the panel says so instead of failing.
+    const bare = stubDeps().registry;
+    expect(await bare.invoke('processes:list', undefined)).toMatchObject({ processes: [], error: 'Process tracking is not running.' });
   });
 
   it('rejects an empty MCP import with an actionable message and no settings write', async () => {
@@ -261,6 +591,22 @@ describe('handler registry', () => {
     expect(await registry.invoke('git:folderIsRepo', { projectRoot: ws })).toEqual({ isRepo: false });
   });
 
+  it('lists a folder\'s local branches for the new worktree only once the app knows the folder', async () => {
+    const repo = tmpDir('branches');
+    for (const args of [['init', '-q', '--initial-branch=main', '.'], ['-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'init'], ['branch', 'develop']]) {
+      const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+      expect(r.status, r.stderr).toBe(0);
+    }
+    const { registry, deps } = stubDeps();
+    await deps.settings.load();
+
+    expect(await registry.invoke('git:folderBranches', { projectRoot: repo })).toEqual({ branches: [] });
+
+    await registry.invoke('settings:update', { folders: [repo, ws] });
+    expect(await registry.invoke('git:folderBranches', { projectRoot: repo })).toEqual({ current: 'main', branches: ['develop', 'main'] });
+    expect(await registry.invoke('git:folderBranches', { projectRoot: ws })).toEqual({ branches: [] });
+  });
+
   it('round-trips settings and pushes settingsChanged', async () => {
     const { registry, deps, pushes } = stubDeps();
     await deps.settings.load();
@@ -270,6 +616,34 @@ describe('handler registry', () => {
     expect(next.notifications).toBe(false);
     expect(((await registry.invoke('settings:get', undefined)) as typeof before).notifications).toBe(false);
     expect(pushes.some(([c, p]) => c === PUSH_CHANNELS.settingsChanged && (p as typeof before).notifications === false)).toBe(true);
+  });
+
+  it('refuses unsafe provider settings through both registered save boundaries without writes or pushes', async () => {
+    const { registry, deps, pushes, logs } = stubDeps();
+    await deps.settings.update({ notifications: false });
+    const before = deps.settings.get();
+    const provider = { id: 'unsafe', kind: 'openai', name: 'Unsafe', enabled: true, hasApiKey: false, models: [], baseUrl: 'http://user:password@192.168.1.2/v1?token=hidden' };
+    const write = vi.spyOn(deps.settings, 'update');
+    const changed = vi.fn(); deps.settings.onChange(changed);
+    await expect(registry.invoke('providers:save', provider)).rejects.toThrow(/HTTPS/);
+    expect(write).not.toHaveBeenCalled();
+    await expect(registry.invoke('settings:update', { providers: [provider] })).rejects.toThrow(/HTTPS/);
+    expect(deps.settings.get()).toBe(before); expect(changed).not.toHaveBeenCalled(); expect(pushes).toEqual([]);
+    expect(logs.map(([, message]) => message).join('\n')).not.toMatch(/password|hidden|192\.168/);
+  });
+
+  it('refuses legacy unsafe provider use before reading keys or dispatching a request', async () => {
+    const { registry, deps } = stubDeps();
+    const provider = { ...deps.settings.get().providers.find((p) => p.id === 'openai')!, baseUrl: 'http://192.168.1.2/v1' };
+    // Simulate a legacy settings file, which remains loadable rather than preventing startup.
+    deps.settings.get().providers.push({ ...provider, id: 'legacy' });
+    const secret = vi.spyOn(deps.secrets, 'get');
+    const network = vi.spyOn(globalThis, 'fetch');
+    try {
+      await expect(registry.invoke('providers:test', { id: 'legacy' })).resolves.toMatchObject({ ok: false, detail: expect.stringContaining('HTTPS') });
+      await expect(registry.invoke('providers:refreshModels', { id: 'legacy' })).resolves.toMatchObject({ error: expect.stringContaining('HTTPS') });
+      expect(secret).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled();
+    } finally { secret.mockRestore(); network.mockRestore(); }
   });
 
   it('flips hasApiKey through secrets:set and pushes the new settings', async () => {
@@ -282,19 +656,154 @@ describe('handler registry', () => {
     expect(pushes.filter(([c]) => c === PUSH_CHANNELS.settingsChanged).length).toBeGreaterThan(0);
   });
 
+  it('never lets a provider id name identity material in the shared secret store', async () => {
+    const { registry, deps } = stubDeps();
+    await deps.settings.load();
+    const set = vi.spyOn(deps.secrets, 'set'), clear = vi.spyOn(deps.secrets, 'clear'), get = vi.spyOn(deps.secrets, 'get');
+    for (const id of ['vocs-account:production', 'vocs-account:staging', 'remote-host', 'remote-enroll']) {
+      await expect(registry.invoke('secrets:set', { providerId: id, apiKey: '{"v":1}' })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('secrets:clear', { providerId: id })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('providers:save', { id, kind: 'openai', name: 'Evil', baseUrl: 'https://evil.example/v1', hasApiKey: false, models: [] })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('secrets:has', { providerId: id })).resolves.toBe(false);
+      await expect(registry.invoke('providers:delete', { id })).rejects.toThrow(/reserved/);
+      await expect(providerSecrets(deps.secrets.get)(id)).resolves.toBeUndefined();
+    }
+    await expect(providerSecrets(async (id) => `key-for-${id}`)('openai')).resolves.toBe('key-for-openai');
+    expect(set).not.toHaveBeenCalled(); expect(clear).not.toHaveBeenCalled();
+    // A provider planted in settings under a reserved id never receives the vault record as its key.
+    const { resolveProviderApiKey } = await import('../src/main/models/providers');
+    await expect(resolveProviderApiKey({ id: 'vocs-account:production', kind: 'openai', name: 'Evil', baseUrl: 'https://evil.example/v1', hasApiKey: true, models: [] } as never, deps.secrets.get)).resolves.toBeUndefined();
+    expect(get).not.toHaveBeenCalledWith('vocs-account:production');
+  });
+
   it('lists, searches and reads workspace files, refusing escapes', async () => {
     const { registry } = stubDeps();
     const list = (await registry.invoke('fs:list', { sessionId: 's_test' })) as { name: string; path: string; isDir: boolean }[];
     expect(list.map((e) => e.path)).toEqual(['sub', 'a.txt']);
     const read = (await registry.invoke('fs:read', { sessionId: 's_test', path: 'a.txt' })) as { content: string; truncated: boolean };
     expect(read).toEqual({ content: 'hello', truncated: false });
-    const escaped = (await registry.invoke('fs:read', { sessionId: 's_test', path: '../escape.txt' })) as { content: string };
-    expect(escaped.content).toBe('');
+    await expect(registry.invoke('fs:read', { sessionId: 's_test', path: '../escape.txt' })).resolves.toEqual({ content: '', truncated: false, readOnly: true });
+    await expect(registry.invoke('fs:read', { sessionId: 's_test', path: 'sub' })).resolves.toEqual({ content: '', truncated: false, readOnly: true });
     const outside = (await registry.invoke('fs:list', { sessionId: 's_test', relPath: '../' })) as unknown[];
     expect(outside).toEqual([]);
     const search = (await registry.invoke('fs:search', { sessionId: 's_test', query: 'txt' })) as string[];
     expect(search).toHaveLength(2);
     expect(search).toEqual(expect.arrayContaining(['a.txt', 'sub/b.txt']));
+  });
+
+  it('saves only desktop text using an exact byte precondition in the session worktree', async () => {
+    const r = await fileResolveRig();
+    const file = path.join(r.cwd, 'edit.txt');
+    const checkoutFile = path.join(r.projectRoot, 'edit.txt');
+    const before = '\uFEFFfirst\r\nsecond\r\n';
+    const content = '\uFEFF雪\r\n';
+    await fs.writeFile(file, before);
+    await fs.writeFile(checkoutFile, before);
+    const target = { sessionId: 's_test', path: 'edit.txt' };
+    const preview = await r.registry.invoke('fs:read', { ...target, maxBytes: FILE_PREVIEW_MAX_BYTES });
+    expect(preview).toEqual({ content: before, truncated: false });
+    const req = { ...target, content, expectedContent: before };
+    expect(isRemoteChannel('fs:writeText')).toBe(false);
+    for (const actor of ['user', 'agent'] as const) {
+      await expect(r.registry.invoke('fs:writeText', req, actor)).rejects.toThrow(/local desktop owner/);
+    }
+    await expect(fs.readFile(file)).resolves.toEqual(Buffer.from(before));
+    await expect(r.registry.invoke('fs:writeText', req, 'desktop')).resolves.toBeUndefined();
+    await expect(fs.readFile(file)).resolves.toEqual(Buffer.from(content));
+    await expect(fs.readFile(checkoutFile)).resolves.toEqual(Buffer.from(before));
+    await fs.writeFile(file, 'external');
+    await expect(r.registry.invoke('fs:writeText', { ...req, expectedContent: content }, 'desktop')).rejects.toThrow(/changed on disk/);
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('external');
+  });
+
+  it('rejects malformed and out-of-workspace save requests before opening files', async () => {
+    const r = await fileResolveRig();
+    const file = path.join(r.cwd, 'edit.txt');
+    const outside = path.join(r.sibling, 'edit.txt');
+    await fs.writeFile(file, 'before');
+    await fs.writeFile(outside, 'before');
+    await fs.symlink(r.sibling, path.join(r.cwd, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const req = { sessionId: 's_test', path: 'edit.txt', content: 'after', expectedContent: 'before' };
+    const open = vi.spyOn(fs, 'open');
+    for (const invalid of [undefined, null, {}, { ...req, expectedContent: undefined }, { ...req, content: 1 },
+      { ...req, root: r.sibling }, { ...req, sessionId: '../s_test' }, { ...req, sessionId: 'missing' },
+      { ...req, missionWorkspaceId: 1 }, { ...req, path: 'escape/edit.txt' }, { ...req, path: '../edit.txt' },
+      { ...req, path: outside }, { ...req, path: 'edit.txt:stream' }, { ...req, path: 'missing.txt' }]) {
+      await expect(r.registry.invoke('fs:writeText', invalid, 'desktop')).rejects.toThrow();
+    }
+    expect(open).not.toHaveBeenCalled();
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe('before');
+    await expect(fs.readFile(outside, 'utf8')).resolves.toBe('before');
+    await expect(fs.stat(path.join(r.cwd, 'missing.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('resolves an exact file from the session cwd before suffix matches or the configured project root', async () => {
+    const r = await fileResolveRig();
+    await fs.mkdir(path.join(r.cwd, 'nested'));
+    await fs.writeFile(path.join(r.cwd, 'notes.md'), 'current worktree');
+    await fs.writeFile(path.join(r.cwd, 'nested', 'notes.md'), 'another suffix match');
+    await fs.writeFile(path.join(r.projectRoot, 'notes.md'), 'project checkout');
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: 'notes.md' })).resolves.toEqual({ status: 'resolved', path: 'notes.md' });
+    await expect(r.registry.invoke('fs:read', { sessionId: 's_test', path: 'notes.md' })).resolves.toEqual({ content: 'current worktree', truncated: false });
+  });
+
+  it('resolves unique basenames and component suffixes, never partial directory names or a different suffix', async () => {
+    const r = await fileResolveRig();
+    await fs.mkdir(path.join(r.cwd, 'src', 'components'), { recursive: true });
+    await fs.writeFile(path.join(r.cwd, 'src', 'components', 'Widget.tsx'), 'widget');
+    for (const p of ['Widget.tsx', 'components/Widget.tsx']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).resolves.toEqual({ status: 'resolved', path: 'src/components/Widget.tsx' });
+    }
+    for (const p of ['ponents/Widget.tsx', 'other/Widget.tsx', 'Widget.ts', 'absent.tsx']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).resolves.toEqual({ status: 'missing' });
+    }
+  });
+
+  it('returns every ambiguous relative path rather than choosing the first basename match', async () => {
+    const r = await fileResolveRig();
+    for (const dir of ['a', 'b']) {
+      await fs.mkdir(path.join(r.cwd, dir));
+      await fs.writeFile(path.join(r.cwd, dir, 'shared.ts'), dir);
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: 'shared.ts' })).resolves.toEqual({ status: 'ambiguous', paths: ['a/shared.ts', 'b/shared.ts'] });
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: 'b/shared.ts' })).resolves.toEqual({ status: 'resolved', path: 'b/shared.ts' });
+  });
+
+  it('never falls back to the project checkout or another session workspace', async () => {
+    const r = await fileResolveRig();
+    await fs.writeFile(path.join(r.projectRoot, 'project-only.ts'), 'project');
+    await fs.mkdir(path.join(r.sibling, 'src'));
+    await fs.writeFile(path.join(r.sibling, 'src', 'sibling-only.ts'), 'sibling');
+    for (const p of ['project-only.ts', 'sibling-only.ts', 'src/sibling-only.ts']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).resolves.toEqual({ status: 'missing' });
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_sibling', path: 'sibling-only.ts' })).resolves.toEqual({ status: 'resolved', path: 'src/sibling-only.ts' });
+  });
+
+  it('skips dependency and generated directories during fallback but permits an exact file there', async () => {
+    const r = await fileResolveRig();
+    const skipped = ['node_modules', 'dist', 'out', 'build', '.next', '.vocs-code'];
+    for (const dir of skipped) {
+      await fs.mkdir(path.join(r.cwd, dir));
+      await fs.writeFile(path.join(r.cwd, dir, 'generated.ts'), dir);
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: 'generated.ts' })).resolves.toEqual({ status: 'missing' });
+    for (const dir of skipped) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: `${dir}/generated.ts` })).resolves.toEqual({ status: 'resolved', path: `${dir}/generated.ts` });
+    }
+  });
+
+  it('rejects malformed file-resolution requests, unknown sessions, absolute paths and traversal', async () => {
+    const { registry } = stubDeps();
+    for (const req of [
+      undefined, null, {}, { sessionId: 's_test' }, { path: 'a.txt' },
+      { sessionId: '', path: 'a.txt' }, { sessionId: '../s_test', path: 'a.txt' }, { sessionId: 1, path: 'a.txt' },
+      { sessionId: 's_missing', path: 'a.txt' }, { sessionId: 's_test', path: null }, { sessionId: 's_test', path: 1 },
+      { sessionId: 's_test', path: 'a.txt', root: ws }, { sessionId: 's_test', path: 'a.txt', missionWorkspaceId: 1 }
+    ]) await expect(registry.invoke('fs:resolve', req)).rejects.toThrow();
+    for (const p of ['', '\0', '/etc/passwd', 'C:\\private\\file.txt', 'C:/private/file.txt', '//server/share/file.txt', '\\\\server\\share\\file.txt', '../a.txt', 'sub/../../a.txt', 'sub/../a.txt', '..\\a.txt']) {
+      await expect(registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).rejects.toThrow();
+    }
   });
 
   it('delegates desktop affordances and keeps the URL guard on openExternal', async () => {
@@ -312,6 +821,26 @@ describe('handler registry', () => {
     expect(calls).toContain('openExternal:https://example.com');
     await registry.invoke('app:openExternal', { url: 'file:///etc/passwd' });
     expect(calls).not.toContain('openExternal:file:///etc/passwd');
+  });
+
+  it('shows a local file in its folder, even outside the session, and never a network or relative path', async () => {
+    const { registry, calls } = stubDeps();
+    const elsewhere = tmpDir('elsewhere');
+    const bundle = path.join(elsewhere, 'SideGuard-Q-2026-10.zip');
+    fsSync.writeFileSync(bundle, 'PK');
+
+    // Transcript links carry forward slashes; the file manager gets the platform's own path.
+    await expect(registry.invoke('app:showInFolder', { sessionId: 's_test', path: bundle.replace(/\\/g, '/') })).resolves.toEqual({ ok: true });
+    const missing = path.join(elsewhere, 'gone.zip');
+    await expect(registry.invoke('app:showInFolder', { sessionId: 's_test', path: missing })).resolves.toEqual({ ok: false, error: `${missing} was not found` });
+    // Refused before any stat, so a UNC link cannot make Windows contact the named host.
+    for (const refused of ['\\\\attacker\\share\\bundle.zip', '//attacker/share/bundle.zip', '\\\\?\\C:\\bundle.zip', 'relative/bundle.zip', '']) {
+      await expect(registry.invoke('app:showInFolder', { sessionId: 's_test', path: refused })).resolves.toEqual({ ok: false, error: 'Only local absolute paths can be shown in their folder' });
+    }
+    await expect(registry.invoke('app:showInFolder', { sessionId: 's_missing', path: bundle })).resolves.toEqual({ ok: false, error: 'Session not found' });
+
+    expect(calls.filter((c) => c.startsWith('showItemInFolder:'))).toEqual([`showItemInFolder:${bundle}`]);
+    expect(calls.some((c) => c.startsWith('openPath:'))).toBe(false);
   });
 
   it('dispatches session handlers, passively indexes new sessions, and fails unknown sessions', async () => {
@@ -630,6 +1159,16 @@ describe('remote handlers', () => {
     return { enabled, saved, ...stubDeps({ remote, secrets }) };
   }
 
+  it('refuses an insecure relay override before settings, secret writes, or host dispatch', async () => {
+    vi.stubEnv('VOCS_CODE_RELAY_URL', 'http://user:password@192.168.1.2/?token=hidden');
+    const { registry, deps, enabled, saved, pushes } = remoteRig();
+    const update = vi.spyOn(deps.settings, 'update');
+    for (const [channel, input] of [['remote:enable', { enrollToken: 'private' }], ['remote:signIn', undefined]] as const) {
+      await expect(registry.invoke(channel, input)).rejects.toThrow(/HTTPS/);
+    }
+    expect(update).not.toHaveBeenCalled(); expect(enabled).toEqual([]); expect(saved.size).toBe(0); expect(pushes).toEqual([]);
+  });
+
   it('connects to code.vocs.io with only the enrollment secret, dropping a relay URL an older build stored', async () => {
     vi.stubEnv('VOCS_CODE_RELAY_URL', undefined);
     const { registry, deps, enabled, saved } = remoteRig();
@@ -661,6 +1200,31 @@ describe('remote handlers', () => {
     expect(((await registry.invoke('remote:get', undefined)) as { relayUrl: string }).relayUrl).toBe('http://127.0.0.1:8787');
     await registry.invoke('remote:enable', { enrollToken: 'enroll-secret' });
     expect(enabled).toEqual([['http://127.0.0.1:8787', 'enroll-secret']]);
+  });
+});
+
+describe('external control owner boundary', () => {
+  it('refuses browser/default and agent origins before any owner service call', async () => {
+    const ownerState = vi.fn(async () => ({ enabled: false }));
+    const setEnabled = vi.fn();
+    const grant = vi.fn();
+    const revoke = vi.fn();
+    const { registry } = stubDeps({ control: { ownerState, setEnabled, grant, revoke } as unknown as NonNullable<Deps['control']> });
+    for (const actor of [undefined, 'user', 'agent'] as const) {
+      await expect(registry.invoke('control:get', undefined, actor)).rejects.toThrow('local desktop owner');
+      await expect(registry.invoke('control:enable', { enabled: true }, actor)).rejects.toThrow('local desktop owner');
+      await expect(registry.invoke('control:grant', {}, actor)).rejects.toThrow('local desktop owner');
+    }
+    expect(ownerState).not.toHaveBeenCalled();
+    expect(setEnabled).not.toHaveBeenCalled();
+    expect(grant).not.toHaveBeenCalled();
+    await expect(registry.invoke('control:get', undefined, 'desktop')).resolves.toEqual({ enabled: false });
+    expect(ownerState).toHaveBeenCalledTimes(1);
+    await expect(registry.invoke('control:enable', { enabled: 'yes' }, 'desktop')).rejects.toBeDefined();
+    await expect(registry.invoke('control:grant', { controllerId: '../escape' }, 'desktop')).rejects.toBeDefined();
+    await expect(registry.invoke('control:revoke', { grantId: '../escape' }, 'desktop')).rejects.toBeDefined();
+    expect(setEnabled).not.toHaveBeenCalled(); expect(grant).not.toHaveBeenCalled(); expect(revoke).not.toHaveBeenCalled();
+    for (const channel of ['control:get', 'control:enable', 'control:grant', 'control:revoke']) expect(isRemoteChannel(channel)).toBe(false);
   });
 });
 
@@ -705,5 +1269,66 @@ describe('remote sign-in handlers', () => {
       expect(((await registry.invoke('remote:get', undefined)) as { signInAvailable: boolean }).signInAvailable).toBe(expected);
     }
     expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual(['http://127.0.0.1:9911/v1/me', 'http://127.0.0.1:9912/v1/me', 'http://127.0.0.1:9913/v1/me']);
+  });
+});
+
+describe('harness:models catalog cache', () => {
+  const opus = { id: 'claude-opus-5-5', provider: 'anthropic', displayName: 'Opus 5.5' };
+  const sonnet = { id: 'claude-sonnet-5-5', provider: 'anthropic', displayName: 'Sonnet 5.5' };
+  const rig = (userData: string) => {
+    const { bridge } = bridgeStub();
+    return stubDeps({ desktop: { ...bridge, userDataPath: () => userData } });
+  };
+  const ids = (r: unknown) => (r as { models: { id: string }[] }).models.map((m) => m.id);
+
+  it('reuses a clean catalog across dialog opens and restarts, and rediscovers only on an explicit refresh', async () => {
+    const discover = vi.mocked(listHarnessModels).mockReset().mockResolvedValue({ models: [opus] });
+    const userData = tmpDir('models');
+    const { registry } = rig(userData);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', projectRoot: 'G:/a' }))).toEqual(['claude-opus-5-5']);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', projectRoot: 'G:/b' }))).toEqual(['claude-opus-5-5']);
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    // A restarted app reads the catalog back from userData instead of spawning the CLI again.
+    expect(ids(await rig(userData).registry.invoke('harness:models', { harness: 'claude' }))).toEqual(['claude-opus-5-5']);
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    discover.mockResolvedValue({ models: [opus, sonnet] });
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude', refresh: true }))).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(ids(await registry.invoke('harness:models', { harness: 'claude' }))).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
+    expect(discover).toHaveBeenCalledTimes(2);
+    // Each harness has its own entry.
+    await registry.invoke('harness:models', { harness: 'pi' });
+    expect(discover).toHaveBeenCalledTimes(3);
+  });
+
+  it('never caches a failed discovery, and a key, sign-in or catalog-settings change rediscovers', async () => {
+    const discover = vi.mocked(listHarnessModels).mockReset().mockResolvedValue({ models: [opus], error: 'Claude model discovery failed; showing the saved catalog.' });
+    const { registry, deps } = rig(tmpDir('models'));
+    await registry.invoke('harness:models', { harness: 'claude' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(2);
+
+    discover.mockResolvedValue({ models: [opus] });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(3);
+
+    await registry.invoke('secrets:set', { providerId: 'testprov', apiKey: 'sk-new' });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(4);
+
+    vi.mocked(openHarnessLogin).mockReset().mockResolvedValue({ ok: true });
+    await registry.invoke('harness:login', { harness: 'claude' }, 'desktop');
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(5);
+
+    await deps.settings.update({ modelOverrides: { 'anthropic::claude-opus-5-5': { supportsImages: true } } });
+    await registry.invoke('harness:models', { harness: 'claude' });
+    expect(discover).toHaveBeenCalledTimes(6);
+
+    for (const harness of ['__proto__', 'unknown', 1]) await expect(registry.invoke('harness:models', { harness })).rejects.toThrow();
+    expect(discover).toHaveBeenCalledTimes(6);
   });
 });

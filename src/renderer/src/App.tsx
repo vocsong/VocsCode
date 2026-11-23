@@ -1,32 +1,44 @@
 /** Top-level layout: sidebar, transcript, composer and the right-hand panel. */
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { invoke } from './api';
 import { useActiveSession, useStore, toastError } from './store';
 import { Vesta } from './components/Vesta';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
-import { Composer } from './components/Composer';
-import { Header } from './components/Header';
+import { FilePreviewPane } from './components/FilePreviewPane';
+import { HousekeepDialog } from './components/HousekeepDialog';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { QuickSessionPicker } from './components/QuickSessionPicker';
 import { RightPanel } from './components/RightPanel';
 import { SearchModal } from './components/SearchModal';
 import { SettingsView } from './components/SettingsView';
-import { nextFolderTarget, nextSessionTarget, sidebarNavModel, Sidebar } from './components/Sidebar';
+import { nextFolderTarget, nextSessionTarget, sidebarNavModel, sidebarViewOf, Sidebar } from './components/Sidebar';
 import { McpView } from './components/McpView';
 import { SkillsView } from './components/SkillsView';
+import { SessionPanes } from './components/SessionPanes';
 import { TitleBar } from './components/TitleBar';
-import { Transcript } from './components/Transcript';
-import { Button, ConfirmHost, EmptyState, Icon, Kbd, Spinner } from './components/ui';
+import { Button, ConfirmHost, Icon, Spinner } from './components/ui';
+import { Welcome } from './components/Welcome';
 import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
-import { applyTheme } from './theme';
+import { applyTheme, applyTypography, applyUiMode } from './theme';
 import { isTopLevelSession, pauseMissionSession } from './missions';
-import { useReportDesktopFocus } from './desktop-focus';
+import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
+import { activeComposer } from './panes';
+import { GitPanelCache } from './git-panel-cache';
+import { canHousekeepHere, HOUSEKEEP_OPEN, type HousekeepOpenOptions } from './housekeep';
 
 export function App() {
+  const [gitPanelCache] = useState(() => new GitPanelCache());
+  const [housekeepOpen, setHousekeepOpen] = useState<HousekeepOpenOptions | null>(null);
+  useEffect(() => {
+    if (!canHousekeepHere()) return;
+    const open = (event: WindowEventMap[typeof HOUSEKEEP_OPEN]) => setHousekeepOpen(event.detail);
+    window.addEventListener(HOUSEKEEP_OPEN, open);
+    return () => window.removeEventListener(HOUSEKEEP_OPEN, open);
+  }, []);
   const booted = useStore((s) => s.booted);
   const bootError = useStore((s) => s.bootError);
   const boot = useStore((s) => s.boot);
@@ -35,21 +47,41 @@ export function App() {
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const panelOpen = useStore((s) => s.panelOpen);
+  // Zen's pins (pins.ts); the classes mean nothing to the Standard layout.
+  const pins = useStore((s) => s.pins);
   const newSessionOpen = useStore((s) => s.newSessionOpen);
+  const onboardingOpen = useStore((s) => s.onboardingOpen);
+  const onboardingDismissed = useStore((s) => s.onboardingDismissed);
+  const onboardingHarness = useStore((s) => s.onboardingHarness);
   const quickSessionOpen = useStore((s) => s.quickSessionOpen);
   const paletteOpen = useStore((s) => s.paletteOpen);
   const searchOpen = useStore((s) => s.searchOpen);
   const session = useActiveSession();
+  // An empty active split still needs a right edge for a preview from the other pane.
+  const previewSession = useStore((s) => session ? undefined : s.sessions.find((x) => x.id === s.layout.filePreview?.sessionId));
+  const panelSession = session ?? previewSession;
+  const hasFilePreview = useStore((s) => !!s.layout.filePreview);
+  const showPanel = (panelOpen || hasFilePreview) && !!panelSession && view === 'chat';
+  const previewOnly = showPanel && !panelOpen;
   // Tell main (and through it, paired browsers) which session this window is on.
   useReportDesktopFocus();
+  useSessionViewing();
 
   useEffect(() => {
     void boot();
   }, [boot]);
 
   useEffect(() => {
-    applyTheme(settings?.theme ?? 'system');
-  }, [settings?.theme]);
+    applyTheme(settings?.theme ?? 'system', settings?.palette);
+  }, [settings?.theme, settings?.palette]);
+
+  useEffect(() => {
+    applyTypography(settings?.typography);
+  }, [settings?.typography]);
+
+  useEffect(() => {
+    applyUiMode(settings?.uiMode);
+  }, [settings?.uiMode]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -99,7 +131,8 @@ export function App() {
         const model = sidebarNavModel(st.sessions, st.settings);
         const target = e.shiftKey ? nextFolderTarget(model, st.activeId, down) : nextSessionTarget(model, st.activeId, down);
         if (target) {
-          const collapsed = st.settings?.collapsedFolders ?? [];
+          // A collapsed folder hides the row only in the folder view; the Recent view lists it anyway.
+          const collapsed = sidebarViewOf(st.settings) === 'folders' ? st.settings?.collapsedFolders ?? [] : [];
           if (collapsed.includes(target.root)) void invoke('settings:update', { collapsedFolders: collapsed.filter((r) => r !== target.root) });
           void st.setActive(target.sessionId).catch(toastError);
           // The sidebar row may not be in view (long list, or folder just expanded above).
@@ -112,11 +145,15 @@ export function App() {
           e.preventDefault();
           void st.setActive(target.id).catch(toastError);
         }
+      } else if (mod && e.code === 'Backslash' && st.view === 'chat' && st.activeId) {
+        // Ctrl+\ splits the conversation right, Ctrl+Shift+\ down (VS Code's editor split).
+        e.preventDefault();
+        st.splitPane(e.shiftKey ? 'vertical' : 'horizontal');
       } else if (mod && e.code === 'Backquote' && st.activeId && st.view === 'chat') {
         // Ctrl+` toggles focus between the terminal and the composer; Ctrl+Shift+` opens a new terminal.
         e.preventDefault();
         if (e.shiftKey) void createTerminal(st.activeId);
-        else if (st.panelOpen && st.panelTab === 'terminal' && document.activeElement?.closest('.term-view')) document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus();
+        else if (st.panelOpen && st.panelTab === 'terminal' && document.activeElement?.closest('.term-view')) activeComposer()?.focus();
         else {
           st.setPanelTab('terminal');
           st.focusTerminal();
@@ -124,15 +161,19 @@ export function App() {
       } else if (handleCustomShortcut(e)) {
         // A custom shortcut bound in Settings → Shortcuts consumed the key; the fixed
         // shortcuts above keep priority.
-      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && !st.searchOpen && st.activeId) {
+      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && !st.searchOpen) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
         // popover, and focus is on the page body or an empty composer.
-        if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename, .find-bar')) return;
+        if (document.querySelector('.dropdown-menu, .modal, .popover, .activity-tray, .session-rename, .find-bar')) return;
         const el = document.activeElement as HTMLElement | null;
         const onBody = !el || el === document.body;
         const onEmptyComposer = el?.tagName === 'TEXTAREA' && el.closest('.composer') !== null && !(el as HTMLTextAreaElement).value;
         if (!onBody && !onEmptyComposer) return;
-        const s = st.sessions.find((x) => x.id === st.activeId);
+        // A freshly split pane is empty and holds focus, so `activeId` is null. The turn still
+        // running in the other pane has to stay interruptible from the keyboard.
+        const targetId = st.activeId ?? st.layout.panes.find((p) => p.sessionId)?.sessionId;
+        if (!targetId) return;
+        const s = st.sessions.find((x) => x.id === targetId);
         if (s && (s.status === 'running' || s.status === 'awaiting')) pauseMissionSession(s);
       }
     };
@@ -172,7 +213,7 @@ export function App() {
   return (
     <div className="shell">
       <TitleBar />
-      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
+      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${showPanel && panelOpen ? '' : 'no-panel'} ${previewOnly ? 'panel-preview-only' : ''} ${pins.left ? 'pin-left' : ''} ${pins.right ? 'pin-right' : ''}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
         {sidebarOpen && <Sidebar />}
         <main className="main">
@@ -184,38 +225,19 @@ export function App() {
             <SkillsView />
           ) : view === 'mcp' ? (
             <McpView />
-          ) : session ? (
-            <>
-              <Header session={session} />
-              <Transcript session={session} />
-              <Composer key={session.id} session={session} />
-            </>
           ) : (
-            <div className="main-empty">
-              <EmptyState icon="sparkles" title="Welcome to Vocs Code">
-                <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
-                <div className="row gap8 center">
-                  <Button variant="primary" icon="plus" onClick={() => void useStore.getState().startNewSession()}>
-                    New session
-                  </Button>
-                  <Button icon="settings" onClick={() => useStore.getState().setView('settings')}>
-                    Settings
-                  </Button>
-                </div>
-                <p className="muted small">
-                  <Kbd>Ctrl+N</Kbd> new (quick) · <Kbd>Ctrl+Alt+N</Kbd> new in folder · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+Shift+F</Kbd> search · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
-                </p>
-              </EmptyState>
-            </div>
+            <SessionPanes empty={<Welcome />} />
           )}
         </main>
-        {panelOpen && session && view === 'chat' && <RightPanel session={session} />}
+        {showPanel && <RightPanel session={panelSession} gitPanelCache={gitPanelCache} />}
+        <FilePreviewPane visible={showPanel} />
       </div>
       {newSessionOpen && <NewSessionDialog />}
-      {!settings.onboardingDone && <OnboardingWizard />}
+      {(onboardingOpen || (!settings.onboardingDone && !onboardingDismissed)) && <OnboardingWizard initialHarness={onboardingHarness ?? undefined} onClose={() => useStore.getState().dismissOnboarding()} />}
       {quickSessionOpen && <QuickSessionPicker />}
       {paletteOpen && <CommandPalette />}
       {searchOpen && <SearchModal />}
+      {housekeepOpen && <HousekeepDialog key={housekeepOpen.recentDaysOverride ?? 'configured'} {...housekeepOpen} onClose={() => setHousekeepOpen(null)} />}
       <ConfirmHost />
       <ContextMenuHost />
       {settings.onboardingDone && <Vesta />}

@@ -3,11 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { KnowledgeStore } from '../src/main/knowledge/store';
 import { KnowledgeService } from '../src/main/knowledge/service';
 import type { AppSettings } from '../src/shared/types';
-import type { KnowledgePageMeta, KnowledgeScope } from '../src/shared/knowledge';
+import { claimKey, type KnowledgePageMeta, type KnowledgeScope } from '../src/shared/knowledge';
+import { withKnowledgeWriteLock } from '../resources/mcp/knowledge-write.mjs';
 
 const dirs: string[] = [];
 afterAll(async () => {
@@ -44,6 +45,49 @@ function pageMeta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
 }
 
 describe('knowledge store scoping', () => {
+  it('does not treat colliding branch slugs as the same branch', async () => {
+    const projectRoot = tmpDir('vocs-kb-branch-');
+    const scope = { projectRoot, cwd: projectRoot, branch: 'topic/one' };
+    const other = { ...scope, branch: 'topic-one' };
+    const store = new KnowledgeStore();
+    expect(store.branchDir(scope)).toBe(store.branchDir(other));
+    await store.write(scope, pageMeta({ scope: 'branch', claim: 'Private to this branch.' }), 'Branch evidence');
+    expect(await store.load(other)).toEqual([]);
+    await expect(store.ingest(other, { pageId: 'conventions/harness-lifecycle', title: 'Changed', claim: 'Different branch', body: '', scope: 'branch' }, 'agent:mcp')).rejects.toThrow(/out-of-scope/);
+    expect(await store.deletePage(other, 'conventions/harness-lifecycle')).toBe(false);
+    expect((await store.read(scope, 'conventions/harness-lifecycle'))?.body).toBe('Branch evidence');
+  });
+
+  it('does not read or write pages through a wiki link into another project', async () => {
+    const left = tmpDir('vocs-kb-left-');
+    const right = tmpDir('vocs-kb-right-');
+    const store = new KnowledgeStore();
+    const source = { projectRoot: right, cwd: right };
+    const scope = { projectRoot: left, cwd: left };
+    await store.write(source, pageMeta({ claim: 'Private to the other project.' }), 'Private body');
+    await fs.mkdir(path.dirname(store.repoDir(scope)), { recursive: true });
+    await fs.symlink(store.repoDir(source), store.repoDir(scope), process.platform === 'win32' ? 'junction' : 'dir');
+    expect(await store.hasWiki(scope)).toBe(false);
+    expect(await store.load(scope)).toEqual([]);
+    await expect(store.ingest(scope, { pageId: 'conventions/harness-lifecycle', title: 'Changed', claim: 'Changed claim.', body: 'Changed body' }, 'agent:mcp')).rejects.toThrow(/linked wiki/);
+    expect((await store.read(source, 'conventions/harness-lifecycle'))?.body).toBe('Private body');
+  });
+
+  it('does not persist a proposal revoked while it waits for the wiki writer', async () => {
+    const projectRoot = tmpDir('vocs-kb-cancel-');
+    const knowledge = service();
+    const scope = { projectRoot, cwd: projectRoot };
+    const controller = new AbortController();
+    let pending!: Promise<unknown>;
+    await withKnowledgeWriteLock(knowledge.store.repoDir(scope), async () => {
+      pending = knowledge.propose(scope, { title: 'Revoked write', claim: 'A revoked call cannot write.', body: 'Not durable.' }, 'agent:mcp', 's_cancel', controller.signal);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      controller.abort(new Error('Capability revoked'));
+    });
+    await expect(pending).rejects.toThrow('Capability revoked');
+    expect(await new KnowledgeStore().load(scope)).toEqual([]);
+  });
+
   it('keeps branch pages inside the project wiki and merges them by id', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const cwd = path.join(projectRoot, '.vocs-code', 'worktrees', 'feature');
@@ -131,6 +175,155 @@ describe('knowledge store scoping', () => {
 });
 
 describe('knowledge service ingestion', () => {
+  it.each([
+    ['C++ is required.', 'C# is required.'],
+    ['The key is Foo.', 'The key is foo.'],
+    ['缓存必须持久化。', '缓存不可持久化。']
+  ])('preserves exact claim identity, including punctuation, case and Unicode (%s)', async (claim, different) => {
+    const projectRoot = tmpDir('vocs-kb-exact-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    const first = await svc.propose(scope, { title: 'Exact identity', claim, body: 'first body' }, 'agent', 's1');
+    await svc.propose(scope, { title: 'Exact identity', claim, body: 'repeated body' }, 'agent', 's2');
+    const file = path.join(svc.store.repoDir(scope), `${first.id}.md`);
+    const before = await fs.readFile(file, 'utf8');
+    await expect(svc.propose(scope, { title: 'Exact identity', claim: different, body: 'replacement' }, 'agent', 's3')).rejects.toThrow(/different claim/);
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect((await svc.store.load(scope)).map((p) => p.meta.claim)).toEqual([claim]);
+  });
+
+  it.each([
+    ['Same title', 'Same title'],
+    ['A & B', 'A / B'],
+    [`${'a'.repeat(60)} first`, `${'a'.repeat(60)} second`]
+  ])('refuses unrelated claims whose titles generate the same id (%s)', async (firstTitle, secondTitle) => {
+    const projectRoot = tmpDir('vocs-kb-collision-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    const first = await svc.propose(scope, { title: firstTitle, claim: 'The original claim.', body: 'original body', labels: ['original'] }, 'agent:first', 's1');
+    const wiki = svc.store.repoDir(scope);
+    const file = path.join(wiki, `${first.id}.md`);
+    const before = await fs.readFile(file, 'utf8');
+    const evidence = await fs.readFile(path.join(wiki, '_evidence.json'), 'utf8');
+    await expect(svc.propose(scope, { title: secondTitle, claim: 'An unrelated claim.', body: 'replacement', supersedes: [first.id] }, 'agent:second', 's2')).rejects.toThrow(/different title.*pageId.*page_id/i);
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect(await fs.readFile(path.join(wiki, '_evidence.json'), 'utf8')).toBe(evidence);
+    expect(await svc.store.load(scope)).toHaveLength(1);
+  });
+
+  it('does not mistake a hash collision, a substring or a truncated claim for identity', async () => {
+    const scopeRoot = tmpDir('vocs-kb-identity-');
+    const scope = { projectRoot: scopeRoot, cwd: scopeRoot };
+    const svc = service();
+    const claims = ['claim ep3txk14adwdaeyh1085rcn12yo1a63otbxug55a', 'claim puezp2ukksp1y031bb819jg1c3pufk171h1clm19oq'];
+    expect(claimKey(claims[0])).toBe(claimKey(claims[1]));
+    await svc.propose(scope, { title: 'First hash', claim: claims[0], body: 'first' }, 'agent');
+    await svc.propose(scope, { title: 'Second hash', claim: claims[1], body: 'second' }, 'agent');
+    expect(await svc.store.load(scope)).toHaveLength(2);
+    for (const claim of ['A sufficiently long claim about main process ownership', 'a'.repeat(310)]) {
+      const filed = await svc.propose(scope, { title: claim, claim, body: 'first' }, 'agent');
+      await expect(svc.propose(scope, { title: claim, claim: `${claim} but not always`, body: 'second' }, 'agent')).rejects.toThrow(/different claim/);
+      expect((await svc.store.read(scope, filed.id))?.body).toBe('first');
+    }
+  });
+
+  it('serializes competing service instances so only one unrelated implicit proposal wins', async () => {
+    const projectRoot = tmpDir('vocs-kb-race-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const services = Array.from({ length: 4 }, () => service());
+    const results = await Promise.allSettled(services.map((svc, index) => svc.propose(scope, { title: index % 2 ? 'Race / title' : 'Race & title', claim: `Claim ${index}.`, body: `Complete body ${index}`, labels: [`winner-${index}`] }, 'agent', `s${index}`)));
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(3);
+    const winner = results.findIndex((r) => r.status === 'fulfilled');
+    const pages = await new KnowledgeStore().load(scope);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({ body: `Complete body ${winner}`, meta: { claim: `Claim ${winner}.`, labels: [`winner-${winner}`], evidenceCount: 1 } });
+    const evidence = JSON.parse(await fs.readFile(path.join(services[0].store.repoDir(scope), '_evidence.json'), 'utf8'));
+    expect(Object.values(evidence)).toEqual([expect.objectContaining({ count: 1, sessions: [`s${winner}`] })]);
+  });
+
+  it('merges explicit updates from fresh metadata across instances and retains provenance', async () => {
+    const projectRoot = tmpDir('vocs-kb-update-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    const id = 'concept/shared';
+    await svc.store.write(scope, pageMeta({ id, claim: 'Original claim.', createdAt: '2020-01-01T00:00:00.000Z', labels: ['original'], related: ['concept/other'], updatedBy: 'agent:bootstrap', confidence: 'high' }), 'old');
+    const writers = Array.from({ length: 4 }, () => service());
+    await Promise.all(writers.map((writer) => writer.store.read(scope, id))); // prime stale caches
+    const results = await Promise.all(writers.map((writer, index) => writer.propose(scope, { pageId: id, title: 'Shared', claim: `Replacement ${index}`, body: `Complete ${index}`, labels: [`label-${index}`], sources: [{ type: 'file', ref: `${index}.ts` }] }, 'agent', `s${index}`)));
+    expect(results).toHaveLength(4);
+    const page = await new KnowledgeStore().read(scope, id);
+    expect(page?.meta).toMatchObject({ createdAt: '2020-01-01T00:00:00.000Z', confidence: 'high', evidenceCount: 4, related: ['concept/other'], updatedBy: 'agent' });
+    expect(page?.meta.labels.slice().sort()).toEqual(['label-0', 'label-1', 'label-2', 'label-3', 'original']);
+    expect(page?.meta.sources.map((s) => s.ref).sort()).toEqual(['0.ts', '1.ts', '2.ts', '3.ts']);
+    expect(page?.body).toBe(`Complete ${page?.meta.claim?.slice(-1)}`);
+  });
+
+  it('keeps normalized same-claim updates on one page and records every session', async () => {
+    const projectRoot = tmpDir('vocs-kb-repeat-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const first = await service().propose(scope, { title: 'First name', claim: 'The main process owns state.', body: 'original' }, 'agent', 's0');
+    const results = await Promise.all(Array.from({ length: 3 }, (_, index) => service().propose(scope, { title: `New name ${index}`, claim: 'The main  process  owns state.', body: `body ${index}`, labels: [`label-${index}`] }, 'agent', `s${index + 1}`)));
+    expect(results.map((r) => r.id)).toEqual([first.id, first.id, first.id]);
+    expect(results.map((r) => r.evidenceCount).sort()).toEqual([2, 3, 4]);
+    const pages = await new KnowledgeStore().load(scope);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].meta.evidenceCount).toBe(4);
+  });
+
+  it('keeps the old complete page and releases the lock after a failed rename, then recovers', async () => {
+    const projectRoot = tmpDir('vocs-kb-failure-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    const first = await svc.propose(scope, { title: 'Failure recovery', claim: 'Original claim.', body: 'original body' }, 'agent', 's1');
+    const wiki = svc.store.repoDir(scope);
+    const file = path.join(wiki, `${first.id}.md`);
+    const before = await fs.readFile(file, 'utf8');
+    const evidence = await fs.readFile(path.join(wiki, '_evidence.json'), 'utf8');
+    const originalRename = fs.rename.bind(fs);
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(to) === file) throw Object.assign(new Error('injected rename failure'), { code: 'EACCES' });
+      return originalRename(from, to);
+    });
+    try {
+      await expect(svc.propose(scope, { pageId: first.id, title: 'Failure recovery', claim: 'Changed claim.', body: 'replacement body' }, 'agent', 's2')).rejects.toThrow('injected rename failure');
+    } finally {
+      rename.mockRestore();
+    }
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect(await fs.readFile(path.join(wiki, '_evidence.json'), 'utf8')).toBe(evidence);
+    expect(await fs.readdir(path.dirname(file))).toEqual(['failure-recovery.md']);
+    await expect(fs.stat(path.join(wiki, '_write.lock'))).rejects.toThrow();
+    expect((await svc.propose(scope, { pageId: first.id, title: 'Failure recovery', claim: 'Changed claim.', body: 'recovered body' }, 'agent', 's2')).promoted).toBe(true);
+    expect((await new KnowledgeStore().read(scope, first.id))?.body).toBe('recovered body');
+  });
+
+  it('fails closed on an abandoned lock and requires deliberate offline recovery', async () => {
+    const root = tmpDir('vocs-kb-lock-');
+    const lock = path.join(root, '_write.lock');
+    await fs.mkdir(lock);
+    await fs.utimes(lock, new Date(0), new Date(0));
+    let executed = false;
+    await expect(withKnowledgeWriteLock(root, async () => { executed = true; }, { timeoutMs: 30 })).rejects.toThrow(/stop all app\/MCP writers/);
+    expect(executed).toBe(false);
+    expect((await fs.stat(lock)).isDirectory()).toBe(true);
+    await fs.rmdir(lock); // operator recovery only after all writers have stopped
+    const scope = { projectRoot: root, cwd: root };
+    expect((await service().propose(scope, { title: 'Recovered', claim: 'Recovery works.', body: 'complete' }, 'agent')).promoted).toBe(true);
+  });
+
+  it('refuses a malformed existing destination rather than treating it as absent', async () => {
+    const projectRoot = tmpDir('vocs-kb-invalid-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(path.join(wiki, 'concept'), { recursive: true });
+    const file = path.join(wiki, 'concept', 'damaged.md');
+    await fs.writeFile(file, 'hand-written document without frontmatter');
+    await expect(service().propose(scope, { title: 'Damaged', claim: 'New claim.', body: 'replacement' }, 'agent')).rejects.toThrow(/invalid knowledge page/);
+    expect(await fs.readFile(file, 'utf8')).toBe('hand-written document without frontmatter');
+    await expect(fs.stat(path.join(wiki, '_evidence.json'))).rejects.toThrow();
+  });
+
   it('ingests a claim into a current, servable page immediately (no review step)', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
@@ -165,13 +358,13 @@ describe('knowledge service ingestion', () => {
     expect(view.pages[0].evidenceCount).toBe(2);
   });
 
-  it('remembers a rejected claim and refuses to refile it', async () => {
+  it.each(['We should cache transcripts in the repo.', 'WE SHOULD cache transcripts in the repo!'])('remembers a rejected claim and refuses to refile it (%s)', async (claim) => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     const svc = service();
     const filed = await svc.propose(scope, { title: 'Bad idea', claim: 'We should cache transcripts in the repo.', body: 'Body.' }, 'agent:pi', 's1');
     await svc.review(scope, filed.id, 'reject', { by: 'human' });
-    const again = await svc.propose(scope, { title: 'Bad idea again', claim: 'We should cache transcripts in the repo.', body: 'Body.' }, 'agent:pi', 's2');
+    const again = await svc.propose(scope, { title: 'Bad idea again', claim, body: 'Body.' }, 'agent:pi', 's2');
     expect(again.rejected).toBe(true);
     const view = await svc.view(scope);
     expect(view.rejectedClaims).toContain('We should cache transcripts in the repo.');

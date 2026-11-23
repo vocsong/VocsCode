@@ -1,6 +1,6 @@
 /** Recognition and workspace resolution for file mentions in transcripts. */
 import { describe, expect, it } from 'vitest';
-import { parseFileRef, workspaceRelativePath } from '../src/renderer/src/file-refs';
+import { joinRelative, parseFileLink, parseFileRef, workspaceRelativePath } from '../src/renderer/src/file-refs';
 
 describe('parseFileRef', () => {
   it('accepts relative, absolute and Windows paths', () => {
@@ -24,6 +24,17 @@ describe('parseFileRef', () => {
     expect(parseFileRef('src/main/handlers.ts:136:7')).toEqual({ path: 'src/main/handlers.ts', line: 136 });
     expect(parseFileRef('src/main/handlers.ts#L136')).toEqual({ path: 'src/main/handlers.ts', line: 136 });
     expect(parseFileRef('G:\\proj\\src\\foo.ts:12')).toEqual({ path: 'G:/proj/src/foo.ts', line: 12 });
+  });
+
+  it('opens a line range at its first line', () => {
+    expect(parseFileRef('src/a.ts:10-20')).toEqual({ path: 'src/a.ts', line: 10 });
+    expect(parseFileRef('src/a.ts#L10-L20')).toEqual({ path: 'src/a.ts', line: 10 });
+    expect(parseFileRef('src/a.ts#L10-20')).toEqual({ path: 'src/a.ts', line: 10 });
+    expect(parseFileRef('src/a.ts#L10C4')).toEqual({ path: 'src/a.ts', line: 10 });
+  });
+
+  it("reads Codex's /G:/ URL-path form as the drive path", () => {
+    expect(parseFileRef('/G:/Vocs-Code/src/main/models/static-models.ts:17')).toEqual({ path: 'G:/Vocs-Code/src/main/models/static-models.ts', line: 17 });
   });
 
   it('marks a trailing slash as a directory reference', () => {
@@ -50,6 +61,42 @@ describe('parseFileRef', () => {
     ]) {
       expect(parseFileRef(text), text).toBeNull();
     }
+  });
+});
+
+describe('parseFileLink', () => {
+  it('reads the URL-shaped targets agents write as markdown links', () => {
+    expect(parseFileLink('/G:/Vocs-Code/.vocs-code/worktrees/x/src/main/harness/codex-exec.ts:242')).toEqual({ path: 'G:/Vocs-Code/.vocs-code/worktrees/x/src/main/harness/codex-exec.ts', line: 242 });
+    expect(parseFileLink('file:///G:/proj/src/a.ts')).toEqual({ path: 'G:/proj/src/a.ts' });
+    expect(parseFileLink('file://localhost/home/me/proj/a.ts#L5')).toEqual({ path: '/home/me/proj/a.ts', line: 5 });
+    expect(parseFileLink('src/my%20file.ts')).toEqual({ path: 'src/my file.ts' });
+    expect(parseFileLink('G:%5Cproj%5Csrc%5Ca.ts')).toEqual({ path: 'G:/proj/src/a.ts' });
+    expect(parseFileLink('docs/guide.md#install')).toEqual({ path: 'docs/guide.md' });
+  });
+
+  it('accepts names with spaces and brackets, which a link target can carry', () => {
+    expect(parseFileLink('shots/Screenshot (2).png')).toEqual({ path: 'shots/Screenshot (2).png' });
+    expect(parseFileRef('shots/Screenshot (2).png')).toBeNull();
+  });
+
+  it('refuses other schemes, remote shares and paths that climb out', () => {
+    for (const href of ['https://example.com/a.ts', 'mailto:me@example.com', 'vscode://file/G:/a.ts', 'file://server/share/a.ts', '#section', '../a.ts', 'src/%2E%2E/%2E%2E/a.ts', '%E0%A4%A', 'src/components']) {
+      expect(parseFileLink(href), href).toBeNull();
+    }
+  });
+});
+
+describe('joinRelative', () => {
+  it('resolves a link written inside a markdown file against that file\'s folder', () => {
+    expect(joinRelative('docs', 'ARCHITECTURE.md')).toBe('docs/ARCHITECTURE.md');
+    expect(joinRelative('docs/guides', '../../src/a.ts:12')).toBe('src/a.ts:12');
+    expect(joinRelative('', './README.md')).toBe('README.md');
+    expect(joinRelative('docs', 'G:/proj/a.ts')).toBe('G:/proj/a.ts');
+    expect(joinRelative('docs', 'img/')).toBe('docs/img/');
+  });
+
+  it('refuses a target that climbs above the workspace root', () => {
+    expect(joinRelative('docs', '../../a.ts')).toBeNull();
   });
 });
 

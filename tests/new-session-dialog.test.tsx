@@ -66,6 +66,53 @@ afterEach(() => {
 });
 
 describe('NewSessionDialog', () => {
+  it('asks main for its cached catalog on open and harness switches, and rediscovers only on Recheck', async () => {
+    render(<NewSessionDialog />);
+    const modelCalls = () => invoke.mock.calls.filter(([channel]) => channel === 'harness:models').map(([, req]) => req as { harness: string; refresh?: boolean });
+    await waitFor(() => expect(modelCalls()).toHaveLength(1));
+    expect(modelCalls()[0]).toMatchObject({ harness: 'claude' });
+    expect(modelCalls()[0].refresh).toBeUndefined();
+
+    const recheck = screen.getByRole('button', { name: 'Recheck models and sign-in' }) as HTMLButtonElement;
+    await waitFor(() => expect(recheck.disabled).toBe(false));
+    fireEvent.click(recheck);
+    await waitFor(() => expect(modelCalls()).toHaveLength(2));
+    expect(modelCalls()[1]).toMatchObject({ harness: 'claude', refresh: true });
+
+    // The recheck was for that harness only: the next switch is served from the cache again.
+    await waitFor(() => expect(recheck.disabled).toBe(false));
+    fireEvent.click([...document.querySelectorAll('.harness-card')].find((card) => card.textContent?.startsWith('Pi'))!);
+    await waitFor(() => expect(modelCalls()).toHaveLength(3));
+    expect(modelCalls()[2]).toMatchObject({ harness: 'pi' });
+    expect(modelCalls()[2].refresh).toBeUndefined();
+  });
+
+  it.each(['codex', 'codex-exec', 'cursor', 'acp'] as const)('labels %s additions as first-message session instructions and submits them', async (harness) => {
+    useStore.setState({ settings: { ...settings, defaultHarness: harness } });
+    render(<NewSessionDialog />);
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    const editor = screen.getByRole('textbox', { name: /^Session instructions/ });
+    expect(screen.queryByText('Append to system prompt')).toBeNull();
+    expect(screen.getByText("Sent with the first message; does not replace the harness's own system prompt.")).toBeTruthy();
+    fireEvent.change(editor, { target: { value: '  Session guidance.  ' } });
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({
+      config: expect.objectContaining({ harness, appendSystemPrompt: 'Session guidance.' })
+    })));
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(1);
+  });
+
+  it.each(['pi', 'claude', 'native'] as const)('keeps the supported system-prompt label for %s', async (harness) => {
+    useStore.setState({ settings: { ...settings, defaultHarness: harness } });
+    render(<NewSessionDialog />);
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    expect(screen.getByRole('textbox', { name: 'Append to system prompt' })).toBeTruthy();
+    expect(screen.queryByText("Sent with the first message; does not replace the harness's own system prompt.")).toBeNull();
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it('starts from the first prompt on Enter and keeps Shift+Enter for newlines', async () => {
     render(<NewSessionDialog />);
     // Starting waits for the model list and the folder's git probe; Enter is inert until then.
@@ -85,6 +132,37 @@ describe('NewSessionDialog', () => {
         expect.objectContaining({ initialPrompt: 'Fix the flaky test' }),
       ),
     );
+  });
+
+  it('puts focus in the first prompt when it opens, not in the model search', async () => {
+    render(<NewSessionDialog />);
+    const prompt = screen.getByRole('textbox', { name: 'First prompt (optional)' });
+    expect(document.activeElement).toBe(prompt);
+    // Still there once the model list has loaded and every mount effect has run.
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    expect(document.activeElement).toBe(prompt);
+  });
+
+  it('heads Fast mode like the selects beside it, with the switch under the heading', () => {
+    render(<NewSessionDialog />);
+    const group = screen.getByRole('group', { name: 'Fast mode' });
+    const toggle = screen.getByRole('checkbox', { name: 'Fast mode' });
+    const heading = group.querySelector(':scope > .field-label');
+    expect(heading?.textContent).toBe('Fast mode');
+    expect(heading!.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(group.querySelector('.toggle-label')).toBeNull();
+  });
+
+  it('shows every harness card as one name line over one status line', () => {
+    useStore.setState({ availability: { claude: { available: true, authenticated: true, authMethod: 'subscription' } } } as never);
+    render(<NewSessionDialog />);
+    const cards = [...document.querySelectorAll('.harness-card')];
+    expect(cards.length).toBeGreaterThan(1);
+    for (const card of cards) {
+      expect([...card.children].map((c) => c.className)).toEqual(['harness-card-name', 'harness-card-status']);
+    }
+    const claude = cards.find((c) => c.textContent?.startsWith('Claude Agent SDK'))!;
+    expect(claude.querySelector('.harness-card-status .badge')?.getAttribute('title')).toBe('Subscription sign-in detected');
   });
 
   it('shows Enter as the start shortcut', () => {
@@ -224,7 +302,7 @@ describe('NewSessionDialog', () => {
     render(<NewSessionDialog />);
     const toggle = screen.getByLabelText(/Isolate in a git worktree/) as HTMLInputElement;
     await waitFor(() => expect(toggle.disabled).toBe(false));
-    expect(screen.getByText('(new branch under .vocs-code/worktrees)')).toBeTruthy();
+    expect(screen.getByText('Work on a new branch in .vocs-code/worktrees. Your current checkout stays untouched.')).toBeTruthy();
 
     fireEvent.click(toggle);
     fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
@@ -249,11 +327,41 @@ describe('NewSessionDialog', () => {
     await waitFor(() => expect(toggle.disabled).toBe(true));
     // The remembered default must not survive as a checked-but-unusable toggle.
     expect(toggle.checked).toBe(false);
-    expect(screen.getByText('(unavailable — this folder is not a git repository)')).toBeTruthy();
+    expect(screen.getByText('Unavailable — this folder is not a git repository.')).toBeTruthy();
 
     fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
     const call = invoke.mock.calls.find(([channel]) => channel === 'sessions:create');
     expect((call?.[1] as { config: { useWorktree?: boolean } }).config.useWorktree).toBe(false);
+  });
+
+  // The setup entry point is for a harness that is not ready; a signed-in harness with a catalog hides it.
+  const sonnet = { id: 'claude-sonnet-5', provider: 'anthropic', displayName: 'Claude Sonnet 5' };
+  it.each([
+    { name: 'a signed-in harness with a model catalog', harness: 'claude', availability: { available: true, authenticated: true, authMethod: 'subscription' }, catalog: { models: [sonnet] }, shown: false },
+    { name: 'the built-in loop with a provider model', harness: 'native', availability: { available: true, authenticated: 'unknown' }, catalog: { models: [sonnet] }, shown: false },
+    { name: 'a signed-out harness', harness: 'claude', availability: { available: true, authenticated: false }, catalog: { models: [sonnet] }, shown: true },
+    { name: 'a harness whose sign-in cannot be verified', harness: 'claude', availability: { available: true, authenticated: 'unknown' }, catalog: { models: [sonnet] }, shown: true },
+    { name: 'a missing runtime', harness: 'cursor', availability: { available: false }, catalog: { models: [sonnet] }, shown: true },
+    { name: 'a failed model discovery', harness: 'claude', availability: { available: true, authenticated: true }, catalog: { models: [sonnet], error: 'Claude model discovery failed; showing the saved catalog.' }, shown: true },
+    { name: 'the built-in loop with no provider models', harness: 'native', availability: { available: true, authenticated: 'unknown' }, catalog: { models: [] }, shown: true },
+  ])('offers Set up / sign in only when setup is needed: $name', async ({ harness, availability, catalog, shown }) => {
+    const openOnboarding = vi.fn();
+    useStore.setState({ settings: { ...settings, defaultHarness: harness }, availability: { [harness]: availability }, openOnboarding } as never);
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'harness:models') return catalog;
+      if (channel === 'git:folderIsRepo') return { isRepo: true };
+      return {};
+    });
+    render(<NewSessionDialog />);
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+
+    const setup = screen.queryByRole('button', { name: 'Set up / sign in' });
+    expect(!!setup).toBe(shown);
+    if (setup) {
+      fireEvent.click(setup);
+      expect(openOnboarding).toHaveBeenCalledWith(harness);
+    }
   });
 });

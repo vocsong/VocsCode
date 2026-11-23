@@ -169,34 +169,7 @@ export function fileVersionKey(cwd: string, p: string): string {
   return process.platform === 'win32' ? abs.toLowerCase() : abs;
 }
 
-/** Missing descendants are resolved through their nearest existing ancestor. Uncertainty prompts. */
-export async function requiresPathApproval(cwd: string, target: string): Promise<boolean> {
-  const outside = (root: string, file: string) => {
-    const rel = path.relative(root, file);
-    return rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
-  };
-  const absolute = path.resolve(cwd, target);
-  if (outside(path.resolve(cwd), absolute)) return true;
-  try {
-    const root = await fs.realpath(cwd);
-    const missing: string[] = [];
-    let ancestor = absolute;
-    for (;;) {
-      try {
-        await fs.lstat(ancestor);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
-        const parent = path.dirname(ancestor);
-        if (parent === ancestor) return true;
-        missing.unshift(path.basename(ancestor));
-        ancestor = parent;
-        continue;
-      }
-      // A dangling link or inaccessible realpath throws rather than authorizing its descendants.
-      return outside(root, path.join(await fs.realpath(ancestor), ...missing));
-    }
-  } catch { return true; }
-}
+export { requiresPathApproval } from '../permissions';
 
 function fileError(cwd: string, file: string, error: unknown): ToolExecResult {
   return { output: `File error for ${file} (cwd: ${cwd}): ${(error as Error).message}`, isError: true };
@@ -284,13 +257,15 @@ async function* walk(root: string, rel = '', signal?: AbortSignal, skipped?: { c
   }
 }
 
-export function detectShell(): { file: string; args: (cmd: string) => string[]; name: string } {
+export function detectShell(): { file: string; args: (cmd: string) => string[]; name: string; windowsVerbatimArguments?: boolean } {
   if (process.platform === 'win32') {
     const bash = which('bash');
     if (bash && !/System32/i.test(bash)) return { file: bash, args: (cmd) => ['-lc', cmd], name: 'bash (Git Bash)' };
     const pwsh = which('pwsh') ?? which('powershell');
     if (pwsh) return { file: pwsh, args: (cmd) => ['-NoProfile', '-NonInteractive', '-Command', cmd], name: 'PowerShell' };
-    return { file: process.env.ComSpec || 'cmd.exe', args: (cmd) => ['/d', '/s', '/c', cmd], name: 'cmd.exe' };
+    // cmd parses its own command line, not spawn's default Windows CRT escaping.
+    // /s strips this outer quote pair, preserving the command's own quotes and operators.
+    return { file: process.env.ComSpec || 'cmd.exe', args: (cmd) => ['/d', '/s', '/c', `"${cmd}"`], name: 'cmd.exe', windowsVerbatimArguments: true };
   }
   return { file: process.env.SHELL || '/bin/sh', args: (cmd) => ['-lc', cmd], name: process.env.SHELL || 'sh' };
 }
@@ -334,7 +309,7 @@ export async function runBash(cwd: string, command: string, timeoutMs: number, s
     let reason = '';
     let done = false;
     let termination: Promise<void> | undefined;
-    const child = spawn(sh.file, sh.args(command), { cwd, env: process.env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(sh.file, sh.args(command), { cwd, env: process.env, windowsHide: true, windowsVerbatimArguments: sh.windowsVerbatimArguments, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     const stop = (why: string) => {
       if (done || termination) return;
       reason = why;

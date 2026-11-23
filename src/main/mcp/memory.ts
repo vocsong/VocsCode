@@ -1,11 +1,9 @@
 /**
  * The Layer 2 built-in MCP server: one stdio process per session serving the project wiki.
  *
- * Like GitNexus, the app owns the definition and injects it through the normal resolver, so every
- * harness with `inject`/`client` support gets the same six tools with no adapter code. Unlike
- * GitNexus there is no shared process and no cross-repo surface: the wiki lives in the project
- * root, and a worktree session additionally sees its own checkout's wiki root for branch-scope
- * pages. A project with no wiki gets no server at all rather than a tool that answers nothing.
+ * The app injects this built-in through the normal resolver. The gateway client receives only
+ * a runtime capability; it cannot fall back to disk. The standalone, wiki-only definition is
+ * used only in explicit legacy mode.
  *
  * No Electron imports.
  */
@@ -16,6 +14,9 @@ import { which } from '../runtime';
 import { exists } from '../util/fs';
 
 export const VOCS_MEMORY_SERVER_ID = 'vocs-memory';
+/** How the stdio server learns where the app's gateway is; the token is a per-session secret. */
+export const MEMORY_GATEWAY_URL_ENV = 'VOCS_MEMORY_GATEWAY_URL';
+export const MEMORY_GATEWAY_TOKEN_ENV = 'VOCS_MEMORY_GATEWAY_TOKEN';
 
 /** Where a project's working wiki lives; the one path the whole feature hangs off. */
 export function memoryRoot(scope: Pick<KnowledgeScope, 'projectRoot'>): string {
@@ -39,22 +40,27 @@ export function vocsMemoryBaseDef(): McpServerDef {
     transport: 'stdio',
     command: 'node',
     args: [],
-    description: 'Project knowledge wiki (architecture, decisions, conventions, gotchas)'
+    description: 'Project knowledge and memory, scoped to this session',
+    builtin: VOCS_MEMORY_SERVER_ID
   };
 }
 
 interface MemoryHostDeps {
   /** Path to resources/mcp/vocs-memory.mjs. */
   memoryServerPath?: string;
+  /**
+   * The app-owned gateway endpoint and this session's capability token. Present, the server is a
+   * thin client and every tool call is answered by the app; absent, it serves the wiki on its own.
+   */
+  memoryGateway?: { url: string; token: string } | null;
   /** The app's userData, where search.db and sessions.json live (session history recall). */
   memoryUserData?: string;
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
 
 /**
- * Materializes the server for one session: the app's node (or Electron in Node mode, exactly as the
- * GitNexus proxy does) plus the two wiki roots. Null when the repo has no wiki yet, or the app was
- * built without the script.
+ * Materializes the server using Node (or Electron in Node mode). Do not hand the thin client
+ * local wiki or transcript paths; its only authority is the app-issued bearer capability.
  */
 export function memoryServerDef(scope: { projectRoot: string; cwd: string; branch?: string }, def: McpServerDef, deps: MemoryHostDeps): McpServerDef | null {
   if (!deps.memoryServerPath) return null;
@@ -67,11 +73,15 @@ export function memoryServerDef(scope: { projectRoot: string; cwd: string; branc
     args: [deps.memoryServerPath],
     env: {
       ...(node ? {} : { ELECTRON_RUN_AS_NODE: '1' }),
-      VOCS_MEMORY_ROOT: memoryRoot(scope),
-      VOCS_MEMORY_PROJECT_ROOT: scope.projectRoot,
-      ...(branchRoot ? { VOCS_MEMORY_BRANCH_ROOT: branchRoot } : {}),
-      ...(scope.branch ? { VOCS_MEMORY_BRANCH: scope.branch } : {}),
-      ...(deps.memoryUserData ? { VOCS_MEMORY_USER_DATA: deps.memoryUserData } : {})
+      ...(deps.memoryGateway
+        ? { [MEMORY_GATEWAY_URL_ENV]: deps.memoryGateway.url, [MEMORY_GATEWAY_TOKEN_ENV]: deps.memoryGateway.token }
+        : {
+            VOCS_MEMORY_ROOT: memoryRoot(scope),
+            VOCS_MEMORY_PROJECT_ROOT: scope.projectRoot,
+            ...(branchRoot ? { VOCS_MEMORY_BRANCH_ROOT: branchRoot } : {}),
+            ...(scope.branch ? { VOCS_MEMORY_BRANCH: scope.branch } : {}),
+            ...(deps.memoryUserData ? { VOCS_MEMORY_USER_DATA: deps.memoryUserData } : {})
+          })
     }
   };
 }

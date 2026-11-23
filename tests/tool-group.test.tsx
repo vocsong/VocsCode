@@ -3,8 +3,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ApprovalRequest, TranscriptItem } from '../src/shared/types';
 import { groupCommands, groupTranscript, ToolGroup, WorkGroup } from '../src/renderer/src/components/Transcript';
+import { useStore } from '../src/renderer/src/store';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  useStore.setState({ searchJump: null });
+});
 
 let seq = 0;
 const tool = (over: Partial<Extract<TranscriptItem, { kind: 'tool' }>> = {}): Extract<TranscriptItem, { kind: 'tool' }> => ({
@@ -27,73 +31,108 @@ const approval = (id: string, decided = false): TranscriptItem => ({
   ...(decided ? { decision: { optionId: 'allow' } } : {})
 });
 
-const workEntries = (chunks: ReturnType<typeof groupTranscript>): TranscriptItem[] => {
-  const work = chunks.find((c) => c.kind === 'work');
-  if (!work || work.kind !== 'work') throw new Error('no work chunk');
-  return work.entries;
-};
-
 describe('groupTranscript', () => {
-  it('collapses a turn of commands and commentary into one work chunk', () => {
-    const items = [tool(), text('m1', 'checking'), tool()];
-    const chunks = groupTranscript(items);
-    expect(chunks).toHaveLength(1);
-    expect(chunks[0]).toMatchObject({ kind: 'work', entries: items });
+  const kinds = (chunks: ReturnType<typeof groupTranscript>) => chunks.map((c) => (c.kind === 'work' ? `work:${c.entries.map((e) => e.id).join(',')}` : c.kind === 'single' ? c.item.id : c.kind));
+  const thinking = (id: string, over: Partial<Extract<TranscriptItem, { kind: 'assistant' }>> = {}): TranscriptItem => ({ id, kind: 'assistant', ts: 0, text: '', thinking: 'hmm', ...over });
+  const turns = (chunks: ReturnType<typeof groupTranscript>) => chunks.flatMap((c) => (c.kind === 'work' ? [c.turn] : []));
+
+  it('keeps every message on screen and collapses only the steps between them', () => {
+    const items = [text('m1', 'Looking at the tree first.'), tool({ id: 'c1' }), text('m2', 'The tree is clean; branching.'), tool({ id: 'c2' }), tool({ id: 'c3' }), text('m3', 'all done')];
+    expect(kinds(groupTranscript(items))).toEqual(['m1', 'work:c1', 'm2', 'work:c2,c3', 'm3']);
   });
 
-  it('keeps users, answers, warnings, plans and turns outside the work', () => {
+  it('shows a message the same way whatever phase its harness gave it', () => {
+    for (const phase of [undefined, 'commentary', 'final', 'plan'] as const) {
+      const message = { ...text('m1', 'Checking the build.'), ...(phase ? { phase } : {}) } as TranscriptItem;
+      expect(kinds(groupTranscript([message, tool({ id: 'c1' }), text('m2', 'done')]))).toEqual(['m1', 'work:c1', 'm2']);
+    }
+  });
+
+  it('keeps users, answers, warnings and turns outside the work', () => {
     const items: TranscriptItem[] = [
       { id: 'u1', kind: 'user', ts: 0, text: 'go' },
       tool({ id: 'c1' }),
       { id: 'w1', kind: 'info', ts: 0, level: 'warn', text: 'MCP unavailable' },
-      { id: 'p1', kind: 'plan', ts: 0, entries: [] },
       text('a1', 'the answer'),
       { id: 'turn1', kind: 'turn', ts: 0, status: 'completed', durationMs: 12_000 }
     ];
-    const chunks = groupTranscript(items);
-    expect(chunks.map((c) => c.kind)).toEqual(['single', 'work', 'single', 'single', 'single', 'single']);
-    expect(workEntries(chunks).map((e) => e.id)).toEqual(['c1']);
+    expect(kinds(groupTranscript(items))).toEqual(['u1', 'work:c1', 'w1', 'a1', 'turn1']);
   });
 
-  it('keeps an approval inside the work so one turn keeps one header', () => {
+  it('keeps a plan update inside the work instead of splitting it in two', () => {
+    const items: TranscriptItem[] = [tool({ id: 'c1' }), { id: 'p1', kind: 'plan', ts: 0, entries: [] }, tool({ id: 'c2' }), text('a1', 'done')];
+    expect(kinds(groupTranscript(items))).toEqual(['work:c1,p1,c2', 'a1']);
+  });
+
+  it('keeps an approval inside the work so one stretch keeps one header', () => {
     const items = [tool({ id: 'c1' }), approval('ap1'), tool({ id: 'c2' })];
-    const chunks = groupTranscript(items);
-    expect(chunks).toHaveLength(1);
-    expect(workEntries(chunks).map((e) => e.id)).toEqual(['c1', 'ap1', 'c2']);
+    expect(kinds(groupTranscript(items))).toEqual(['work:c1,ap1,c2']);
   });
 
   it('keeps info-level lines inside the work', () => {
     const items: TranscriptItem[] = [tool({ id: 'c1' }), { id: 'i1', kind: 'info', ts: 0, level: 'info', text: 'Compacted.' }, tool({ id: 'c2' })];
-    const chunks = groupTranscript(items);
-    expect(chunks).toHaveLength(1);
-    expect(workEntries(chunks).map((e) => e.id)).toEqual(['c1', 'i1', 'c2']);
+    expect(kinds(groupTranscript(items))).toEqual(['work:c1,i1,c2']);
   });
 
-  it('treats an unlabelled text before another command as commentary and the trailing one as the answer', () => {
-    const items = [tool({ id: 'c1' }), text('m1', 'narrating'), tool({ id: 'c2' }), text('m2', 'all done')];
-    const chunks = groupTranscript(items);
-    expect(chunks.map((c) => c.kind)).toEqual(['work', 'single']);
-    expect(workEntries(chunks).map((e) => e.id)).toEqual(['c1', 'm1', 'c2']);
-    expect(chunks[1]).toMatchObject({ kind: 'single', item: { id: 'm2' } });
+  it('keeps every reply visible when background follow-ups do more work before the turn closes', () => {
+    const items: TranscriptItem[] = [
+      tool({ id: 'c1' }),
+      text('report', 'The change is merged.'),
+      { ...text('p1', 'Fetching the result'), phase: 'commentary' } as TranscriptItem,
+      tool({ id: 'lookup1', name: 'subagent_result', hint: 'agent' }),
+      tool({ id: 'c2' }),
+      text('update1', 'The review has no blockers.'),
+      tool({ id: 'lookup2', name: 'subagent_result', hint: 'agent' }),
+      text('update2', 'The background tests passed.'),
+      { id: 'turn1', kind: 'turn', ts: 0, status: 'completed' }
+    ];
+    expect(kinds(groupTranscript(items))).toEqual(['work:c1', 'report', 'p1', 'work:lookup1,c2', 'update1', 'work:lookup2', 'update2', 'turn1']);
   });
 
-  it('treats thinking-only items as work and keeps an explicit final outside', () => {
-    const thinking = { id: 'th1', kind: 'assistant', ts: 0, text: '', thinking: 'hmm' } as TranscriptItem;
-    const final: TranscriptItem = { id: 'f1', kind: 'assistant', ts: 0, text: 'answer', phase: 'final' };
-    const items = [tool({ id: 'c1' }), thinking, tool({ id: 'c2' }), final];
-    const chunks = groupTranscript(items);
-    expect(chunks.map((c) => c.kind)).toEqual(['work', 'single']);
-    expect(workEntries(chunks).map((e) => e.id)).toEqual(['c1', 'th1', 'c2']);
+  it('folds reasoning in with the steps beside it, and never puts a header over reasoning alone', () => {
+    // Codex emits reasoning as rows of their own; Claude, Cursor, Pi, ACP and native put it on the
+    // message's row. Either way a header only ever stands for steps.
+    const items = [thinking('th0'), text('m1', 'On it.'), tool({ id: 'c1' }), thinking('th1'), tool({ id: 'c2' }), thinking('th2'), text('f1', 'answer')];
+    expect(kinds(groupTranscript(items))).toEqual(['th0', 'm1', 'work:c1,th1,c2', 'th2', 'f1']);
+  });
+
+  it('keeps reasoning with the live work until the message it leads into arrives', () => {
+    const live = [tool({ id: 'c1' }), thinking('th1', { streaming: true })];
+    expect(kinds(groupTranscript(live))).toEqual(['work:c1,th1']);
+    // Not a message: a turn row closing the work leaves the reasoning where it was.
+    expect(kinds(groupTranscript([...live, { id: 'turn1', kind: 'turn', ts: 0, status: 'interrupted' }]))).toEqual(['work:c1,th1', 'turn1']);
+  });
+
+  it('shows a notice with no step beside it as its own line, not as a header over nothing', () => {
+    const items: TranscriptItem[] = [
+      text('a1', 'done'),
+      { id: 'turn1', kind: 'turn', ts: 0, status: 'completed' },
+      { id: 'i1', kind: 'info', ts: 0, level: 'info', text: 'Permission mode set to ask.' },
+      { id: 'u2', kind: 'user', ts: 0, text: 'again' }
+    ];
+    expect(kinds(groupTranscript(items))).toEqual(['a1', 'turn1', 'i1', 'u2']);
+  });
+
+  it('keeps a message that also carries reasoning on screen', () => {
+    const both = thinking('m1', { text: 'Reading the server first.' });
+    expect(kinds(groupTranscript([both, tool({ id: 'c1' }), text('f1', 'answer')]))).toEqual(['m1', 'work:c1', 'f1']);
+  });
+
+  it('makes no row for reasoning when thinking is hidden, nor for a stream with nothing in it yet', () => {
+    const items = [thinking('th0'), text('m1', 'On it.'), thinking('th1'), text('m2', 'Next.'), tool({ id: 'c1' }), thinking('th2'), text('f1', 'answer')];
+    expect(kinds(groupTranscript(items, false))).toEqual(['m1', 'm2', 'work:c1', 'f1']);
+    const pending: TranscriptItem = { id: 'a9', kind: 'assistant', ts: 0, text: '', streaming: true };
+    expect(kinds(groupTranscript([text('m1', 'On it.'), pending]))).toEqual(['m1']);
   });
 
   it('splits work when an item that must stay visible sits between two runs', () => {
-    const items: TranscriptItem[] = [tool({ id: 'c1' }), { id: 'p1', kind: 'plan', ts: 0, entries: [] }, tool({ id: 'c2' })];
-    const chunks = groupTranscript(items);
-    expect(chunks.map((c) => c.kind)).toEqual(['work', 'single', 'work']);
+    const items: TranscriptItem[] = [tool({ id: 'c1' }), { id: 'w1', kind: 'info', ts: 0, level: 'warn', text: 'context is getting full' }, tool({ id: 'c2' })];
+    expect(kinds(groupTranscript(items))).toEqual(['work:c1', 'w1', 'work:c2']);
   });
 
-  it('gives each work chunk the duration of the turn that closed it', () => {
+  it('gives a turn’s only stretch of work the duration of the turn that closed it', () => {
     const items: TranscriptItem[] = [
+      text('m1', 'Checking.'),
       tool({ id: 'c1' }),
       text('a1', 'one'),
       { id: 'turn1', kind: 'turn', ts: 0, status: 'completed', durationMs: 4200 },
@@ -102,12 +141,35 @@ describe('groupTranscript', () => {
       text('a2', 'two'),
       { id: 'turn2', kind: 'turn', ts: 0, status: 'interrupted', durationMs: 900 }
     ];
-    const chunks = groupTranscript(items);
-    const work = chunks.filter((c) => c.kind === 'work');
-    expect(work.map((c) => (c.kind === 'work' ? c.turn : null))).toEqual([
+    expect(turns(groupTranscript(items))).toEqual([
       { status: 'completed', durationMs: 4200 },
       { status: 'interrupted', durationMs: 900 }
     ]);
+  });
+
+  it('leaves the turn duration on the turn row when the turn worked in several stretches', () => {
+    const items: TranscriptItem[] = [
+      { id: 'u1', kind: 'user', ts: 0, text: 'go' },
+      tool({ id: 'c1' }),
+      text('m1', 'Now the tests.'),
+      tool({ id: 'c2' }),
+      text('a1', 'done'),
+      { id: 'turn1', kind: 'turn', ts: 0, status: 'completed', durationMs: 4200 }
+    ];
+    expect(turns(groupTranscript(items))).toEqual([undefined, undefined]);
+  });
+
+  it('does not let reasoning or a notice on its own block the turn duration', () => {
+    const items: TranscriptItem[] = [
+      thinking('th0'),
+      text('m1', 'On it.'),
+      tool({ id: 'c1' }),
+      text('m2', 'Nearly there.'),
+      { id: 'i1', kind: 'info', ts: 0, level: 'info', text: 'Compacted.' },
+      text('a1', 'done'),
+      { id: 'turn1', kind: 'turn', ts: 0, status: 'completed', durationMs: 4200 }
+    ];
+    expect(turns(groupTranscript(items))).toEqual([{ status: 'completed', durationMs: 4200 }]);
   });
 
   it('finds the work behind a trailing warning line when the turn closes', () => {
@@ -116,8 +178,7 @@ describe('groupTranscript', () => {
       { id: 'w1', kind: 'info', ts: 0, level: 'warn', text: 'context is getting full' },
       { id: 'turn1', kind: 'turn', ts: 0, status: 'completed', durationMs: 5000 }
     ];
-    const chunks = groupTranscript(items);
-    expect(chunks.find((c) => c.kind === 'work')).toMatchObject({ turn: { status: 'completed', durationMs: 5000 } });
+    expect(turns(groupTranscript(items))).toEqual([{ status: 'completed', durationMs: 5000 }]);
   });
 });
 
@@ -132,8 +193,8 @@ describe('groupCommands', () => {
     expect(groupCommands([cmd])).toEqual([{ kind: 'single', item: cmd }]);
   });
 
-  it('lets commentary break a run', () => {
-    const items = [tool({ id: 'c1' }), text('m1', 'note'), tool({ id: 'c2' })];
+  it('lets a thinking row break a run', () => {
+    const items = [tool({ id: 'c1' }), { id: 'th1', kind: 'assistant', ts: 0, text: '', thinking: 'hmm' } as TranscriptItem, tool({ id: 'c2' })];
     expect(groupCommands(items).map((c) => c.kind)).toEqual(['single', 'single', 'single']);
   });
 
@@ -169,13 +230,31 @@ describe('WorkGroup', () => {
     expect(screen.getByText('npm test')).toBeTruthy();
   });
 
-  it('shows commentary but keeps its thinking collapsed', () => {
-    const entry = { id: 'a1', kind: 'assistant', ts: 0, text: 'Looking into it', thinking: 'private reasoning' } as TranscriptItem;
+  it('keeps finished reasoning behind its own toggle once the work is opened', () => {
+    const entry = { id: 'a1', kind: 'assistant', ts: 0, text: '', thinking: 'private reasoning' } as TranscriptItem;
     const { container } = render(<WorkGroup chunk={chunk([tool(), entry])} {...props} showThinking />);
+    expect(container.querySelector('.thinking-toggle')).toBeNull();
     fireEvent.click(container.querySelector('.work-head') as HTMLElement);
-    expect(screen.getByText('Looking into it')).toBeTruthy();
     expect(screen.queryByText('private reasoning')).toBeNull();
     fireEvent.click(screen.getByText('Thinking'));
+    expect(screen.getByText('private reasoning')).toBeTruthy();
+  });
+
+  it('shows reasoning while it is being written, then folds it away', () => {
+    const entry = { id: 'a1', kind: 'assistant', ts: 0, text: '', thinking: 'private reasoning', streaming: true } as TranscriptItem;
+    const view = render(<WorkGroup chunk={chunk([tool(), entry])} {...props} showThinking live />);
+    expect(screen.getByText('Thinking…')).toBeTruthy();
+    expect(screen.getByText('private reasoning')).toBeTruthy();
+    view.rerender(<WorkGroup chunk={chunk([tool(), { ...entry, streaming: false } as TranscriptItem])} {...props} showThinking live />);
+    expect(screen.getByText('Thinking')).toBeTruthy();
+    expect(screen.queryByText('private reasoning')).toBeNull();
+  });
+
+  it('opens the work and the reasoning a deep-search jump landed in', () => {
+    const entry = { id: 'a1', kind: 'assistant', ts: 0, text: '', thinking: 'private reasoning' } as TranscriptItem;
+    useStore.setState({ searchJump: { sessionId: 's', itemId: 'a1', n: 1 } });
+    render(<WorkGroup chunk={chunk([tool({ summary: 'git status' }), entry])} {...props} showThinking />);
+    expect(screen.getByText('git status')).toBeTruthy();
     expect(screen.getByText('private reasoning')).toBeTruthy();
   });
 
@@ -192,6 +271,63 @@ describe('WorkGroup', () => {
   it('collapses again once the only approval has been decided', () => {
     render(<WorkGroup chunk={chunk([tool(), approval('ap2', true)])} {...props} />);
     expect(screen.queryByText('Run it?')).toBeNull();
+  });
+
+  it('keeps only the latest plan on screen while the work around it is collapsed', () => {
+    const first: TranscriptItem = { id: 'p1', kind: 'plan', ts: 0, entries: [{ content: 'Write the limiter', status: 'in_progress' }, { content: 'Add tests', status: 'pending' }] };
+    const latest: TranscriptItem = { id: 'p2', kind: 'plan', ts: 1, entries: [{ content: 'Write the limiter', status: 'completed' }, { content: 'Add tests', status: 'in_progress' }] };
+    const { container } = render(<WorkGroup chunk={chunk([tool({ hint: 'read', name: 'Read', summary: 'git status' }), first, tool({ summary: 'npm test' }), latest], { status: 'completed', durationMs: 9000 })} {...props} />);
+    // Collapsed: the steps are hidden, the one plan card is not.
+    expect(screen.queryByText('git status')).toBeNull();
+    expect(container.querySelectorAll('.plan-card')).toHaveLength(1);
+    expect(container.querySelector('.plan-progress')?.textContent).toBe('1 of 2 done');
+    expect(container.querySelector('.plan-completed')?.textContent).toContain('Write the limiter');
+    expect(container.querySelector('.plan-in_progress')?.textContent).toContain('Add tests');
+    // Opened: the steps appear and the plan is still shown once, not once per update.
+    fireEvent.click(container.querySelector('.work-head') as HTMLElement);
+    expect(screen.getByText('git status')).toBeTruthy();
+    expect(container.querySelectorAll('.plan-card')).toHaveLength(1);
+  });
+
+  it('shows a plan-only turn as its card without an empty work header', () => {
+    const plan: TranscriptItem = { id: 'p1', kind: 'plan', ts: 0, entries: [{ content: 'Read the code', status: 'pending' }] };
+    const { container } = render(<WorkGroup chunk={chunk([plan])} {...props} />);
+    expect(container.querySelector('.work-head')).toBeNull();
+    expect(container.querySelector('.plan-card')?.textContent).toContain('Read the code');
+  });
+
+  it('sums the steps and the files they changed on the header', () => {
+    const edit = tool({ hint: 'edit', name: 'Edit', summary: 'src/a.ts', changes: [{ path: 'src/a.ts', kind: 'update' }] });
+    const write = tool({ hint: 'edit', name: 'Write', summary: 'src/b.ts', changes: [{ path: 'src/b.ts', kind: 'add' }, { path: 'src/a.ts', kind: 'update' }] });
+    const { container } = render(<WorkGroup chunk={chunk([tool(), edit, write])} {...props} />);
+    const stats = [...container.querySelectorAll('.work-head .work-stat')].map((el) => el.textContent);
+    expect(stats).toEqual(['3 steps', '2 files changed']);
+  });
+});
+
+describe('ToolCard rows', () => {
+  const props = { sessionId: 's', showThinking: false, onImageExpand: () => undefined } as const;
+  const open = (entries: TranscriptItem[]) => {
+    const view = render(<WorkGroup chunk={{ kind: 'work', id: entries[0]!.id, entries }} {...props} />);
+    fireEvent.click(view.container.querySelector('.work-head') as HTMLElement);
+    return view;
+  };
+
+  it('gives a successful step no status badge, and a failed or declined one a badge', () => {
+    const { container } = open([
+      tool({ hint: 'read', name: 'Read', summary: 'src/ok.ts' }),
+      tool({ hint: 'read', name: 'Read', summary: 'src/missing.ts', status: 'error' }),
+      tool({ hint: 'edit', name: 'Edit', summary: 'src/locked.ts', status: 'declined' })
+    ]);
+    const rows = [...container.querySelectorAll('.tool-card')];
+    expect(rows.map((row) => row.querySelector('.badge')?.textContent ?? null)).toEqual([null, 'error', 'declined']);
+  });
+
+  it('counts the lines an edit added and removed', () => {
+    const diff = ['--- a/src/a.ts', '+++ b/src/a.ts', '@@ -1,2 +1,3 @@', ' keep', '-old', '+new', '+added'].join('\n');
+    const { container } = open([tool({ hint: 'edit', name: 'Edit', summary: 'src/a.ts', changes: [{ path: 'src/a.ts', kind: 'update', diff }] })]);
+    expect(container.querySelector('.tool-changes .add')?.textContent).toBe('+2');
+    expect(container.querySelector('.tool-changes .del')?.textContent).toBe('−1');
   });
 });
 

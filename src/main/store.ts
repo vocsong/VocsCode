@@ -30,6 +30,9 @@ export class SessionStore {
   private pendingIndexWrite: Promise<void> | null = null;
   /** Per-session transcript write chain: reads and rewrites wait for in-flight appends to land first. */
   private transcriptWrites = new Map<string, Promise<void>>();
+  private importing = new Set<string>();
+  /** Imports and removals own a directory until publication or cleanup has completely finished. */
+  private sessionLifecycles = new Map<string, Promise<void>>();
   /** Optional observers (the search indexer); set after construction to avoid a dependency cycle. */
   hooks: { onAppend?: (sessionId: string, item: TranscriptItem) => void; onRewrite?: (sessionId: string) => void; onRemove?: (sessionId: string) => void } = {};
   private readonly log: Logger;
@@ -58,6 +61,8 @@ export class SessionStore {
         reset++;
       }
       s.queued = 0;
+      // A previous process's tier observation is never evidence for a resumed request.
+      if (s.fastModeStatus || s.config?.fastMode === true) s.fastModeStatus = { state: s.config?.fastMode === true ? 'requested' : 'off' };
     }
     this.log('info', `loaded ${this.sessions.length} session(s)${reset ? `; ${reset} were still running at the last shutdown and are now idle` : ''}`);
     return this.sessions;
@@ -82,6 +87,37 @@ export class SessionStore {
     if (idx >= 0) this.sessions[idx] = meta;
     else this.sessions.unshift(meta);
     await this.flushIndex();
+  }
+
+  /** Publish an imported session only after its complete transcript and continuation context exist. */
+  async importSession(meta: SessionMeta, items: TranscriptItem[], context: string): Promise<void> {
+    assertValidSessionId(meta.id);
+    if (this.importing.has(meta.id)) throw new Error('Session already exists');
+    this.importing.add(meta.id);
+    try {
+      await this.queueSessionLifecycle(meta.id, async () => {
+        // A preceding removal may still own this ID; check existence only after it finishes.
+        if (this.get(meta.id)) throw new Error('Session already exists');
+        const dir = this.sessionDir(meta.id);
+        try {
+          await writeText(path.join(dir, 'transcript.jsonl'), items.map((item) => JSON.stringify(item)).join('\n') + '\n');
+          await writeText(path.join(dir, 'fork-context.md'), context);
+          // Do not expose the new metadata to concurrent snapshots until its index write succeeds.
+          const publish = this.writeQueue.then(async () => {
+            await writeJson(this.indexFile, structuredClone([meta, ...this.sessions]));
+            this.sessions.unshift(meta);
+          });
+          this.writeQueue = publish.catch(() => undefined);
+          await publish;
+        } catch (error) {
+          await rmrf(dir).catch(() => undefined);
+          throw error;
+        }
+        this.hooks.onRewrite?.(meta.id);
+      });
+    } finally {
+      this.importing.delete(meta.id);
+    }
   }
 
   /**
@@ -130,12 +166,26 @@ export class SessionStore {
 
   async remove(id: string): Promise<void> {
     assertValidSessionId(id);
-    this.sessions = this.sessions.filter((s) => s.id !== id);
-    await this.flushIndex();
-    await (this.transcriptWrites.get(id) ?? Promise.resolve()).catch(() => undefined);
-    this.transcriptWrites.delete(id);
-    await rmrf(this.sessionDir(id));
-    this.hooks.onRemove?.(id);
+    await this.queueSessionLifecycle(id, async () => {
+      this.sessions = this.sessions.filter((s) => s.id !== id);
+      await this.flushIndex();
+      await (this.transcriptWrites.get(id) ?? Promise.resolve()).catch(() => undefined);
+      this.transcriptWrites.delete(id);
+      await rmrf(this.sessionDir(id));
+      this.hooks.onRemove?.(id);
+    });
+  }
+
+  private queueSessionLifecycle(id: string, run: () => Promise<void>): Promise<void> {
+    const previous = this.sessionLifecycles.get(id);
+    // Start an uncontended operation synchronously to preserve ordinary upsert/remove batching.
+    const next = previous ? previous.then(run) : run();
+    const settled = next.catch(() => undefined);
+    this.sessionLifecycles.set(id, settled);
+    void settled.then(() => {
+      if (this.sessionLifecycles.get(id) === settled) this.sessionLifecycles.delete(id);
+    });
+    return next;
   }
 
   private flushIndex(): Promise<void> {
@@ -173,6 +223,36 @@ export class SessionStore {
     return order.map((i) => byId.get(i) as TranscriptItem);
   }
 
+  /** A damaged or unbounded history is viewable, but is not reliable evidence for housekeeping. */
+  async readHousekeepTranscript(id: string): Promise<TranscriptItem[]> {
+    await (this.transcriptWrites.get(id) ?? Promise.resolve());
+    const maxBytes = 64 * 1024 * 1024;
+    const file = await fs.open(path.join(this.sessionDir(id), 'transcript.jsonl'), 'r');
+    try {
+      const initial = await file.stat();
+      if (!initial.isFile() || initial.size > maxBytes) throw new Error('Transcript is unavailable or too large to review.');
+      const bytes = Buffer.alloc(initial.size);
+      let offset = 0;
+      while (offset < initial.size) {
+        const { bytesRead } = await file.read(bytes, offset, initial.size - offset, offset);
+        if (!bytesRead) throw new Error('Transcript changed while reading.');
+        offset += bytesRead;
+      }
+      const current = await file.stat();
+      if (current.size !== initial.size || current.mtimeMs !== initial.mtimeMs) throw new Error('Transcript changed while reading.');
+      const byId = new Map<string, TranscriptItem>();
+      for (const line of new TextDecoder('utf-8', { fatal: true }).decode(bytes).split('\n')) {
+        if (!line.trim()) continue;
+        const row = JSON.parse(line) as TranscriptItem;
+        if (!row || typeof row.id !== 'string' || !Number.isFinite(row.ts) || typeof row.kind !== 'string') throw new Error('Transcript is incomplete or damaged.');
+        byId.set(row.id, row);
+      }
+      return [...byId.values()];
+    } finally {
+      await file.close();
+    }
+  }
+
   /** Rewrites the transcript file from a compacted item list (used after clear). */
   async rewriteTranscript(id: string, items: TranscriptItem[]): Promise<void> {
     const file = path.join(this.sessionDir(id), 'transcript.jsonl');
@@ -180,6 +260,22 @@ export class SessionStore {
     await this.queueTranscriptWrite(id, async () => {
       await ensureDir(path.dirname(file));
       await fs.writeFile(file, items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : ''), 'utf8');
+    });
+    this.hooks.onRewrite?.(id);
+  }
+
+  /** Controller barrier: an atomic, fsynced whole-file snapshot behind ordinary appenders.
+   * Reads fail closed (unlike UI transcript reads); callers retain earlier append failures too.
+   * This is not a transaction with sessions.json or the controller's separate receipt journal. */
+  async commitTranscript(id: string, items: TranscriptItem[]): Promise<void> {
+    const file = path.join(this.sessionDir(id), 'transcript.jsonl');
+    const suffix = items.map((item) => JSON.stringify(item)).join('\n');
+    await this.queueTranscriptWrite(id, async () => {
+      const previous = await fs.readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return '';
+        throw error;
+      });
+      await writeText(file, previous + (previous && !previous.endsWith('\n') ? '\n' : '') + (suffix ? suffix + '\n' : ''));
     });
     this.hooks.onRewrite?.(id);
   }

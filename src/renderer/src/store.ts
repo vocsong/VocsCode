@@ -2,18 +2,25 @@
 import { create } from 'zustand';
 import type { AgentState } from '../../shared/agent';
 import { EMPTY_AGENT_STATE } from '../../shared/agent';
-import type { AppSettings, DesktopFocus, HarnessAvailability, HarnessId, ImageAttachment, FileAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
+import { parseGitHubPullRequestUrl } from '../../shared/github-pull-request';
+import type { AppSettings, DesktopFocus, GitPullRequestDetail, HarnessAvailability, HarnessId, ImageAttachment, FileAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import type { MissionRecord } from '../../shared/mission';
+import type { ProcessSummary } from '../../shared/processes';
 import { resolveNewSessionDefaults } from '../../shared/session-defaults';
-import { invoke, on, canInvoke } from './api';
+import { invoke, invokeErrorMessage, on, canInvoke } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
+import * as panes from './panes';
+import type { DropZone, FilePreviewTarget, PaneLayout, PaneOrientation, PaneSide } from './panes';
+import { workspaceRelativePath } from './file-refs';
+import { fileScope, showOutsideFile } from './file-open';
+import { loadPins, savePins, type PinSide, type Pins } from './pins';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
 /** The Git panel's inner view: the repo, its worktrees, or the two GitHub lists. */
 export type GitPanelView = 'branches' | 'worktrees' | 'prs' | 'issues';
 /** The panel's lower half: live session services rather than workspace views. */
-export type PanelBottomTab = 'mcp' | 'subagents' | 'knowledge' | 'desktop';
+export type PanelBottomTab = 'mcp' | 'subagents' | 'knowledge' | 'desktop' | 'processes';
 export type View = 'chat' | 'settings' | 'analytics' | 'skills' | 'mcp';
 export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'code' | 'reliability' | 'sessions';
 /** Days in the analytics range; 0 is all time. */
@@ -25,15 +32,13 @@ export interface NavEntry {
   sessionId: string | null;
 }
 
-/** A path a transcript file link wants the Files tab to show; the Files tab clears it once opened. */
+/** A folder a transcript link wants the Files tab to show; the Files tab clears it once opened. */
 export interface FileReveal {
   sessionId: string;
   path: string;
-  /** Line to scroll to when the mention carried one. */
-  line?: number;
 }
 
-/** A harness's model list fetched without a running session, so a not-yet-started session still has models. */
+/** A harness's shared model catalog, discovered independently of any session process. */
 export interface ModelCatalogEntry {
   models: ModelInfo[];
   loading: boolean;
@@ -58,7 +63,10 @@ interface State {
   missionInspector: { missionId: string; sessionId: string; itemId?: string } | null;
   newSessionKind: 'normal' | 'mission';
   newMissionSourceId: string | null;
+  /** The active pane's session; every global panel follows it. Kept equal to `layout`'s active pane. */
   activeId: string | null;
+  /** The split conversation workspace (panes.ts); a single pane is the app as it always was. */
+  layout: PaneLayout;
   transcripts: Record<string, TranscriptItem[]>;
   loaded: Record<string, boolean>;
   /** Last transcript load failure per session; the transcript pane offers a retry instead of spinning forever. */
@@ -68,7 +76,7 @@ interface State {
   /** First item index of each paged transcript; greater than zero means earlier items exist. */
   transcriptStarts: Record<string, number>;
   models: Record<string, ModelInfo[]>;
-  /** Per-harness catalog, keyed by harness id, used until that session's process reports its own list. */
+  /** Per-harness catalog shared by New Session, settings and existing session model pickers. */
   modelCatalog: Partial<Record<HarnessId, ModelCatalogEntry>>;
   availability: Partial<Record<HarnessId, HarnessAvailability>>;
   /** Set when the last availability check failed; setup surfaces a retry instead of an endless spinner. */
@@ -103,16 +111,35 @@ interface State {
    */
   panelBottomOpened: PanelBottomTab[];
   /**
+   * Which half of the panel was asked for last. Standard shows both halves; Zen's drawer shows one
+   * view at a time, and this picks it.
+   */
+  panelFocus: 'top' | 'bottom';
+  /**
+   * Zen: something other than the pointer asked for the panel (a file link, the branch crumb, a
+   * shortcut), so its drawer slides out without being hovered. It folds back when the pointer leaves
+   * the drawer or a press lands outside it.
+   */
+  panelPeek: boolean;
+  /** Zen: sides held open instead of folding back to their rails (see pins.ts). */
+  pins: Pins;
+  /**
    * The Git panel's inner view. It lives here for the same reason `panelBottomOpened` does: the panel
    * unmounts and mounts again on a session switch — opening a session from a PR row does exactly that —
    * and a local state would drop the user back on Branches every time.
    */
   gitPanelView: GitPanelView;
-  /** One-shot request to show a file in the Files tab, set by transcript file links. */
+  gitPullRequestPreview: { sessionId: string; url: string; number: number; detail: GitPullRequestDetail | null } | null;
+  /** One-shot request to show a folder in the Files tab, set by transcript folder links. */
   fileReveal: FileReveal | null;
   /** One-shot request to open one subagent run, set by a subagent tool card. */
   subagentReveal: { sessionId: string; runId: string } | null;
   newSessionOpen: boolean;
+  onboardingOpen: boolean;
+  onboardingDismissed: boolean;
+  onboardingHarness: HarnessId | null;
+  openOnboarding(harness?: HarnessId): void;
+  dismissOnboarding(): void;
   /** Project folder the new session dialog is targeting; null until a folder is picked. */
   newSessionRoot: string | null;
   /** Ctrl+N quick picker: choose a known folder, then start a session with defaults. */
@@ -129,8 +156,12 @@ interface State {
   agent: AgentState;
   /** In-app auto-update state (issue #198); idle (never transitions) in dev and web builds. */
   updateState: UpdateState;
+  /** Tracked process counts, pushed as they change, for the Processes tab badge. */
+  processSummary: ProcessSummary | null;
   /** Where the desktop window is looking, from desktop:focus / push:desktopFocus. */
   desktopFocus: DesktopFocus | null;
+  /** The sessions in the panes actually on screen (SessionPanes); empty while another view hides them. */
+  visibleSessionIds: string[];
   /** The host's remote policy, pushed over the e2e session; view-only gates write controls. */
   remoteAccess: { viewOnly: boolean };
   /** Text another part of the UI wants Vesta's composer to start from. */
@@ -141,7 +172,17 @@ interface State {
   historyIndex: number;
 
   boot(): Promise<void>;
-  setActive(id: string | null): Promise<void>;
+  /** Opens a session in the active pane (or focuses it where shown), unless explicitly opened to the right. */
+  setActive(id: string | null, pane?: 'right'): Promise<void>;
+  /** Makes a pane active, so its session becomes the context for the global panels. */
+  focusPane(paneId: string): void;
+  /** Splits a pane (the active one by default); the new pane is active and shows `sessionId` or a picker. */
+  splitPane(orientation: PaneOrientation, opts?: { paneId?: string; sessionId?: string | null; side?: PaneSide }): void;
+  /** Removes a pane from the split. Its session keeps running and stays in the sidebar. */
+  closePane(paneId: string): void;
+  /** A session dragged onto a pane: shown in it (`center`) or in a new pane on that edge. */
+  dropSession(paneId: string, zone: DropZone, sessionId: string): void;
+  resizePanes(sizes: number[]): void;
   /** `force` reloads a transcript that is already marked loaded (resync); items stay until it lands. */
   loadTranscript(id: string, force?: boolean): Promise<void>;
   /** Prepends the page before a paged transcript's first item (web shells). */
@@ -165,9 +206,19 @@ interface State {
   togglePanel(open?: boolean): void;
   setPanelTab(t: PanelTab | 'mcp'): void;
   setGitPanelView(v: GitPanelView): void;
+  openPullRequestLink(sessionId: string, url: string): boolean;
+  closePullRequestPreview(): void;
   setPanelBottomTab(t: PanelBottomTab): void;
-  /** Opens the Files tab on a path (workspace-relative or absolute inside the session cwd). */
-  revealFile(sessionId: string, path: string, line?: number): void;
+  endPanelPeek(): void;
+  togglePin(side: PinSide): void;
+  /**
+   * Opens a path a session names (workspace-relative, shortened, or absolute inside its folder). A
+   * file opens a preview and a folder opens for browsing, both in the Files tab. A path outside the
+   * folder is only shown in the system file manager. `exact` skips the shortened-name lookup;
+   * `workspace` picks a Mission workspace ('' is the integration result, absent is the lead's).
+   */
+  revealFile(sessionId: string, path: string, line?: number, opts?: { exact?: boolean; workspace?: string; missionLoaded?: boolean }): void;
+  closeFilePreview(): void;
   consumeFileReveal(): void;
   /** Opens the Subagents tab on one run, used by a transcript tool card. */
   revealSubagentRun(sessionId: string, runId: string): void;
@@ -190,8 +241,12 @@ interface State {
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
   refreshAvailability(): Promise<void>;
-  /** Fetches one harness's model catalog, at most once per harness until the model overrides change. */
+  recordHarnessAvailability(harness: HarnessId, availability: HarnessAvailability): void;
+  /** Fetches one harness's model catalog only when it has no cached or pending entry. */
   ensureModelCatalog(harness: HarnessId): Promise<void>;
+  /** Re-probes the selected runtime; preserves usable models on failure and fences stale responses. */
+  /** `refresh` skips main's 7-day catalog cache: the user's explicit recheck. */
+  refreshModelCatalog(harness: HarnessId, context?: { acpAgent?: string; projectRoot?: string; refresh?: boolean }): Promise<ModelCatalogEntry>;
   clearTranscriptLocal(id: string): void;
   /** Replaces a loaded transcript after a server-side rewrite (for example, editing a past prompt). */
   replaceTranscript(id: string, items: TranscriptItem[]): void;
@@ -311,6 +366,10 @@ type Getter = () => State;
 
 function pushHistory(set: Setter, get: Getter, entry: NavEntry): void {
   if (navigating) return;
+  // An empty pane is not a destination. Recording one would make a later Back replay
+  // `setActive(null)`, which blanks whichever pane is active at that moment instead of
+  // returning to the session the reader came from.
+  if (entry.view === 'chat' && entry.sessionId === null) return;
   const { history, historyIndex } = get();
   const current = history[historyIndex];
   if (current && current.view === entry.view && current.sessionId === entry.sessionId) return;
@@ -335,6 +394,26 @@ function markPanelBottomOpened(list: PanelBottomTab[], tab: PanelBottomTab): Pan
   return list.includes(tab) ? list : [...list, tab];
 }
 
+/** Off until the desktop boot has restored the last split, so the initial empty layout never overwrites it. */
+let persistLayout = false;
+/** Numbers each file preview request, so opening the same file again still reloads it. */
+let fileNonce = 0;
+
+/** Installs a restored split: every pane's transcript loads, the active one becomes the context. */
+async function applyLayout(set: Setter, get: Getter, layout: PaneLayout): Promise<void> {
+  const activeId = panes.activePane(layout).sessionId;
+  set({ layout, activeId, view: 'chat' });
+  pushHistory(set, get, { view: 'chat', sessionId: activeId });
+  for (const pane of layout.panes) {
+    const session = pane.sessionId ? get().sessions.find((s) => s.id === pane.sessionId) : undefined;
+    if (session?.mission) void get().loadMission(session.mission.missionId);
+  }
+  await Promise.all(layout.panes.map((p) => (p.sessionId ? get().loadTranscript(p.sessionId) : undefined)));
+}
+
+let availabilityRequest = 0;
+const availabilityOverrides: Partial<Record<HarnessId, number>> = {};
+
 export const useStore = create<State>((set, get) => ({
   booted: false,
   bootError: null,
@@ -346,6 +425,7 @@ export const useStore = create<State>((set, get) => ({
   newSessionKind: 'normal',
   newMissionSourceId: null,
   activeId: null,
+  layout: panes.singlePaneLayout(),
   transcripts: {},
   loaded: {},
   transcriptErrors: {},
@@ -371,10 +451,17 @@ export const useStore = create<State>((set, get) => ({
   panelTab: 'changes',
   panelBottomTab: 'mcp',
   panelBottomOpened: [],
+  panelFocus: 'top',
+  panelPeek: false,
+  pins: loadPins(),
   gitPanelView: 'branches',
+  gitPullRequestPreview: null,
   fileReveal: null,
   subagentReveal: null,
   newSessionOpen: false,
+  onboardingOpen: false,
+  onboardingDismissed: false,
+  onboardingHarness: null,
   newSessionRoot: null,
   quickSessionOpen: false,
   quickSessionPrefill: undefined,
@@ -384,7 +471,9 @@ export const useStore = create<State>((set, get) => ({
   showThinking: true,
   agent: EMPTY_AGENT_STATE,
   updateState: { status: 'idle' },
+  processSummary: null,
   desktopFocus: null,
+  visibleSessionIds: [],
   remoteAccess: { viewOnly: false },
   agentPrefill: null,
   toasts: [],
@@ -409,6 +498,7 @@ export const useStore = create<State>((set, get) => ({
           on('push:terminalsChanged', (list) => get().setTerminals(list));
           on('push:agentState', (s) => get().setAgentState(s));
           on('push:updateState', (s) => set({ updateState: s }));
+          on('push:processSummary', (summary) => set({ processSummary: summary }));
           on('push:desktopFocus', (focus) => set({ desktopFocus: focus }));
           on('push:remotePolicy', ({ viewOnly }) => set({ remoteAccess: { viewOnly } }));
           subscribed = true;
@@ -428,7 +518,14 @@ export const useStore = create<State>((set, get) => ({
         if (canInvoke('desktop:focus')) void invoke('desktop:focus', undefined).then((focus) => set({ desktopFocus: focus })).catch(() => undefined);
         if (canInvoke('missions:list')) void invoke('missions:list', undefined).then((records) => records.forEach((record) => get().setMission(record))).catch(() => undefined);
         const first = sessions.find((s) => !s.archived && s.mission?.role !== 'worker');
-        if (first && storeOptions.openFirstSessionOnBoot !== false) await get().setActive(first.id);
+        if (storeOptions.openFirstSessionOnBoot !== false) {
+          // A split from the last run comes back when its sessions still exist; otherwise the first
+          // session opens exactly as it did before split view existed.
+          const restored = panes.restoreLayout(panes.loadStoredLayout(), (id) => sessions.some((s) => s.id === id && !s.archived && s.mission?.role !== 'worker'));
+          if (restored && restored.panes.length > 1) await applyLayout(set, get, restored);
+          else if (first) await get().setActive(first.id);
+          persistLayout = true;
+        }
         // Availability probes spawn one subprocess per harness; kicking them off right as the
         // window opens competes with the first git calls and stalls startup under antivirus.
         // On-demand refreshes (dialogs, settings, fork menus) stay immediate.
@@ -448,16 +545,63 @@ export const useStore = create<State>((set, get) => ({
     return bootInFlight;
   },
 
-  async setActive(id) {
+  async setActive(id, pane) {
     const target = id ? get().sessions.find((session) => session.id === id) : undefined;
     if (target?.mission?.role === 'worker') {
       await get().inspectMissionSession(target.mission.missionId, target.id);
       return;
     }
     if (target?.mission) void get().loadMission(target.mission.missionId);
-    set({ activeId: id, view: 'chat' });
+    set((s) => ({
+      activeId: id,
+      view: 'chat',
+      layout: pane === 'right' && id ? panes.openSessionOnRight(s.layout, id) : panes.openSession(s.layout, id)
+    }));
     pushHistory(set, get, { view: 'chat', sessionId: id });
     if (id) await get().loadTranscript(id);
+  },
+
+  focusPane(paneId) {
+    const layout = panes.focusPane(get().layout, paneId);
+    if (layout === get().layout) return;
+    const sessionId = panes.activePane(layout).sessionId;
+    // Both panes are mounted and loaded already: focusing only moves the context, nothing reloads.
+    set({ layout, activeId: sessionId });
+    pushHistory(set, get, { view: 'chat', sessionId });
+  },
+
+  splitPane(orientation, opts = {}) {
+    const current = get().layout;
+    const layout = panes.splitPane(current, opts.paneId ?? current.activePaneId, orientation, opts.sessionId ?? null, opts.side);
+    if (layout === current) return;
+    const sessionId = panes.activePane(layout).sessionId;
+    set({ layout, activeId: sessionId, view: 'chat' });
+    if (sessionId) {
+      pushHistory(set, get, { view: 'chat', sessionId });
+      void get().loadTranscript(sessionId).catch(toastError);
+    }
+  },
+
+  closePane(paneId) {
+    const layout = panes.closePane(get().layout, paneId);
+    if (layout === get().layout) return;
+    set({ layout, activeId: panes.activePane(layout).sessionId });
+  },
+
+  dropSession(paneId, zone, sessionId) {
+    const target = get().sessions.find((s) => s.id === sessionId);
+    if (!target || target.mission?.role === 'worker') return;
+    const layout = panes.applyDrop(get().layout, paneId, zone, sessionId);
+    if (layout === get().layout) return;
+    if (target.mission) void get().loadMission(target.mission.missionId);
+    set({ layout, activeId: sessionId, view: 'chat' });
+    pushHistory(set, get, { view: 'chat', sessionId });
+    void get().loadTranscript(sessionId).catch(toastError);
+  },
+
+  resizePanes(sizes) {
+    const layout = panes.resizePanes(get().layout, sizes);
+    if (layout !== get().layout) set({ layout });
   },
 
   async navBack() {
@@ -590,6 +734,7 @@ export const useStore = create<State>((set, get) => ({
       settings: null,
       sessions: [],
       activeId: null,
+      layout: panes.singlePaneLayout(),
       transcripts: {},
       loaded: {},
       transcriptErrors: {},
@@ -734,8 +879,10 @@ export const useStore = create<State>((set, get) => ({
 
   setSettings(settings) {
     set((s) => {
-      // Overrides are baked in when the catalog is fetched, so a change to them invalidates it.
-      const stale = !!s.settings && JSON.stringify(s.settings.modelOverrides) !== JSON.stringify(settings.modelOverrides);
+      // Discovery and its last-good fallback belong to this configuration. Do not resurrect a
+      // removed endpoint or an old runtime's catalog after a settings change or in-flight probe.
+      const catalogInputs = (value: AppSettings) => [value.modelOverrides, value.providers, value.binaries, value.claude];
+      const stale = !!s.settings && JSON.stringify(catalogInputs(s.settings)) !== JSON.stringify(catalogInputs(settings));
       return stale ? { settings, modelCatalog: {} } : { settings };
     });
   },
@@ -750,6 +897,8 @@ export const useStore = create<State>((set, get) => ({
     let replacement: SessionMeta | undefined;
     let departedTitle: string | undefined;
     let departedArchived = false;
+    /** A pane left waiting for a pick after its neighbour closed, filled the way a lone pane would be. */
+    let refilled: string | undefined;
     set((s) => {
       const removed = new Set<string>();
       for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
@@ -773,7 +922,30 @@ export const useStore = create<State>((set, get) => ({
         departedArchived = !!after?.archived;
         replacement = replacementFor(s.sessions, sessions, activeId);
       }
-      if (removed.size === 0 && !activeRemoved) return { sessions };
+      // Any pane whose session left closes; the last pane takes the replacement instead.
+      const departed = (id: string) => {
+        const was = s.sessions.find((x) => x.id === id);
+        const now = sessions.find((x) => x.id === id);
+        return !now || now.mission?.role === 'worker' || (!was?.archived && !!now.archived);
+      };
+      let layout = panes.withoutSessions(s.layout, departed, activeRemoved ? replacement?.id ?? null : null);
+      if (layout.panes.length < s.layout.panes.length) {
+        // A pane closed and its neighbour took over. A neighbour still waiting for a pick gets the
+        // sidebar's replacement, exactly as a lone pane would, rather than leaving an empty screen.
+        const next = panes.activePane(layout).sessionId;
+        if (next) {
+          if (activeRemoved) replacement = sessions.find((x) => x.id === next);
+        } else {
+          const gone = s.layout.panes.find((p) => p.sessionId && departed(p.sessionId))!.sessionId!;
+          const pick = replacement ?? replacementFor(s.sessions, sessions, gone);
+          if (pick && !panes.paneShowing(layout, pick.id)) {
+            layout = panes.openSession(layout, pick.id);
+            if (!activeRemoved) refilled = pick.id;
+          }
+        }
+      }
+      const activeAfter = layout === s.layout ? s.activeId : panes.activePane(layout).sessionId;
+      if (removed.size === 0 && !activeRemoved && layout === s.layout) return { sessions };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
       const transcriptErrors = { ...s.transcriptErrors };
@@ -805,7 +977,8 @@ export const useStore = create<State>((set, get) => ({
         models,
         drafts,
         composerHistory,
-        activeId: activeRemoved ? replacement?.id ?? null : s.activeId
+        layout,
+        activeId: activeAfter
       };
     });
     if (departedTitle) {
@@ -819,6 +992,7 @@ export const useStore = create<State>((set, get) => ({
         get().toast(`Session "${departedTitle}" was ${what}; no active sessions remain.`, 'info');
       }
     }
+    if (refilled) void get().loadTranscript(refilled).catch(toastError);
   },
   setMission(record) {
     set((s) => {
@@ -842,7 +1016,7 @@ export const useStore = create<State>((set, get) => ({
     if (!get().missions[missionId]) await get().loadMission(missionId);
     const record = get().missions[missionId];
     if (!record) { get().toast(get().missionErrors[missionId] ?? 'Mission unavailable', 'error'); return; }
-    set({ missionInspector: { missionId, sessionId, itemId }, panelOpen: true, panelTab: 'goal' });
+    set({ missionInspector: { missionId, sessionId, itemId }, panelOpen: true, panelTab: 'goal', panelFocus: 'top', panelPeek: true });
     await get().setActive(record.leadSessionId);
     await get().loadTranscript(sessionId);
   },
@@ -860,27 +1034,93 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({ sidebarOpen: !s.sidebarOpen }));
   },
   togglePanel(open) {
-    set((s) => ({ panelOpen: open ?? !s.panelOpen }));
+    set((s) => {
+      const panelOpen = open ?? !(s.panelOpen || s.layout.filePreview);
+      return { panelOpen, panelPeek: panelOpen, layout: panelOpen ? s.layout : panes.closeFilePreview(s.layout) };
+    });
   },
   setPanelTab(tab) {
     // MCP moved to the lower half; asking for that tab opens the half instead of an empty top pane.
-    if (tab === 'mcp') set((s) => ({ panelBottomTab: 'mcp', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'mcp'), panelOpen: true }));
-    else set({ panelTab: tab, panelOpen: true });
+    if (tab === 'mcp') get().setPanelBottomTab('mcp');
+    else set({ panelTab: tab, panelOpen: true, panelFocus: 'top', panelPeek: true });
   },
   setGitPanelView(gitPanelView) {
     set({ gitPanelView });
   },
-  setPanelBottomTab(panelBottomTab) {
-    set((s) => ({ panelBottomTab, panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, panelBottomTab), panelOpen: true }));
+  openPullRequestLink(sessionId, url) {
+    if (get().activeId !== sessionId) return false;
+    const link = parseGitHubPullRequestUrl(url);
+    if (!link) return false;
+    const preview = { sessionId, url, number: link.number, detail: null };
+    set({ panelOpen: true, panelTab: 'branches', panelFocus: 'top', panelPeek: true, gitPanelView: 'prs', gitPullRequestPreview: preview });
+    // A different link, dismissal, or session switch takes precedence over this response.
+    const settle = (detail: GitPullRequestDetail) => {
+      set((s) => s.gitPullRequestPreview === preview ? { gitPullRequestPreview: { ...preview, detail } } : s);
+    };
+    void invoke('git:pullRequest', { sessionId, url: link.url }).then(settle, (error) => settle({ error: invokeErrorMessage(error) }));
+    return true;
   },
-  revealFile(sessionId, path, line) {
-    set({ fileReveal: line ? { sessionId, path, line } : { sessionId, path }, panelTab: 'files', panelOpen: true });
+  closePullRequestPreview() {
+    set({ gitPullRequestPreview: null });
+  },
+  setPanelBottomTab(panelBottomTab) {
+    set((s) => ({ panelBottomTab, panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, panelBottomTab), panelOpen: true, panelFocus: 'bottom', panelPeek: true }));
+  },
+  endPanelPeek() {
+    set((s) => (s.panelPeek ? { panelPeek: false } : {}));
+  },
+  togglePin(side) {
+    const pins = { ...get().pins, [side]: !get().pins[side] };
+    savePins(pins);
+    set({ pins });
+  },
+  revealFile(sessionId, path, line, opts = {}) {
+    const st = get();
+    const session = st.sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    const mission = session.mission ? st.missions[session.mission.missionId] : undefined;
+    if (session.mission && !mission && !opts.missionLoaded) {
+      // A Mission lead reads its files from a workspace on the Mission record: load it, then open.
+      void get().loadMission(session.mission.missionId)
+        .then(() => get().revealFile(sessionId, path, line, { ...opts, missionLoaded: true }))
+        .catch(toastError);
+      return;
+    }
+    const scope = fileScope(session, mission, opts.workspace);
+    const target = path.trim();
+    const rel = workspaceRelativePath(scope.root, target);
+    if (rel === null) {
+      void showOutsideFile(sessionId, scope.root, target, (text, kind) => get().toast(text, kind));
+      return;
+    }
+    const filesPanel = { panelTab: 'files', panelFocus: 'top', panelPeek: true, view: 'chat' } as const;
+    const clean = rel.replace(/\/+$/, '');
+    if (/[\\/]$/.test(target) || clean === '') {
+      // A folder is something to browse: the Files tab opens on it.
+      set({ ...filesPanel, panelOpen: true, fileReveal: { sessionId, path: target } });
+      return;
+    }
+    const file: FilePreviewTarget = {
+      sessionId,
+      path: clean,
+      nonce: ++fileNonce,
+      ...(line && line > 0 ? { line } : {}),
+      ...(opts.exact ? { exact: true } : {}),
+      ...(session.mission ? { missionWorkspaceId: scope.missionWorkspaceId } : {})
+    };
+    const layout = panes.openFilePreview(st.layout, file);
+    if (layout !== st.layout) set({ ...filesPanel, layout });
+  },
+  closeFilePreview() {
+    const current = get().layout;
+    const layout = panes.closeFilePreview(current);
+    if (layout !== current) set({ layout });
   },
   consumeFileReveal() {
     set((s) => (s.fileReveal ? { fileReveal: null } : {}));
   },
   revealSubagentRun(sessionId, runId) {
-    set((s) => ({ subagentReveal: { sessionId, runId }, panelBottomTab: 'subagents', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'subagents'), panelOpen: true }));
+    set((s) => ({ subagentReveal: { sessionId, runId }, panelBottomTab: 'subagents', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'subagents'), panelOpen: true, panelFocus: 'bottom', panelPeek: true }));
   },
   consumeSubagentReveal() {
     set((s) => (s.subagentReveal ? { subagentReveal: null } : {}));
@@ -912,6 +1152,7 @@ export const useStore = create<State>((set, get) => ({
       effort: defaults.effort || undefined,
       permissionMode: defaults.permissionMode,
       useWorktree: defaults.useWorktree,
+      branchPrefix: defaults.branchPrefix,
       acpAgent: harness === 'acp' ? defaults.acpAgent : undefined
     };
     try {
@@ -967,26 +1208,53 @@ export const useStore = create<State>((set, get) => ({
   dismissToast(id) {
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
   },
+  openOnboarding(harness) {
+    set({ onboardingOpen: true, onboardingHarness: harness ?? null });
+  },
+  dismissOnboarding() {
+    // Dismissal is transient. Only the guide's explicit Finish/Skip actions persist completion.
+    set({ onboardingOpen: false, onboardingDismissed: true, modelCatalog: {} });
+  },
+  recordHarnessAvailability(harness, availability) {
+    // A setup card is fresher than an already-in-flight whole-app check. Preserve that card's
+    // result without discarding the old check's still-useful results for the other harnesses.
+    availabilityOverrides[harness] = availabilityRequest;
+    set((s) => ({ availability: { ...s.availability, [harness]: availability } }));
+  },
   async refreshAvailability() {
+    const request = ++availabilityRequest;
     try {
-      const availability = await invoke('harness:availability', undefined);
-      set({ availability, availabilityError: null });
+      const availability = await invoke('harness:availability', { refresh: true });
+      if (request === availabilityRequest) {
+        const fresh = Object.fromEntries(Object.entries(availability).filter(([id]) => (availabilityOverrides[id as HarnessId] ?? 0) < request));
+        set((s) => ({ availability: { ...s.availability, ...fresh }, availabilityError: null }));
+      }
     } catch (e) {
-      set({ availabilityError: e instanceof Error ? e.message : String(e) });
+      if (request === availabilityRequest) set({ availabilityError: e instanceof Error ? e.message : String(e) });
     }
   },
 
   async ensureModelCatalog(harness) {
     // Present means fetched, failed or in flight: one round trip per harness, not per session.
     if (get().modelCatalog[harness]) return;
+    await get().refreshModelCatalog(harness);
+  },
+  async refreshModelCatalog(harness, context) {
+    const previous = get().modelCatalog[harness];
     const put = (entry: ModelCatalogEntry) => set((s) => ({ modelCatalog: { ...s.modelCatalog, [harness]: entry } }));
-    put({ models: [], loading: true });
+    const pending: ModelCatalogEntry = { models: previous?.models ?? [], loading: true };
+    put(pending);
+    let result: ModelCatalogEntry;
     try {
-      const r = await invoke('harness:models', { harness });
-      put({ models: r.models, error: r.error, loading: false });
+      const r = await invoke('harness:models', { harness, ...context });
+      if (!Array.isArray(r?.models)) throw new Error('Harness model discovery returned an invalid catalog.');
+      result = { models: r.error && previous?.models.length ? previous.models : r.models, error: r.error, loading: false };
     } catch (e) {
-      put({ models: [], error: (e as Error).message, loading: false });
+      result = { models: previous?.models ?? [], error: e instanceof Error ? e.message : String(e), loading: false };
     }
+    // Settings invalidation or a newer refresh owns the catalog now; never resurrect an old request.
+    if (get().modelCatalog[harness] === pending) put(result);
+    return result;
   },
   clearTranscriptLocal(id) {
     set((s) => {
@@ -1062,6 +1330,20 @@ export const useStore = create<State>((set, get) => ({
     set({ composerInsert: null });
   }
 }));
+
+useStore.subscribe((s, prev) => {
+  // `activeId` is the active pane's session. The actions keep the two together; this catches any
+  // other write to `activeId`, so the layout can never show one session while the panels show another.
+  if (s.activeId !== prev.activeId && panes.activePane(s.layout).sessionId !== s.activeId) {
+    useStore.setState({ layout: panes.openSession(s.layout, s.activeId) });
+    return;
+  }
+  // The split is remembered for the next launch; boot turns this on once it has restored the last one.
+  if (persistLayout && s.layout !== prev.layout) panes.saveLayout(s.layout);
+  if (s.gitPullRequestPreview && (s.activeId !== s.gitPullRequestPreview.sessionId || s.view !== 'chat' || !s.panelOpen || s.panelTab !== 'branches' || s.gitPanelView !== 'prs')) {
+    useStore.setState({ gitPullRequestPreview: null });
+  }
+});
 
 /** Reports a rejected fire-and-forget action as an error toast instead of an unhandled rejection. */
 export function toastError(error: unknown): void {

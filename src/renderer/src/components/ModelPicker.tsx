@@ -21,7 +21,8 @@ export function ModelPicker({
   onSelect,
   onSelectCustom,
   clearOption,
-  emptyText = 'No models available'
+  emptyText = 'No models available',
+  autoFocus = true
 }: {
   models: ModelInfo[];
   loading?: boolean;
@@ -33,6 +34,8 @@ export function ModelPicker({
   /** Optional "no explicit model" row (e.g. harness default). */
   clearOption?: { label: string };
   emptyText?: string;
+  /** Focus the search on mount; off where another field is the place to start typing. */
+  autoFocus?: boolean;
 }) {
   const favorites = useStore((s) => s.settings?.favoriteModels ?? EMPTY_FAVORITES);
   // A remote shell cannot write app settings, so it shows favorites read-only (no stars).
@@ -41,8 +44,8 @@ export function ModelPicker({
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (autoFocus) inputRef.current?.focus();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const q = query.trim().toLowerCase();
   const typed = query.trim();

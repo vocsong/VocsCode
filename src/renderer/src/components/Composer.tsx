@@ -3,27 +3,49 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, FileAttachment, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
 import { formatDoctorReport } from '../../../shared/doctor';
 import { HARNESS_BY_ID, SLASH_COMMANDS, effortOptionsFor } from '../../../shared/harness-meta';
+import { MAX_HOUSEKEEP_RECENT_DAYS } from '../../../shared/housekeep';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
-import { invoke } from '../api';
+import { canInvoke, invoke } from '../api';
 import { FileAttachmentChips, readAttachments } from '../attachments';
 import { fmtCost, fmtTokens } from '../format';
+import { canHousekeepHere, openHousekeep } from '../housekeep';
+import { openSettings } from './SettingsView';
 import { useSessionModels } from '../models';
 import { setSessionEffort } from '../sessionActions';
 import { NO_COMPOSER_HISTORY, useStore } from '../store';
 import * as host from '../terminal/host';
-import { Button, Icon, Kbd } from './ui';
+import { Button, Dropdown, Icon, Kbd, MenuItem } from './ui';
 import { parseMissionCommand } from '../../../shared/mission-command';
 import { missionQuestionUsage } from '../../../shared/mission';
 import { commandMission, MISSION_MANAGED_REASON, pauseMissionSession, sendMissionUser } from '../missions';
+import { insertTranscript } from '../../../shared/dictation';
+import { DictationControl, type DictationHandle } from './DictationControl';
+import { SessionControls, SessionMeter } from './SessionControls';
+import { useUiMode } from '../ui-mode';
 
-export function Composer({ session }: { session: SessionMeta }) {
+/** With one pane the composer is the only one; in a split, only the active pane's takes focus and inserts. */
+function ownsComposerFocus(sessionId: string): boolean {
+  const st = useStore.getState();
+  return st.layout.panes.length === 1 || st.activeId === sessionId;
+}
+
+/** Where the pane hands files dropped anywhere on it; set only while a writable composer is mounted. */
+export type AttachFilesRef = React.MutableRefObject<((files: File[]) => void) | null>;
+
+/** The idle prompt's hint, shorter in the minimalist Zen interface. */
+const IDLE_PLACEHOLDER = {
+  standard: 'Message the agent… @ files · / commands · ! shell',
+  zen: 'Ask anything…'
+} as const;
+
+export function Composer({ session, attachRef }: { session: SessionMeta; attachRef?: AttachFilesRef }) {
   const archived = useStore((s) => session.mission && s.missions[session.mission.missionId]?.archived);
   if (session.mission && (session.archived || archived)) return <div className="pad muted">Archived Mission — read-only. Restore the Mission before messaging the principal engineer.</div>;
   if (session.mission?.role === 'worker') return <div className="pad muted">Managed specialist — read-only. Ask the principal engineer in the Mission conversation.</div>;
-  return <SessionComposer session={session} />;
+  return <SessionComposer session={session} attachRef={attachRef} />;
 }
 
-function SessionComposer({ session }: { session: SessionMeta }) {
+function SessionComposer({ session, attachRef }: { session: SessionMeta; attachRef?: AttachFilesRef }) {
   const missionPending = useRef(false);
   const [missionSending, setMissionSending] = useState(false);
   const mission = useStore((s) => session.mission && s.missions[session.mission.missionId]);
@@ -44,6 +66,8 @@ function SessionComposer({ session }: { session: SessionMeta }) {
   // The browse position stays local — it is a caret-like cursor, not part of the session's record.
   const [histIdx, setHistIdx] = useState(-1);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const dictation = useRef<DictationHandle>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const toast = useStore((s) => s.toast);
   const providers = useStore((s) => s.settings?.providers) ?? [];
   const composerInsert = useStore((s) => s.composerInsert);
@@ -53,6 +77,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
   const shellDraft = text.trimStart().startsWith('!');
   const harness = HARNESS_BY_ID[session.config.harness];
   const caps = harness.capabilities;
+  const uiMode = useUiMode();
   const { models } = useSessionModels(session);
   const currentModel = session.activeModel ?? session.config.model;
   const currentInfo = models.find((m) => currentModel && m.id === currentModel.model && m.provider === currentModel.provider);
@@ -85,9 +110,25 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     el.style.height = Math.min(el.scrollHeight, 320) + 'px';
   }, [text]);
 
+  // A split (or a resized window) narrows the box without changing the text: fit it again.
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let width = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 320) + 'px';
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const el = ref.current;
+    // A pane opening beside the one being typed in must not steal the caret.
+    if (!el || !ownsComposerFocus(session.id)) return;
     el.focus();
     // Put the caret at the end of a restored draft so typing continues where it left off.
     const end = el.value.length;
@@ -101,7 +142,8 @@ function SessionComposer({ session }: { session: SessionMeta }) {
 
   // Text handed over from elsewhere (the terminal's "send to agent") lands below the current draft.
   useEffect(() => {
-    if (!composerInsert) return;
+    // Inserts go to the active session; the composer of another pane leaves them for it.
+    if (!composerInsert || !ownsComposerFocus(session.id)) return;
     const insert = composerInsert.text;
     setText((t) => (t.trim() ? `${t.replace(/\s+$/, '')}\n\n${insert}` : insert));
     clearComposerInsert();
@@ -111,7 +153,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
     });
-  }, [composerInsert, clearComposerInsert]);
+  }, [composerInsert, clearComposerInsert, session.id]);
 
   useEffect(() => {
     if (!mention) return;
@@ -160,6 +202,21 @@ function SessionComposer({ session }: { session: SessionMeta }) {
       setHistIdx(-1);
     };
     const typedCommand = t.startsWith('/') ? t.slice(1).split(/\s+/)[0] : '';
+    if (typedCommand === 'housekeep') {
+      if (images.length || files.length) { toast('Housekeep cannot include attachments.', 'error'); return; }
+      const arg = t.slice('/housekeep'.length).trim().toLowerCase();
+      const days = /^\d+$/.test(arg) ? Number(arg) : undefined;
+      if (arg && arg !== 'sessions' && arg !== 'settings' && (days === undefined || days > MAX_HOUSEKEEP_RECENT_DAYS)) {
+        toast(`Usage: /housekeep [days|sessions|settings]. Enter a whole number from 0 to ${MAX_HOUSEKEEP_RECENT_DAYS} for a one-time override.`, 'info');
+        return;
+      }
+      if (!canHousekeepHere()) { toast('Housekeep is available in the desktop app.', 'info'); return; }
+      clearDraft();
+      setDraft(session.id, '');
+      if (arg === 'settings') openSettings('housekeep');
+      else openHousekeep(days);
+      return;
+    }
     // Mission owns its exact token before native /goal or harness command forwarding.
     const missionCommand = parseMissionCommand(text);
     if (missionCommand) {
@@ -384,7 +441,33 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     }
   };
 
+  /** A transcript goes in at the caret (replacing a selection), and the caret ends up after it. */
+  const insertDictation = (said: string) => {
+    const el = ref.current;
+    // The clip finished after the user switched sessions: it belongs to this session's draft.
+    if (!el) {
+      const draft = useStore.getState().drafts[session.id] ?? '';
+      setDraft(session.id, insertTranscript(draft, draft.length, draft.length, said).text);
+      return;
+    }
+    const current = el?.value ?? text;
+    const { text: next, caret } = insertTranscript(current, el?.selectionStart ?? current.length, el?.selectionEnd ?? current.length, said);
+    setText(next);
+    setHistIdx(-1);
+    requestAnimationFrame(() => {
+      const box = ref.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(caret, caret);
+    });
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'Space') {
+      e.preventDefault();
+      dictation.current?.toggle();
+      return;
+    }
     if (mention && mention.results.length) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -478,12 +561,32 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     setFiles((prev) => [...prev, ...added.files]);
   };
 
+  // A file dropped anywhere on the pane lands here, and the caret follows so typing can go on.
+  const addFilesRef = useRef(addFiles);
+  addFilesRef.current = addFiles;
+  useEffect(() => {
+    if (!attachRef) return;
+    attachRef.current = (dropped) => {
+      void addFilesRef.current(dropped);
+      ref.current?.focus();
+    };
+    return () => {
+      attachRef.current = null;
+    };
+  }, [attachRef]);
+
   const onPaste = (e: React.ClipboardEvent) => {
     const pasted = [...(e.clipboardData?.files ?? [])];
     if (!pasted.length) return;
     e.preventDefault();
     void addFiles(pasted);
   };
+
+  const secondaryItems = (close: () => void) => <>
+    <MenuItem onClick={() => { close(); fileInput.current?.click(); }}>Attach files</MenuItem>
+    {!session.mission && <MenuItem hint={`${fmtCost(session.usage.costUsd)}${session.usage.contextWindow && session.usage.contextTokens ? ` · ${Math.round(100 * session.usage.contextTokens / session.usage.contextWindow)}% context` : ''}`} onClick={() => { close(); useStore.getState().setPanelTab('usage'); }}>Session usage</MenuItem>}
+    {(session.queued ?? 0) > 0 && <div className="run-more-note" role="status">{session.queued} messages waiting for the current turn</div>}
+  </>;
 
   return (
     <div className="composer">
@@ -546,15 +649,24 @@ function SessionComposer({ session }: { session: SessionMeta }) {
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, ! shell, paste images)'}
+          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now; send menu to queue)' : 'Queue a follow-up… (sent after this turn)') : IDLE_PLACEHOLDER[uiMode]}
           rows={1}
           spellCheck
         />
         <div className="composer-actions">
-          <label className="icon-btn" title="Attach files">
-            <Icon name="file" size={16} />
-            <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
-          </label>
+          <button type="button" className="icon-btn composer-attach" title="Attach files" aria-label="Attach files" onClick={() => fileInput.current?.click()}>
+            <Icon name="plus" size={16} />
+          </button>
+          <input ref={fileInput} type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
+          {!session.mission && <SessionControls session={session} />}
+          <span className="spacer" />
+          {(session.queued ?? 0) > 0 && <span className="queued-hint" title="Messages waiting for the current turn">{session.queued}<span className="queued-label"> queued</span></span>}
+          {!session.mission && <SessionMeter session={session} />}
+          {canInvoke('dictation:transcribe') ? <DictationControl ref={dictation} onText={insertDictation} menuItems={secondaryItems} /> : (
+            <Dropdown align="right" width={260} trigger={() => <button type="button" className="icon-btn" title="Composer options" aria-label="Composer options"><Icon name="more" size={16} /></button>}>
+              {secondaryItems}
+            </Dropdown>
+          )}
           {shellDraft && !completed ? (
             <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
               Run
@@ -566,27 +678,26 @@ function SessionComposer({ session }: { session: SessionMeta }) {
             </>
           ) : busy ? (
             <>
-              {caps.queue && (
-                <Button size="sm" onClick={() => void send('queue')} title="Send after the current turn">
-                  Queue
+              <div className="composer-send-group">
+                <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now (Enter)' : 'Queue (Enter)'} aria-label={caps.steer ? 'Steer' : 'Queue'}>
+                  <span className="composer-send-label">{caps.steer ? 'Steer' : 'Queue'}</span>
                 </Button>
-              )}
-              <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now' : 'Queue'}>
-                {caps.steer ? 'Steer' : 'Queue'}
-              </Button>
+                {caps.steer && caps.queue && <Dropdown align="right" width={240} trigger={() => <Button size="sm" variant="primary" className="composer-send-options" icon="chevron" title="Send options" aria-label="Send options" />}>
+                  {(close) => <MenuItem hint="After the current turn" onClick={() => { close(); void send('queue'); }}>Queue</MenuItem>}
+                </Dropdown>}
+              </div>
               <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => pauseMissionSession(session)} title="Interrupt (Esc)" />
             </>
           ) : (
-            <Button size="sm" variant="primary" icon="send" onClick={() => void send()} disabled={!text.trim() && !images.length && !files.length}>
-              Send
-            </Button>
+            <Button size="sm" variant="primary" icon="arrowUp" className="send-btn" onClick={() => void send()} disabled={!text.trim() && !images.length && !files.length} title="Send (Enter) · Shift+Enter for a new line" aria-label="Send" />
           )}
         </div>
       </div>
-      <div className="composer-hint muted small">
-        <Kbd>Enter</Kbd> {completed ? 'ask' : 'send'} · <Kbd>Shift+Enter</Kbd> newline · <Kbd>Esc</Kbd> {completed ? 'cancel answer' : session.mission ? 'pause Mission' : 'stop'} · <Kbd>@</Kbd> files · <Kbd>/</Kbd> commands{!completed && <> · <Kbd>!</Kbd> shell</>}
-        {(session.queued ?? 0) > 0 && <span className="queued-hint"> · {session.queued} queued</span>}
-      </div>
+      {session.mission && (
+        <div className="composer-hint muted small">
+          <Kbd>Enter</Kbd> {completed ? 'ask' : 'send'} · <Kbd>Shift+Enter</Kbd> newline · <Kbd>Esc</Kbd> {completed ? 'cancel answer' : 'pause Mission'} · <Kbd>@</Kbd> files · <Kbd>/</Kbd> commands
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-/** Tokens: the mix of input, output and cache, the cache hit rate, and how each model uses tokens. */
+/** Provider token usage and cache hit rates, alongside a separate estimate of submitted user text. */
 import React, { useState } from 'react';
 import type { AnalyticsSummary, UsageBucket } from '../../../../shared/types';
 import { totalTokens } from '../../../../shared/usage-rollup';
@@ -36,6 +36,8 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
   const total = totalTokens(t);
   const dates = scope.days.map((d) => d.date);
   const kinds = tokenKindSeries(scope.days);
+  const userInput = scope.days.map((d) => d.usage.userInputTokens ?? 0);
+  const userInputSeries = [{ key: 'userInputTokens', label: 'User input (est.)', values: userInput, color: 'var(--accent)' }];
   const bySplit = splitSeries(scope, split, 'tokens');
   const rate = cacheHitRate(t);
   const share = (n: number) => (total > 0 ? `${fmtPct(n / total)} of tokens` : undefined);
@@ -51,8 +53,9 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
   return (
     <>
       <KpiGrid caption={scope.previousLabel ? `Change is against the ${scope.previousLabel}.` : undefined}>
-        <StatTile label="Total tokens" value={fmtTokens(total)} delta={delta(total, p ? totalTokens(p) : undefined)} spark={scope.days.map((d) => totalTokens(d.usage))} sub="input + output + cache" />
-        <StatTile label="Input" value={fmtTokens(t.inputTokens)} delta={delta(t.inputTokens, p?.inputTokens)} spark={spark('inputTokens')} sub={share(t.inputTokens)} />
+        <StatTile label="Total tokens" value={fmtTokens(total)} delta={delta(total, p ? totalTokens(p) : undefined)} spark={scope.days.map((d) => totalTokens(d.usage))} sub="provider input + output + cache" />
+        <StatTile label="User input (est.)" value={fmtTokens(t.userInputTokens)} delta={delta(t.userInputTokens ?? 0, p?.userInputTokens)} spark={userInput} sub="counted once · separate from provider totals" />
+        <StatTile label="Input" value={fmtTokens(t.inputTokens)} delta={delta(t.inputTokens, p?.inputTokens)} spark={spark('inputTokens')} sub="provider-reported uncached context" title="Provider-reported uncached context, not just typed text." />
         <StatTile label="Output" value={fmtTokens(t.outputTokens)} delta={delta(t.outputTokens, p?.outputTokens)} spark={spark('outputTokens')} sub={share(t.outputTokens)} />
         <StatTile label="Cache read" value={fmtTokens(t.cacheReadTokens)} delta={delta(t.cacheReadTokens, p?.cacheReadTokens)} spark={spark('cacheReadTokens')} sub={share(t.cacheReadTokens)} />
         <StatTile label="Cache write" value={fmtTokens(t.cacheWriteTokens)} delta={delta(t.cacheWriteTokens, p?.cacheWriteTokens)} spark={spark('cacheWriteTokens')} sub={share(t.cacheWriteTokens)} />
@@ -87,6 +90,10 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
         {pairRates.length > 0 && <p className="muted small">Recorded since update; older days a harness split across several models have no pair to show. The pair is the controlled comparison: a harness across its own models, or two harnesses on the same one.</p>}
       </ChartCard>
 
+      <ChartCard title="User input per day (est.)" subtitle={`Ordinary-session message text, counted once · ${scope.label} · UTC days`} table={seriesTable(dates, userInputSeries, fmtTokens)} wide>
+        <ColumnChart dates={dates} series={userInputSeries} format={fmtTokens} integer ariaLabel="User input per day (est.)" emptyText="No ordinary-session message text tracked in this range yet." />
+      </ChartCard>
+
       <ChartCard title="Tokens per day by kind" subtitle="Click a legend entry to hide a kind — cache reads usually dwarf the rest" table={seriesTable(dates, kinds, fmtTokens)} wide>
         <ColumnChart dates={dates} series={kinds} format={fmtTokens} axis={METRICS.tokens.axis} ariaLabel="Tokens per day by kind" />
       </ChartCard>
@@ -119,7 +126,12 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
           </>
         )}
       </ChartCard>
-      <Footnotes scope={scope} summary={summary} />
+      <Footnotes scope={scope} summary={summary} extra={[
+        'Input is provider-reported uncached context, not just typed text.',
+        'User input (est.) tracks ordinary-session message text: original submitted text is counted once, including pasted text. It excludes attachments, system/context content, tool output and automated prompts (including automatic goal prompts).',
+        'Mission mailbox input, goal configuration fields and subagent-panel steering are not tracked. This rough estimate uses one token per four Unicode characters, not model-specific billing, and is separate from provider token totals and mixes.',
+        'User input tracking starts with this update; legacy unmarked messages are not reconstructed.'
+      ]} />
     </>
   );
 }

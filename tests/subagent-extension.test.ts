@@ -15,6 +15,8 @@ import { createVocsCodeSubagents, type SubagentDeps } from '../resources/pi/vocs
 import { GRANT_EVENT, PLAN_REASON } from '../resources/pi/subagent-gate';
 import { parseRunFile } from '../src/shared/subagents';
 import { deferred } from '../src/main/util/async';
+import { memoryServerDef, vocsMemoryBaseDef } from '../src/main/mcp/memory';
+import { annotatedTools, stubPiMcpBridge, type StubbedBridge } from './support/pi-mcp-stub';
 
 const tempDirs: string[] = [];
 const envKeys = ['VOCS_CODE_MODE_FILE', 'VOCS_CODE_PERMISSION_MODE', 'VOCS_CODE_SUBAGENT_DIR', 'VOCS_CODE_SUBAGENT_COMPLETION_MS', 'VOCS_CODE_PI_NONCE', 'VOCS_CODE_PROJECT_ROOT', 'PI_CODING_AGENT_DIR'] as const;
@@ -281,6 +283,25 @@ describe('foreground runs', () => {
     expect((h.loaderOptions[0]!.systemPromptOverride as () => string)()).toContain('PARENT PROMPT');
   });
 
+  it('tells an append-mode child that the lead\'s delegation rules are not addressed to it', async () => {
+    const h = harness();
+    // The parent prompt carries the user's app instructions, which address the lead.
+    h.parentCtx.getSystemPrompt = () => 'PARENT PROMPT\n\nYou are the lead. Prefer delegation for any non-trivial request.';
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await h.tools.get('subagent')!.execute('call_1', { ...subagentCall, type: 'general-purpose' }, undefined, undefined, h.parentCtx);
+    const prompt = (h.loaderOptions[0]!.systemPromptOverride as () => string)();
+    const lead = prompt.indexOf('You are the lead.');
+    const notice = prompt.indexOf('# You are a subagent');
+    const role = prompt.indexOf('# Your role');
+    // The notice follows everything inherited and precedes the role, so it is the later word.
+    expect(lead).toBeGreaterThanOrEqual(0);
+    expect(notice).toBeGreaterThan(lead);
+    expect(role).toBeGreaterThan(notice);
+    expect(prompt).toMatch(/cannot delegate/);
+    // The child still has no way to delegate.
+    expect(h.sessionOptions[0]!.excludeTools).toEqual(expect.arrayContaining(['subagent', 'subagent_result', 'subagent_steer']));
+  });
+
   it('rejects an unknown agent type with the available names', async () => {
     const h = harness();
     await createVocsCodeSubagents(h.pi as never, h.deps);
@@ -394,6 +415,42 @@ describe('permission gate in a child', () => {
     const outside = (await gate({ toolName: 'write', toolCallId: 't2', input: { path: '../escape.txt' } })) as { block?: boolean } | undefined;
     expect(h.select).toHaveBeenCalledTimes(1);
     expect(outside?.block ?? false).toBe(false); // Allow once from the default select
+  });
+
+  describe('MCP tools with read-only annotations', () => {
+    let bridge: StubbedBridge | undefined;
+    afterEach(async () => {
+      await bridge?.restore();
+      bridge = undefined;
+    });
+    const third = (id: string) => ({ id, transport: 'http', url: 'https://mcp.example.invalid/mcp' });
+    const cases: [id: string, mode: string, outcome: 'ask' | 'block' | 'run'][] = [];
+    for (const id of ['vocs_memory', 'vocs.memory', 'Vocs-Memory', 'vocs-memory', 'notes']) {
+      for (const [mode, outcome] of [['ask', 'ask'], ['auto', 'run'], ['plan', 'block']] as const) cases.push([id, mode, outcome]);
+    }
+
+    it.each(cases)('gates a third-party %s tool like any other in %s mode', async (id, mode, outcome) => {
+      bridge = await stubPiMcpBridge([third(id)], annotatedTools);
+      const { h, gate } = await gateFor(mode, async () => 'Deny');
+      const tool = 'mcp__' + id.toLowerCase().replace(/[^a-z0-9_]/g, '_') + '__knowledge_search';
+      const result = (await gate({ toolName: tool, toolCallId: 't1', input: {} })) as { block?: boolean; reason?: string } | undefined;
+      // Auto runs third-party MCP tools; below it they ask (denied here) or are blocked in Plan.
+      expect(result?.block).toBe(outcome === 'run' ? undefined : true);
+      expect(h.select).toHaveBeenCalledTimes(outcome === 'ask' ? 1 : 0);
+      if (outcome === 'block') expect(result?.reason).toBe(PLAN_REASON);
+      expect(bridge.calls).toEqual([]);
+    });
+
+    it.each(['ask', 'auto', 'plan'])('lets the app-built memory server read without asking in %s mode', async (mode) => {
+      const root = path.join(os.tmpdir(), 'vocs-child-trust-project');
+      bridge = await stubPiMcpBridge([memoryServerDef({ projectRoot: root, cwd: root }, vocsMemoryBaseDef(), { memoryServerPath: path.join(root, 'm.mjs') })!], annotatedTools);
+      const { h, gate } = await gateFor(mode, async () => 'Deny');
+      await expect(gate({ toolName: 'mcp__vocs_memory__knowledge_search', toolCallId: 't1', input: {} })).resolves.toBeUndefined();
+      const write = (await gate({ toolName: 'mcp__vocs_memory__knowledge_propose', toolCallId: 't2', input: {} })) as { block?: boolean } | undefined;
+      // The write tool follows the tier: asked (and denied) in Ask, blocked in Plan, run in Auto.
+      expect(write?.block).toBe(mode === 'auto' ? undefined : true);
+      expect(h.select).toHaveBeenCalledTimes(mode === 'ask' ? 1 : 0);
+    });
   });
 
   it('fails closed when no approval UI is attached at all', async () => {

@@ -284,7 +284,8 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
           permissionMode: defaults.permissionMode,
           model: typed ? await resolveSessionModel(typed, harness, ctx) : rememberedModel(ctx.settings, projectRoot, harness),
           effort: defaults.effort || undefined,
-          useWorktree: typeof a.use_worktree === 'boolean' ? a.use_worktree : defaults.useWorktree
+          useWorktree: typeof a.use_worktree === 'boolean' ? a.use_worktree : defaults.useWorktree,
+          branchPrefix: defaults.branchPrefix
         },
         title: str(a.title) || undefined,
         initialPrompt: str(a.prompt) || undefined

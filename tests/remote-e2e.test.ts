@@ -9,6 +9,8 @@ import { REMOTE_CHANNELS, REMOTE_PUSH_CHANNELS, REMOTE_READ_CHANNELS, REMOTE_WRI
 import { pollPairing } from '../relay/src/core';
 import { clientFinish, createHello, generateIdentity, openFrame, openSealedToKey, pairingTokenContext, publicOf, sealFrame, type PublicIdentity } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
+import type { TerminalWatcher } from '../src/main/terminal';
+import type { RemoteAuditAction } from '../src/shared/types';
 
 import { ENROLL, FakeRelay } from './fake-relay';
 import { accessOverHttp } from './support/relay-auth';
@@ -267,22 +269,235 @@ describe('remote channel classification (view-only partition)', () => {
     for (const channel of REMOTE_READ_CHANNELS) expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(false);
   });
 
-  it('lets a paired browser view terminals but never type, resize, attach or kill them (P3.5 read-only)', () => {
-    for (const channel of ['terminal:list', 'terminal:screen'] as const) {
+  it('lets a paired browser watch and type into terminals, but never resize, attach, kill or close them (P3.5)', () => {
+    for (const channel of ['terminal:list', 'terminal:screen', 'terminal:watch', 'terminal:unwatch', 'terminal:watchAck'] as const) {
       expect(REMOTE_CHANNELS.has(channel)).toBe(true);
       expect(REMOTE_READ_CHANNELS.has(channel)).toBe(true);
     }
-    for (const channel of ['terminal:input', 'terminal:resize', 'terminal:attach', 'terminal:ack', 'terminal:create', 'terminal:kill', 'terminal:close', 'terminal:restart', 'terminal:clear', 'terminal:rename'] as const) {
+    // Typing and opening a shell are writes: view-only mode refuses them.
+    for (const channel of ['terminal:input', 'terminal:create'] as const) {
+      expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(true);
+      expect(REMOTE_READ_CHANNELS.has(channel)).toBe(false);
+    }
+    // The desktop owns its terminals' geometry and lifetime, and its own renderer's attach.
+    for (const channel of ['terminal:resize', 'terminal:attach', 'terminal:detach', 'terminal:ack', 'terminal:kill', 'terminal:close', 'terminal:restart', 'terminal:clear', 'terminal:rename'] as const) {
       expect(REMOTE_CHANNELS.has(channel)).toBe(false);
     }
-    // Live PTY output is not pushed to browsers: the viewer polls a snapshot instead.
+    // Raw PTY output is never broadcast; a watched terminal is sealed to its watcher alone.
     expect(REMOTE_PUSH_CHANNELS.has('push:terminalData')).toBe(false);
+    expect(REMOTE_PUSH_CHANNELS.has('push:remoteTerminal')).toBe(false);
   });
 
   it('classifies every write control as write, not read', () => {
     for (const channel of ['sessions:send', 'sessions:interrupt', 'sessions:stop', 'sessions:create', 'sessions:rename', 'sessions:setModel', 'sessions:setEffort', 'sessions:setPermissionMode', 'approvals:respond'] as const) {
       expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(true);
       expect(REMOTE_READ_CHANNELS.has(channel)).toBe(false);
+    }
+  });
+});
+
+/** Pairs one browser with `host` over the fake relay and opens its e2e session. */
+async function pairBrowser(host: RemoteHost, port: number, name: string) {
+  const { code } = await host.startPairing('Test PC');
+  const web = await generateIdentity();
+  const claim = await fetch(`http://127.0.0.1:${port}/v1/pair/claim`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, webPub: publicOf(web), name })
+  });
+  const { pollToken } = (await claim.json()) as { pollToken: string };
+  for (let i = 0; i < 40 && host.state().pendingRequest?.name !== name; i++) await sleep(100);
+  await host.respondPairing('approve');
+  let approved: Extract<Awaited<ReturnType<typeof pollPairing>>, { status: 'approved' }> | null = null;
+  for (let i = 0; i < 40 && !approved; i++) {
+    const poll = (await (await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${code}`, { headers: { authorization: `Bearer ${pollToken}` } })).json()) as Awaited<ReturnType<typeof pollPairing>>;
+    if (poll.status === 'approved') approved = poll;
+    else await sleep(100);
+  }
+  if (!approved) throw new Error(`${name} was not approved`);
+  const refresh = await openSealedToKey(web.enc, approved.sealedToken, pairingTokenContext(code, approved.webDeviceId));
+  const access = await accessOverHttp(`http://127.0.0.1:${port}`, { deviceId: approved.webDeviceId, refresh, identity: web });
+  await sleep(300);
+  const { ticket } = (await (await fetch(`http://127.0.0.1:${port}/v1/ws/ticket?device=${encodeURIComponent(approved.webDeviceId)}`, {
+    method: 'POST', headers: { authorization: `Bearer ${access}` }
+  })).json()) as { ticket: string };
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws/client?device=${encodeURIComponent(approved.webDeviceId)}&ticket=${encodeURIComponent(ticket)}`);
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve());
+    ws.once('error', () => reject(new Error('browser upgrade failed')));
+  });
+  ws.send(JSON.stringify({ t: 'hello', host: approved.hostDeviceId }));
+  const { hello, ephPriv } = await createHello(web);
+  ws.send(JSON.stringify({ t: 'hs', seq: 0, payload: hello }));
+  const hsReply = await waitFrame(ws, (m) => m.t === 'hs');
+  const session = await clientFinish(hello, ephPriv, hsReply.payload as never, approved.hostPub, web);
+  // Every sealed frame this browser receives, opened in order.
+  const inbox: Record<string, unknown>[] = [];
+  let opening = Promise.resolve();
+  ws.on('message', (data) => {
+    const m = JSON.parse(String(data)) as { t: string; payload?: unknown };
+    if (m.t !== 'd') return;
+    opening = opening.then(async () => void inbox.push(await openFrame<Record<string, unknown>>(session.key, m.payload as never)));
+  });
+  let out = 0;
+  let id = 0;
+  const invoke = async (channel: string, request: unknown): Promise<Record<string, unknown>> => {
+    const callId = ++id;
+    const sealed = await sealFrame(session.key, session.salt, ++out, { type: 'invoke', id: callId, channel, request });
+    ws.send(JSON.stringify({ t: 'd', seq: sealed.seq, payload: sealed }));
+    for (let i = 0; i < 150; i++) {
+      const result = inbox.find((m) => m.type === 'result' && m.id === callId);
+      if (result) return result;
+      await sleep(20);
+    }
+    throw new Error(`${channel} got no answer`);
+  };
+  const pushes = (channel: string) => inbox.filter((m) => m.type === 'push' && m.channel === channel).map((m) => m.payload as Record<string, unknown>);
+  return { ws, invoke, pushes, deviceId: approved.webDeviceId };
+}
+
+describe('remote terminal over e2e (P3.5 read/write)', () => {
+  let relay: FakeRelay;
+  let port = 0;
+
+  beforeAll(async () => {
+    relay = new FakeRelay();
+    port = await relay.start();
+  });
+
+  afterAll(async () => {
+    await relay.stop();
+  });
+
+  it('keeps the socket enrollment reconnected on instead of replacing it a few seconds later', async () => {
+    const registry = { channels: () => [], invoke: async () => [{ id: 's1' }] } as unknown as HandlerRegistry;
+    const host = new RemoteHost({
+      registry: () => registry,
+      secrets: { get: async () => undefined, set: async () => undefined },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined
+    });
+    const socket = () => (host as unknown as { ws: unknown }).ws;
+    await host.enable(`http://127.0.0.1:${port}`, ENROLL);
+    // The first approval enrolls the desktop: it reconnects under its device token at once, while
+    // the enrolling socket's close also schedules the routine reconnect.
+    const browser = await pairBrowser(host, port, 'Fresh');
+    try {
+      const live = socket();
+      expect(await browser.invoke('sessions:list', null)).toMatchObject({ ok: true });
+      await sleep(3500); // past RECONNECT_MS
+      // That late reconnect must not replace a healthy socket: it would strand the browser.
+      expect(socket()).toBe(live);
+      expect(await browser.invoke('sessions:list', null)).toMatchObject({ ok: true, value: [{ id: 's1' }] });
+    } finally {
+      browser.ws.close();
+      await host.disable();
+    }
+  });
+
+  it('streams a watched terminal to its watcher alone, types through the registry, and honors view-only', async () => {
+    const registryCalls: { channel: string; request: unknown }[] = [];
+    const registry = {
+      channels: () => [],
+      invoke: async (channel: string, request: unknown) => {
+        registryCalls.push({ channel, request });
+        if (channel === 'terminal:create') return { id: 't_new', sessionId: 's1' };
+        return undefined;
+      }
+    } as unknown as HandlerRegistry;
+    const watchers = new Set<TerminalWatcher>();
+    let seq = 2;
+    const info = (id: string, patch: Record<string, unknown> = {}) => ({ id, sessionId: 's1', title: 'bash', shell: 'bash' as const, shellName: 'bash', cwd: '/', createdAt: 1, pid: 77, ...patch });
+    const terminals = {
+      // A running shell, a tab restored from the last run whose shell has not started, and one that exited.
+      list: () => [info('t1'), info('t_restored', { pid: undefined, restored: true }), info('t_exited', { pid: undefined, exit: { code: 1 } })],
+      watch: (_id: string, watcher: TerminalWatcher) => {
+        watchers.add(watcher);
+        return () => void watchers.delete(watcher);
+      },
+      snapshot: async (id: string) => {
+        if (id !== 't1') throw new Error('Terminal not found');
+        return { snapshot: '$ make\r\n', seq, cols: 90, rows: 20, info: info('t1') };
+      }
+    };
+    const emit = (data: string) => {
+      seq++;
+      for (const w of [...watchers]) w.data(seq, data);
+    };
+    const audit: RemoteAuditAction[] = [];
+    let viewOnly = false;
+    const host = new RemoteHost({
+      registry: () => registry,
+      secrets: { get: async () => undefined, set: async () => undefined },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined,
+      viewOnly: () => viewOnly,
+      terminals: () => terminals,
+      audit: { record: (action: RemoteAuditAction) => void audit.push(action), list: () => [], clear: () => undefined } as never
+    });
+    await host.enable(`http://127.0.0.1:${port}`, ENROLL);
+    const watcher = await pairBrowser(host, port, 'Watcher');
+    const other = await pairBrowser(host, port, 'Other');
+    try {
+      // Watch: the snapshot arrives as the answer, at the desktop's geometry.
+      const watched = await watcher.invoke('terminal:watch', { terminalId: 't1' });
+      expect(watched).toMatchObject({ ok: true, value: { terminalId: 't1', snapshot: '$ make\r\n', seq: 2, cols: 90, rows: 20 } });
+      emit('compiling…');
+      await expect.poll(() => watcher.pushes('push:remoteTerminal')).toEqual([{ terminalId: 't1', kind: 'data', seq: 3, data: 'compiling…' }]);
+      // The other browser never asked, so it never receives this terminal.
+      await sleep(100);
+      expect(other.pushes('push:remoteTerminal')).toEqual([]);
+      // Even a broadcast of the frame (a desktop bug) is dropped before sealing.
+      await host.broadcastPush('push:remoteTerminal', { terminalId: 't1', kind: 'data', seq: 99, data: 'broadcast' });
+      await sleep(100);
+      expect(other.pushes('push:remoteTerminal')).toEqual([]);
+
+      // Typing reaches the registry (and its Mission terminal guards); the first keystroke is audited once.
+      expect(await watcher.invoke('terminal:input', { terminalId: 't1', data: 'ls\r' })).toMatchObject({ ok: true });
+      expect(await watcher.invoke('terminal:input', { terminalId: 't1', data: 'pwd\r' })).toMatchObject({ ok: true });
+      expect(registryCalls.filter((c) => c.channel === 'terminal:input').map((c) => c.request)).toEqual([
+        { terminalId: 't1', data: 'ls\r' }, { terminalId: 't1', data: 'pwd\r' }
+      ]);
+      expect(audit.filter((a) => a === 'terminal-input')).toHaveLength(1);
+      // An oversized input is refused before the registry.
+      expect(await watcher.invoke('terminal:input', { terminalId: 't1', data: 'x'.repeat(64 * 1024 + 1) })).toMatchObject({ ok: false, error: 'input too large' });
+      // Only a running shell takes keystrokes: an unknown id, a restored tab that would queue them
+      // unseen until the desktop opens it, and an exited shell are all refused before the registry.
+      expect(await watcher.invoke('terminal:input', { terminalId: 't_made_up', data: 'x' })).toMatchObject({ ok: false, error: 'Terminal not found' });
+      expect(await watcher.invoke('terminal:input', { terminalId: 't_restored', data: 'rm -rf build\r' })).toMatchObject({ ok: false, error: "This terminal's shell starts when it is opened on the computer" });
+      expect(await watcher.invoke('terminal:input', { terminalId: 't_exited', data: 'x' })).toMatchObject({ ok: false, error: "This terminal's shell has exited" });
+      expect(registryCalls.filter((c) => c.channel === 'terminal:input')).toHaveLength(2);
+      expect(audit.filter((a) => a === 'terminal-input')).toHaveLength(1);
+      // Resizing stays the desktop's.
+      expect(await watcher.invoke('terminal:resize', { terminalId: 't1', cols: 10, rows: 5 })).toMatchObject({ ok: false, error: 'channel not available remotely' });
+      // Opening a shell for the session is a write, audited.
+      expect(await watcher.invoke('terminal:create', { sessionId: 's1' })).toMatchObject({ ok: true, value: { id: 't_new' } });
+      expect(audit).toContain('terminal-create');
+
+      // View-only: watching still works, typing and opening shells never reach the registry.
+      viewOnly = true;
+      const before = registryCalls.length;
+      expect(await other.invoke('terminal:watch', { terminalId: 't1' })).toMatchObject({ ok: true });
+      expect(await other.invoke('terminal:input', { terminalId: 't1', data: 'rm -rf /\r' })).toMatchObject({ ok: false, error: 'remote access is in view-only mode' });
+      expect(await other.invoke('terminal:create', { sessionId: 's1' })).toMatchObject({ ok: false, error: 'remote access is in view-only mode' });
+      expect(registryCalls.length).toBe(before);
+      emit('both see this');
+      await expect.poll(() => other.pushes('push:remoteTerminal').length).toBe(1);
+      viewOnly = false;
+
+      // A browser that leaves stops its stream; the other keeps its own.
+      expect(watchers.size).toBe(2);
+      watcher.ws.close();
+      await expect.poll(() => watchers.size, { timeout: 5000 }).toBe(1);
+      expect(await other.invoke('terminal:unwatch', { terminalId: 't1' })).toMatchObject({ ok: true });
+      expect(watchers.size).toBe(0);
+      // Watching a terminal that does not exist is an error, not a hang.
+      expect(await other.invoke('terminal:watch', { terminalId: 't_gone' })).toMatchObject({ ok: false, error: 'Terminal not found' });
+      expect(watchers.size).toBe(0);
+    } finally {
+      watcher.ws.close();
+      other.ws.close();
+      await host.disable();
     }
   });
 });

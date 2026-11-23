@@ -1,7 +1,8 @@
 # Project knowledge — Layer 2 memory
 
 Vocs Code carries four kinds of memory. This document defines the second one, what it may and may
-not contain, and how the four stay out of each other's way.
+not contain, and how the four stay out of each other's way. For the desktop memory ledger,
+scoped evidence, collections and the built-in Graphify index, see [Local Knowledge and Memory](INTELLIGENCE.md).
 
 | Layer | Question | Owner | Lifetime |
 | --- | --- | --- | --- |
@@ -22,7 +23,7 @@ Anything that only makes sense with "in session X we found…" is L3, not L2.
 | Scored + graph-aware retrieval, digest, ingestion, authority, jobs facade | `src/main/knowledge/service.ts` |
 | Bootstrap, distillation and PR-reflection prompts (utility model) | `src/main/knowledge/synth.ts`, `knowledge/llm.ts` |
 | Shared schema, frontmatter codec, digest renderer | `src/shared/knowledge.ts` |
-| `vocs-memory` stdio MCP server (6 tools) | `resources/mcp/vocs-memory.mjs` |
+| `vocs-memory` stdio MCP client (six aliases plus scoped tools) | `resources/mcp/vocs-memory.mjs`, `src/main/intelligence/gateway.ts` |
 | Built-in server registration + per-repo switches | `src/main/mcp/memory.ts`, `src/main/mcp/index.ts` |
 | Knowledge panel (browse · search · reject/delete · publish) | `src/renderer/src/components/KnowledgeTab.tsx` |
 | Live anchor resolution | `src/main/knowledge/anchors.ts` — each page anchor is checked against GitNexus when the detail view opens |
@@ -72,7 +73,8 @@ Five seams:
    like the GitNexus scope proxy (`src/main/mcp/memory.ts`). It is injected into every harness whose
    MCP capability is `inject` or `client`. Cursor does not get it (inherit-only, file export); pi
    subagent children do, over the parent's connections, unless their agent definition sets
-   `mcp: false` — which the shipped Explore and Plan templates do. A project with no wiki gets no server at all.
+   `mcp: false` — which the shipped Explore and Plan templates do. The gateway can recall history
+   without a wiki. Only explicit legacy mode requires a wiki; managed Mission sessions get neither.
 2. **Push.** When a wiki exists and `knowledge.prime` is on (default), a new session gains a bounded
    `<digest>` naming the most useful pages. It never contains page bodies and never outranks
    AGENTS.md. A harness with a system prompt (pi, Claude, native) gets it through
@@ -103,6 +105,7 @@ Local-first, under the project, git-excluded by the existing `.vocs-code/` conve
   _observations/*.jsonl       commit / PR / merge outcomes waiting for distillation
   _evidence.json              claim key → distinct sessions that have seen it
   _rejected.json              claim tombstones, so a job stops refiling a rejection
+  _write.lock/                app/MCP cross-process write mutex (normally absent)
 docs/wiki/                    written only by the explicit Publish action (tracked, committed by the user)
 ```
 
@@ -128,6 +131,22 @@ Decisions behind this layout:
 - **No second copy of L1.** Pages may name a file and a symbol in `anchors:`; those are pointers.
   Nothing stores call graphs, symbol lists or line numbers, because the next `gitnexus analyze`
   makes them false.
+
+### Concurrent writes and recovery
+
+The app and standalone MCP processes share a project-wide filesystem mutex (`_write.lock/`,
+acquired with atomic directory creation). Proposal identity checks, fresh metadata merges and page
+replacement all happen while holding it. A call-start page snapshot, retrieval scan limit or cached
+mtime is never an overwrite guard. Explicit-id updates participate in the same boundary. Pages use
+unique sibling temp files plus rename, so a failed write or crashed writer cannot expose half a page.
+
+Writers wait at most five seconds for a busy lock, then fail without taking it over. **Locks are never
+automatically deleted for age or an apparently dead PID:** a paused writer must not resume into
+another owner's critical section. After a crash, stop **all** app and MCP writers for that project,
+inspect the wiki and remove only its abandoned `_write.lock/` directory before retrying. Leftover
+`*.tmp` siblings are not pages and may also be removed while every writer is stopped. Do not remove
+a lock while another session may still be writing. The lock coordinates Vocs writers, not arbitrary
+external editors; stop them too before repairing damaged page files.
 
 ## Page model
 
@@ -205,8 +224,17 @@ The wiki is easy to generate; keeping it true is the product. The rules:
 - **No accept gate.** Every write is automatic and passive: generated pages and `knowledge_propose`
   land as `status: current` immediately, with `updated_by: agent:*` so they rank below a
   human-reviewed page. There is no approval queue.
-- **One guard, and it is a tombstone.** A rejected claim is recorded in `_rejected.json`; the same
-  claim is refused on sight, so a job cannot refile it every scan. Nothing else blocks a write.
+- **Tombstones and collision-safe identity.** A rejected claim is recorded in `_rejected.json`;
+  the same claim is refused on sight, so a job cannot refile it every scan. Rejection retains its
+  conservative case/punctuation-insensitive match, checked against the full stored claim rather
+  than only its lookup hash; that broader refusal never grants permission to overwrite. Without an explicit
+  `pageId` (app) / `page_id` (MCP), an existing generated id may only be updated for the same full
+  claim with whitespace folded. Case, punctuation and Unicode remain meaningful (`C++` is not
+  `C#`, and an identifier's case can change its meaning); a hash, substring or truncated prefix
+  is not proof. Unrelated claims with the same title, normalized slug or truncated slug fail with
+  a clear error and leave pages, evidence and supersession untouched. Choose a different title for
+  a new page, or pass the existing id explicitly for an intentional claim change. Same-claim repeats
+  keep one page and merge evidence; explicit updates preserve creation time and merge provenance.
 - **The panel is for browsing, not approving.** It searches and reads pages, corrects them, rejects
   or deletes, and publishes to `docs/wiki/`. Rejecting tombstones the claim; accepting is not a step.
 - **Bootstrap is passive, recursive and incremental.** `Generate from docs` walks *every* markdown
@@ -248,7 +276,7 @@ turns into noise.
 
 ## Retrieval
 
-Six tools, all pull-based and cheap enough to call without thinking:
+Six compatibility tools. The new scoped tools are described in [Local Knowledge and Memory](INTELLIGENCE.md):
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
@@ -274,8 +302,8 @@ paths. The wiki itself costs nothing until an agent asks a question.
 - **Not a transcript dump.** A page must stand alone; a session reference is evidence, not content.
 - **Not an unbounded rewriter.** Ingestion writes and updates pages automatically, but it never
   deletes, never edits AGENTS.md, never refiles a tombstoned claim, and never touches `docs/wiki/` —
-  Publish is an explicit act. No scoring engine, no org ontology, no cross-project memory in this
-  version.
+  Publish is an explicit act. Cross-project retrieval belongs to a separate collection grant,
+  not to the wiki store or ingestion jobs.
 - **Not a replacement for AGENTS.md.** Explicit rules are the top rung of the ladder.
 
 ## Build vs integrate
@@ -295,24 +323,21 @@ paths. The wiki itself costs nothing until an agent asks a question.
 
 ## Evolution
 
-- **L3 recall is live; L3 capture is next.** `session_history_search` reads the app's existing
-  transcript index (`search.db`, read-only, project-scoped, redacted) so any harness can recall "we
-  tried this and it failed". What is still missing is *structured* episodes from session end: the
-  distillation trigger covers commits, PRs and merges, and a session-end pass (opt-in, same
-  guardrails) would widen the evidence without widening the write path.
+- **L3 recall and capture.** `session_history_search` reads the app's existing transcript index
+  (`search.db`, project-scoped, redacted). Optional session reflection records bounded episodes and
+  candidate lessons in the separate memory ledger, not in the wiki.
 - **Consolidation.** Repetition detection is in (`_evidence.json`); the next steps are a periodic
   lint (unresolved anchors, changed sources, contradictions) and a merge flow that folds a duplicate
   auto-ingested page into an existing one instead of keeping a near-duplicate.
 - **Branch overlay.** Branch-scope pages are stored, retrieved and overlaid; the remaining work is a
   UI affordance for promoting a branch page into repo scope.
-- **L4.** Scope is already `projectRoot`-keyed and GitNexus has repo groups (currently hidden by
-  the scope proxy), so organisational knowledge is another scope with a higher authority rung, not
-  a rewrite. Portable export/import (e.g. OKF bundles) is the interop story.
+- **L4.** Explicit local collections can share selected project knowledge. Organizational and
+  account-bound memory remain unimplemented; collection membership does not imply either.
+
+
 
 ## Open questions
 
-- Should `vocs-memory` be injected even in projects with no wiki, so `session_history_search` (L3)
-  works everywhere rather than only where a wiki exists?
 - Should the digest prime every new session by default even on a project with a large wiki (cost of
   ~500 tokens/turn), or only when the wiki is small?
 - Should distillation run on session end and archive, or only on git outcomes?

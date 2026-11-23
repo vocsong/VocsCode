@@ -8,6 +8,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { Transcript, UserMessage } from '../src/renderer/src/components/Transcript';
 import { TranscriptCapabilitiesProvider } from '../src/renderer/src/capabilities';
 import { useStore } from '../src/renderer/src/store';
+import { fmtStamp, fmtStampFull } from '../src/renderer/src/format';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
 const scrollPos = new WeakMap<Element, number>();
@@ -47,7 +48,6 @@ afterEach(() => {
 const session = { id: 's1', title: 't', cwd: '/w', status: 'idle', config: { harness: 'native' }, harnessRef: {}, usage: {} } as unknown as SessionMeta;
 
 function messages(count: number): TranscriptItem[] {
-  // Each answer closes its own turn; without a phase they would read as commentary for a later tool.
   return Array.from({ length: count }, (_, i) => ({ id: `a${i}`, kind: 'assistant', ts: i, text: `message ${i}`, phase: 'final' }) as TranscriptItem);
 }
 
@@ -55,9 +55,13 @@ describe('user message actions', () => {
   it('shows its timestamp, copies its text, and opens an edit control', async () => {
     const writeText = vi.fn(async () => undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
-    render(<UserMessage sessionId="s1" item={{ id: 'u1', kind: 'user', ts: new Date('2026-03-14T15:15:00').getTime(), text: 'Message to copy' }} />);
+    const ts = new Date('2026-03-14T15:15:00').getTime();
+    const { container } = render(<UserMessage sessionId="s1" item={{ id: 'u1', kind: 'user', ts, text: 'Message to copy' }} />);
 
-    expect(screen.getByText(/Saturday 3:15 (AM|PM|am|pm)/)).toBeTruthy();
+    const time = container.querySelector('.msg-user-meta time.stamp');
+    expect(time?.getAttribute('datetime')).toBe(new Date(ts).toISOString());
+    expect(time?.textContent).toBe(fmtStamp(ts));
+    expect(time?.getAttribute('title')).toBe(fmtStampFull(ts));
     fireEvent.click(screen.getByRole('button', { name: 'Copy message' }));
     expect(writeText).toHaveBeenCalledWith('Message to copy');
     fireEvent.click(screen.getByRole('button', { name: 'Edit and rerun message' }));
@@ -71,6 +75,42 @@ describe('user message actions', () => {
     expect(screen.getByText('2 images not shown')).toBeTruthy();
     rerender(<UserMessage item={{ id: 'u2', kind: 'user', ts: 1, text: 'look', imagesOmitted: 1 }} />);
     expect(screen.getByText('1 image not shown')).toBeTruthy();
+  });
+});
+
+describe('turn completion timestamps', () => {
+  it('shows each turn’s recorded local completion time, including turns without usage', () => {
+    const timestamps = [new Date('2026-03-14T15:15:12Z').getTime(), new Date('2026-03-15T04:02:03Z').getTime()];
+    const turns: TranscriptItem[] = timestamps.map((ts, i) => ({ id: `turn${i}`, kind: 'turn', ts, status: 'completed' }));
+    useStore.setState({ transcripts: { s1: turns.slice(0, 1) }, loaded: { s1: true }, searchJump: null });
+    const { container, rerender } = render(<Transcript session={session} />);
+    act(() => useStore.setState({ transcripts: { s1: turns } }));
+
+    const checkTimes = () => {
+      const footers = container.querySelectorAll('.turn-completed');
+      expect(footers).toHaveLength(2);
+      footers.forEach((footer, i) => {
+        const date = new Date(timestamps[i]!);
+        const time = footer.querySelector('time');
+        expect(time).not.toBeNull();
+        expect(time?.getAttribute('datetime')).toBe(date.toISOString());
+        expect(time?.getAttribute('title')).toBe(date.toLocaleString());
+        expect(time?.textContent).toBe(date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
+        expect(footer.textContent).toContain('Turn complete');
+      });
+    };
+    checkTimes();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-01T00:00:00Z'));
+    rerender(<Transcript session={{ ...session, title: 'reopened' }} />);
+    checkTimes();
+  });
+
+  it.each(['interrupted', 'failed'] as const)('shows the recorded end time of a %s turn', (status) => {
+    const ts = new Date('2026-03-14T15:15:12Z').getTime();
+    useStore.setState({ transcripts: { s1: [{ id: 'turn', kind: 'turn', ts, status }] }, loaded: { s1: true }, searchJump: null });
+    const { container } = render(<Transcript session={session} />);
+    expect(container.querySelector(`.turn-${status} time`)?.getAttribute('datetime')).toBe(new Date(ts).toISOString());
   });
 });
 

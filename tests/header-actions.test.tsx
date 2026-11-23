@@ -1,5 +1,7 @@
-// Header: the thinking toggle lives in the title row, the 3-dot menu is gone, and fork/archive
-// buttons behave exactly like the sidebar row's (same fork menu, same archive flow).
+// Header: one row — the session's identity (title, harness, folder, branch), what it changed and the
+// view actions. The 3-dot menu is gone, and fork/archive buttons behave exactly like the sidebar
+// row's (same fork menu, same archive flow). Model, effort, permission and usage stay under the
+// composer: SessionControls.
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,12 +12,13 @@ const invokeMock = vi.fn().mockResolvedValue({});
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Header } from '../src/renderer/src/components/Header';
+import { SessionControls } from '../src/renderer/src/components/SessionControls';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { rememberEffort, setSessionEffort } from '../src/renderer/src/sessionActions';
 import { useStore } from '../src/renderer/src/store';
-import type { SessionMeta } from '../src/shared/types';
+import type { GitSummary, SessionMeta } from '../src/shared/types';
 
 // Header owns an asynchronous shared Git subscription; release it before jsdom is torn down.
 afterEach(async () => { await act(async () => { cleanup(); }); });
@@ -33,9 +36,10 @@ const session = (id = 's_h', patch: Partial<SessionMeta> = {}): SessionMeta => (
   ...patch
 });
 
-function setup(patch: Partial<SessionMeta> = {}, withConfirm = false) {
+/** `git` is what the session's Git summary reads back. */
+function reset(git: Partial<GitSummary> = {}) {
   invokeMock.mockReset();
-  invokeMock.mockResolvedValue({});
+  invokeMock.mockImplementation(async (channel: string) => (channel === 'git:summary' ? git : {}));
   useStore.setState({
     activeId: 's_h',
     view: 'chat',
@@ -45,12 +49,22 @@ function setup(patch: Partial<SessionMeta> = {}, withConfirm = false) {
     models: {},
     modelCatalog: { native: { models: [], loading: false } }
   });
+}
+
+function setup(patch: Partial<SessionMeta> = {}, withConfirm = false, git?: Partial<GitSummary>) {
+  reset(git);
   return render(
     <>
       <Header session={session('s_h', patch)} />
       {withConfirm && <ConfirmHost />}
     </>
   );
+}
+
+/** The run controls the composer shows under the prompt of an ordinary session. */
+function setupControls(patch: Partial<SessionMeta> = {}) {
+  reset();
+  return render(<SessionControls session={session('s_h', patch)} />);
 }
 
 describe('header actions', () => {
@@ -61,54 +75,33 @@ describe('header actions', () => {
     expect(container.querySelector('[aria-label="More"]')).toBeNull();
   });
 
-  it('shows the harness label in the controls row, left of the model pill, with the session row tone', () => {
-    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
-    const pills = container.querySelector('.header-pills') as HTMLElement;
-    const label = pills.querySelector('.badge') as HTMLElement;
-    expect(label).toBeTruthy();
-    expect(label.textContent).toContain('Claude');
-    // Same tone class the sidebar session row uses for this harness.
-    expect(label.classList.contains('badge-amber')).toBe(true);
-    // Ordered before the model selector pill in the same row.
-    const model = pills.querySelector('[title="Model"]') as HTMLElement;
-    expect(label.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // No longer in the title row.
-    expect((container.querySelector('.header-title') as HTMLElement).querySelector('.badge')).toBeNull();
+  it('shows the harness, project and session name in the header of a worktree session', () => {
+    const { container } = setup({
+      config: { harness: 'claude', projectRoot: 'G:\\proj\\a\\', permissionMode: 'ask' },
+      cwd: 'G:\\proj\\a\\.vocs-code\\worktrees\\topic'
+    });
+    const title = container.querySelector('.header-title .session-label');
+    expect(title?.textContent).toBe('Claude a | Header session');
+    expect(title?.firstElementChild?.matches('.harness-pill[data-harness="claude"]')).toBe(true);
+    expect(screen.getByTestId('session-title').title).toBe('Header session');
+    expect(screen.getByRole('button', { name: 'Open session folder' }).textContent?.trim()).toBe('topic');
   });
 
-  it('names the model by its provider and reads a pasted qualified name back', async () => {
-    // A configured provider is what makes the first segment of a typed name a provider.
-    useStore.setState({ settings: { providers: [{ id: 'openrouter' }] } } as never);
-    const { container } = setup({ activeModel: { provider: 'deepseek', model: 'deepseek-v4-flash' } });
-    const pill = container.querySelector('[title="Model"]') as HTMLElement;
-    expect(pill.textContent).toContain('deepseek/deepseek-v4-flash');
-
-    fireEvent.click(pill);
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'openrouter/deepseek/deepseek-flash' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Use “openrouter/deepseek/deepseek-flash”' }));
-
-    // The aggregator route survives the round trip: the provider comes from the name, the model
-    // keeps its own slash instead of it being read as a second provider boundary.
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('sessions:setModel', {
-        id: 's_h',
-        model: { provider: 'openrouter', model: 'deepseek/deepseek-flash' }
-      })
-    );
-  });
-
-  it('toggles thinking from the actions row, below the panel toggle', () => {
+  it('toggles thinking from the actions group, ahead of the panel toggle in the same row', () => {
     const { container } = setup();
     const actions = container.querySelector('.header-actions') as HTMLElement;
-    // Order in the actions row: hide thinking, fork, archive.
+    // Order in the actions group: hide thinking, fork, archive.
     const labels = [...actions.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? '');
     expect(labels[0]).toBe('Hide thinking');
     expect(labels).toContain('Fork session');
     expect(labels).toContain('Archive session');
     fireEvent.click(actions.querySelector('[aria-label="Hide thinking"]') as HTMLElement);
     expect(useStore.getState().showThinking).toBe(false);
-    // The thinking toggle is not in the title row anymore.
-    expect((container.querySelector('.header-title') as HTMLElement).querySelector('[aria-label="Hide thinking"]')).toBeNull();
+    // One header row: the actions share the title row and come before the panel toggle.
+    const title = container.querySelector('.header-title') as HTMLElement;
+    expect(title.contains(actions)).toBe(true);
+    const toggle = title.querySelector('[aria-label="Toggle panel"]') as HTMLElement;
+    expect(actions.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('fork button opens the same harness menu as the sidebar row and forks', async () => {
@@ -137,27 +130,169 @@ describe('header actions', () => {
     expect(invokeMock).toHaveBeenCalledWith('sessions:archive', { id: 's_h', archived: true });
   });
 
-  it('disables the effort pill for a model that takes no effort', () => {
-    const haiku = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' };
-    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask', model: haiku } as SessionMeta['config'] });
-    act(() => useStore.setState({ models: { s_h: [{ id: haiku.model, provider: haiku.provider, displayName: 'Haiku 4.5', supportedEfforts: [] }] } }));
-
-    const pill = container.querySelector('.pill[aria-label="Reasoning effort"]') as HTMLButtonElement;
-    expect(pill.disabled).toBe(true);
-    expect(pill.title).toBe('Haiku 4.5 does not support reasoning effort');
-    // The menu trigger is gone, so nothing can open a list of levels.
-    expect(container.querySelector('[title="Reasoning effort"]')).toBeNull();
+  it('worktree sessions confirm before archive removes the worktree', () => {
+    const { container } = setup({ worktreeBranch: 'agent/a' }, true);
+    expect((container.querySelector('[aria-label="Archive session"]') as HTMLElement).title).toBe('Archive & remove worktree');
+    fireEvent.click(container.querySelector('[aria-label="Archive session"]') as HTMLElement);
+    // Confirmation dialog first; nothing is archived until confirmed.
+    expect(invokeMock).not.toHaveBeenCalledWith('sessions:archive', expect.anything());
+    expect(document.querySelector('.modal')).toBeTruthy();
+    // It pops up at the button rather than centred.
+    expect(document.querySelector('.modal')?.classList.contains('is-anchored')).toBe(true);
+    expect(container.querySelector('[aria-label="Archive session"]')?.hasAttribute('data-dialog-anchor')).toBe(true);
   });
 
-  it('offers Claude its own effort levels while the model does not say which it takes', () => {
-    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
-    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
-    const levels = [...document.querySelectorAll('.dropdown-menu .menu-item')].map((item) => item.textContent?.trim());
-    expect(levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  it('sums the changed files into one button that opens Changes', async () => {
+    setup({}, false, {
+      isRepo: true,
+      branch: 'main',
+      files: [
+        { path: 'src/a.ts', status: 'M', staged: false, additions: 12, deletions: 4 },
+        { path: 'src/b.ts', status: 'M', staged: true, additions: 3, deletions: 2 },
+        // An untracked file reports its line count and no deletions.
+        { path: 'notes.md', status: '?', staged: false, additions: 5 }
+      ]
+    });
+    act(() => useStore.setState({ panelTab: 'files', panelOpen: false }));
+    const changes = await screen.findByTitle('3 changed files — open Changes');
+    expect(changes.textContent).toContain('3 files');
+    expect(changes.textContent).toContain('+20');
+    // A typographic minus (U+2212), not a hyphen.
+    expect(changes.textContent).toContain('−6');
+    fireEvent.click(changes);
+    expect(useStore.getState().panelTab).toBe('changes');
+    expect(useStore.getState().panelOpen).toBe(true);
+  });
+
+  it('shows no changed-files button for a clean working tree', async () => {
+    setup({}, false, { isRepo: true, branch: 'main', files: [] });
+    // The branch crumb comes from the same summary, so it has arrived before the absence is checked.
+    await screen.findByTitle('Branch main — open the Git panel');
+    expect(screen.queryByTitle(/changed files? — open Changes/)).toBeNull();
+  });
+});
+
+describe('composer run controls', () => {
+  it('names the provider in the pill and reads a pasted qualified name back', async () => {
+    // A configured provider is what makes the first segment of a typed name a provider.
+    useStore.setState({ settings: { providers: [{ id: 'openrouter' }] } } as never);
+    const { container } = setupControls({ activeModel: { provider: 'deepseek', model: 'deepseek-v4-flash' } });
+    const pill = container.querySelector('[title="Model"]') as HTMLElement;
+    expect(pill.querySelector('.pill-text')?.textContent).toBe('deepseek/deepseek-v4-flash');
+    expect(pill.getAttribute('aria-label')).toContain('deepseek/deepseek-v4-flash');
+
+    fireEvent.click(pill);
+    const favourites = within(screen.getByRole('group', { name: 'Favourite' }));
+    expect(favourites.getByRole('menuitem', { name: 'deepseek/deepseek-v4-flash' }).querySelector('[data-icon="check"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole('menuitem', { name: /^More models/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'openrouter/deepseek/deepseek-flash' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use “openrouter/deepseek/deepseek-flash”' }));
+
+    // The aggregator route survives the round trip: the provider comes from the name, the model
+    // keeps its own slash instead of it being read as a second provider boundary.
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('sessions:setModel', {
+        id: 's_h',
+        model: { provider: 'openrouter', model: 'deepseek/deepseek-flash' }
+      })
+    );
+  });
+
+  it('shows effort beside the model and in the model menu, and keeps permissions as their own pill', () => {
+    const { container } = setupControls({ activeEffort: 'high' });
+    const pill = container.querySelector('[title="Model"]') as HTMLElement;
+    expect(pill.querySelector('.pill-effort')?.textContent).toBe('high');
+    fireEvent.click(pill);
+    const reasoning = within(screen.getByRole('group', { name: 'Reasoning Effort' }));
+    expect(reasoning.getByRole('menuitemradio', { name: 'high', checked: true })).toBeTruthy();
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole('button', { name: 'More session controls' })).toBeNull();
+
+    const permission = screen.getByRole('button', { name: 'Permission mode: Ask' });
+    fireEvent.click(permission);
+    fireEvent.click(screen.getByRole('menuitem', { name: /Accept edits/ }));
+    expect(invokeMock).toHaveBeenCalledWith('sessions:setPermissionMode', { id: 's_h', mode: 'accept-edits' });
+  });
+
+  it('reads default in the model menu while no effort was chosen', () => {
+    setupControls();
+    fireEvent.click(screen.getByTitle('Model'));
+    const reasoning = within(screen.getByRole('group', { name: 'Reasoning Effort' }));
+    expect(reasoning.getByText('Default', { exact: true })).toBeTruthy();
+    expect(reasoning.queryByRole('menuitemradio', { checked: true })).toBeNull();
+  });
+
+  it('names the model provider-first in the pill, with the effort beside it as its own lighter label', () => {
+    const opus = { provider: 'anthropic', model: 'claude-opus-5-5' };
+    const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask', model: opus, effort: 'xhigh' } as SessionMeta['config'] });
+    act(() => useStore.setState({ models: { s_h: [{ id: opus.model, provider: opus.provider, displayName: 'Opus 5.5', supportedEfforts: ['low', 'high', 'xhigh'] }] } }));
+    const pill = container.querySelector('[title="Model"]') as HTMLElement;
+    expect(pill.querySelector('.pill-text')?.textContent).toBe('anthropic/Opus 5.5');
+    expect(pill.querySelector('.pill-text')?.getAttribute('title')).toBe('anthropic/claude-opus-5-5');
+    expect(pill.querySelector('.pill-effort')?.textContent).toBe('xhigh');
+    // Effort follows the name, so the name truncates first and the effort stays readable.
+    expect(pill.querySelector('.pill-text')?.nextElementSibling).toBe(pill.querySelector('.pill-effort'));
+  });
+
+  it('explains when a model takes no effort, and drops effort from the pill', () => {
+    const haiku = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' };
+    const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask', model: haiku } as SessionMeta['config'] });
+    act(() => useStore.setState({ models: { s_h: [{ id: haiku.model, provider: haiku.provider, displayName: 'Haiku 4.5', supportedEfforts: [] }] } }));
+    expect(container.querySelector('[title="Model"] .pill-effort')).toBeNull();
+
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    const reasoning = within(screen.getByRole('group', { name: 'Reasoning Effort' }));
+    expect(reasoning.getByText('Haiku 4.5 does not support reasoning effort')).toBeTruthy();
+    expect(reasoning.queryAllByRole('menuitemradio')).toHaveLength(0);
+  });
+
+  it('offers all of Claude’s effort levels inline when the model does not say which it takes', () => {
+    setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    fireEvent.click(screen.getByTitle('Model'));
+    const reasoning = within(screen.getByRole('group', { name: 'Reasoning Effort' }));
+    expect(reasoning.getAllByRole('menuitemradio').map((item) => item.textContent?.trim())).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  });
+
+  it('lists starred catalog models plus the current one, and switches with one click', async () => {
+    const catalog = [
+      { id: 'opus', provider: 'anthropic', displayName: 'Opus' },
+      { id: 'fable', provider: 'anthropic', displayName: 'Fable' },
+      { id: 'sonnet', provider: 'anthropic', displayName: 'Sonnet' },
+      { id: 'haiku', provider: 'anthropic', displayName: 'Haiku' },
+      { id: 'mini', provider: 'anthropic', displayName: 'Mini' }
+    ];
+    // A star for a model this catalog does not list stays out of the short list.
+    useStore.setState({ settings: { providers: [], favoriteModels: [{ provider: 'anthropic', model: 'mini' }, { provider: 'openai', model: 'gpt-x' }] } } as never);
+    const { container } = setupControls({ activeModel: { provider: 'anthropic', model: 'sonnet' } });
+    act(() => useStore.setState({ models: { s_h: catalog } }));
+
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    const rows = [...document.querySelectorAll('.model-menu-models .menu-item-label')].map((row) => row.textContent);
+    expect(rows).toEqual(['anthropic/sonnet', 'anthropic/mini']);
+    fireEvent.click(screen.getByRole('menuitem', { name: /anthropic\/mini/ }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:setModel', { id: 's_h', model: { provider: 'anthropic', model: 'mini' } }));
+  });
+
+  it('falls back to the first catalog models without stars, and keeps the full picker under More models', () => {
+    const catalog = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({ id, provider: 'p', displayName: id.toUpperCase() }));
+    useStore.setState({ settings: { providers: [], favoriteModels: [] } } as never);
+    const { container } = setupControls({ activeModel: { provider: 'p', model: 'f' } });
+    act(() => useStore.setState({ models: { s_h: catalog } }));
+
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    expect([...document.querySelectorAll('.model-menu-models .menu-item-label')].map((row) => row.textContent)).toEqual(['p/a', 'p/b', 'p/c', 'p/d', 'p/f']);
+    fireEvent.click(screen.getByRole('menuitem', { name: /^More models/ }));
+    const search = screen.getByRole('textbox', { name: 'Search models' });
+    expect(document.activeElement).toBe(search);
+    fireEvent.change(search, { target: { value: 'p/e' } });
+    expect(screen.getByRole('button', { name: /p\/e/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /^p\/a/ }));
+    expect(screen.getByRole('group', { name: 'Reasoning Effort' })).toBeTruthy();
   });
 
   it('remembers a successful reasoning effort switch for the next session', async () => {
-    const { container } = setup({ activeEffort: 'low' });
+    const { container } = setupControls({ activeEffort: 'low' });
     invokeMock.mockClear();
     let resolveSwitch!: (value: unknown) => void;
     invokeMock.mockImplementation((channel: string) => {
@@ -165,9 +300,8 @@ describe('header actions', () => {
       return Promise.resolve({});
     });
 
-    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
-    const high = [...document.querySelectorAll('.dropdown-menu .menu-item')].find((item) => item.textContent?.trim() === 'high') as HTMLElement;
-    fireEvent.click(high);
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'high' }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:setEffort', { id: 's_h', effort: 'high' }));
     expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
@@ -176,20 +310,19 @@ describe('header actions', () => {
   });
 
   it('does not remember a reasoning effort switch that fails', async () => {
-    const { container } = setup({ activeEffort: 'low' });
+    const { container } = setupControls({ activeEffort: 'low' });
     invokeMock.mockClear();
     invokeMock.mockImplementation((channel: string) => channel === 'sessions:setEffort' ? Promise.reject(new Error('unsupported')) : Promise.resolve({}));
 
-    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
-    const high = [...document.querySelectorAll('.dropdown-menu .menu-item')].find((item) => item.textContent?.trim() === 'high') as HTMLElement;
-    fireEvent.click(high);
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'high' }));
 
     await waitFor(() => expect(useStore.getState().toasts.some((toast) => toast.text.includes('unsupported'))).toBe(true));
     expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
   });
 
   it('keeps the latest effort choice across live and new-session surfaces', async () => {
-    setup();
+    setupControls();
     invokeMock.mockClear();
     let resolveHigh!: (value: unknown) => void;
     invokeMock.mockImplementation((channel: string, request: { effort?: string }) => {
@@ -207,14 +340,5 @@ describe('header actions', () => {
       ['sessions:setEffort', { id: 's_h', effort: 'high' }],
       ['settings:update', { defaultEffort: 'max' }]
     ]);
-  });
-
-  it('worktree sessions confirm before archive removes the worktree', () => {
-    const { container } = setup({ worktreeBranch: 'agent/a' }, true);
-    expect((container.querySelector('[aria-label="Archive session"]') as HTMLElement).title).toBe('Archive & remove worktree');
-    fireEvent.click(container.querySelector('[aria-label="Archive session"]') as HTMLElement);
-    // Confirmation dialog first; nothing is archived until confirmed.
-    expect(invokeMock).not.toHaveBeenCalledWith('sessions:archive', expect.anything());
-    expect(document.querySelector('.modal')).toBeTruthy();
   });
 });

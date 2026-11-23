@@ -5,12 +5,17 @@
  * reserves that space; on macOS the traffic lights sit in the padded left edge instead.
  */
 import React, { useEffect, useRef, useState } from 'react';
+import { sessionTitleText } from '../../../shared/session-title';
 import { invoke, isMac, isWeb, modKey } from '../api';
 import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
-import type { UpdateState } from '../../../shared/types';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
+import { SessionTitle } from './SessionTitle';
+import { openSettings } from './SettingsView';
+import { VestaLauncher } from './Vesta';
+import { setUiMode, useMinimalUi, useUiMode } from '../ui-mode';
+import { UI_MODES } from '../../../shared/ui-modes';
 
 const REPO = 'https://github.com/vocsong/VocsCode';
 
@@ -31,7 +36,7 @@ export function TitleBar() {
   const navForward = useStore((s) => s.navForward);
   const view = useStore((s) => s.view);
   const session = useActiveSession();
-  const title = view === 'settings' ? 'Settings · Vocs Code' : session ? `${session.title} · Vocs Code` : 'Vocs Code';
+  const title = view === 'settings' ? 'Settings · Vocs Code' : session ? `${sessionTitleText(session)} · Vocs Code` : 'Vocs Code';
 
   return (
     <div className={`titlebar ${isMac ? 'titlebar-mac' : ''} ${isWeb ? 'titlebar-web' : ''}`}>
@@ -40,42 +45,23 @@ export function TitleBar() {
         <TitleBarButton icon="arrowLeft" label="Back" hint={isMac ? '⌘[' : 'Alt+←'} disabled={!canBack} onClick={() => void navBack()} />
         <TitleBarButton icon="arrowRight" label="Forward" hint={isMac ? '⌘]' : 'Alt+→'} disabled={!canForward} onClick={() => void navForward()} />
         <MenuBar />
-        <UpdatePill />
       </div>
-      <div className="titlebar-title" title={title}>
-        {title}
+      {/* The middle of the bar names where you are and doubles as the way to go anywhere else. */}
+      <div className="titlebar-title">
+        <button type="button" className="titlebar-search" title={`${title} — search sessions and commands (${modKey}+K)`} onClick={() => useStore.getState().openPalette(true)}>
+          <Icon name="search" size={13} />
+          {session && view !== 'settings'
+            ? <SessionTitle session={session} className="titlebar-search-text" />
+            : <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : 'Search sessions and commands'}</span>}
+          <kbd className="kbd">{modKey}+K</kbd>
+        </button>
+      </div>
+      <div className="titlebar-trail">
+        <VestaLauncher />
       </div>
       <div className="titlebar-tail">{isWeb && <span className="web-badge">web</span>}</div>
     </div>
   );
-}
-
-/** Unobtrusive auto-update indicator (issue #198): appears only when there is something to act on.
- *  Clicking moves the update along — download, or restart-to-install. While a session is live the
- *  restart prompt is held (deferred); an explicit click installs anyway. */
-function UpdatePill() {
-  const updateState = useStore((s) => s.updateState);
-  if (!pillFor(updateState)) return null;
-  const s = updateState;
-  const label = s.status === 'available' ? `Update ${s.version} available` : s.status === 'downloading' ? `Updating… ${Math.round(s.progress?.percent ?? 0)}%` : s.deferred ? `Update ${s.version} ready` : 'Restart to update';
-  const title = s.status === 'restart-pending' ? (s.deferred ? `Vocs Code ${s.version} is downloaded. It will be offered again once every session is idle; click to update now.` : `Restart to install Vocs Code ${s.version}.`) : s.status === 'downloading' ? 'Downloading the update' : `Download Vocs Code ${s.version}`;
-  return (
-    <button
-      type="button"
-      className={`update-pill ${s.status === 'restart-pending' ? 'update-pill-ready' : ''}`}
-      title={title}
-      onClick={() => {
-        if (s.status === 'available') void invoke('update:download', undefined);
-        else if (s.status === 'restart-pending') void invoke('update:install', undefined);
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
-function pillFor(s: UpdateState): boolean {
-  return s.status === 'available' || s.status === 'downloading' || s.status === 'restart-pending';
 }
 
 function TitleBarButton({ icon, label, hint, onClick, disabled }: { icon: string; label: string; hint?: string; onClick: () => void; disabled?: boolean }) {
@@ -86,11 +72,16 @@ function TitleBarButton({ icon, label, hint, onClick, disabled }: { icon: string
   );
 }
 
-/** Click to open, then hover to walk across the menus — the way a native menu bar behaves. */
+/**
+ * Click to open, then hover to walk across the menus — the way a native menu bar behaves. The
+ * minimalist Zen interface folds the four words into one button whose panel switches between the
+ * same menus by icon, so every item stays reachable without the labels on the bar.
+ */
 function MenuBar() {
   const [open, setOpen] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const close = () => setOpen(null);
+  const compact = useMinimalUi();
 
   useEffect(() => {
     if (!open) return;
@@ -108,12 +99,54 @@ function MenuBar() {
     };
   }, [open]);
 
-  const menus: { label: string; width: number; render: (close: () => void) => React.ReactNode }[] = [
-    { label: 'File', width: 280, render: (c) => <FileMenu close={c} /> },
-    { label: 'Edit', width: 240, render: (c) => <EditMenu close={c} /> },
-    { label: 'View', width: 260, render: (c) => <ViewMenu close={c} /> },
-    { label: 'Help', width: 240, render: (c) => <HelpMenu close={c} /> }
+  const menus: { label: string; icon: string; width: number; render: (close: () => void) => React.ReactNode }[] = [
+    { label: 'File', icon: 'file', width: 280, render: (c) => <FileMenu close={c} /> },
+    { label: 'Edit', icon: 'edit', width: 240, render: (c) => <EditMenu close={c} /> },
+    { label: 'View', icon: 'eye', width: 260, render: (c) => <ViewMenu close={c} /> },
+    { label: 'Help', icon: 'info', width: 240, render: (c) => <HelpMenu close={c} /> }
   ];
+
+  if (compact) {
+    const current = menus.find((m) => m.label === open);
+    return (
+      <nav className="menubar menubar-compact" ref={ref}>
+        <div className="menubar-item">
+          <button
+            type="button"
+            className={`menubar-btn titlebar-btn ${open ? 'open' : ''}`}
+            aria-label="Menu"
+            aria-expanded={!!open}
+            title="Menu"
+            onClick={() => setOpen(open ? null : 'File')}
+          >
+            <Icon name="menu" size={15} />
+          </button>
+          {current && (
+            <div className="dropdown-menu dropdown-left menubar-panel" style={{ width: 280 }}>
+              <div className="menubar-tabs" role="tablist" aria-label="Menus">
+                {menus.map((m) => (
+                  <button
+                    key={m.label}
+                    type="button"
+                    role="tab"
+                    className={`menubar-tab ${m.label === open ? 'active' : ''}`}
+                    aria-selected={m.label === open}
+                    aria-label={m.label}
+                    title={m.label}
+                    onClick={() => setOpen(m.label)}
+                    onMouseEnter={() => setOpen(m.label)}
+                  >
+                    <Icon name={m.icon} size={14} />
+                  </button>
+                ))}
+              </div>
+              {current.render(close)}
+            </div>
+          )}
+        </div>
+      </nav>
+    );
+  }
 
   return (
     <nav className="menubar" ref={ref}>
@@ -228,6 +261,7 @@ function ViewMenu({ close }: { close: () => void }) {
   const panelOpen = useStore((s) => s.panelOpen);
   const panelTab = useStore((s) => s.panelTab);
   const showThinking = useStore((s) => s.showThinking);
+  const uiMode = useUiMode();
   const st = useStore.getState();
   const run = (fn: () => void) => () => {
     close();
@@ -259,7 +293,12 @@ function ViewMenu({ close }: { close: () => void }) {
         Thinking
       </MenuItem>
       <Sep />
-      <MenuItem onClick={run(() => st.setView('settings'))}>Theme</MenuItem>
+      {UI_MODES.map((m) => (
+        <MenuItem key={m.id} active={uiMode === m.id} onClick={run(() => setUiMode(m.id))}>
+          {m.name} interface
+        </MenuItem>
+      ))}
+      <MenuItem onClick={run(() => openSettings('appearance'))}>Theme</MenuItem>
     </>
   );
 }

@@ -1,0 +1,66 @@
+/** First-run terminology and read-only setup results. No credentials cross this boundary. */
+import type { HarnessAvailability, HarnessId } from './types';
+import { HARNESS_BY_ID } from './harness-meta';
+
+export type InstallableHarnessId = 'claude' | 'codex' | 'pi' | 'dsh';
+export type LoginHarnessId = 'claude' | 'codex' | 'pi' | 'antigravity';
+export const ANTIGRAVITY_INSTALL_URL = 'https://antigravity.google/docs/getting-started?tab=cli';
+export const ANTIGRAVITY_MIN_VERSION = '1.5.12';
+
+export interface AntigravityQuota {
+  groups: {
+    name: string;
+    buckets: { name: string; remainingFraction: number; resetAt?: string }[];
+  }[];
+}
+export interface SetupRequirement {
+  id: 'sdk' | 'node' | 'npm' | 'git' | 'runtime';
+  name: string;
+  available: boolean;
+  detail: string;
+  url?: string;
+}
+export interface ProviderAccess {
+  id: string;
+  source: 'stored' | 'environment' | 'local' | 'none';
+}
+export interface HarnessSetupStatus {
+  harness: HarnessId;
+  availability: HarnessAvailability;
+  requirements: SetupRequirement[];
+  providers: ProviderAccess[];
+  /** Installation repairs a missing CLI, not a missing SDK or a pinned runtime selection. */
+  installId?: InstallableHarnessId;
+  canInstall: boolean;
+  installReason?: string;
+  loginId?: LoginHarnessId;
+  /** Codex also receives configured app/environment API keys; CLI status alone cannot prove billing. */
+  apiCredentialsMayOverrideLogin?: boolean;
+}
+
+export const INSTALL_HARNESS: Partial<Record<HarnessId, InstallableHarnessId>> = {
+  claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi', acp: 'dsh'
+};
+export const LOGIN_HARNESS: Partial<Record<HarnessId, LoginHarnessId>> = {
+  claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi', antigravity: 'antigravity'
+};
+
+/** A runnable binary and an unknown login must never be presented as a ready account. */
+export function harnessStatus(harness: HarnessId, status?: HarnessAvailability): { label: string; tone: 'neutral' | 'green' | 'amber' | 'red' } {
+  if (!status) return { label: 'Checking…', tone: 'neutral' };
+  if (!status.available) return { label: 'Setup needed', tone: 'red' };
+  if (harness === 'native') return { label: 'Built in', tone: 'neutral' };
+  if (status.authenticated === true) return { label: status.authMethod === 'subscription' ? 'Subscription sign-in detected' : status.authMethod === 'api-key' ? 'API credentials configured' : 'Credentials detected', tone: 'green' };
+  if (status.authenticated === false) return { label: 'Sign-in needed', tone: 'amber' };
+  return { label: 'Sign-in not verified', tone: 'amber' };
+}
+
+/** Whether New Session offers setup: the runtime or sign-in is not ready, or no usable model catalog loaded.
+ *  An unchecked harness is not flagged; ACP's catalog note (models arrive after start) is not a fault. */
+export function harnessNeedsSetup(harness: HarnessId, status: HarnessAvailability | undefined, catalog: { loading: boolean; count: number; error?: string }): boolean {
+  if (!status) return false;
+  if (harnessStatus(harness, status).tone !== 'green' && harness !== 'native') return true;
+  if (!status.available) return true;
+  if (catalog.loading || HARNESS_BY_ID[harness].capabilities.modelSource === 'acp-config') return false;
+  return !!catalog.error || catalog.count === 0;
+}

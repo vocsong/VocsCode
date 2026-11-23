@@ -20,17 +20,17 @@ import type {
 } from './types';
 import { modelKeyLabel } from './model-names';
 
-export const COUNTER_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'durationMs', 'toolCalls', 'speedTokens', 'speedMs'] as const;
+export const COUNTER_FIELDS = ['userInputTokens', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'durationMs', 'toolCalls', 'speedTokens', 'speedMs'] as const;
 
 export function emptyCounters(): UsageCounters {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0, durationMs: 0, toolCalls: 0, speedTokens: 0, speedMs: 0 };
+  return { userInputTokens: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0, durationMs: 0, toolCalls: 0, speedTokens: 0, speedMs: 0 };
 }
 
 /** Adds the positive numeric fields of `from` into `into`; anything else is ignored so old files load cleanly. */
 export function addCounters(into: UsageCounters, from: Partial<UsageCounters>): void {
   for (const f of COUNTER_FIELDS) {
     const v = from[f];
-    if (typeof v === 'number' && v > 0) into[f] += v;
+    if (typeof v === 'number' && v > 0) into[f] = (into[f] ?? 0) + v;
   }
 }
 

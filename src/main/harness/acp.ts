@@ -1,28 +1,19 @@
-import { Readable, Writable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
 import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { isEffortLevel } from '../../shared/harness-meta';
+import { HARNESS_BY_ID, assertPermissionModeOffered, isEffortLevel } from '../../shared/harness-meta';
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
 import { toAcp } from '../mcp/effective';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
-import { isOutsideWorkspace } from './permissions';
+import { requiresPathApproval } from './permissions';
 import { shutdownChild, spawnTool } from './spawn';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
-
-interface ConfigOptionLike {
-  id: string;
-  name: string;
-  description?: string | null;
-  category?: string | null;
-  type: 'select' | 'boolean';
-  currentValue: string | boolean;
-  options?: { value?: string; name: string; description?: string | null; group?: string; options?: { value: string; name: string; description?: string | null; group?: string }[] }[];
-}
+import { ANTIGRAVITY_ACP_ARGS, ANTIGRAVITY_SIGN_IN_MESSAGE, antigravityAccountEnv, connectAcp, isAntigravityAuthRequired } from './antigravity';
+import { acpModelCatalog, decodeAcpModelValue, findEffortOption, findModelOption, flattenSelect, type ConfigOptionLike } from './acp-config';
 
 const ACP_ENV_KEYS: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
@@ -36,51 +27,44 @@ const ACP_ENV_KEYS: Record<string, string> = {
   mistral: 'MISTRAL_API_KEY'
 };
 
-function flattenSelect(opt: ConfigOptionLike): { value: string; name: string; description?: string | null; group?: string }[] {
-  const out: { value: string; name: string; description?: string | null; group?: string }[] = [];
-  for (const o of opt.options ?? []) {
-    if (Array.isArray(o.options)) for (const g of o.options) out.push({ ...g, group: g.group ?? o.group });
-    else if (typeof o.value === 'string') out.push({ value: o.value, name: o.name, description: o.description, group: o.group });
-  }
-  return out;
-}
+// The ACP prompt result is the only proof of completion. Recover a quiet Antigravity
+// stream as failed, not completed, and allow an explicit interrupt even without prose.
+export const ANTIGRAVITY_PROMPT_QUIET_MS = 180_000;
+export const ANTIGRAVITY_CANCEL_GRACE_MS = 5_000;
 
-/** dsh-style agents advertise model choices as JSON `[provider, model]` tuples; decode them. */
-function decodeAcpModelValue(value: string): { provider: string; model: string } | null {
-  try {
-    const v = JSON.parse(value) as unknown;
-    if (!Array.isArray(v) || v.length !== 2 || !v.every((x) => typeof x === 'string' && x.length > 0)) return null;
-    return { provider: v[0] as string, model: v[1] as string };
-  } catch {
-    return null;
-  }
-}
+type ActivePrompt = {
+  startedAt: number;
+  quietTimer?: NodeJS.Timeout;
+  cancelTimer?: NodeJS.Timeout;
+  recovering?: boolean;
+};
 
 export class AcpAdapter implements HarnessAdapter {
-  readonly id = 'acp' as const;
   private child: ChildProcess | null = null;
+  private childShutdown: Promise<void> | null = null;
   private conn: acp.ClientSideConnection | null = null;
   private sessionId: string | null = null;
-  private _busy = false;
+  private prompt: ActivePrompt | null = null;
+  private pendingPermissions = 0;
   private queue: UserInput[] = [];
   private currentAssistant: Extract<TranscriptItem, { kind: 'assistant' }> | null = null;
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private configOptions: ConfigOptionLike[] = [];
   private caps: Record<string, unknown> = {};
   private readonly usage: TurnUsageTracker;
-  private turnStartedAt = 0;
   private sessionAllowedKinds = new Set<string>();
   private preset: AcpAgentPreset | null = null;
+  private sessionModes?: acp.SessionModeState | null;
+  private applyingMode = false;
   /** Clean ModelRef -> the agent's raw option value (tuple-advertising agents key choices by it). */
   private modelValues = new Map<string, string>();
-  private inflightPrompt: Promise<unknown> | null = null;
 
-  constructor(private readonly ctx: HarnessContext) {
+  constructor(private readonly ctx: HarnessContext, readonly id: 'acp' | 'antigravity' = 'acp') {
     this.usage = new TurnUsageTracker(ctx.session().usage);
   }
 
   get busy(): boolean {
-    return this._busy;
+    return this.prompt !== null;
   }
 
   private resolvePreset(): AcpAgentPreset {
@@ -92,16 +76,31 @@ export class AcpAdapter implements HarnessAdapter {
   }
 
   private async killChild(): Promise<void> {
+    if (this.childShutdown) return this.childShutdown;
     const child = this.child;
     this.conn = null;
     this.child = null;
-    if (child) await shutdownChild(child, 2000);
+    this.pendingPermissions = 0;
+    if (!child) return;
+    this.childShutdown = shutdownChild(child, 2000);
+    try {
+      await this.childShutdown;
+    } finally {
+      this.childShutdown = null;
+    }
   }
 
-  async start(): Promise<void> {
-    const meta = this.ctx.session();
+  private async resolveLaunch() {
+    if (this.id === 'antigravity') {
+      const binary = this.ctx.runtime.resolve('agy');
+      if (!binary) throw new Error('Install Antigravity CLI (agy) from Settings → Providers & keys → Harness logins.');
+      const preset = {
+        id: this.id, name: HARNESS_BY_ID[this.id].name, description: '',
+        command: binary.path, args: [...ANTIGRAVITY_ACP_ARGS]
+      };
+      return { preset, command: preset.command, args: preset.args, env: antigravityAccountEnv() };
+    }
     const preset = this.resolvePreset();
-    this.preset = preset;
     const env: NodeJS.ProcessEnv = { ...process.env, ...(preset.env ?? {}) };
     for (const [pid, envKey] of Object.entries(ACP_ENV_KEYS)) {
       if (!env[envKey]) {
@@ -125,23 +124,35 @@ export class AcpAdapter implements HarnessAdapter {
         }
       }
     }
+    return { preset, command, args, env };
+  }
+
+  async start(): Promise<void> {
+    const meta = this.ctx.session();
+    const { preset, command, args, env } = await this.resolveLaunch();
+    this.preset = preset;
     // Preset args are user-visible configuration, not secrets (keys travel in env).
     this.ctx.log('info', `spawning ACP agent ${preset.id}: ${command} ${args.join(' ')} in ${meta.cwd}`);
     const child = spawnTool(command, args, { cwd: meta.cwd, env });
     this.child = child;
-    child.stderr?.on('data', (d: Buffer) => this.ctx.log('debug', `[acp:${preset.id}] ${d.toString().trimEnd()}`));
+    if (this.id === 'antigravity') child.stderr?.resume();
+    else child.stderr?.on('data', (d: Buffer) => this.ctx.log('debug', `[acp:${preset.id}] ${d.toString().trimEnd()}`));
     child.on('close', (code) => {
-      this._busy = false;
-      this.ctx.emit({ type: 'status', status: 'stopped', detail: `${preset.name} exited (${code})` });
+      if (this.child !== child) return;
+      this.child = null;
+      this.conn = null;
+      this.pendingPermissions = 0;
+      const detail = `${preset.name} exited (${code})`;
+      if (this.prompt) this.finishPrompt(this.prompt, 'failed', detail, false);
+      this.discardQueue();
+      this.ctx.emit({ type: 'status', status: 'stopped', detail });
     });
-    child.on('error', (e) => this.ctx.emit({ type: 'error', message: `${preset.name} failed to start: ${errorMessage(e)}`, fatal: true }));
-    if (!child.stdin || !child.stdout) throw new Error('ACP agent has no stdio');
+    child.on('error', (e) => {
+      if (this.child === child) this.ctx.emit({ type: 'error', message: `${preset.name} failed to start: ${errorMessage(e)}`, fatal: true });
+    });
 
     try {
-      const output = Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>;
-      const input = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
-      const stream = acp.ndJsonStream(output, input);
-      this.conn = new acp.ClientSideConnection(() => this.clientHandlers(), stream);
+      this.conn = connectAcp(child, () => this.clientHandlers(child));
 
       const init = await withTimeout(
         this.conn.initialize({
@@ -183,12 +194,13 @@ export class AcpAdapter implements HarnessAdapter {
         this.info(`Skipped MCP ${what} with a command that is not an absolute path: ${skippedMcp.join(', ')}`, 'warn');
       }
       const mcpServers = toAcp(mcpDefs, mcpCaps) as unknown as acp.NewSessionRequest['mcpServers'];
-      let res: { sessionId?: string; configOptions?: unknown[] | null; modes?: unknown } | null = null;
+      let res: { sessionId: string; configOptions?: unknown[] | null; modes?: acp.SessionModeState | null } | null = null;
       if (meta.harnessRef.acpSessionId && sessionCaps.resume) {
         try {
           const r = await withTimeout(this.conn.resumeSession({ sessionId: meta.harnessRef.acpSessionId, cwd: meta.cwd, mcpServers } as acp.ResumeSessionRequest), 120_000, 'session/resume');
           res = { sessionId: meta.harnessRef.acpSessionId, configOptions: r.configOptions ?? null, modes: r.modes };
         } catch (e) {
+          if (this.id === 'antigravity' && isAntigravityAuthRequired(e)) throw e;
           this.info(`Could not resume ACP session (${errorMessage(e)}); starting a new one.`, 'warn');
         }
       }
@@ -196,9 +208,11 @@ export class AcpAdapter implements HarnessAdapter {
         const r = await withTimeout(this.conn.newSession({ cwd: meta.cwd, mcpServers }), 180_000, 'session/new');
         res = { sessionId: r.sessionId, configOptions: r.configOptions ?? null, modes: r.modes };
       }
-      this.sessionId = res.sessionId ?? null;
-      if (this.sessionId) this.ctx.updateRef({ acpSessionId: this.sessionId });
+      this.sessionId = res.sessionId;
+      this.sessionModes = res.modes;
       this.configOptions = (res.configOptions ?? []) as ConfigOptionLike[];
+      await this.setPermissionMode(this.ctx.permissionMode());
+      this.ctx.updateRef({ acpSessionId: this.sessionId });
       this.publishModels();
 
       // Apply the configured model / effort if the agent exposes them.
@@ -208,42 +222,28 @@ export class AcpAdapter implements HarnessAdapter {
     } catch (e) {
       // Handshake failed: tear the agent down so it cannot linger holding injected API keys.
       await this.killChild();
+      if (this.id === 'antigravity' && isAntigravityAuthRequired(e)) throw new Error(ANTIGRAVITY_SIGN_IN_MESSAGE);
       throw e;
     }
     this.ctx.emit({ type: 'status', status: 'idle' });
   }
 
   private modelOption(): ConfigOptionLike | undefined {
-    return this.configOptions.find((o) => o.type === 'select' && (o.category === 'model' || o.id === 'model' || /model/i.test(o.id)));
+    return findModelOption(this.configOptions);
   }
 
   private effortOption(): ConfigOptionLike | undefined {
-    return this.configOptions.find((o) => o.type === 'select' && (o.category === 'thought_level' || /effort|thinking|reasoning/i.test(o.id)));
+    return findEffortOption(this.configOptions);
   }
 
   private publishModels(): void {
     const opt = this.modelOption();
     if (!opt) return;
     const eff = this.effortOption();
-    // Agents can advertise values the app does not model (none, auto, numeric levels); drop them at the boundary.
-    // An option left with none is not a claim that the model takes no effort (`[]`), so it stays unknown.
-    const levels = eff ? flattenSelect(eff).map((o) => o.value).filter(isEffortLevel) : [];
-    const efforts = levels.length ? levels : undefined;
     this.modelValues.clear();
-    const models: ModelInfo[] = flattenSelect(opt).map((o) => {
-      // dsh-style agents advertise the route as a JSON [provider, model] tuple; expose the bare
-      // model id and real provider so model refs stay clean, and keep the raw value for setting.
-      const decoded = decodeAcpModelValue(o.value);
-      const info: ModelInfo = {
-        id: decoded?.model ?? o.value,
-        provider: decoded?.provider ?? this.preset?.id ?? 'acp',
-        displayName: o.name || decoded?.model || o.value,
-        description: o.description ?? undefined,
-        supportedEfforts: efforts,
-        isDefault: o.value === opt.currentValue
-      };
-      this.modelValues.set(`${info.provider}\u0000${info.id}`, o.value);
-      return info;
+    const models: ModelInfo[] = acpModelCatalog(this.configOptions, this.preset?.id ?? 'acp').map(({ model, value }) => {
+      this.modelValues.set(`${model.provider}\u0000${model.id}`, value);
+      return model;
     });
     this.ctx.emit({ type: 'models', models });
     const currentValue = typeof opt.currentValue === 'string' ? opt.currentValue : undefined;
@@ -253,11 +253,27 @@ export class AcpAdapter implements HarnessAdapter {
     if (eff && isEffortLevel(eff.currentValue)) this.ctx.updateMeta({ activeEffort: eff.currentValue });
   }
 
-  private clientHandlers(): acp.Client {
+  private clientHandlers(child: ChildProcess): acp.Client {
     const cwd = () => this.ctx.session().cwd;
     return {
-      requestPermission: async (params: acp.RequestPermissionRequest) => this.onRequestPermission(params),
-      sessionUpdate: async (params: acp.SessionNotification) => this.onSessionUpdate(params),
+      requestPermission: async (params: acp.RequestPermissionRequest) => {
+        if (this.child !== child || this.prompt?.recovering) return { outcome: { outcome: 'cancelled' } };
+        this.pendingPermissions++;
+        this.armQuietTimer();
+        try {
+          return await this.onRequestPermission(params);
+        } finally {
+          if (this.child === child) {
+            this.pendingPermissions--;
+            this.armQuietTimer();
+          }
+        }
+      },
+      sessionUpdate: async (params: acp.SessionNotification) => {
+        if (this.child !== child || this.prompt?.recovering) return;
+        this.onSessionUpdate(params);
+        this.armQuietTimer();
+      },
       // ACP reads intentionally retain the adapter-wide read policy: an absolute path is allowed
       // even when it is outside the session workspace. Writes and commands still go through the
       // permission gate; callers should only use ACP with an agent they trust.
@@ -277,8 +293,8 @@ export class AcpAdapter implements HarnessAdapter {
         const abs = path.isAbsolute(p.path) ? p.path : path.join(cwd(), p.path);
         const mode = this.ctx.permissionMode();
         if (mode === 'plan') throw new Error('Plan mode: writes are disabled');
-        const outside = isOutsideWorkspace(cwd(), abs, path);
-        if (mode === 'ask' || (outside && mode !== 'full-auto')) {
+        const outside = mode !== 'full-auto' && mode !== 'ask' && await requiresPathApproval(cwd(), abs);
+        if (mode === 'ask' || outside) {
           let before = '';
           try {
             before = await fs.readFile(abs, 'utf8');
@@ -322,12 +338,14 @@ export class AcpAdapter implements HarnessAdapter {
     const command = typeof raw.command === 'string' ? raw.command : Array.isArray(raw.command) ? raw.command.join(' ') : undefined;
     const dangerous = !!command && isDangerousCommand(command);
     const cwd = this.ctx.session().cwd;
-    const outsideWorkspace = (tc.locations ?? []).some((l) => isOutsideWorkspace(cwd, l.path, path));
 
     const selected = (optionId: string): acp.RequestPermissionResponse => ({ outcome: { outcome: 'selected', optionId } });
     const cancelled: acp.RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
+    // Every grant the agent receives is one-time: an "always" answer would let the agent stop asking,
+    // and a later, stricter Vocs Code tier could no longer gate that tool. A generic agent that offers
+    // no allow_once option still gets its allow_always one, or it could never run anything.
     const allow = () => {
-      const id = pick(['allow_once', 'allow_always']);
+      const id = pick(this.id === 'antigravity' ? ['allow_once'] : ['allow_once', 'allow_always']);
       return id ? selected(id) : cancelled;
     };
     const reject = () => {
@@ -336,21 +354,24 @@ export class AcpAdapter implements HarnessAdapter {
     };
     if (isRead) return allow();
     if (mode === 'plan') return reject();
-    if (mode === 'full-auto') {
-      const id = pick(['allow_always', 'allow_once']);
-      return id ? selected(id) : cancelled;
-    }
+    if (mode === 'full-auto') return allow();
+    // Real-path check: a symlink or junction inside the project that leads out of it counts as outside.
+    const outsideWorkspace = (await Promise.all((tc.locations ?? []).map((l) => requiresPathApproval(cwd, l.path)))).some(Boolean);
     if (!dangerous && !outsideWorkspace) {
       if (mode === 'auto') return allow();
       if (mode === 'accept-edits' && isEdit) return allow();
       if (this.sessionAllowedKinds.has(kind)) return allow();
     }
 
-    const ourOptions: ApprovalOption[] = options.map((o) => ({
-      id: o.optionId,
-      label: o.name,
-      kind: o.kind === 'allow_once' ? 'allow' : o.kind === 'allow_always' ? 'allow_always' : o.kind === 'reject_once' ? 'deny' : 'deny_always'
-    }));
+    const offered = this.id === 'antigravity' ? options.filter((option) => option.kind === 'allow_once' || option.kind === 'reject_once') : options;
+    if (!offered.length) return cancelled;
+    // The agent's "always allow" becomes an app-side "Allow for session": it is kept here, cleared on
+    // any tier change, and never forwarded to the agent as a persistent rule.
+    const ourOptions: ApprovalOption[] = offered.map((o) =>
+      o.kind === 'allow_always'
+        ? { id: o.optionId, label: 'Allow for session', kind: 'allow_session', description: `Do not ask again for ${kind} actions in this session.` }
+        : { id: o.optionId, label: o.name, kind: o.kind === 'allow_once' ? 'allow' : o.kind === 'reject_once' ? 'deny' : 'deny_always' }
+    );
     const changes = this.changesFromContent(tc.content ?? undefined);
     const decision = await this.ctx.requestApproval({
       kind: command ? 'command' : isEdit ? 'file_change' : 'tool',
@@ -364,9 +385,14 @@ export class AcpAdapter implements HarnessAdapter {
       toolItemId: tc.toolCallId,
       options: ourOptions
     });
-    const chosen = options.find((o) => o.optionId === decision.optionId);
-    if (chosen?.kind === 'allow_always') this.sessionAllowedKinds.add(kind);
+    const chosen = offered.find((o) => o.optionId === decision.optionId);
     if (!chosen) return { outcome: { outcome: 'cancelled' } };
+    if (chosen.kind === 'allow_always') {
+      this.sessionAllowedKinds.add(kind);
+      // Answer with the agent's one-time option. Only when it offered none is the chosen option sent,
+      // since cancelling would refuse an action the user just allowed.
+      return selected(pick(['allow_once']) ?? chosen.optionId);
+    }
     return selected(chosen.optionId);
   }
 
@@ -495,9 +521,11 @@ export class AcpAdapter implements HarnessAdapter {
   }
 
   async send(input: UserInput): Promise<void> {
+    if (this.prompt?.recovering || this.childShutdown) throw new Error('The ACP agent is stopping. Retry once it stops.');
     if (!this.conn) await this.start();
     if (!this.conn || !this.sessionId) throw new Error('ACP session is not ready');
-    if (this._busy) {
+    if (this.applyingMode) throw new Error('Wait for the Antigravity permission update to finish.');
+    if (this.prompt) {
       this.queue.push(input);
       this.ctx.updateMeta({ queued: this.queue.length });
       return;
@@ -509,42 +537,95 @@ export class AcpAdapter implements HarnessAdapter {
       if (promptCaps.image) blocks.push({ type: 'image', data: img.data, mimeType: img.mimeType });
       else this.info('This ACP agent does not accept images; the attachment was dropped.', 'warn');
     }
-    this._busy = true;
+    this.toolItems.clear();
+    const turn: ActivePrompt = { startedAt: Date.now() };
+    this.prompt = turn;
     this.usage.beginTurn();
-    this.turnStartedAt = Date.now();
     this.ctx.emit({ type: 'status', status: 'running' });
-    const p = this.conn.prompt({ sessionId: this.sessionId, prompt: blocks } as acp.PromptRequest);
-    this.inflightPrompt = p;
-    void p
-      .then((res) => {
-        this.closeAssistant();
+    void this.conn.prompt({ sessionId: this.sessionId, prompt: blocks } as acp.PromptRequest).then(
+      (res) => {
+        if (this.prompt !== turn || turn.recovering) return;
         const stop = res.stopReason;
-        const completed = this.usage.finishTurn();
-        this.ctx.emit({ type: 'usage', totals: completed.totals });
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: stop === 'cancelled' ? 'interrupted' : stop === 'refusal' ? 'failed' : 'completed', durationMs: Date.now() - this.turnStartedAt, error: stop === 'refusal' ? 'The agent refused the request.' : stop === 'max_tokens' || stop === 'max_turn_requests' ? `Stopped: ${stop}` : undefined } });
-      })
-      .catch((e) => {
-        this.usage.finishTurn(false);
-        this.closeAssistant();
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', durationMs: Date.now() - this.turnStartedAt, error: errorMessage(e) } });
-      })
-      .finally(() => {
-        this._busy = false;
-        this.inflightPrompt = null;
-        this.ctx.emit({ type: 'status', status: 'idle' });
-        const next = this.queue.shift();
-        this.ctx.updateMeta({ queued: this.queue.length });
-        if (next) void this.send(next);
-      });
+        this.finishPrompt(turn, stop === 'cancelled' ? 'interrupted' : stop === 'refusal' ? 'failed' : 'completed',
+          stop === 'refusal' ? 'The agent refused the request.' : stop === 'max_tokens' || stop === 'max_turn_requests' ? `Stopped: ${stop}` : undefined);
+        this.drainQueue();
+      },
+      (e) => {
+        if (this.prompt !== turn || turn.recovering) return;
+        const error = this.id === 'antigravity' && isAntigravityAuthRequired(e) ? ANTIGRAVITY_SIGN_IN_MESSAGE : errorMessage(e);
+        this.finishPrompt(turn, 'failed', error, false);
+        this.drainQueue();
+      }
+    );
+  }
+
+  private finishPrompt(turn: ActivePrompt, status: Extract<TranscriptItem, { kind: 'turn' }>['status'], error?: string, count = true): void {
+    clearTimeout(turn.quietTimer);
+    clearTimeout(turn.cancelTimer);
+    this.closeAssistant();
+    if (!count) {
+      for (const item of this.toolItems.values()) {
+        if (item.status === 'running') this.ctx.emit({ type: 'item.upsert', item: { ...item, status: 'error' } });
+      }
+    }
+    const completed = this.usage.finishTurn(count);
+    if (count) this.ctx.emit({ type: 'usage', totals: completed.totals });
+    this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - turn.startedAt, error } });
+    this.prompt = null;
+  }
+
+  private drainQueue(): void {
+    if (!this.conn) return;
+    this.ctx.emit({ type: 'status', status: 'idle' });
+    const next = this.queue.shift();
+    this.ctx.updateMeta({ queued: this.queue.length });
+    if (next) void this.send(next);
+  }
+
+  private discardQueue(): void {
+    if (!this.queue.length) return;
+    this.queue = [];
+    this.ctx.updateMeta({ queued: 0 });
+    this.info('Queued messages were not sent. Resend them after checking the workspace.', 'warn');
+  }
+
+  private armQuietTimer(): void {
+    const turn = this.prompt;
+    if (this.id !== 'antigravity' || !turn || turn.recovering || turn.cancelTimer) return;
+    clearTimeout(turn.quietTimer);
+    if (!this.currentAssistant?.text.trim() || this.pendingPermissions || [...this.toolItems.values()].some((item) => item.status === 'running')) return;
+    turn.quietTimer = setTimeout(() => {
+      void this.recoverPrompt(turn, 'failed', 'Antigravity stopped sending updates without confirming the turn ended. The reply was kept; check the workspace before retrying.');
+    }, ANTIGRAVITY_PROMPT_QUIET_MS).unref();
+  }
+
+  private async recoverPrompt(turn: ActivePrompt, status: 'failed' | 'interrupted', detail: string): Promise<void> {
+    if (this.prompt !== turn || turn.recovering) return;
+    turn.recovering = true;
+    clearTimeout(turn.quietTimer);
+    clearTimeout(turn.cancelTimer);
+    // A prompt cannot be retried safely on a connection that may still be doing work.
+    await this.killChild();
+    if (this.prompt !== turn) return;
+    this.finishPrompt(turn, status, detail, false);
+    this.discardQueue();
+    this.ctx.emit({ type: 'status', status: 'stopped', detail });
   }
 
   async interrupt(): Promise<void> {
     if (!this.conn || !this.sessionId) return;
-    try {
-      await this.conn.cancel({ sessionId: this.sessionId });
-    } catch (e) {
-      this.ctx.log('warn', `cancel failed: ${errorMessage(e)}`);
+    const turn = this.prompt;
+    if (this.id === 'antigravity' && turn && !turn.cancelTimer) {
+      clearTimeout(turn.quietTimer);
+      turn.cancelTimer = setTimeout(() => {
+        void this.recoverPrompt(turn, 'interrupted', 'Antigravity did not acknowledge the interrupt. Its CLI was stopped; check the workspace before retrying.');
+      }, ANTIGRAVITY_CANCEL_GRACE_MS).unref();
     }
+    const cancel = this.conn.cancel({ sessionId: this.sessionId }).catch((e) => {
+      this.ctx.log('warn', `cancel failed: ${errorMessage(e)}`);
+    });
+    // A stuck write must not hold the caller open; recovery is tied to the prompt result.
+    if (this.id !== 'antigravity') await cancel;
   }
 
   async setModel(model: ModelRef): Promise<void> {
@@ -571,8 +652,30 @@ export class AcpAdapter implements HarnessAdapter {
     this.ctx.updateMeta({ activeEffort: effort });
   }
 
-  async setPermissionMode(_mode: PermissionMode): Promise<void> {
-    // Client-side policy: takes effect on the next permission request.
+  async setPermissionMode(mode: PermissionMode): Promise<void> {
+    // A grant made under one tier must not outlive it, for every ACP agent.
+    this.sessionAllowedKinds.clear();
+    if (this.id !== 'antigravity') return; // Other ACP agents use client-side policy.
+    assertPermissionModeOffered(this.id, mode);
+    if (!this.conn || !this.sessionId) return;
+    if (this.busy || this.applyingMode) throw new Error('Wait for the current Antigravity activity before changing permissions.');
+    // Every mode but Plan runs the CLI in `default` under its strict tool policy, so each tool call
+    // reaches onRequestPermission and Accept edits / Auto / Full access are enforced client-side.
+    const modeId = mode === 'plan' ? 'plan' : 'default';
+    if (!this.sessionModes?.availableModes.some((value) => value.id === modeId)) {
+      throw new Error('Antigravity CLI did not offer the requested permission mode. Update the CLI and retry.');
+    }
+    this.applyingMode = true;
+    try {
+      await withTimeout(this.conn.setSessionMode({ sessionId: this.sessionId, modeId }), 10_000, 'Antigravity permission mode');
+    } catch (error) {
+      // The server may have applied the mode even though the acknowledgement was lost.
+      // Reconnect and apply the saved mode before accepting another prompt.
+      await this.killChild();
+      throw error;
+    } finally {
+      this.applyingMode = false;
+    }
   }
 
   async listModels(): Promise<ModelInfo[]> {
@@ -591,13 +694,20 @@ export class AcpAdapter implements HarnessAdapter {
 
   async dispose(): Promise<void> {
     const conn = this.conn;
+    const turn = this.prompt;
+    if (turn) {
+      turn.recovering = true;
+      clearTimeout(turn.quietTimer);
+      clearTimeout(turn.cancelTimer);
+    }
     this.conn = null;
-    this.child = null;
-    if (conn && this.sessionId) {
+    this.queue = [];
+    if (conn && !turn && this.sessionId) {
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { close?: unknown };
       if (sessionCaps.close) await withTimeout(conn.closeSession({ sessionId: this.sessionId } as acp.CloseSessionRequest), 5000, 'session/close').catch(() => undefined);
     }
     await this.killChild();
+    if (this.prompt) this.finishPrompt(this.prompt, 'interrupted', undefined, false);
   }
 }
 

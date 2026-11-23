@@ -3,15 +3,23 @@ import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, CuaSettings, FolderSessionDefaults, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, PermissionMode, ProviderConfig } from '../shared/types';
 import { MCP_BUILTIN_IDS, isCuaPermissionMode } from '../shared/types';
 import type { KnowledgeSettings } from '../shared/knowledge';
+import { DEFAULT_INTELLIGENCE_SETTINGS, resolveIntelligenceSettings } from '../shared/intelligence';
+import { normalizeBranchPrefix, normalizeCustomBranchPrefixes } from '../shared/branch-prefix';
+import { assertEndpointUrl } from '../shared/endpoint-policy';
 import { isAutoCompactionThreshold } from '../shared/compaction';
+import { DEFAULT_DICTATION, DICTATION_IDLE_MINUTES, localModel, type DictationSettings } from '../shared/dictation';
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
+import { DEFAULT_HOUSEKEEP_RECENT_DAYS, normalizeHousekeepRecentDays } from '../shared/housekeep';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigError, validateMissionConfig, validateMissionProjectOverride, type MissionCapabilityResolver, type MissionProjectOverride } from '../shared/mission-config';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
-import { isThemeId } from '../shared/themes';
+import { DEFAULT_PALETTE, migrateTheme } from '../shared/themes';
+import { DEFAULT_TYPOGRAPHY, normalizeTypography } from '../shared/typography';
+import { DEFAULT_UI_MODE, isUiModeId } from '../shared/ui-modes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
+import { mcpIdIssues } from '../shared/mcp-ids';
 import { CODEX_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from './models/static-models';
 import { readJson, writeJson } from './util/fs';
 
@@ -205,10 +213,14 @@ export function defaultSettings(): AppSettings {
     mission: createDefaultMissionConfig(),
     missionProjects: {},
     theme: 'system',
+    palette: DEFAULT_PALETTE,
+    typography: { ...DEFAULT_TYPOGRAPHY },
+    uiMode: DEFAULT_UI_MODE,
     defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
     autoCompactionThreshold: undefined,
+    housekeepRecentDays: DEFAULT_HOUSEKEEP_RECENT_DAYS,
     defaultModelByHarness: {},
     folderSessionDefaults: {},
     favoriteModels: [],
@@ -224,6 +236,8 @@ export function defaultSettings(): AppSettings {
     cua: { enabled: true, mode: 'standard' },
     mcpProjectState: {},
     knowledge: { prime: true, autoDistill: true },
+    intelligence: structuredClone(DEFAULT_INTELLIGENCE_SETTINGS),
+    dictation: structuredClone(DEFAULT_DICTATION),
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
     sidebarWidth: 280,
@@ -233,8 +247,10 @@ export function defaultSettings(): AppSettings {
     folders: [],
     folderStyles: {},
     customLabels: [],
+    customBranchPrefixes: [],
     folderOrder: [],
     collapsedFolders: [],
+    sidebarView: 'folders',
     customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25, preferHarness: true },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] },
@@ -278,6 +294,8 @@ export function normalizeFolderSessionDefaults(stored: unknown): Record<string, 
     if (isEffortLevel(s.effort)) d.effort = s.effort;
     if (typeof s.permissionMode === 'string' && s.permissionMode in PERMISSION_MODE_LABELS) d.permissionMode = s.permissionMode as PermissionMode;
     if (typeof s.useWorktree === 'boolean') d.useWorktree = s.useWorktree;
+    const branchPrefix = normalizeBranchPrefix(s.branchPrefix);
+    if (branchPrefix) d.branchPrefix = branchPrefix;
     if (typeof s.acpAgent === 'string' && s.acpAgent.trim()) d.acpAgent = s.acpAgent.trim().slice(0, 64);
     if (Object.keys(d).length) out[root] = d;
   }
@@ -323,7 +341,26 @@ function normalizeCustomLabels(stored: unknown): string[] {
   return out;
 }
 
-/** Keep only well-formed MCP server definitions; a malformed entry must not reach a harness. */
+/**
+ * Why a list of MCP server definitions about to be saved must be refused, or null: a name that folds
+ * onto a built-in's, or onto another server's in the same list (see shared/mcp-ids.ts). Only a
+ * problem the list introduces counts. One already in `current` was saved before this rule and stays
+ * on disk, shown as not loaded with its reason, so it does not block an unrelated save. Known problems
+ * match by id and kind, not reason text: a collision's reason names the other server, which changes
+ * when that server is removed, and removing a server must never be refused for it.
+ */
+export function mcpServersSaveError(incoming: unknown, current: readonly McpServerDef[]): string | null {
+  if (!Array.isArray(incoming)) return null;
+  const ids = incoming.map((raw) => ({ id: raw && typeof raw === 'object' && typeof (raw as { id?: unknown }).id === 'string' ? (raw as { id: string }).id.trim() : '' }));
+  const known = new Set(mcpIdIssues(current).map((issue) => `${issue.id}\n${issue.kind}`));
+  return mcpIdIssues(ids.filter((d) => d.id)).find((issue) => !known.has(`${issue.id}\n${issue.kind}`))?.reason ?? null;
+}
+
+/**
+ * Keep only well-formed MCP server definitions; a malformed entry must not reach a harness. Each
+ * definition is rebuilt field by field, so app-only fields (the `builtin` provenance) never come
+ * from what was stored or sent.
+ */
 export function normalizeMcpServers(stored: unknown): McpServerDef[] {
   if (!Array.isArray(stored)) return [];
   const out: McpServerDef[] = [];
@@ -369,6 +406,33 @@ function strMap(v: unknown): Record<string, string> | undefined {
 export function normalizeKnowledgeSettings(stored: unknown): KnowledgeSettings {
   const s = stored && typeof stored === 'object' && !Array.isArray(stored) ? (stored as Record<string, unknown>) : {};
   return { prime: s.prime !== false, autoDistill: s.autoDistill !== false };
+}
+
+/**
+ * Dictation falls back field by field: only a known engine, compute and catalog model survive, so a
+ * hand-edited settings.json cannot point the local engine at a file the app never verified.
+ */
+export function normalizeDictationSettings(stored: unknown): DictationSettings {
+  const s = stored && typeof stored === 'object' && !Array.isArray(stored) ? (stored as Record<string, unknown>) : {};
+  const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+  const cloud = obj(s.cloud);
+  const local = obj(s.local);
+  const d = DEFAULT_DICTATION;
+  const text = (v: unknown, max: number): string | undefined => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
+  const idle = typeof local.idleMinutes === 'number' && (DICTATION_IDLE_MINUTES as readonly number[]).includes(local.idleMinutes) ? local.idleMinutes : d.local.idleMinutes;
+  const language = typeof s.language === 'string' && /^[a-z]{2,3}$/.test(s.language.trim().toLowerCase()) ? s.language.trim().toLowerCase() : '';
+  const provider = text(cloud.provider, 64) ?? d.cloud.provider;
+  return {
+    engine: s.engine === 'local' ? 'local' : 'cloud',
+    // A provider switched without a model keeps an empty model; the service answers with the provider's default.
+    cloud: { provider, model: typeof cloud.model === 'string' ? cloud.model.trim().slice(0, 200) : provider === d.cloud.provider ? d.cloud.model : '' },
+    local: {
+      model: localModel(typeof local.model === 'string' ? local.model : undefined)?.id ?? d.local.model,
+      compute: local.compute === 'gpu' || local.compute === 'cpu' ? local.compute : 'auto',
+      idleMinutes: idle
+    },
+    language
+  };
 }
 
 /** Per-repo MCP switches: string id lists, keyed by absolute project root. */
@@ -449,9 +513,15 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
   const merged: AppSettings = {
     ...d,
     ...stored,
-    // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
-    theme: isThemeId(stored.theme) ? stored.theme : d.theme,
+    // Mode and palette are stored apart; a legacy single-variant theme id is split into both, and
+    // anything this build does not know falls back to System + Default.
+    ...migrateTheme(stored.theme, stored.palette),
+    // Unknown fonts fall back to the default, sizes are clamped, custom family names are kept as typed.
+    typography: normalizeTypography(stored.typography),
+    // Same for an interface mode this build does not know: the full layout is always safe.
+    uiMode: isUiModeId(stored.uiMode) ? stored.uiMode : d.uiMode,
     autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,
+    housekeepRecentDays: normalizeHousekeepRecentDays(stored.housekeepRecentDays),
     // An effort level removed from the app (or a harness-specific value written by an older build) falls back to the harness default.
     defaultEffort: isEffortLevel(stored.defaultEffort) ? stored.defaultEffort : undefined,
     binaries: { ...d.binaries, ...(stored.binaries ?? {}) },
@@ -465,9 +535,11 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    sidebarView: stored.sidebarView === 'recent' ? 'recent' : 'folders',
     gitSetupSkipped: Array.isArray(stored.gitSetupSkipped) ? stored.gitSetupSkipped.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
     customLabels: normalizeCustomLabels(stored.customLabels),
+    customBranchPrefixes: normalizeCustomBranchPrefixes(stored.customBranchPrefixes),
     customShortcuts: normalizeCustomShortcuts(stored.customShortcuts),
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
@@ -483,6 +555,9 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
       : [],
     mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),
     knowledge: normalizeKnowledgeSettings(stored.knowledge),
+    // Field by field, so a hand-edited file can switch nothing on that the type does not allow.
+    intelligence: resolveIntelligenceSettings(stored.intelligence),
+    dictation: normalizeDictationSettings(stored.dictation),
     providers: [],
     acpAgents: []
   };
@@ -534,7 +609,7 @@ export class SettingsStore {
       this.settings = normalizeSettings({ ...stored, mission: undefined, missionProjects: undefined });
     }
     if (stored === undefined) this.log('info', 'no settings.json yet; using defaults');
-    else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme}`);
+    else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme} palette=${this.settings.palette}`);
     return this.settings;
   }
 
@@ -550,6 +625,18 @@ export class SettingsStore {
       const missionChanged = Object.hasOwn(input, 'mission') || Object.hasOwn(input, 'missionProjects');
       if (this.blockedMission && missionChanged && !(Object.hasOwn(input, 'mission') && Object.hasOwn(input, 'missionProjects'))) {
         throw new MissionConfigError('mission', 'Stored Mission settings are invalid. Replace both the configuration and project overrides explicitly.');
+      }
+      if (Object.hasOwn(input, 'mcpServers')) {
+        const refused = mcpServersSaveError(input.mcpServers, this.settings.mcpServers ?? []);
+        if (refused) throw new Error(refused);
+      }
+      // Legacy unsafe URLs remain loadable and do not block unrelated saves. New or changed
+      // endpoint configuration must be safe before any write, publication or listener callback.
+      if (Array.isArray(input.providers)) {
+        for (const provider of input.providers) {
+          const previous = this.settings.providers.find((p) => p.id === provider.id);
+          if (provider.baseUrl !== undefined && provider.baseUrl !== '' && (!previous || previous.baseUrl !== provider.baseUrl)) assertEndpointUrl(provider.baseUrl);
+        }
       }
       const next = normalizeSettings({ ...this.settings, ...input });
       if (missionChanged) {

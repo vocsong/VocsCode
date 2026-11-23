@@ -62,8 +62,18 @@ export async function setSessionEffort(id: string, effort: EffortLevel, toast: T
   }
 }
 
-/** Archive like the sidebar row does: a worktree is removed after confirmation; uncommitted changes block, then force. */
-export async function archiveSession(s: SessionMeta, toast: Toast) {
+/** Publish only the server-confirmed request and effective status, never an optimistic Fast state. */
+export async function setSessionFastMode(id: string, enabled: boolean): Promise<void> {
+  const meta = await invoke('sessions:setFastMode', { id, enabled });
+  useStore.setState((s) => ({ sessions: s.sessions.map((session) => session.id === id ? meta : session) }));
+}
+
+/**
+ * Archive like the sidebar row does: a worktree is removed after confirmation; uncommitted changes
+ * block, then force. `anchor` is the control that was clicked: the confirmations open there, so a
+ * prompt from Zen's rail keeps the rail open beside it instead of landing mid-window.
+ */
+export async function archiveSession(s: SessionMeta, toast: Toast, anchor?: HTMLElement | null) {
   if (s.archived || useStore.getState().archiving[s.id]) return;
   if (s.mission) {
     if (s.mission.role === 'worker') { toast('Archive the owning Mission; specialists cannot be archived independently.', 'info'); return; }
@@ -80,7 +90,8 @@ export async function archiveSession(s: SessionMeta, toast: Toast) {
       title: `Remove the worktree for "${s.title}"?`,
       body: `The folder is deleted; the branch ${s.worktreeBranch} is kept. Unarchiving recreates the worktree.`,
       confirmLabel: 'Archive & remove',
-      danger: true
+      danger: true,
+      anchor
     });
     if (!ok) return;
     // The row stays visible with a blinking Archiving pill until the main process reports back.
@@ -100,7 +111,8 @@ export async function archiveSession(s: SessionMeta, toast: Toast) {
         title: 'Discard uncommitted changes?',
         body: `The worktree has modified or untracked files. Removing it discards them; the branch ${s.worktreeBranch} is kept.`,
         confirmLabel: 'Discard & remove',
-        danger: true
+        danger: true,
+        anchor
       });
       if (!force) return;
       try {

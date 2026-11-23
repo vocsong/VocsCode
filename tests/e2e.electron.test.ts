@@ -109,8 +109,9 @@ async function runScenario(win: Page): Promise<void> {
   await win.waitForSelector('.turn-footer', { timeout: 60_000 });
   await win.screenshot({ path: path.join(shots, `e2e-03-${harness}-reply.png`) });
 
-  // Header pills reflect model + mode; usage pill exists; Changes tab renders git state.
-  expect(await win.locator('.pill').count()).toBeGreaterThanOrEqual(3);
+  // Check the actual run controls, not a stale count of decorative pills.
+  expect(await win.getByRole('button', { name: /^Model:/ }).isVisible()).toBe(true);
+  expect(await win.getByRole('button', { name: /^Permission mode:/ }).isVisible()).toBe(true);
   const title = await win.getByTestId('session-title').innerText();
   expect(title.length).toBeGreaterThan(3);
   await win.click('.panel-tab:has-text("Changes")');

@@ -15,6 +15,8 @@ import { SettingsView } from '../src/renderer/src/components/SettingsView';
 import { MissionPanel, MissionHeaderControls, MissionUsage } from '../src/renderer/src/components/mission/MissionPanel';
 import { MissionSettings } from '../src/renderer/src/components/mission/MissionSettings';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
+import { FilePreviewPane } from '../src/renderer/src/components/FilePreviewPane';
+import { singlePaneLayout } from '../src/renderer/src/panes';
 import { Sidebar, sidebarNavModel } from '../src/renderer/src/components/Sidebar';
 import { CommandPalette } from '../src/renderer/src/components/CommandPalette';
 import { Transcript } from '../src/renderer/src/components/Transcript';
@@ -48,7 +50,7 @@ beforeEach(() => {
   apiMode.platform = 'win32';
   record = missionFixture({ originSessionId: 'source', planRevision: 2, specificationRevision: 3, status: 'awaiting_execution_approval', pendingProposal: { id: 'proposal-three', specificationRevision: 3, planRevision: 2, assistantMessageId: 'proposal-message', requestedAt: 1 } });
   settings = { folders: ['/project'], recentProjects: ['/project'], folderStyles: {}, collapsedFolders: [], defaultHarness: 'native', defaultPermissionMode: 'ask', defaultModelByHarness: {}, acpAgents: [], providers: [], mission: record.config, goalDefaults: {}, sidebarWidth: 250, panelWidth: 450 } as unknown as AppSettings;
-  useStore.setState({ settings, sessions: [ordinary(), owned('lead'), owned('worker')], missions: { mission: record }, missionErrors: {}, missionInspector: null, activeId: 'source', transcripts: {}, loaded: {}, transcriptErrors: {}, drafts: {}, composerHistory: {}, composerInsert: null, modelCatalog: { native: { models: [], loading: false } }, models: {}, panelTab: 'goal', panelBottomTab: 'mcp', panelBottomOpened: [], newSessionKind: 'normal', newSessionRoot: '/project', newMissionSourceId: null, toasts: [], archiving: {}, history: [], historyIndex: -1 });
+  useStore.setState({ settings, sessions: [ordinary(), owned('lead'), owned('worker')], missions: { mission: record }, missionErrors: {}, missionInspector: null, activeId: 'source', transcripts: {}, loaded: {}, transcriptErrors: {}, drafts: {}, composerHistory: {}, composerInsert: null, modelCatalog: { native: { models: [], loading: false } }, models: {}, panelTab: 'goal', fileReveal: null, panelBottomTab: 'mcp', panelBottomOpened: [], newSessionKind: 'normal', newSessionRoot: '/project', newMissionSourceId: null, toasts: [], archiving: {}, history: [], historyIndex: -1 });
   invokeMock.mockReset().mockImplementation(async (channel: string, input?: { id?: string; control?: { action: string } }) => {
     if (channel === 'missions:get') return record;
     if (channel === 'missions:list') return [record];
@@ -495,16 +497,16 @@ describe('Mission launch and controls', () => {
   it('states the Mission support boundary and flags a principal engineer that cannot run one', () => {
     useStore.setState({ newSessionKind: 'mission' });
     const ui = render(<NewSessionDialog />);
-    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi presets on Windows.');
+    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi and Claude Agent SDK presets on Windows.');
     expect(screen.getByRole('option', { name: 'Project default · Principal engineer · not supported for Missions yet' })).toBeTruthy();
-    expect(screen.getByText(/Native loop presets are not supported for Missions yet\. A Mission that uses one stops at a blocker before any work; choose a Pi preset\./)).toBeTruthy();
+    expect(screen.getByText(/Native loop presets are not supported for Missions yet\. A Mission that uses one stops at a blocker before any work; choose a Pi or Claude Agent SDK preset\./)).toBeTruthy();
     ui.unmount();
-    const pi = { ...record.leadPreset, harnessId: 'pi' as const };
-    settings.mission = { ...record.config, presets: [pi] };
+    const claude = { ...record.leadPreset, harnessId: 'claude' as const };
+    settings.mission = { ...record.config, presets: [claude] };
     useStore.setState({ settings: { ...settings } });
     apiMode.platform = 'darwin';
     render(<NewSessionDialog />);
-    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi presets on Windows. Missions cannot run on this platform yet.');
+    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi and Claude Agent SDK presets on Windows. Missions cannot run on this platform yet.');
     expect(screen.getByRole('option', { name: 'Project default · Principal engineer' })).toBeTruthy();
     expect(screen.queryByText(/not supported for Missions yet/)).toBeNull();
   });
@@ -524,8 +526,10 @@ describe('Mission launch and controls', () => {
   it('disables stale proposals and offers T5 handover instead of model/effort controls', async () => {
     record = { ...record, specificationRevision: 4 };
     useStore.setState({ missions: { mission: record } });
-    render(<><Header session={owned('lead')} /><MissionPanel session={owned('lead')} /></>);
+    // The composer is where an ordinary session's model and effort controls live.
+    render(<><Header session={owned('lead')} /><MissionPanel session={owned('lead')} /><Composer session={owned('lead')} /></>);
     expect((screen.getByRole('button', { name: 'Proceed' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByPlaceholderText(/Message the principal engineer/)).toBeTruthy();
     expect(screen.queryByTitle('Model')).toBeNull();
     expect(screen.queryByTitle('Reasoning effort')).toBeNull();
     expect(screen.getByTestId('mission-header').textContent).toContain('T5 principal engineer: Principal engineer');
@@ -728,6 +732,32 @@ describe('Mission navigation, inspection and workspace safety', () => {
     expect(screen.getByTestId('mission-changes').textContent).toContain('Mission result');
   });
 
+  it('resolves shortened transcript files in the lead workspace rather than integration', async () => {
+    const base = { baseCommitSha: 'a'.repeat(40), contentHash: 'b'.repeat(64) };
+    record.workspaces = [
+      { id: 'integration-workspace', role: 'integration', path: '/integration', branch: 'result', base },
+      { id: 'lead-workspace', role: 'lead', path: '/workspaces/lead', branch: 'lead', ownerSessionId: 'lead', base }
+    ];
+    const original = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (channel, input) => {
+      if (channel === 'fs:resolve') return { status: 'resolved', path: 'src/tools.ts' };
+      if (channel === 'fs:read') return { content: 'lead workspace preview', truncated: false };
+      return original(channel, input);
+    });
+    useStore.setState({ missions: { mission: record }, panelTab: 'files', layout: singlePaneLayout('lead') });
+    render(<><RightPanel session={owned('lead')} /><FilePreviewPane /></>);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('fs:list', { sessionId: 'lead', relPath: undefined, missionWorkspaceId: undefined }));
+    act(() => useStore.getState().revealFile('lead', 'tools.ts'));
+    expect(useStore.getState().layout.filePreview).toMatchObject({ sessionId: 'lead', path: 'tools.ts', missionWorkspaceId: 'lead-workspace' });
+    expect((await screen.findByRole('textbox', { name: 'File contents' })).textContent).toBe('lead workspace preview');
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:resolve')).toEqual([
+      ['fs:resolve', { sessionId: 'lead', path: 'tools.ts', missionWorkspaceId: 'lead-workspace' }]
+    ]);
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:read')).toEqual([
+      ['fs:read', { sessionId: 'lead', path: 'src/tools.ts', maxBytes: 200_000, missionWorkspaceId: 'lead-workspace' }]
+    ]);
+  });
+
   it('disables generic fork and rewind while leaving ordinary session messages editable', () => {
     useStore.setState({ activeId: 'lead', loaded: { lead: true }, transcripts: { lead: [{ id: 'message', kind: 'user', ts: 1, text: 'Mission input' }] } });
     render(<Transcript session={owned('lead')} />);
@@ -745,6 +775,7 @@ describe('Mission navigation, inspection and workspace safety', () => {
     useStore.setState({ missions: { mission: record }, transcripts: { worker: ['permission', 'command', 'file_change', 'question'].map((kind) => approval(kind as Parameters<typeof approval>[0])) }, loaded: { worker: true } });
     render(<MissionPanel session={owned('lead')} />);
     const cards = screen.getByTestId('mission-worker-approvals');
+    expect([...cards.querySelectorAll('.session-label')].map((label) => label.textContent)).toEqual(Array(3).fill('Native project | Hidden specialist'));
     expect(within(cards).queryByText('Worker question request')).toBeNull();
     expect(within(cards).getAllByRole('button', { name: 'Allow once' })).toHaveLength(3);
     fireEvent.click(within(cards).getAllByRole('button', { name: 'Allow once' })[0]);
@@ -766,7 +797,9 @@ describe('Mission navigation, inspection and workspace safety', () => {
     expect(screen.getByTestId('mission-usage').textContent).toContain('$1.25');
     expect(screen.getByTestId('mission-usage').textContent).toContain('not a complete billing total');
     expect(useStore.getState().sessions.find((s) => s.id === 'lead')?.usage.costUsd).toBe(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Source discussion: Discussion source' }));
+    const discussion = screen.getByRole('button', { name: 'Source discussion: Native project | Discussion source' });
+    expect(discussion.querySelector('.harness-pill')?.getAttribute('data-harness')).toBe('native');
+    fireEvent.click(discussion);
     await waitFor(() => expect(useStore.getState().activeId).toBe('source'));
     expect(useStore.getState().drafts.source).toBe('Keep my discussion draft');
   });
@@ -801,10 +834,13 @@ describe('Mission navigation, inspection and workspace safety', () => {
 
   it('ordinary sessions retain app Goal, native subagents, model controls, editable prompts and normal creation', async () => {
     useStore.setState({ panelTab: 'goal', activeId: 'source', loaded: { source: true }, transcripts: { source: [{ id: 'normal-message', kind: 'user', ts: 1, text: 'Normal prompt' }] } });
-    const ui = render(<><Header session={ordinary()} /><RightPanel session={ordinary()} /><Transcript session={ordinary()} /></>);
+    const ui = render(<><Header session={ordinary()} /><RightPanel session={ordinary()} /><Transcript session={ordinary()} /><Composer session={ordinary()} /></>);
     expect(screen.getByRole('button', { name: 'Set goal' })).toBeTruthy();
     expect(screen.getByTestId('panel-bottom-subagents')).toBeTruthy();
-    expect(screen.getByTitle('Model')).toBeTruthy();
+    // One model control for the session, under the composer rather than in the header.
+    const models = screen.getAllByTitle('Model');
+    expect(models).toHaveLength(1);
+    expect(models[0].closest('.composer')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Edit and rerun message' }) as HTMLButtonElement).disabled).toBe(false);
     ui.unmount();
     const previous = invokeMock.getMockImplementation()!;
