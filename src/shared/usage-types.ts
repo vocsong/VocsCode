@@ -127,6 +127,14 @@ export interface FileUsageRow extends FileUsage {
   total: number;
 }
 
+/** Per-harness rollup inside a session that switched harnesses in place. */
+export interface UsageHarnessSlice {
+  usage: UsageTotals;
+  toolCalls: number;
+  durationMs: number;
+  speed: UsageSpeed;
+}
+
 /** Per-session usage snapshot; kept in the analytics store even after the session is deleted. */
 export interface UsageSessionRecord {
   id: string;
@@ -144,6 +152,8 @@ export interface UsageSessionRecord {
   durationMs?: number;
   /** Output speed sample for this session; absent in records written before speed was tracked. */
   speed?: UsageSpeed;
+  /** Per-harness totals when a session switched harnesses in place; absent for single-harness sessions. */
+  byHarness?: Partial<Record<HarnessId, UsageHarnessSlice>>;
 }
 
 /** Usage rollup for one dimension (harness, model, project). */

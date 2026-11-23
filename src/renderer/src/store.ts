@@ -910,6 +910,15 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.composerHistory)) if (!ids.has(id)) removed.add(id);
+      // An in-place harness switch invalidates the old runtime's reported model list.
+      const prevById = new Map(s.sessions.map((x) => [x.id, x]));
+      const harnessChanged = new Set<string>();
+      for (const next of sessions) {
+        const prev = prevById.get(next.id);
+        if (prev && (prev.config.harness !== next.config.harness || prev.config.acpAgent !== next.config.acpAgent) && next.id in s.models) {
+          harnessChanged.add(next.id);
+        }
+      }
       const activeId = s.activeId;
       const before = activeId ? s.sessions.find((x) => x.id === activeId) : undefined;
       const after = activeId ? sessions.find((x) => x.id === activeId) : undefined;
@@ -945,7 +954,7 @@ export const useStore = create<State>((set, get) => ({
         }
       }
       const activeAfter = layout === s.layout ? s.activeId : panes.activePane(layout).sessionId;
-      if (removed.size === 0 && !activeRemoved && layout === s.layout) return { sessions };
+      if (removed.size === 0 && harnessChanged.size === 0 && !activeRemoved && layout === s.layout) return { sessions };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
       const transcriptErrors = { ...s.transcriptErrors };
@@ -966,6 +975,7 @@ export const useStore = create<State>((set, get) => ({
         delete drafts[id];
         delete composerHistory[id];
       }
+      for (const id of harnessChanged) delete models[id];
       return {
         sessions,
         transcripts,

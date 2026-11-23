@@ -5,6 +5,7 @@ import type {
   AnalyticsSummary,
   FileUsage,
   FileUsageRow,
+  HarnessId,
   HarnessModelToolRow,
   ModelRateRow,
   ModelRef,
@@ -20,6 +21,7 @@ import type {
   UsageCounters,
   UsageDay,
   UsageDayDimensions,
+  UsageHarnessSlice,
   UsageSessionRecord,
   UsageSpeed,
   UsageTotals
@@ -251,7 +253,48 @@ function dayModelCovering(by: UsageDayDimensions, sessions: string[]): string | 
   return sessions.every((id) => covering.has(id)) ? found : undefined;
 }
 
+function emptyHarnessSlice(): UsageHarnessSlice {
+  return { usage: { ...EMPTY_USAGE }, toolCalls: 0, durationMs: 0, speed: emptySpeed() };
+}
+
+function cloneByHarness(byHarness: UsageSessionRecord['byHarness']): UsageSessionRecord['byHarness'] {
+  if (!byHarness) return undefined;
+  const out: Partial<Record<HarnessId, UsageHarnessSlice>> = {};
+  for (const [k, v] of Object.entries(byHarness)) {
+    if (!v) continue;
+    out[k as HarnessId] = {
+      usage: { ...v.usage },
+      toolCalls: v.toolCalls,
+      durationMs: v.durationMs,
+      speed: v.speed ? { ...v.speed } : emptySpeed()
+    };
+  }
+  return out;
+}
+
+function hasHarnessSliceActivity(slice: UsageHarnessSlice): boolean {
+  return slice.usage.costUsd > 0 || slice.usage.turns > 0 || slice.toolCalls > 0 || slice.durationMs > 0 || totalTokens(slice.usage) > 0;
+}
+
+function ensureHarnessSlice(session: UsageSessionRecord, harness: HarnessId): UsageHarnessSlice {
+  const by = (session.byHarness ??= {});
+  return (by[harness] ??= emptyHarnessSlice());
+}
+
 function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSessionRecord {
+  let byHarness = cloneByHarness(prev?.byHarness);
+  // First in-place harness switch for this session: freeze prior totals under the old harness
+  // so all-time harness rollups do not re-attribute earlier spend to the new harness.
+  if (prev && prev.harness !== meta.config.harness && !byHarness) {
+    byHarness = {
+      [prev.harness]: {
+        usage: { ...prev.usage },
+        toolCalls: prev.toolCalls,
+        durationMs: prev.durationMs ?? 0,
+        speed: prev.speed ? { ...prev.speed } : emptySpeed()
+      }
+    };
+  }
   return {
     id: meta.id,
     title: meta.title,
@@ -264,7 +307,8 @@ function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSes
     usage: { ...meta.usage },
     toolCalls: prev?.toolCalls ?? 0,
     durationMs: prev?.durationMs ?? 0,
-    speed: prev?.speed ? { ...prev.speed } : emptySpeed()
+    speed: prev?.speed ? { ...prev.speed } : emptySpeed(),
+    ...(byHarness ? { byHarness } : {})
   };
 }
 
@@ -520,7 +564,29 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     return [...map.values()].sort((a, b) => b.usage.costUsd - a.usage.costUsd || b.usage.turns - a.usage.turns);
   };
 
-  const byHarness = rollup((s) => ({ key: s.harness, label: s.harness }));
+  const byHarness = (() => {
+    const map = new Map<string, UsageBucket>();
+    const add = (key: string, slice: UsageHarnessSlice) => {
+      const b = map.get(key) ?? { key, label: key, usage: { ...EMPTY_USAGE }, toolCalls: 0, durationMs: 0, sessions: 0, speed: emptySpeed() };
+      addTotals(b.usage, slice.usage);
+      b.toolCalls += slice.toolCalls;
+      b.durationMs += slice.durationMs;
+      addSpeed(b.speed, slice.speed);
+      b.sessions += 1;
+      map.set(key, b);
+    };
+    for (const s of sessions) {
+      if (s.byHarness) {
+        const activeSlices = Object.entries(s.byHarness).filter((entry): entry is [string, UsageHarnessSlice] => !!entry[1] && hasHarnessSliceActivity(entry[1]));
+        if (activeSlices.length) {
+          for (const [k, slice] of activeSlices) add(k, slice);
+          continue;
+        }
+      }
+      add(s.harness, { usage: s.usage, toolCalls: s.toolCalls, durationMs: s.durationMs ?? 0, speed: s.speed ?? emptySpeed() });
+    }
+    return [...map.values()].sort((a, b) => b.usage.costUsd - a.usage.costUsd || b.usage.turns - a.usage.turns);
+  })();
   const byModel = rollup((s) => {
     if (!s.model) return null;
     const key = `${s.provider ?? ''}/${s.model}`;
@@ -938,7 +1004,19 @@ export class AnalyticsStore {
     const prev = this.data.recorded[meta.id];
     const delta = usageDelta(prev ?? { ...EMPTY_USAGE }, totals);
     this.data.recorded[meta.id] = { ...totals };
-    this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]);
+    const session = (this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]));
+    if (session.byHarness) {
+      const slice = ensureHarnessSlice(session, meta.config.harness);
+      addTotals(slice.usage, {
+        inputTokens: delta.inputTokens ?? 0,
+        outputTokens: delta.outputTokens ?? 0,
+        cacheReadTokens: delta.cacheReadTokens ?? 0,
+        cacheWriteTokens: delta.cacheWriteTokens ?? 0,
+        reasoningTokens: delta.reasoningTokens ?? 0,
+        costUsd: delta.costUsd ?? 0,
+        turns: delta.turns ?? 0
+      });
+    }
     const day = this.dayFor(dayKey(now));
     addDay(day, delta);
     attribute(day, attributionOf(meta), delta);
@@ -962,7 +1040,10 @@ export class AnalyticsStore {
       addToolUsage((by.tool[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
       addToolUsage((this.data.tools[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
       const session = this.data.sessions[meta.id];
-      if (session) session.toolCalls += uses;
+      if (session) {
+        session.toolCalls += uses;
+        if (session.byHarness) ensureHarnessSlice(session, meta.config.harness).toolCalls += uses;
+      }
       // Live per-harness outcomes, so the reliability table accounts for delegated work too.
       addToolUsage(((this.data.harnessTools[meta.config.harness] ??= {})[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
       this.executions.recordSubagent(meta.id, completion, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel, undefined, 'live', now));
@@ -1069,6 +1150,11 @@ export class AnalyticsStore {
     if (speed) {
       addSpeed((session.speed ??= emptySpeed()), speed);
     }
+    if (session.byHarness) {
+      const slice = ensureHarnessSlice(session, meta.config.harness);
+      slice.durationMs += durationMs;
+      if (speed) addSpeed(slice.speed, speed);
+    }
     this.scheduleWrite();
   }
 
@@ -1099,7 +1185,10 @@ export class AnalyticsStore {
       addFileUsage((this.data.files[p] ??= emptyFileUsage()), u);
     }
     const session = this.data.sessions[sessionId];
-    if (session) session.toolCalls += 1;
+    if (session) {
+      session.toolCalls += 1;
+      if (session.byHarness) ensureHarnessSlice(session, session.harness).toolCalls += 1;
+    }
     const day = this.dayFor(dayKey(now));
     addDay(day, { toolCalls: 1 });
     const by = (day.by ??= emptyDimensions());

@@ -8,6 +8,8 @@ import { useStore } from '../store';
 import { Icon, MenuItem, Spinner } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { FastModeOptions } from './FastModeOptions';
+import { SwitchHarnessOptions, switchHarnessDisabledReason } from './SwitchHarness';
+import { harnessShort } from '../format';
 
 const NO_FAVORITES: ModelRef[] = [];
 
@@ -44,19 +46,20 @@ export function ModelMenu({
   close: () => void;
 }) {
   const favorites = useStore((s) => s.settings?.favoriteModels ?? NO_FAVORITES);
-  const [showAll, setShowAll] = useState(false);
+  const [subview, setSubview] = useState<'main' | 'models' | 'harness'>('main');
   const ref = useRef<HTMLDivElement>(null);
   const favouriteId = useId();
   const effortId = useId();
-  // Restore row focus when returning from the full picker, which focuses its own search.
+  const harnessId = useId();
+  // Restore row focus when returning from a drill-in view.
   useEffect(() => {
-    if (!showAll) ref.current?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus();
-  }, [showAll]);
+    if (subview !== 'models') ref.current?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus();
+  }, [subview]);
 
-  if (showAll) {
+  if (subview === 'models') {
     return (
       <div className="model-menu model-menu-wide">
-        <button type="button" className="menu-item model-menu-back" aria-label="Back" onClick={() => setShowAll(false)}>
+        <button type="button" className="menu-item model-menu-back" aria-label="Back" onClick={() => setSubview('main')}>
           <Icon name="arrowLeft" size={13} /> <span className="menu-item-label">All models</span>
         </button>
         <ModelPicker
@@ -78,7 +81,19 @@ export function ModelMenu({
     );
   }
 
+  if (subview === 'harness') {
+    return (
+      <div ref={ref} className="model-menu">
+        <button type="button" className="menu-item model-menu-back" aria-label="Back" onClick={() => setSubview('main')}>
+          <Icon name="arrowLeft" size={13} /> <span className="menu-item-label">Switch harness</span>
+        </button>
+        <SwitchHarnessOptions session={session} close={close} showHeading={false} />
+      </div>
+    );
+  }
+
   const short = quickModels(models, favorites, current);
+  const switchDisabled = switchHarnessDisabledReason(session);
   return (
     <div ref={ref} className="model-menu">
       <div role="group" aria-labelledby={favouriteId}>
@@ -95,7 +110,7 @@ export function ModelMenu({
         </div>
         {loading && !short.length && <div className="run-more-note row gap6"><Spinner size={11} /> Loading models…</div>}
         {!loading && !short.length && <div className="run-more-note">{error ?? emptyText}</div>}
-        <MenuItem trailing={<Icon name="chevronRight" size={13} />} onClick={() => setShowAll(true)}>
+        <MenuItem trailing={<Icon name="chevronRight" size={13} />} onClick={() => setSubview('models')}>
           More models
         </MenuItem>
       </div>
@@ -115,6 +130,20 @@ export function ModelMenu({
         </div>
       )}
       <FastModeOptions key={session.id} session={session} />
+      {!session.mission && (
+        <div className="run-more-section" role="group" aria-labelledby={harnessId}>
+          <div className="run-more-label" id={harnessId}>Harness</div>
+          <MenuItem
+            disabled={!!switchDisabled}
+            hint={harnessShort(session.config.harness)}
+            trailing={<Icon name="chevronRight" size={13} />}
+            onClick={() => setSubview('harness')}
+          >
+            Switch harness
+          </MenuItem>
+          {switchDisabled && <div className="run-more-note">{switchDisabled}</div>}
+        </div>
+      )}
     </div>
   );
 }

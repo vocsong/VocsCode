@@ -237,6 +237,7 @@ const GOAL_CONTINUATION_RETRY_MS = 5_000;
 const GOAL_CONTINUATION_MAX_ATTEMPTS = 60;
 /** Handoff text written into a cross-harness fork's session dir, consumed by its first message. */
 const FORK_CONTEXT_FILE = 'fork-context.md';
+const ALTERNATE_FORK_CONTEXT_FILE = 'fork-context-alternate.md';
 
 /** Title calls per session per run: one on the first message, one more if that one came back empty. */
 const MAX_TITLE_ATTEMPTS = 2;
@@ -265,8 +266,10 @@ export class SessionManager {
   private fastModeUpdates = new Set<string>();
   /** Hold turn admission while Antigravity acknowledges and persists a permission change. */
   private antigravityModeUpdates = new Set<string>();
-  /** Reserve send-first dispatches before startup/preamble awaits expose an idle gap. */
+  /** Count ordinary operations across awaits; callers do not exclude one another. */
   private configDispatches = new Map<string, number>();
+  /** Exclusive admission from before Stop through the persisted harness and handoff. */
+  private harnessSwitches = new Map<string, symbol>();
   /** Blocks turn admission and ordinary edits during the checked housekeeping commit. */
   private housekeepArchives = new Set<string>();
   /** Last runtime created per session. An ordinary runtime is fenced only once a newer one exists. */
@@ -1036,7 +1039,7 @@ export class SessionManager {
   private housekeepIdle(id: string): boolean {
     const meta = this.get(id);
     if (!meta || meta.archived || meta.mission || meta.pinned || this.configDispatches.has(id) || this.persistTimers.has(id) ||
-        this.fastModeUpdates.has(id) || this.antigravityModeUpdates.has(id)) return false;
+        this.fastModeUpdates.has(id) || this.antigravityModeUpdates.has(id) || this.harnessSwitches.has(id)) return false;
     const activity = this.activity(id);
     return !activity.active && activity.quiescent;
   }
@@ -1438,8 +1441,13 @@ export class SessionManager {
     return this.sendAs(id, input, 'user');
   }
 
+  private assertNotSwitchingHarness(id: string): void {
+    if (this.harnessSwitches.has(id)) throw new Error('Wait for the harness switch to finish.');
+  }
+
   private assertNotControlled(id: string): void {
     this.assertNotHousekeeping(id);
+    this.assertNotSwitchingHarness(id);
     if (this.controlled.has(id)) throw new Error('Session is busy with a controlled turn');
   }
 
@@ -1447,6 +1455,10 @@ export class SessionManager {
   private async withoutControlled<T>(id: string, operation: () => Promise<T>): Promise<T> {
     this.assertNotControlled(id);
     if (this.antigravityModeUpdates.has(id)) throw new Error('Wait for the Antigravity permission update to finish.');
+    return this.withConfigDispatch(id, operation);
+  }
+
+  private async withConfigDispatch<T>(id: string, operation: () => Promise<T>): Promise<T> {
     this.configDispatches.set(id, (this.configDispatches.get(id) ?? 0) + 1);
     try {
       return await operation();
@@ -1806,15 +1818,9 @@ export class SessionManager {
   }
 
   private async dispatchInput(id: string, input: UserInput, generation?: number): Promise<void> {
+    this.assertNotSwitchingHarness(id);
     if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
-    this.configDispatches.set(id, (this.configDispatches.get(id) ?? 0) + 1);
-    try {
-      await this.dispatchReservedInput(id, input, generation);
-    } finally {
-      const count = (this.configDispatches.get(id) ?? 1) - 1;
-      if (count) this.configDispatches.set(id, count);
-      else this.configDispatches.delete(id);
-    }
+    return this.withConfigDispatch(id, () => this.dispatchReservedInput(id, input, generation));
   }
 
   private async dispatchReservedInput(id: string, input: UserInput, generation?: number): Promise<void> {
@@ -1888,7 +1894,7 @@ export class SessionManager {
     if (meta.pendingKnowledgeDigest && meta.knowledgeDigest) parts.push(meta.knowledgeDigest);
     if (meta.pendingForkContext) {
       try {
-        const context = await this.deps.store.readBlob(id, FORK_CONTEXT_FILE);
+        const context = await this.deps.store.readBlob(id, meta.pendingForkContextAlternate ? ALTERNATE_FORK_CONTEXT_FILE : FORK_CONTEXT_FILE);
         if (context) parts.push(context);
       } catch {
         // The blob is written before the flag is set; a read failure only means we have no context.
@@ -1902,6 +1908,7 @@ export class SessionManager {
     const meta = this.get(id);
     if (!meta?.pendingForkContext && !meta?.pendingKnowledgeDigest && !meta?.pendingAppInstructions) return;
     meta.pendingForkContext = undefined;
+    meta.pendingForkContextAlternate = undefined;
     meta.pendingKnowledgeDigest = undefined;
     meta.pendingAppInstructions = undefined;
     await this.deps.store.upsert(meta);
@@ -2154,6 +2161,7 @@ export class SessionManager {
 
   async interrupt(id: string): Promise<void> {
     this.assertUnmanaged(id);
+    this.assertNotSwitchingHarness(id);
     const controlled = this.controlled.get(id);
     if (controlled) {
       if (!controlled.terminal) await this.interruptControlled(id, controlled.operationId);
@@ -2161,18 +2169,23 @@ export class SessionManager {
     }
     const active = this.active.get(id);
     if (!active) return;
-    this.deps.log('info', `[${id}] interrupt requested`);
-    this.cancelApprovals(id, active, 'Interrupted');
-    await active.adapter.interrupt();
+    return this.withConfigDispatch(id, async () => {
+      this.deps.log('info', `[${id}] interrupt requested`);
+      this.cancelApprovals(id, active, 'Interrupted');
+      await active.adapter.interrupt();
+    });
   }
 
-  /** User Stop (also Archive, Delete and Move): never fails or wedges an ordinary session. */
+  /** User Stop (also Archive, Delete and Move): ordinary teardown is best-effort and bounded. */
   async stop(id: string): Promise<void> {
     this.assertUnmanaged(id);
-    const controlled = this.controlled.get(id);
-    if (controlled) controlled.canceled = true;
-    await this.releaseStaleWriterClaims(id);
-    await this.stopOrdinary(id);
+    this.assertNotSwitchingHarness(id);
+    return this.withConfigDispatch(id, async () => {
+      const controlled = this.controlled.get(id);
+      if (controlled) controlled.canceled = true;
+      await this.releaseStaleWriterClaims(id);
+      await this.stopOrdinary(id);
+    });
   }
 
   private async stopOrdinary(id: string): Promise<void> {
@@ -3083,7 +3096,8 @@ export class SessionManager {
   async refreshGoalDrivers(): Promise<void> {
     let changed = false;
     for (const meta of this.deps.store.list()) {
-      if (await this.applyGoalDriver(meta)) {
+      const config = meta.config;
+      if (await this.applyGoalDriver(meta, () => this.get(meta.id) === meta && meta.config === config)) {
         this.schedulePersist(meta);
         changed = true;
       }
@@ -3097,6 +3111,124 @@ export class SessionManager {
    */
   async moveTo(id: string, cwd: string): Promise<SessionMeta> {
     return this.withoutControlled(id, () => this.moveUncontrolled(id, cwd));
+  }
+
+  /**
+   * Switches a session to another harness in place, keeping its workspace, worktree, and transcript.
+   * Any running harness is stopped first and prior conversation is handed over on the next message.
+   */
+  async switchHarness(id: string, harness: HarnessId, opts: { model?: ModelRef; acpAgent?: string } = {}): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
+    this.assertNotControlled(id);
+    if (this.antigravityModeUpdates.has(id)) throw new Error('Wait for the Antigravity permission update to finish.');
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (meta.archived) throw new Error('Restore this session before switching harnesses.');
+    if (!HARNESS_BY_ID[harness]) throw new Error('Unknown harness');
+    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    const settings = this.settings();
+    const targetAcpAgent = harness === 'acp' ? (opts.acpAgent ?? settings.acpAgents[0]?.id) : undefined;
+    if (meta.config.harness === harness && (harness !== 'acp' || targetAcpAgent === meta.config.acpAgent)) {
+      if (opts.model && (!meta.activeModel || meta.activeModel.provider !== opts.model.provider || meta.activeModel.model !== opts.model.model)) {
+        return this.setModel(id, opts.model);
+      }
+      return meta;
+    }
+    const active = this.active.get(id);
+    const activity = this.activity(id);
+    if (
+      this.configDispatches.has(id) ||
+      active?.starting ||
+      activity.turn ||
+      activity.tools ||
+      activity.nativeChildren ||
+      activity.approvals ||
+      activity.compacting ||
+      activity.queued ||
+      activity.tearingDown ||
+      activity.uncertain ||
+      meta.status === 'running' ||
+      meta.status === 'starting' ||
+      meta.status === 'awaiting'
+    ) {
+      throw new Error('Wait for the current turn to finish before switching harnesses.');
+    }
+    const token = Symbol();
+    this.harnessSwitches.set(id, token);
+    try {
+      return await this.commitHarnessSwitch(meta, harness, targetAcpAgent, opts.model ?? settings.defaultModelByHarness[harness]);
+    } finally {
+      if (this.harnessSwitches.get(id) === token) this.harnessSwitches.delete(id);
+    }
+  }
+
+  private async commitHarnessSwitch(meta: SessionMeta, harness: HarnessId, targetAcpAgent: string | undefined, nextModel: ModelRef | undefined): Promise<SessionMeta> {
+    const { id } = meta;
+    // Fence even a previously stopped runtime: ordinary Stop alone permits late callbacks.
+    this.runtimeSeq.set(id, (this.runtimeSeq.get(id) ?? 0) + 1);
+    await this.stopOrdinary(id);
+    const activity = this.activity(id);
+    if (activity.tearingDown || activity.uncertain) throw new Error('Previous runtime disposal is unproven; wait for it to stop before switching harnesses.');
+
+    const fromHarness = meta.config.harness;
+    const items = await this.deps.store.readTranscript(id);
+    const hasConversation = items.some((item) => item.kind === 'user' || item.kind === 'assistant' || item.kind === 'tool' || item.kind === 'plan');
+    // Don't overwrite the prior pending handoff: the persisted index selects the slot only on success.
+    const alternate = !!meta.pendingForkContext && !meta.pendingForkContextAlternate;
+    if (hasConversation) {
+      await this.deps.store.writeBlob(id, alternate ? ALTERNATE_FORK_CONTEXT_FILE : FORK_CONTEXT_FILE, renderForkContext(items, fromHarness, harness, 'switch'));
+    }
+    // Native reads its history even without a resume ref. Enter it only with a clean slate.
+    if (harness === 'native') await this.deps.store.clearNativeHistory(id);
+    const nativeGoal = (await this.harnessGoal(harness)) ?? undefined;
+    const systemPrompt = HARNESS_BY_ID[harness].capabilities.systemPrompt;
+    const nextPermission = closestPermissionMode(harness, meta.config.permissionMode);
+    const permissionClamped = nextPermission !== meta.config.permissionMode;
+    const goalPaused = harness === 'antigravity' && meta.goal?.status === 'active';
+    const nextUsage = { ...meta.usage };
+    delete nextUsage.contextTokens;
+    delete nextUsage.contextWindow;
+    await this.deps.store.commitSessionPatch(meta, {
+      config: {
+        ...meta.config,
+        harness,
+        model: nextModel,
+        effort: undefined,
+        fastMode: false,
+        permissionMode: nextPermission,
+        acpAgent: targetAcpAgent,
+        codexModelProvider: undefined
+      },
+      activeModel: nextModel,
+      activeEffort: undefined,
+      fastModeStatus: { state: 'off' },
+      harnessRef: {},
+      harnessCommands: undefined,
+      usage: nextUsage,
+      ...(meta.status === 'error' || meta.status === 'stopped' ? { status: 'idle', statusDetail: undefined, lastError: undefined } : {}),
+      ...(goalPaused && meta.goal ? { goal: { ...meta.goal, status: 'paused', updatedAt: Date.now() } } : {}),
+      nativeGoal,
+      pendingAppInstructions: !systemPrompt ? true : undefined,
+      pendingKnowledgeDigest: meta.knowledgeDigest && !systemPrompt ? true : undefined,
+      pendingForkContext: hasConversation ? true : undefined,
+      pendingForkContextAlternate: hasConversation && alternate ? true : undefined,
+      updatedAt: Date.now()
+    });
+    // Don't delete the source's resume history until the new configuration is durable.
+    if (fromHarness === 'native') {
+      await this.deps.store.clearNativeHistory(id).catch((e) => this.deps.log('warn', `[${id}] clear native history after switch failed: ${errorMessage(e)}`));
+    }
+    this.deps.analytics.touchSession(meta);
+    this.pushSessions();
+    const fromName = HARNESS_BY_ID[fromHarness].name;
+    const toName = HARNESS_BY_ID[harness].name;
+    const parts = [`Switched harness from ${fromName} to ${toName} in the same workspace.`];
+    if (hasConversation) parts.push('The conversation above will be handed over as context on your next message.');
+    if (permissionClamped) parts.push(`Permission mode tightened to ${nextPermission}.`);
+    if (goalPaused) parts.push('Active goal paused (Antigravity requires direct user prompts).');
+    this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: parts.join(' ') } });
+    this.deps.log('info', `[${id}] harness switched ${fromHarness} → ${harness} (model=${describeModel(meta.activeModel)} permissions=${meta.config.permissionMode} cwd=${meta.cwd}${hasConversation ? '; handoff queued' : ''})`);
+    return meta;
   }
 
   private async moveUncontrolled(id: string, cwd: string): Promise<SessionMeta> {
@@ -3146,6 +3278,11 @@ export class SessionManager {
 
   async fork(id: string, harness?: HarnessId): Promise<SessionMeta | null> {
     this.assertUnmanaged(id);
+    this.assertNotSwitchingHarness(id);
+    return this.withConfigDispatch(id, () => this.forkSession(id, harness));
+  }
+
+  private async forkSession(id: string, harness?: HarnessId): Promise<SessionMeta | null> {
     const src = this.get(id);
     if (!src) return null;
     const items = await this.transcript(id);
@@ -3181,6 +3318,7 @@ export class SessionManager {
       importedFrom: undefined,
       harnessRef: {},
       pendingForkContext: undefined,
+      pendingForkContextAlternate: undefined,
       pendingKnowledgeDigest: undefined,
       goal: undefined,
       // A fresh fork starts unpinned and active, never in the archive.

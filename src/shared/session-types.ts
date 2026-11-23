@@ -99,12 +99,13 @@ export interface SessionMeta {
   lastViewedAt?: number;
   harnessRef: HarnessRef;
   /**
-   * Set when the harness has to be handed the conversation on its next message: a fork into another
-   * harness, and a same-harness fork that moved to its own worktree and so cannot resume the
-   * provider session the source ran in. Written to `fork-context.md` and cleared once the harness
-   * accepted the seeded message.
+   * Set for a harness switch or a fork whose new provider session needs the conversation on its
+   * next message. The default handoff file is `fork-context.md`; the flag clears when the harness
+   * accepts the seeded message.
    */
   pendingForkContext?: boolean;
+  /** Selects the alternate local handoff file so a switch can stage without replacing a pending handoff. */
+  pendingForkContextAlternate?: true;
   /**
    * Set when a harness with no system prompt of its own has to be handed the app's instruction
    * layer on its first message (`withSessionPreamble`); cleared once the harness accepted it.
