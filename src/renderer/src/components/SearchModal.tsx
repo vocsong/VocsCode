@@ -4,18 +4,9 @@ import type { SearchResult } from '../../../shared/types';
 import { invoke } from '../api';
 import { relTime } from '../format';
 import { useStore } from '../store';
+import { HighlightedSnippet } from './HighlightedSnippet';
 import { Icon } from './ui';
 import { SessionTitle } from './SessionTitle';
-
-/** \u0001/\u0002 from main's snippet() become <mark>; \\u2026 ellipsis passes through. */
-function Snippet({ text }: { text: string }) {
-  const parts = useMemo(() => text.split(/[\u0001\u0002]/), [text]);
-  return (
-    <>
-      {parts.map((p, i) => (i % 2 ? <mark key={i}>{p}</mark> : <React.Fragment key={i}>{p}</React.Fragment>))}
-    </>
-  );
-}
 
 const KIND_ICON: Record<string, string> = { meta: 'sparkles', user: 'send', assistant: 'sparkles', tool: 'terminal', info: 'info' };
 
@@ -104,7 +95,7 @@ export function SearchModal() {
                     {s && <span className="search-meta">{s.mission?.role === 'worker' ? 'Mission specialist (read-only) · ' : ''}{relTime(s.updatedAt)}</span>}
                   </span>
                   <span className="search-snippet">
-                    <Snippet text={r.snippet} />
+                    <HighlightedSnippet text={r.snippet} />
                   </span>
                 </span>
               </button>

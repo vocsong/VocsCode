@@ -105,7 +105,11 @@ describe.runIf(enabled)('project knowledge panel', () => {
     await fs.mkdir(path.join(wiki, 'gotchas'), { recursive: true });
     await fs.mkdir(userData, { recursive: true });
     // An auto-ingested page: current with no human review step, and an anchor to check.
-    await fs.writeFile(path.join(wiki, 'conventions', 'harness-lifecycle.md'), serializeKnowledgeDocument(pageMeta({ anchors: [{ file: 'src/main/session-manager.ts', symbol: 'buildContext' }] }), 'The main process owns harness lifetime.'));
+    const lifecycleBody = 'The main process owns harness lifetime. A <b>literal</b> PTY example.';
+    await fs.writeFile(
+      path.join(wiki, 'conventions', 'harness-lifecycle.md'),
+      serializeKnowledgeDocument(pageMeta({ anchors: [{ file: 'src/main/session-manager.ts', symbol: 'buildContext' }] }), lifecycleBody)
+    );
     // A second current page that relates to the first, so the graph has an edge to render.
     await fs.writeFile(
       path.join(wiki, 'gotchas', 'duplicate-pty.md'),
@@ -162,6 +166,16 @@ describe.runIf(enabled)('project knowledge panel', () => {
     expect(await ledger.innerText()).toContain('1 rejected claim');
     await ledger.locator('summary').click();
     expect(await ledger.innerText()).toContain('The stale flag is set by the CLI.');
+
+    // "session" matches metadata; only "pty" matches this page's body.
+    const search = win.getByRole('textbox', { name: 'Search project knowledge' });
+    await search.fill('session pty');
+    await search.press('Enter');
+    const excerpt = lifecycle.locator('.knowledge-snippet');
+    await excerpt.waitFor({ timeout: 10_000 });
+    expect(await excerpt.locator('mark').allTextContents()).toEqual(['PTY']);
+    expect(await excerpt.textContent()).toBe(lifecycleBody);
+    expect(await excerpt.locator('b').count()).toBe(0);
 
     // An anchor is checked against GitNexus live; this sandbox has no index, so the panel says so
     // instead of failing or pretending the pointer is good.
