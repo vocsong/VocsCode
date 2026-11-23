@@ -28,6 +28,40 @@ async function expectEditorText(editor: Locator, text: string) {
   await expect.poll(() => editor.locator('.cm-line').allTextContents(), { timeout: 10_000 }).toEqual(text.split('\n'));
 }
 
+async function captureImageCopies(win: Page) {
+  // Keep writes in this test's renderer; ClipboardItem and all canvas operations stay native.
+  const writes = await win.evaluateHandle(() => {
+    const records: { types: string[]; mime: string; size: number[]; corners: number[][] }[] = [];
+    navigator.clipboard.write = async (items) => {
+      const [item] = items;
+      if (items.length !== 1 || !(item instanceof ClipboardItem)) throw new Error('Expected one ClipboardItem');
+      const blob = await item.getType('image/png');
+      const bitmap = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const pixel = (x: number, y: number) => Array.from(ctx.getImageData(x, y, 1, 1).data);
+      records.push({
+        types: [...item.types], mime: blob.type, size: [canvas.width, canvas.height],
+        corners: [pixel(0, 0), pixel(canvas.width - 1, canvas.height - 1)],
+      });
+    };
+    return records;
+  });
+  return () => writes.evaluate((records) => records);
+}
+
+async function copyPreviewImage(win: Page, image: Locator) {
+  const menu = win.getByTestId('context-menu');
+  await image.click({ button: 'right', timeout: 10_000 });
+  await menu.getByRole('menuitem', { name: 'Copy image', exact: true }).click({ timeout: 10_000 });
+  await menu.waitFor({ state: 'hidden', timeout: 10_000 });
+  await win.locator('.toast').getByText('Image copied', { exact: true }).waitFor({ timeout: 10_000 });
+}
+
 describe.runIf(enabled)('workspace file previews and editing', () => {
   it('decodes and previews inline Markdown screenshots from the session checkout without activating enclosing links', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-inline-images-'));
@@ -39,7 +73,8 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await fs.mkdir(project);
     await fs.mkdir(userData);
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
-    const absolutePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    // Red on the left, green on the right, and wider than the lightbox can render.
+    const absolutePng = 'iVBORw0KGgoAAAANSUhEUgAABkAAAAAIAQMAAACbGaHfAAAABlBMVEX/AAAA/wDSh+9xAAAAH0lEQVR42mNgoAP4TwfAMOqRUY+MemTUI6MeGQiPAACbjR0OCIf8eAAAAABJRU5ErkJggg==';
     const imagePath = path.join(imageDir, 'shot with spaces.png');
     const absoluteImagePath = path.join(imageDir, 'absolute shot.png');
     await fs.writeFile(imagePath, Buffer.from(png, 'base64'));
@@ -84,10 +119,13 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
       env: isolatedEnv(userData), timeout: 60_000,
     });
     const win = await app.firstWindow();
-    for (const [name, data] of [['Relative screenshot', png], ['Absolute screenshot', absolutePng], ['Linked screenshot', png]]) {
+    await win.setViewportSize({ width: 1440, height: 900 });
+    for (const [name, data, width] of [
+      ['Relative screenshot', png, 1], ['Absolute screenshot', absolutePng, 1600], ['Linked screenshot', png, 1],
+    ] as const) {
       const image = win.getByRole('img', { name, exact: true });
       await image.waitFor({ timeout: 15_000 });
-      await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 15_000 }).toBe(1);
+      await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 15_000 }).toBe(width);
       expect(await image.getAttribute('src')).toBe(`data:image/png;base64,${data}`);
     }
     const message = win.locator('.transcript [data-item-id="answer"]');
@@ -119,26 +157,42 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     }
 
     const preview = win.getByRole('dialog', { name: 'Image preview', exact: true });
-    const expectPreview = async (name: string, data: string) => {
+    const expectPreview = async (name: string, data: string, width = 1) => {
       await preview.waitFor({ state: 'visible', timeout: 10_000 });
       const image = preview.getByRole('img', { name, exact: true });
       await image.waitFor({ state: 'visible', timeout: 10_000 });
-      await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 10_000 }).toBe(1);
+      await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 10_000 }).toBe(width);
       expect(await image.getAttribute('src')).toBe(`data:image/png;base64,${data}`);
       expect(await preview.getByRole('img').count()).toBe(1);
+      return image;
     };
 
     await message.getByRole('button', { name: 'Preview Relative screenshot', exact: true }).click();
     await expectPreview('Relative screenshot', png);
     await preview.getByRole('button', { name: 'Next image', exact: true }).click();
-    await expectPreview('Absolute screenshot', absolutePng);
+    const nextImage = await expectPreview('Absolute screenshot', absolutePng, 1600);
+    expect(await nextImage.evaluate((el: HTMLImageElement) => el.width < el.naturalWidth)).toBe(true);
+    const readCopies = await captureImageCopies(win);
+    const menu = win.getByTestId('context-menu');
+    await nextImage.click({ button: 'right', timeout: 10_000 });
+    await menu.getByRole('menuitem', { name: 'Copy image', exact: true }).waitFor({ timeout: 10_000 });
+    await win.keyboard.press('Escape');
+    await menu.waitFor({ state: 'hidden', timeout: 10_000 });
+    await expectPreview('Absolute screenshot', absolutePng, 1600);
+    expect(await readCopies()).toEqual([]);
+
+    await copyPreviewImage(win, nextImage);
+    expect(await readCopies()).toEqual([{
+      types: ['image/png'], mime: 'image/png', size: [1600, 8], corners: [[255, 0, 0, 255], [0, 255, 0, 255]],
+    }]);
+    await expectPreview('Absolute screenshot', absolutePng, 1600);
     await preview.getByRole('button', { name: 'Previous image', exact: true }).click();
     await expectPreview('Relative screenshot', png);
     await win.keyboard.press('Escape');
     await preview.waitFor({ state: 'hidden', timeout: 10_000 });
 
     await message.getByRole('button', { name: 'Preview Absolute screenshot', exact: true }).click();
-    await expectPreview('Absolute screenshot', absolutePng);
+    await expectPreview('Absolute screenshot', absolutePng, 1600);
     await preview.getByRole('button', { name: 'Close image preview', exact: true }).click();
     await preview.waitFor({ state: 'hidden', timeout: 10_000 });
 
@@ -404,6 +458,12 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 10_000 }).toBe(1);
     expect(await editor.count()).toBe(0);
     expect(await filePane.getByRole('button', { name: 'Save', exact: true }).count()).toBe(0);
+    const readCopies = await captureImageCopies(win);
+    await copyPreviewImage(win, img);
+    expect(await readCopies()).toEqual([{
+      types: ['image/png'], mime: 'image/png', size: [1, 1], corners: [[0, 0, 255, 127], [0, 0, 255, 127]],
+    }]);
+    await img.waitFor({ state: 'visible', timeout: 10_000 });
     await expect.poll(() => pixelRow.getAttribute('class')).toContain('active');
     await win.screenshot({ path: path.join(shots, 'files-02-image.png') });
   }, 180_000);
