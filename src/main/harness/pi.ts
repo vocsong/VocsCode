@@ -693,10 +693,11 @@ export class PiAdapter implements HarnessAdapter {
         this.missionSettling = true;
         const finishing = this.finishTurn();
         this.turnFinishing = finishing;
-        this.refreshCommands();
         void finishing.finally(() => {
           if (this.turnFinishing !== finishing) return;
           this.turnFinishing = null;
+          // After the turn's own stats request, never alongside it.
+          this.refreshCommands();
           for (const deferredLine of this.deferredLines.splice(0)) this.handleLine(deferredLine);
           this.advanceInputs();
         }).catch((error) => this.ctx.log('warn', `Pi turn finalization failed: ${errorMessage(error)}`));

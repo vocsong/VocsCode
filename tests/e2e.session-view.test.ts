@@ -204,7 +204,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.locator('[data-session-id="s_housekeep_current"]').click();
     const input = win.locator('.composer-box textarea');
     const dialog = win.getByRole('dialog', { name: 'Housekeep sessions', exact: true });
-    const suggestion = win.getByRole('button', { name: /^\/housekeep\b/ });
+    const suggestion = win.getByRole('option', { name: /^\/housekeep\b/ });
     await input.pressSequentially('/');
     await suggestion.waitFor({ state: 'visible' });
     await input.pressSequentially('hou');

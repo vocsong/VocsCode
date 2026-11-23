@@ -95,7 +95,7 @@ describe('/housekeep', () => {
     reply({ preview: () => preview([]) });
     const { session, composer } = renderAppWithComposer();
     fireEvent.change(composer, { target: { value: '/housek' } });
-    const item = screen.getByRole('button', { name: /^\/housekeep\b/ });
+    const item = screen.getByRole('option', { name: /^\/housekeep\b/ });
     expect(calls()).toEqual([]);
     fireEvent.mouseDown(item);
     expect(composer.value.trim()).toBe('/housekeep');
