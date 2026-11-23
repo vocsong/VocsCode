@@ -15,6 +15,7 @@ import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { MISSION_SERVER_ID } from '../../../resources/pi/vocs-code-mission';
 import { PI_FAST_MODE_COMMAND, PI_FAST_MODE_MARKER } from '../../../resources/pi/vocs-code-fast-mode';
+import { SUBAGENT_CONTROL_COMMAND, SUBAGENT_CONTROL_MARKER, type SubagentControlKind } from '../../../resources/pi/subagent-control';
 import { parseQuestionPayload, QUESTION_MARKER, QUESTION_RESPONSE_LIMIT, QUESTION_TOOL } from '../../../resources/pi/question-tool';
 import { questionResponse } from '../../shared/question-response';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -222,6 +223,7 @@ export class PiAdapter implements HarnessAdapter {
   private readonly unknownFastCostReported = new Set<string>();
   private fastModeRevision = 0;
   private fastModeChange: { requestId: string; revision: number; enabled: boolean; ack: Deferred<void> } | null = null;
+  private readonly subagentControls = new Map<string, { runId: string; kind: SubagentControlKind; ack: Deferred<void> }>();
   private missionSecrets: string[] = [];
   /** Only the nonce-bound gate can report the active managed surface. Never the configured list. */
   private missionTools: string[] = [];
@@ -459,7 +461,9 @@ export class PiAdapter implements HarnessAdapter {
       this.extensionCapabilities.clear();
       this._busy = false;
       const detail = `pi exited (${code})`;
-      this.rejectPending(new Error(detail));
+      const error = new Error(detail);
+      this.rejectPending(error);
+      this.rejectSubagentControls(error);
       if (ready && !this.transportError) this.ctx.emit({ type: 'status', status: 'stopped', detail });
     });
     child.on('error', (e: NodeJS.ErrnoException) => {
@@ -468,9 +472,10 @@ export class PiAdapter implements HarnessAdapter {
       this.transportError = new Error(message);
       this.extensionCapabilities.clear();
       this._busy = false;
-      // Settle RPC before anything can retire the child. Unlike close, error is not evidence
-      // that a managed supervisor is gone. During startup the rejected start owns reporting.
+      // Settle pending requests before anything can retire the child. Unlike close, error is not
+      // evidence that a managed supervisor is gone. During startup the rejected start owns reporting.
       this.rejectPending(this.transportError);
+      this.rejectSubagentControls(this.transportError);
       if (ready) this.ctx.emit({ type: 'error', message, fatal: true });
       else startupErrno = e.code;
     });
@@ -887,6 +892,14 @@ export class PiAdapter implements HarnessAdapter {
       return;
     }
     const run = this.subagentRuns.get(runId);
+    if (kind === 'configuration' && run) {
+      // Child construction can outlast the panel's initial refresh. The effective configuration is
+      // durable before this notification; publish a refresh even while its first model call waits.
+      run.provider = text(payload.provider) ?? run.provider;
+      run.model = text(payload.model) ?? run.model;
+      this.ctx.emit({ type: 'subagent.run', run: { runId, agent: run.agent, description: run.description, mode: run.mode, status: 'running', provider: run.provider, model: run.model, costUsd: run.costUsd, turns: run.turns, toolUses: run.toolUses, startedAt: run.startedAt } });
+      return;
+    }
     if (kind === 'call' && run) {
       const call = (payload.call ?? {}) as Record<string, unknown>;
       run.costUsd += number(call.costUsd);
@@ -1221,12 +1234,18 @@ export class PiAdapter implements HarnessAdapter {
       this.handleSubagentEvent(message.slice(PI_SUBAGENT_MARKER.length));
       return true;
     }
-    const marker = [PI_READY_MARKER, PI_EXTENSION_ERROR_MARKER, PI_TOOL_INPUT_MARKER, PI_FAST_MODE_MARKER].find((prefix) => message.startsWith(prefix));
+    const marker = [PI_READY_MARKER, PI_EXTENSION_ERROR_MARKER, PI_TOOL_INPUT_MARKER, PI_FAST_MODE_MARKER, SUBAGENT_CONTROL_MARKER].find((prefix) => message.startsWith(prefix));
     if (!marker) return false;
     try {
       const payload = JSON.parse(message.slice(marker.length)) as Record<string, unknown>;
       if (!payload || payload.version !== 1 || !this.extensionNonce || payload.nonce !== this.extensionNonce) return true;
-      if (marker === PI_FAST_MODE_MARKER) {
+      if (marker === SUBAGENT_CONTROL_MARKER) {
+        const control = typeof payload.requestId === 'string' ? this.subagentControls.get(payload.requestId) : undefined;
+        if (control && control.runId === payload.runId && control.kind === payload.kind) {
+          if (payload.ok === true) control.ack.resolve();
+          else if (payload.ok === false) control.ack.reject(new Error(typeof payload.error === 'string' ? payload.error : 'Subagent control was not accepted.'));
+        }
+      } else if (marker === PI_FAST_MODE_MARKER) {
         const change = this.fastModeChange;
         const acknowledged = !!change && payload.requestId === change.requestId && payload.revision === change.revision && payload.enabled === change.enabled;
         const current = payload.revision === this.fastModeRevision && payload.enabled === this.fastModeRequested;
@@ -1250,7 +1269,7 @@ export class PiAdapter implements HarnessAdapter {
           detail = `${detail ?? ''} ${pricingDetail} Check provider billing for actual charges.`.trim();
         }
         this.ctx.updateMeta({ fastModeStatus: { state: payload.state as 'off' | 'requested' | 'unavailable' | 'cooldown', ...(detail ? { detail } : {}) } });
-      } else if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'mission' || payload.capability === 'mcp' || payload.capability === 'fast-mode')) {
+      } else if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'subagent-control' || payload.capability === 'mission' || payload.capability === 'mcp' || payload.capability === 'fast-mode')) {
         if (payload.ready === false) this.extensionCapabilities.delete(payload.capability);
         else this.extensionCapabilities.add(payload.capability);
         if (payload.capability === 'mission') {
@@ -1565,6 +1584,30 @@ export class PiAdapter implements HarnessAdapter {
     await this.request('compact', {});
   }
 
+  /**
+   * Executes a subagent stop/steer extension command directly over Pi's RPC `prompt` channel so it
+   * neither aborts an active parent turn nor marks an idle session busy waiting for `agent_settled`.
+   */
+  async controlSubagent(runId: string, kind: SubagentControlKind, message?: string): Promise<void> {
+    if (this.ctx.session().mission) throw new Error('Mission owns delegation; use Mission controls.');
+    if (!this.child || this.exited || this.ordinaryStopping) throw new Error('pi process is not running');
+    if (!this.extensionNonce || !this.extensionCapabilities.has('subagent-control')) throw new Error('Pi subagent controls are unavailable. Restart the session.');
+    const requestId = randomUUID();
+    const ack = deferred<void>();
+    this.subagentControls.set(requestId, { runId, kind, ack });
+    const command = `/${SUBAGENT_CONTROL_COMMAND} ${JSON.stringify({ version: 1, nonce: this.extensionNonce, requestId, runId, kind, message })}`;
+    try {
+      await withTimeout(Promise.all([this.request('prompt', { message: command }), ack.promise]), 10_000, `Pi subagent ${kind} confirmation`);
+    } finally {
+      this.subagentControls.delete(requestId);
+    }
+  }
+
+  private rejectSubagentControls(error: Error): void {
+    for (const { ack } of this.subagentControls.values()) ack.reject(error);
+    this.subagentControls.clear();
+  }
+
   async listModels(): Promise<ModelInfo[]> {
     if (!this.child) return [];
     try {
@@ -1589,6 +1632,7 @@ export class PiAdapter implements HarnessAdapter {
     this.declinedTools.clear();
     // Disposal can detach the runtime before close arrives (and close need not arrive at all).
     this.rejectPending(new Error('Pi stopped before its RPC requests completed.'));
+    this.rejectSubagentControls(new Error('Pi stopped before the subagent control was confirmed.'));
     const child = this.child;
     if (this.ctx.session().mission) {
       this.missionStopping = true;

@@ -1,4 +1,5 @@
 /** Deterministic offline model: the user supplies calls; Pi still dispatches real tools. */
+import { appendFileSync } from 'node:fs';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { createReadToolDefinition } from '@earendil-works/pi-coding-agent';
 
@@ -20,8 +21,13 @@ export default function (pi) {
     baseUrl: 'http://127.0.0.1:1/never-used',
     api: 'vocs-offline-script',
     apiKey: 'offline-fixture-not-a-credential',
-    models: [{ id: 'scripted', name: 'Scripted', reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 10000 }],
+    models: [
+      { id: 'scripted', name: 'Scripted', reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 10000 },
+      { id: 'reasoner', name: 'Scripted reasoner', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 10000 },
+    ],
     streamSimple(model, context, options) {
+      const callLog = process.env.VOCS_CODE_PI_FIXTURE_CALL_LOG;
+      if (callLog) appendFileSync(callLog, JSON.stringify({ model: model.id, role: context.messages.at(-1)?.role }) + '\n');
       const stream = createAssistantMessageEventStream();
       queueMicrotask(() => {
         const message = {
@@ -45,11 +51,11 @@ export default function (pi) {
               calls = [];
             }
           }
-          // IMAGES_OK proves the attached image survived the whole Pi pipeline; the tool flows and
-          // tool-result turns keep replying COMPAT_OK.
-          // Echo the actual next provider request's tool result so question tests can prove that
-          // both the selected answer and context reached the model, not merely the UI transcript.
-          const reply = last?.role === 'toolResult' && last.toolName === 'ask_user' ? `QUESTION_SEEN:${content}` : images ? 'IMAGES_OK' : 'COMPAT_OK';
+          // Echo what actually reached the provider, not values from the UI or tool arguments.
+          const reply = last?.role === 'user' && content.startsWith('PI_CONTROL_TEST:') ? `STEER_SEEN:${content.slice('PI_CONTROL_TEST:'.length)}`
+            : last?.role === 'toolResult' && last.toolName === 'ask_user' ? `QUESTION_SEEN:${content}`
+            : last?.role === 'user' && content === 'REPORT_CONFIG' ? `CONFIG_OK:${model.id}:${options?.reasoning ?? 'off'}`
+            : images ? 'IMAGES_OK' : 'COMPAT_OK';
           message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: reply }];
           message.stopReason = calls.length ? 'toolUse' : 'stop';
           stream.push({ type: 'start', partial: message });

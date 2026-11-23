@@ -102,10 +102,13 @@ async function seedSession(userData: string, project: string, harness: 'pi' | 'c
     { id: 't1', kind: 'tool', ts: Date.now(), name: harness === 'pi' ? 'subagent' : 'Agent', hint: 'agent', summary: 'Find the registry', status: 'done', runId: 'agent_seed1', output: 'The registry is at src/main/harness/registry.ts' }
   ];
   await fs.writeFile(path.join(dir, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
+  const runMeta = { runId: 'agent_seed1', agent: 'Explore', description: 'Find the registry', mode: 'foreground', provider: 'anthropic', model: 'claude-sonnet-4-5', cwd: project, startedAt: 1000, ...(harness === 'pi' ? { requestedThinkingLevel: 'xhigh' } : {}) };
   const run = [
-    { t: 'run', runId: 'agent_seed1', agent: 'Explore', description: 'Find the registry', mode: 'foreground', provider: 'anthropic', model: 'claude-sonnet-4-5', cwd: project, startedAt: 1000 },
+    { t: 'run', ...runMeta },
     { t: 'item', item: { id: 'i1', ts: 1100, kind: 'tool', name: 'grep', summary: 'createAgentSession', status: 'done', output: 'src/main/harness/registry.ts:1' } },
     { t: 'item', item: { id: 'i2', ts: 1200, kind: 'assistant', text: 'The registry is at src/main/harness/registry.ts' } },
+    // Pi learns the effective level from the child and may restate the header after creation.
+    ...(harness === 'pi' ? [{ t: 'run', ...runMeta, thinkingLevel: 'high' }] : []),
     { t: 'call', call: { index: 0, provider: 'anthropic', model: 'claude-sonnet-4-5', inputTokens: 800, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.1, durationMs: 1500, stopReason: 'toolUse', toolsInvoked: ['grep'] } },
     { t: 'call', call: { index: 1, provider: 'anthropic', model: 'claude-sonnet-4-5', inputTokens: 200, outputTokens: 60, cacheReadTokens: 50, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.15, durationMs: 2500, stopReason: 'stop', toolsInvoked: [] } },
     { t: 'end', status: 'completed', totals: { turns: 2, toolUses: 1, inputTokens: 1000, outputTokens: 100, cacheReadTokens: 50, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.25, durationMs: 4000 }, endedAt: 2000 }
@@ -114,7 +117,7 @@ async function seedSession(userData: string, project: string, harness: 'pi' | 'c
 }
 
 describe.runIf(enabled)('electron e2e: subagents panel', () => {
-  it('splits the panel, lists the recorded run, shows its transcript and per-call cost, and links from the card', async () => {
+  it('splits the panel, lists the recorded run and its effective effort across reload, and links from the card', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-subagents-ui-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -155,7 +158,23 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       const row = win.locator('.subagent-row').first();
       await row.waitFor({ timeout: 20_000 });
       const rowText = await row.innerText();
-      for (const expected of ['Explore', 'Find the registry', 'claude-sonnet-4-5', '$0.25']) expect(rowText).toContain(expected);
+      for (const expected of ['Explore', 'Find the registry', 'claude-sonnet-4-5', 'effort high (requested xhigh)', '$0.25']) expect(rowText).toContain(expected);
+      expect(rowText).not.toContain('effort xhigh');
+
+      // Both IPC views retain the persisted request and effective level; neither substitutes one
+      // for the other. Repeat after reload to prove the panel re-reads the same durable metadata.
+      const assertEffort = async () => {
+        const runs = await invoke(win, 'subagents:list', { id: SEED_SESSION_ID });
+        expect(runs).toHaveLength(1);
+        expect(runs[0]).toMatchObject({ requestedThinkingLevel: 'xhigh', thinkingLevel: 'high' });
+        const run = await invoke(win, 'subagents:get', { id: SEED_SESSION_ID, runId: 'agent_seed1' });
+        expect(run?.meta).toMatchObject({ requestedThinkingLevel: 'xhigh', thinkingLevel: 'high' });
+        for (const selector of ['.subagent-row .subagent-meta', '.subagent-detail-stats']) {
+          await expect.poll(() => win.locator(selector).innerText(), { timeout: 20_000 }).toContain('effort high (requested xhigh)');
+          expect(await win.locator(selector).innerText()).not.toContain('effort xhigh');
+        }
+      };
+      await assertEffort();
 
       // The detail shows the child's transcript and one row per model call.
       const detailText = await win.locator('.subagent-detail').innerText();
@@ -179,6 +198,7 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       await win.waitForSelector('.panel-section.panel-bottom', { timeout: 30_000 });
       await win.getByTestId('panel-bottom-subagents').click();
       await win.locator('.subagent-row:has-text("Explore")').first().waitFor({ timeout: 20_000 });
+      await assertEffort();
     } finally {
       await app?.close().catch(() => undefined);
       app = null;
@@ -211,6 +231,9 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       const rowText = await row.innerText();
       for (const expected of ['Explore', 'Find the registry', 'claude-sonnet-4-5', '$0.25']) expect(rowText).toContain(expected);
       expect(await win.locator('.subagents').innerText()).not.toContain('does not record subagent runs');
+      // Legacy records without effort metadata remain readable without inventing an effective level.
+      expect(rowText).not.toContain('effort');
+      expect(await win.locator('.subagent-detail-stats').innerText()).not.toContain('effort');
 
       // Its transcript and per-call table come through the same reader.
       const detailText = await win.locator('.subagent-detail').innerText();
@@ -440,7 +463,7 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
 
       const session = await invoke(win, 'sessions:create', { config: { harness: 'pi', projectRoot: project, useWorktree: false, permissionMode: 'full-auto' }, title: 'Subagents panel live' });
       const id = session.id;
-      const calls: ScriptedCall[] = [{ id: 's1', name: 'subagent', arguments: { description: 'Find the registry', prompt: 'Where is the harness registry?', type: 'Explore' } }];
+      const calls: ScriptedCall[] = [{ id: 's1', name: 'subagent', arguments: { description: 'Report child configuration', prompt: 'REPORT_CONFIG', type: 'Explore', model: 'vocs-offline/reasoner', thinkingLevel: 'medium' } }];
       await invoke(win, 'sessions:send', { id, input: { text: JSON.stringify({ calls }) } });
 
       // The extension writes the run file; the panel reads it back through IPC.
@@ -455,18 +478,22 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
           return summary?.status ?? 'none';
         }, { timeout: 90_000, interval: 500 })
         .toBe('completed');
-      expect(summary).toMatchObject({ agent: 'Explore', status: 'completed' });
+      expect(summary).toMatchObject({ agent: 'Explore', status: 'completed', model: 'reasoner', requestedThinkingLevel: 'medium', thinkingLevel: 'medium', turns: 1 });
+      expect(await invoke(win, 'subagents:list', { id })).toHaveLength(1);
       expect(summary!.runId).toMatch(/^agent_/);
       const detail = await invoke(win, 'subagents:get', { id, runId: summary!.runId });
-      expect(detail!.calls.length).toBeGreaterThan(0);
-      expect(detail!.items.some((item) => item.kind === 'assistant' && item.text?.includes('COMPAT_OK'))).toBe(true);
+      expect(detail!.calls).toHaveLength(1);
+      expect(detail!.meta).toMatchObject({ model: 'reasoner', requestedThinkingLevel: 'medium', thinkingLevel: 'medium' });
+      expect(detail!.items.some((item) => item.kind === 'assistant' && item.text === 'CONFIG_OK:reasoner:medium')).toBe(true);
 
       // And the UI shows that same run. The session was created over IPC, so select it first.
       await win.locator('[data-testid="session-row"]', { hasText: 'Subagents panel live' }).first().click();
       await win.waitForSelector('.panel', { timeout: 30_000 });
       await win.getByTestId('panel-bottom-subagents').click();
       await win.locator('.subagent-row:has-text("Explore")').first().waitFor({ timeout: 20_000 });
-      await win.locator('.subagent-detail:has-text("COMPAT_OK")').waitFor({ timeout: 20_000 });
+      await win.locator('.subagent-detail:has-text("CONFIG_OK:reasoner:medium")').waitFor({ timeout: 20_000 });
+      expect(await win.locator('.subagent-row .subagent-meta').innerText()).toContain('reasoner · effort medium');
+      expect(await win.locator('.subagent-detail-stats').innerText()).toContain('vocs-offline/reasoner · effort medium');
     } finally {
       await app?.close().catch(() => undefined);
       app = null;

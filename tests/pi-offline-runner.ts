@@ -33,7 +33,7 @@ export class PiOfflineRunner {
   private waiters = new Set<{ match: (event: PiEvent) => boolean; resolve: (event: PiEvent) => void; reject: (error: Error) => void }>();
   private ended = false;
 
-  constructor(options: { cwd: string; agentDir: string; mode?: string; extraArgs?: string[]; modeFile?: string; competing?: boolean; projectRoot?: string; choice?: (payload: PiEvent) => string; mcpConfig?: string }) {
+  constructor(options: { cwd: string; agentDir: string; mode?: string; extraArgs?: string[]; modeFile?: string; competing?: boolean; projectRoot?: string; choice?: (payload: PiEvent) => string | undefined; mcpConfig?: string }) {
     const { cli, resources } = piIntegrationPaths();
     const fixture = path.resolve('tests/fixtures/pi-scripted-provider.mjs');
     const args = [cli, '--mode', 'rpc', '--offline', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-themes', '--no-approve',
@@ -70,7 +70,8 @@ export class PiOfflineRunner {
       for (const waiter of [...this.waiters]) if (waiter.match(event)) waiter.resolve(event);
       if (event.type === 'extension_ui_request' && event.method === 'select' && event.title?.startsWith('VCODE_APPROVAL::')) {
         const payload = JSON.parse(event.title.slice('VCODE_APPROVAL::'.length));
-        this.send({ type: 'extension_ui_response', id: event.id, value: options.choice?.(payload) ?? 'Deny' });
+        const value = options.choice ? options.choice(payload) : 'Deny';
+        if (value !== undefined) this.send({ type: 'extension_ui_response', id: event.id, value });
       }
     });
   }

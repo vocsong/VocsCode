@@ -371,4 +371,52 @@ describe('Pi adapter subagent reporting', () => {
     // The same route the user reads on the subagent's info line.
     expect(events.some((e) => e.type === 'item.upsert' && e.item.kind === 'info' && e.item.text.includes('anthropic/claude-opus-5'))).toBe(true);
   });
+
+  it('dispatches controlSubagent over RPC prompt without aborting a busy parent turn or marking an idle session busy', async () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    const sent: Record<string, unknown>[] = [];
+    const internal = a as unknown as {
+      child: object;
+      extensionCapabilities: Set<string>;
+      extensionNonce: string;
+      _busy: boolean;
+      write: (obj: Record<string, unknown>) => void;
+    };
+    internal.child = {};
+    internal.extensionNonce = 'current-pi';
+    internal.extensionCapabilities.add('subagent-control');
+    internal.write = (obj) => {
+      sent.push(obj);
+      feed(a, { type: 'response', id: obj.id, command: obj.type, success: true });
+    };
+    const command = (index: number) => {
+      const message = String(sent[index]?.message);
+      expect(message).toMatch(/^\/vocs-subagent-control /);
+      return JSON.parse(message.slice(message.indexOf(' ') + 1)) as Record<string, unknown>;
+    };
+    const acknowledge = (payload: Record<string, unknown>) => feed(a, { type: 'extension_ui_request', method: 'notify',
+      message: 'VCODE_SUBAGENT_CONTROL::' + JSON.stringify(payload) });
+
+    internal._busy = true;
+    let settled = false;
+    const steering = a.controlSubagent('agent_1', 'steer', 'check\nedge cases').then(() => { settled = true; });
+    const request = command(0);
+    expect(request).toMatchObject({ version: 1, nonce: 'current-pi', runId: 'agent_1', kind: 'steer', message: 'check\nedge cases' });
+    acknowledge({ ...request, nonce: 'old-pi', ok: true });
+    acknowledge({ ...request, runId: 'other-run', ok: true });
+    await settle();
+    expect(settled).toBe(false);
+    acknowledge({ ...request, ok: false, error: 'Subagent is still starting.' });
+    await expect(steering).rejects.toThrow('Subagent is still starting.');
+    expect(internal._busy).toBe(true);
+
+    internal._busy = false;
+    const stop = a.controlSubagent('agent_2', 'stop');
+    acknowledge({ ...command(1), ok: true });
+    await stop;
+    expect(sent.map((m) => m.type)).toEqual(['prompt', 'prompt']);
+    expect(internal._busy).toBe(false);
+    expect(events.some((e) => e.type === 'status' && e.status === 'running')).toBe(false);
+  });
 });

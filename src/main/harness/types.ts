@@ -115,6 +115,8 @@ export interface HarnessAdapter {
   listModels?(): Promise<ModelInfo[]>;
   /** The subagent types this engine can delegate to, when it can name them at all. */
   listAgents?(): Promise<AgentTypeInfo[]>;
+  /** Stops or steers one running subagent without interrupting or starting a parent turn. */
+  controlSubagent?(runId: string, kind: 'stop' | 'steer', message?: string): Promise<void>;
   dispose(): Promise<void>;
 }
 
