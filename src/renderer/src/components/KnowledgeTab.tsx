@@ -72,13 +72,6 @@ function KnowledgeSession({ session, active, id }: { session: SessionMeta; activ
     if (JSON.stringify(resolveIntelligenceSettings(settings)) !== JSON.stringify(view.settings)) void refresh();
   }, [active, view, busy, settings, refresh]);
 
-  const graphIndexing = view?.graph.indexing;
-  useEffect(() => {
-    if (active !== 'sources' || !graphIndexing) return;
-    const timer = setInterval(() => void refresh(), 3_000);
-    return () => clearInterval(timer);
-  }, [active, graphIndexing, refresh]);
-
   return SECTIONS.map(([section]) => {
     const selected = section === active;
     const View = section === 'knowledge' ? null : INTELLIGENCE_SECTIONS[section];

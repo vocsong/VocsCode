@@ -5,6 +5,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { gitIdentityFacts } from '../src/main/git';
+import { GraphifyProvider } from '../src/main/intelligence/graphify';
 import { MemoryStore } from '../src/main/intelligence/memory-store';
 import { ProjectRegistry, normalizeRoot, type ProjectFacts } from '../src/main/intelligence/registry';
 import { IntelligenceService, type IntelligenceContext, type IntelligenceServiceDeps, type SessionRef } from '../src/main/intelligence/service';
@@ -23,7 +24,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function fixture(ports: Partial<Pick<IntelligenceServiceDeps, 'history' | 'transcript' | 'completer' | 'git'>> = {}) {
+async function fixture(ports: Partial<Pick<IntelligenceServiceDeps, 'history' | 'transcript' | 'completer' | 'git' | 'graph'>> = {}) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-intel-'));
   dirs.push(temp);
   const root = await fs.realpath(temp);
@@ -34,7 +35,8 @@ async function fixture(ports: Partial<Pick<IntelligenceServiceDeps, 'history' | 
   let time = Date.parse('2026-01-05T00:00:00Z');
   const deps = { log, now: () => time };
   const advance = (days: number) => { time += days * 86_400_000; };
-  const registryAt = () => new ProjectRegistry(data, { ...deps, facts: async (cwd) => facts.get(normalizeRoot(cwd)) ?? {} });
+  const factsForRoot = vi.fn(async (cwd: string) => facts.get(normalizeRoot(cwd)) ?? {});
+  const registryAt = () => new ProjectRegistry(data, { ...deps, facts: factsForRoot });
   const open = () => {
     const registry = registryAt();
     const memory = new MemoryStore(data, deps);
@@ -51,7 +53,7 @@ async function fixture(ports: Partial<Pick<IntelligenceServiceDeps, 'history' | 
     if (projectFacts) facts.set(normalizeRoot(projectRoot), projectFacts);
     return { sessionId: `session-${name}`, projectRoot, cwd: projectRoot };
   };
-  return { ...open(), root, settings, sessions, open, checkout, advance };
+  return { ...open(), root, settings, sessions, open, checkout, advance, factsForRoot };
 }
 
 function member(projectId: string, share: CollectionMember['share'] = 'promoted'): CollectionMember {
@@ -69,6 +71,32 @@ function capture(service: IntelligenceService, ctx: IntelligenceContext, claim: 
 }
 
 describe('intelligence core on disk', () => {
+  it('admits background Graphify through exact checkout metadata, without the legacy Git identity probe', async () => {
+    const graph = new GraphifyProvider({ command: () => null, log });
+    const refresh = vi.spyOn(graph, 'refresh');
+    const f = await fixture({ graph });
+    const ordinary = await f.checkout('background graph');
+    const unrelated = await f.checkout('different checkout');
+    const { signal } = new AbortController();
+    await f.service.refreshGraph(ordinary, signal);
+    expect(await f.registry.projects()).toEqual([]);
+    for (const ctx of [ordinary, unrelated]) {
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: ctx.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+      git('init', '-q', '-b', 'main');
+      git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'fixture');
+    }
+    await f.service.refreshGraph({ ...ordinary, cwd: unrelated.cwd }, signal);
+    expect(refresh).not.toHaveBeenCalled();
+    await f.service.refreshGraph(ordinary, signal);
+    expect(f.factsForRoot).not.toHaveBeenCalled();
+    const project = await f.registry.known(ordinary.projectRoot);
+    expect(project).not.toBeNull();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith({ projectRoot: ordinary.projectRoot, cwd: ordinary.cwd, projectId: project?.id }, signal, expect.stringMatching(/^[a-f0-9]{40,64}$/));
+    f.settings.intelligence!.graphify.excludedProjects = [project!.id];
+    await f.service.refreshGraph(ordinary, signal);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
   it('uses real Git registration, not just origin or history, to identify a linked worktree', async () => {
     const f = await fixture();
     const main = (await f.checkout('real main')).cwd;
