@@ -188,6 +188,15 @@ describe('sessionPrRefs transcript caching', () => {
       { repo: 'other/repo', number: 7 }
     ]);
     expect(readSpy).toHaveBeenCalledTimes(2);
+
+    await fs.appendFile(file, JSON.stringify({ kind: 'assistant', text: 'Merged https://github.com/vocsong/VocsCode/pull/12.' }) + '\n');
+    expect(await manager.sessionPrRefs(session.id, { latestOnly: true })).toEqual([{ repo: 'vocsong/VocsCode', number: 12 }]);
+    // /merge still sees all unique refs in their original order.
+    expect(await manager.sessionPrRefs(session.id)).toEqual([
+      { repo: 'vocsong/VocsCode', number: 12 },
+      { repo: 'other/repo', number: 7 }
+    ]);
+    expect(readSpy).toHaveBeenCalledTimes(3);
   });
 
   it('answers missing transcripts and invalid session ids with no refs', async () => {
