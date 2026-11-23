@@ -210,17 +210,28 @@ runner temp because failure messages could contain sensitive data. The Windows E
 validated prebuilt web bundle instead of building it again. Standalone runs still build it.
 Paid/live tiers remain manual.
 
-## Optional Graphify pilot
+## Bundled Graphify
 
-Run the provider fixture corpus offline as normal. For CLI/artifact upgrades, install the pinned
-`graphifyy==0.9.115` in a disposable environment and run:
+Run `node --test scripts/graphify-runtime.test.mjs` for the artifact locks and builder contract, and
+`npm test -- tests/graph-scheduler.test.ts tests/graphify-snapshot.test.ts tests/intelligence-graphify.test.ts`
+for local scheduling, committed Git inputs and cache behavior. Installer builds stage a private
+Python and pinned wheels for the target from hash-verified build inputs, outside ASAR. There are no
+first-run downloads. To exercise the development app with the actual parser:
 
 ```bash
-VOCS_CODE_GRAPHIFY_TEST_EXE="/absolute/path/to/graphify" npx vitest run tests/intelligence-graphify.test.ts
+node scripts/graphify-runtime.mjs prepare
+npm run build
+VOCS_CODE_GRAPHIFY_E2E=1 node scripts/e2e-guard.mjs tests/e2e.knowledge.test.ts
 ```
 
-The extra test indexes a throwaway Git repo, queries the result, commits a new revision and checks
-that the original index is stale. No provider keys and no production repositories are needed.
+For the packaged Windows flow, run `npm run dist:dir -- --publish never`, then
+`node scripts/graphify-smoke.mjs --packaged` and
+`HARNESS_E2E_EXE="$PWD/dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.knowledge.test.ts`.
+The smoke executes the exact packaged worker without relying on system Python or Graphify. The
+Electron suite asserts default-on indexing, committed paths in Evidence, and project opt-out.
+A dev run without a staged worker checks fallback instead. There are no provider keys or live model calls.
+The path-filtered `graphify-bundle.yml` runs the packaged worker natively on Linux x64 and both Mac
+architectures, and verifies Mac signatures. It does not publish assets or run the full release suite.
 
 ## Coverage rules for high-risk paths
 

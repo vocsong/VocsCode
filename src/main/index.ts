@@ -20,6 +20,8 @@ import { createKnowledgeCompleter } from './knowledge/llm';
 import { createGitnexusAnchorResolver } from './knowledge/anchors';
 import { IntelligenceGateway, callIntelligenceTool } from './intelligence/gateway';
 import { GraphifyProvider, TESTED_GRAPHIFY_VERSION } from './intelligence/graphify';
+import { GraphScheduler } from './intelligence/graph-scheduler';
+import { graphHead, graphHeadStamp, snapshotCommittedCode } from './intelligence/graph-snapshot';
 import { MemoryStore } from './intelligence/memory-store';
 import { ProjectRegistry } from './intelligence/registry';
 import { IntelligenceService } from './intelligence/service';
@@ -275,22 +277,27 @@ async function main(): Promise<void> {
     })
   });
 
-  // The intelligence core: stable project identity and collections, the memory ledger, the optional
-  // graph provider, and the local gateway. Reflection alone can call the configured utility model
+  // The intelligence core: stable project identity and collections, the memory ledger, the local
+  // Graphify cache, and the gateway. Reflection alone can call the configured utility model
   // when explicitly requested or opted in.
   const intelligenceDir = path.join(userData, 'intelligence');
   const projectRegistry = new ProjectRegistry(intelligenceDir, { log, facts: (root) => gitIdentityFacts(root) });
   const memoryStore = new MemoryStore(intelligenceDir, { log });
   memoryStore.init();
+  const graphPayload = app.isPackaged ? runtime.resource('graphify-runtime') : runtime.resource('graphify-runtime', `${process.platform}-${process.arch}`);
+  const graphPython = path.join(graphPayload, 'python', process.platform === 'win32' ? 'python.exe' : 'bin/python3');
+  const graphLauncher = path.join(graphPayload, 'launch.py');
+  // Never launch a PATH executable or a saved override in an automatic indexer.
+  const graphCommand = () => existsSync(graphPython) && existsSync(graphLauncher) ? graphPython : null;
   const graphify = new GraphifyProvider({
-    // Looked up on every call, so installing Graphify does not need an app restart.
-    command: () => {
-      const configured = resolveIntelligenceSettings(settings.get().intelligence).graphify.command;
-      return configured && path.isAbsolute(configured) ? configured : which('graphify');
-    },
+    command: graphCommand,
+    commandArgs: ['-I', '-S', '-B', graphLauncher],
     requireVersion: TESTED_GRAPHIFY_VERSION,
     cacheRoot: path.join(intelligenceDir, 'graphs'),
-    headRevision: async (cwd) => (await gitIdentityFacts(cwd)).head ?? null,
+    headRevision: graphHead,
+    revisionStamp: graphHeadStamp,
+    snapshot: snapshotCommittedCode,
+    timeoutMs: 180_000,
     log
   });
   intelligence = new IntelligenceService({
@@ -311,6 +318,16 @@ async function main(): Promise<void> {
     gatewayState: () => intelligenceGateway?.state() ?? { listening: false, sessions: 0 }
   });
   const intelligenceCore = intelligence;
+  const graphSettings = () => resolveIntelligenceSettings(settings.get().intelligence).graphify;
+  const graphScheduler = new GraphScheduler({
+    enabled: () => graphSettings().enabled && graphCommand() !== null,
+    refresh: async (id, signal) => {
+      const meta = store.get(id);
+      if (!meta || meta.archived || meta.mission) return;
+      await intelligenceCore.refreshGraph({ sessionId: id, projectRoot: meta.config.projectRoot, cwd: meta.cwd }, signal);
+    },
+    onError: (error) => log('debug', `Graphify refresh could not be scheduled: ${describeError(error)}`)
+  });
   intelligenceGateway = new IntelligenceGateway({
     log,
     enabled: () => resolveIntelligenceSettings(settings.get().intelligence).gateway,
@@ -440,6 +457,7 @@ async function main(): Promise<void> {
   const desktopFocus = new DesktopFocusTracker({
     hasSession: (id) => !!sessionsRef.get(id),
     push: (focus) => {
+      graphScheduler.select(focus.sessionId);
       pushAll(PUSH_CHANNELS.desktopFocus, focus);
       remoteMirror?.notifyIndex();
     }
@@ -610,8 +628,15 @@ async function main(): Promise<void> {
     await webServer.start();
   }
 
+  let lastGraphSettings = JSON.stringify(graphSettings());
   settings.onChange((s) => {
     localControl.projectsChanged();
+    const nextGraphSettings = JSON.stringify(graphSettings());
+    if (nextGraphSettings !== lastGraphSettings) {
+      lastGraphSettings = nextGraphSettings;
+      void graphify.cancel();
+      graphScheduler.settingsChanged();
+    }
     currentPalette = s.palette ?? DEFAULT_PALETTE;
     nativeTheme.themeSource = themeSourceFor(s.theme);
     // A palette switch leaves themeSource as it was, so nativeTheme stays silent — repaint the
@@ -703,6 +728,7 @@ async function main(): Promise<void> {
       safe('terminal shutdown', terminals?.shutdown(deadline)),
       safe('search close', search?.close()),
       safe('intelligence gateway close', intelligenceGateway?.close()),
+      safe('Graphify shutdown', Promise.all([graphScheduler.close(), graphify.cancel()])),
       safe('memory ledger close', Promise.resolve().then(() => memoryStore.close())),
       safe('web server stop', webServer?.stop()),
       safe('vesta shutdown', registry.shutdown()),

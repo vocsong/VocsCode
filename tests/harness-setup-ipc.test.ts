@@ -6,7 +6,7 @@ const { listeners, invoke, mainFrame, contents, ownerChannels, ownerDocument } =
   const ownerChannels = [
     'harness:login', 'harness:antigravityQuota', 'control:grant', 'control:local:get', 'control:local:enable', 'control:local:disable',
     'vocsAccount:get', 'vocsAccount:signIn', 'vocsAccount:cancel', 'vocsAccount:refresh', 'vocsAccount:signOut',
-    'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText', 'intelligence:view', 'intelligence:promote'
+    'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText', 'intelligence:view', 'intelligence:promote', 'desktop:setFocus'
   ];
   return { listeners: new Map<string, (event: { sender: unknown; senderFrame: unknown }, req: unknown) => unknown>(), invoke: vi.fn(), mainFrame, ownerChannels, ownerDocument,
     contents: { mainFrame, isLoadingMainFrame: vi.fn(() => false) } };
@@ -68,7 +68,8 @@ describe('local desktop setup authority', () => {
   it.each([
     { channel: 'harness:login', payload: { harness: 'antigravity' }, reply: { ok: true } },
     { channel: 'harness:antigravityQuota', payload: undefined, reply: { groups: [{ name: 'Gemini', buckets: [{ name: 'Gemini Pro', remainingFraction: 0.73 }] }] } },
-    { channel: 'fs:writeText', payload: { sessionId: 's1', path: 'notes.txt', content: 'next', expectedContent: 'before' }, reply: undefined }
+    { channel: 'fs:writeText', payload: { sessionId: 's1', path: 'notes.txt', content: 'next', expectedContent: 'before' }, reply: undefined },
+    { channel: 'desktop:setFocus', payload: { sessionId: 's1' }, reply: undefined }
   ])('passes $channel through the owner frame', async ({ channel, payload, reply }) => {
     invoke.mockResolvedValue(reply);
     await expect(listeners.get(channel)!({ sender: contents, senderFrame: mainFrame }, payload)).resolves.toEqual(reply);

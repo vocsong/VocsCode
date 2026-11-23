@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KnowledgeTab } from '../src/renderer/src/components/KnowledgeTab';
 import { useStore } from '../src/renderer/src/store';
 import {
-  resolveIntelligenceSettings, type ContextPacket, type IntelligenceSearchResponse, type IntelligenceSettings, type IntelligenceView,
+  resolveIntelligenceSettings, type ContextPacket, type GraphIndexStatus, type IntelligenceSearchResponse, type IntelligenceSettings, type IntelligenceView,
   type MemoryRecord, type MemoryState, type ProjectCollection, type ProjectIdentity, type PromotionRequest
 } from '../src/shared/intelligence';
 import type { IpcChannel } from '../src/shared/ipc';
@@ -16,6 +16,7 @@ vi.mock('../src/renderer/src/api', () => ({ invoke, canInvoke, isMac: false, mod
 
 const at = '2026-01-01T00:00:00.000Z';
 const revision = '1234567890ab11cd22ef33';
+const bundledGraph: GraphIndexStatus = { provider: 'graphify', enabled: true, installed: true, indexed: false };
 const project = (id: string, name: string): ProjectIdentity => ({ id, name, roots: [`G:/${name}`], createdAt: at, updatedAt: at });
 const alpha = project('prj-alpha', 'alpha-lab');
 const beta = project('prj-beta', 'beta-lab');
@@ -30,7 +31,7 @@ const rowRecord = (id: string, state: MemoryState, over: Partial<MemoryRecord> =
 });
 const ledger = (over: Partial<IntelligenceView> = {}): IntelligenceView => ({
   available: true, project: alpha, settings: resolveIntelligenceSettings(undefined), records: [], personal: [], shared: [],
-  collections: [], projects: [alpha, beta], promotions: [], graph: { provider: 'graphify', enabled: false, installed: false, indexed: false },
+  collections: [], projects: [alpha, beta], promotions: [], graph: { ...bundledGraph, installed: false },
   gateway: { enabled: true, listening: true, sessions: 2 }, audit: [], ...over
 });
 const pageSummary = (id: string, over: Partial<KnowledgePageSummary> = {}): KnowledgePageSummary => ({
@@ -78,6 +79,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 const intelligenceCalls = () => invoke.mock.calls.filter(([channel]) => channel.startsWith('intelligence:'));
+const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 
 beforeEach(() => {
   invoke.mockReset();
@@ -86,6 +88,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -396,31 +400,70 @@ describe('Collections, Sources and Evidence', () => {
     expect(screen.queryByTestId('collection-card')).toBeNull();
   });
 
-  it('shows gateway status, writes full settings, and opts the stable project id into Graphify', async () => {
-    const settings = resolveIntelligenceSettings({ reflection: 'manual', graphify: { enabled: false, projects: [beta.id], command: 'my-graphify' } });
+  it('defaults Graphify on and excludes only the project the user switches off', async () => {
+    const defaults = resolveIntelligenceSettings(undefined);
+    let settings = defaults;
+    setup(ledger(), {
+      'intelligence:view': () => ledger({ settings, graph: { ...bundledGraph, enabled: !settings.graphify.excludedProjects.includes(alpha.id) } }),
+      'settings:update': ({ intelligence }: { intelligence: IntelligenceSettings }) => { settings = intelligence; }
+    });
+    await openView('sources');
+    expect((screen.getByTestId('setting-graphify') as HTMLInputElement).checked).toBe(true);
+    const graphProject = screen.getByTestId('setting-graphify-project') as HTMLInputElement;
+    const index = screen.getByTestId('graph-index') as HTMLButtonElement;
+    expect(graphProject.checked).toBe(true);
+    expect(index.disabled).toBe(false);
+    expect(within(screen.getByTestId('graph-status')).getByText('Bundled')).toBeTruthy();
+    expect(screen.getByText(/automatically indexes committed code by revision in Git workspaces you open/).textContent).toContain('no model, cloud service, or separate download');
+    expect(invoke).not.toHaveBeenCalledWith('settings:update', expect.anything());
+    await click(graphProject);
+    expect(invoke).toHaveBeenCalledWith('settings:update', { intelligence: { ...defaults, graphify: { enabled: true, excludedProjects: [alpha.id] } } });
+    expect(graphProject.checked).toBe(false);
+    expect(index.disabled).toBe(true);
+    await click(graphProject);
+    expect(settings.graphify).toEqual({ enabled: true, excludedProjects: [] });
+    expect(graphProject.checked).toBe(true);
+    expect(index.disabled).toBe(false);
+  });
+
+  it('shows gateway status and honors saved Graphify global off and project exclusions independently', async () => {
+    const settings = resolveIntelligenceSettings({ reflection: 'manual', graphify: { enabled: false, excludedProjects: [alpha.id, beta.id] } });
     let current = settings;
     setup(ledger(), {
       'intelligence:view': () => ledger({ settings: current, gateway: { enabled: current.gateway, listening: current.gateway, sessions: current.gateway ? 2 : 0 } }),
-      'settings:update': ({ intelligence }: { intelligence: IntelligenceSettings }) => { current = intelligence; return {}; }
+      'settings:update': ({ intelligence }: { intelligence: IntelligenceSettings }) => { current = intelligence; }
     });
     await openView('sources');
     expect(screen.getByTestId('gateway-status').textContent).toBe('Listening · 2 sessions connected');
+    const graphify = screen.getByTestId('setting-graphify') as HTMLInputElement;
     const graphProject = screen.getByTestId('setting-graphify-project') as HTMLInputElement;
+    expect(graphify.checked).toBe(false);
     expect(graphProject.disabled).toBe(true);
     await click(screen.getByTestId('setting-gateway'));
     expect(invoke).toHaveBeenCalledWith('settings:update', { intelligence: { ...settings, gateway: false } });
     expect((screen.getByTestId('setting-gateway') as HTMLInputElement).checked).toBe(false);
     expect(screen.getByTestId('gateway-status').textContent).toBe('Not listening · 0 sessions connected');
-    await click(screen.getByTestId('setting-graphify'));
+    await click(graphify);
+    expect(current.graphify).toEqual({ enabled: true, excludedProjects: [alpha.id, beta.id] });
+    expect(graphProject.checked).toBe(false);
     await click(graphProject);
     expect(invoke).toHaveBeenCalledWith('settings:update', {
-      intelligence: { ...settings, gateway: false, graphify: { ...settings.graphify, enabled: true, projects: [beta.id, alpha.id] } }
+      intelligence: { ...settings, gateway: false, graphify: { enabled: true, excludedProjects: [beta.id] } }
     });
     expect(graphProject.checked).toBe(true);
-    expect((screen.getByTestId('graph-index') as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('uv tool install graphifyy==0.9.115')).toBeTruthy();
     const reflection = screen.getByTestId('setting-reflection');
     expect(document.getElementById(reflection.getAttribute('aria-describedby')!)?.textContent).toContain('when a session is archived or merged');
+  });
+
+  it('explains the unavailable bundled worker without an install instruction or losing other sources', async () => {
+    setup(ledger({ graph: { ...bundledGraph, installed: false, indexed: true, revision } }));
+    const sources = await openView('sources');
+    expect(within(screen.getByTestId('graph-status')).getByText('Unavailable')).toBeTruthy();
+    expect(screen.getByText(/bundled Graphify worker is unavailable/).textContent).toContain('wiki, memory, and other sources still work');
+    expect(sources.textContent).not.toMatch(/uv tool install|not installed/i);
+    expect((screen.getByTestId('graph-index') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId('graph-clear') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId('setting-gateway') as HTMLInputElement).disabled).toBe(false);
   });
 
   it('refreshes the new session on an app-wide settings push without refreshing the old one', async () => {
@@ -445,31 +488,117 @@ describe('Collections, Sources and Evidence', () => {
     ]);
   });
 
-  it('indexes only when enabled and installed, shows the running state, and clears the cache', async () => {
-    const graph = { provider: 'graphify', enabled: false, installed: true, indexed: false };
+  it('builds the index on request, shows progress and cached metadata, and clears the cache', async () => {
     const pending = deferred<IntelligenceView>();
-    let settings = resolveIntelligenceSettings({ graphify: { enabled: true, projects: [] } });
-    const current = () => ledger({ settings, graph: { ...graph, enabled: settings.graphify.projects.includes(alpha.id) } });
-    setup(current(), {
-      'intelligence:view': current, 'settings:update': ({ intelligence }: { intelligence: IntelligenceSettings }) => { settings = intelligence; },
-      'intelligence:graph:index': pending.promise, 'intelligence:graph:clear': current
-    });
+    const empty = ledger({ graph: bundledGraph });
+    setup(empty, { 'intelligence:graph:index': pending.promise, 'intelligence:graph:clear': empty });
     await openView('sources');
     const index = screen.getByTestId('graph-index') as HTMLButtonElement;
-    expect(index.disabled).toBe(true);
-    await click(screen.getByTestId('setting-graphify-project'));
     expect(index.disabled).toBe(false);
     await click(index);
     expect(invoke).toHaveBeenCalledWith('intelligence:graph:index', { sessionId: 's1' });
     expect(index.textContent).toContain('Indexing');
     expect(index.disabled).toBe(true);
-    await act(async () => { pending.resolve(ledger({ settings, graph: { ...graph, enabled: true, indexed: true, stale: true, version: '0.9.115', revision, indexedAt: at, nodes: 7, edges: 9 } })); });
+    await act(async () => { pending.resolve(ledger({ graph: { ...bundledGraph, indexed: true, stale: true, version: '0.9.115', revision, indexedAt: at, nodes: 7, edges: 9 } })); });
     expect(index.textContent).toBe('Refresh index');
     expect(screen.getByTestId('graph-status').textContent).toContain('Stale');
     expect(screen.getByText('7 nodes · 9 edges')).toBeTruthy();
     await click(screen.getByTestId('graph-clear'));
     expect(invoke).toHaveBeenCalledWith('intelligence:graph:clear', { sessionId: 's1' });
     expect(index.textContent).toBe('Build index');
+  });
+
+  it('follows automatic indexing to completion without starting a build or publishing settings from the poll', async () => {
+    vi.useFakeTimers();
+    const empty = ledger({ graph: bundledGraph });
+    let current = empty;
+    setup(empty, { 'intelligence:view': () => current });
+    await click(screen.getByTestId('knowledge-view-sources'));
+    const status = within(screen.getByTestId('graph-status'));
+    expect(status.getByText('Not indexed')).toBeTruthy();
+    current = { ...empty, graph: { ...bundledGraph, indexing: true } };
+    await advance(3_000);
+    expect(status.getByText('Indexing')).toBeTruthy();
+    expect((screen.getByTestId('graph-clear') as HTMLButtonElement).disabled).toBe(true);
+    current = { ...empty, settings: { ...empty.settings, gateway: false }, graph: { ...bundledGraph, indexed: true, revision } };
+    await advance(3_000);
+    expect(status.getByText('Indexed')).toBeTruthy();
+    expect(status.queryByText('Indexing')).toBeNull();
+    expect((screen.getByTestId('setting-gateway') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByTestId('graph-index').textContent).toBe('Refresh index');
+    await advance(60_000);
+    expect(intelligenceCalls()).toEqual(Array.from({ length: 3 }, () => ['intelligence:view', { sessionId: 's1' }]));
+    expect(invoke).not.toHaveBeenCalledWith('settings:update', expect.anything());
+  });
+
+  it('keeps settings usable while polling a running job and ignores its older status after an opt-out', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<IntelligenceView>();
+    const running = ledger({ graph: { ...bundledGraph, indexing: true } });
+    let current = running;
+    let reads = 0;
+    setup(running, {
+      'intelligence:view': () => ++reads === 2 ? pending.promise : current,
+      'settings:update': ({ intelligence }: { intelligence: IntelligenceSettings }) => { current = ledger({ settings: intelligence, graph: { ...bundledGraph, enabled: false } }); }
+    });
+    await click(screen.getByTestId('knowledge-view-sources'));
+    await advance(6_000);
+    expect(reads).toBe(2);
+    const setting = screen.getByTestId('setting-graphify') as HTMLInputElement;
+    expect(setting.disabled).toBe(false);
+    await click(setting);
+    expect(setting.checked).toBe(false);
+    await act(async () => { pending.resolve(ledger({ graph: { ...bundledGraph, indexed: true, revision } })); });
+    expect(setting.checked).toBe(false);
+    expect(within(screen.getByTestId('graph-status')).getByText('Not indexed')).toBeTruthy();
+    await advance(60_000);
+    expect(reads).toBe(3);
+  });
+
+  it('looks for a background build only within a bounded, visible Sources visit', async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    setup(ledger({ graph: bundledGraph }));
+    await click(screen.getByTestId('knowledge-view-sources'));
+    await advance(60_000);
+    expect(intelligenceCalls()).toHaveLength(1);
+    visibility.mockReturnValue('visible');
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    await advance(60_000);
+    const reads = intelligenceCalls().length;
+    expect(reads).toBeGreaterThan(1);
+    await advance(60_000);
+    expect(intelligenceCalls()).toHaveLength(reads);
+
+    await click(screen.getByTestId('knowledge-view-memory'));
+    await click(screen.getByTestId('knowledge-view-sources'));
+    await advance(3_000);
+    expect(intelligenceCalls()).toHaveLength(reads + 1);
+    await click(screen.getByTestId('knowledge-view-memory'));
+    await advance(60_000);
+    expect(intelligenceCalls()).toHaveLength(reads + 1);
+  });
+
+  it('does not apply a pending graph status read after switching sessions', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<IntelligenceView>();
+    let alphaReads = 0;
+    const instance = setup(ledger(), {
+      'intelligence:view': ({ sessionId }: { sessionId: string }) => sessionId === 's2'
+        ? ledger({ project: beta })
+        : ++alphaReads === 1 ? ledger({ graph: bundledGraph }) : pending.promise
+    });
+    await click(screen.getByTestId('knowledge-view-sources'));
+    await advance(3_000);
+    expect(alphaReads).toBe(2);
+    await act(async () => { instance.rerender(<KnowledgeTab session={session('s2')} />); });
+    await act(async () => { pending.resolve(ledger({ graph: { ...bundledGraph, indexed: true, revision } })); });
+    expect(within(screen.getByTestId('graph-status')).getByText('Unavailable')).toBeTruthy();
+    expect(screen.queryByText(revision.slice(0, 12))).toBeNull();
+    await advance(60_000);
+    expect(intelligenceCalls()).toEqual([
+      ['intelligence:view', { sessionId: 's1' }], ['intelligence:view', { sessionId: 's1' }], ['intelligence:view', { sessionId: 's2' }]
+    ]);
   });
 
   it('shows evidence provenance, conflicts and missing sources, then compiles the same question', async () => {

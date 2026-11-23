@@ -15,9 +15,16 @@
   text-overflow: ellipsis;
 }
 
+/* When the label is squeezed (a narrow pane beside the sidebar and right panel), the project name
+   gives way first: the session's own name keeps a readable sliver instead of collapsing to zero. */
 .session-label-project {
-  flex: none;
+  flex: 0 8 auto;
   max-width: clamp(4em, 50%, 16em);
+}
+
+.session-label-name {
+  flex: 0 1 auto;
+  min-width: min(3em, 100%);
 }
 
 .session-label-separator {
