@@ -207,6 +207,7 @@ export class PiAdapter implements HarnessAdapter {
   /** Live Vocs Code subagent runs by run id, until their terminal record arrives. */
   private readonly subagentRuns = new Map<string, { agent: string; description: string; mode: 'foreground' | 'background'; provider?: string; model?: string; startedAt: number; costUsd: number; turns: number; toolUses: number }>();
   private exited = false;
+  private transportError: Error | null = null;
   private modeFile: string | null = null;
   private extensionNonce = '';
   private extensionCapabilities = new Set<string>();
@@ -293,6 +294,7 @@ export class PiAdapter implements HarnessAdapter {
     this.missionTools = [];
     this.extensionFailure = null;
     this.exited = false;
+    this.transportError = null;
     this.subagentModelNames.clear();
     this.recordedSubagents.clear();
     this.pendingSubagentCost.clear();
@@ -444,6 +446,8 @@ export class PiAdapter implements HarnessAdapter {
       throw error;
     }
     this.child = child;
+    let ready = false;
+    let startupErrno: string | undefined;
     const splitter = new LineSplitter((line) => { if (this.child === child) this.handleLine(line); });
     child.stdout?.on('data', (d: Buffer) => splitter.push(d));
     const err = new LineSplitter((line) => this.ctx.log('debug', `[pi] ${this.redactMissionSecrets(line)}`));
@@ -454,32 +458,54 @@ export class PiAdapter implements HarnessAdapter {
       this.exited = true;
       this.extensionCapabilities.clear();
       this._busy = false;
-      for (const d of this.pending.values()) d.reject(new Error(`pi exited (${code})`));
-      this.pending.clear();
-      this.fastModeChange?.ack.reject(new Error(`pi exited (${code})`));
-      this.ctx.emit({ type: 'status', status: 'stopped', detail: `pi exited (${code})` });
+      const detail = `pi exited (${code})`;
+      this.rejectPending(new Error(detail));
+      if (ready && !this.transportError) this.ctx.emit({ type: 'status', status: 'stopped', detail });
     });
-    child.on('error', (e) => { if (this.child === child) this.ctx.emit({ type: 'error', message: `pi failed to start: ${errorMessage(e)}`, fatal: true }); });
+    child.on('error', (e: NodeJS.ErrnoException) => {
+      if (this.child !== child || this.exited || this.transportError) return;
+      const message = `${ready ? 'pi process failed' : 'pi failed to start'}: ${this.redactMissionSecrets(errorMessage(e))}`;
+      this.transportError = new Error(message);
+      this.extensionCapabilities.clear();
+      this._busy = false;
+      // Settle RPC before anything can retire the child. Unlike close, error is not evidence
+      // that a managed supervisor is gone. During startup the rejected start owns reporting.
+      this.rejectPending(this.transportError);
+      if (ready) this.ctx.emit({ type: 'error', message, fatal: true });
+      else startupErrno = e.code;
+    });
 
-    let state: { model?: PiModel; thinkingLevel?: string; sessionFile?: string; sessionId?: string };
     try {
-      state = await withTimeout(this.request<typeof state>('get_state'), 60_000, 'pi get_state');
+      const state = await withTimeout(this.request<{ model?: PiModel; thinkingLevel?: string; sessionFile?: string }>('get_state'), 60_000, 'pi get_state');
+      if (this.transportError) throw this.transportError;
       // session_start notifications are emitted before get_state is handled in RPC mode.
       this.assertExtensionsReady();
       if (mission) {
         const readiness = await this.missionReadiness();
         if (!readiness.ready) throw new Error(readiness.reason ?? 'Managed Mission runtime is unverified.');
       }
+      if (state.sessionFile) this.ctx.updateRef({ piSessionFile: state.sessionFile });
+      if (!mission && state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
+      // A resumed session can report a different model than the one on the session config; keep the
+      // effort file pointed at whatever pi actually loaded.
+      await this.writeEffortConfig(mission ? undefined : intendedEffort, state.model ? { provider: state.model.provider, model: state.model.id } : meta.config.model);
+      if (this.transportError) throw this.transportError;
+      if (this.child !== child || this.exited || this.missionStopping || this.ordinaryStopping) throw new Error(mission ? 'Managed Pi startup was canceled.' : 'Pi startup was canceled.');
     } catch (error) {
+      const checkFolder = !mission && startupErrno === 'ENOENT' && error === this.transportError;
       await this.dispose();
+      if (checkFolder) {
+        // Windows names cmd.exe in ENOENT even if the saved working directory is the problem.
+        // Diagnose the folder if we can, but never retry a prompt in some other checkout.
+        const unavailable = await withTimeout(fs.stat(meta.cwd), 1_000, 'Pi session folder check').then(
+          (stat) => !stat.isDirectory(),
+          (e: NodeJS.ErrnoException) => e.code === 'ENOENT' || e.code === 'ENOTDIR'
+        );
+        if (unavailable) throw new Error(`Pi could not start: session folder is missing or not a directory: ${meta.cwd}. Restore the folder or use an existing worktree.`);
+      }
       throw error;
     }
-    if (state.sessionFile) this.ctx.updateRef({ piSessionFile: state.sessionFile });
-    if (!mission && state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
-    // A resumed session can report a different model than the one on the session config; keep the
-    // effort file pointed at whatever pi actually loaded.
-    await this.writeEffortConfig(mission ? undefined : intendedEffort, state.model ? { provider: state.model.provider, model: state.model.id } : meta.config.model);
-    if (mission && (this.missionStopping || this.exited)) throw new Error('Managed Pi startup was canceled.');
+    ready = true;
     this.ctx.emit({ type: 'status', status: 'idle' });
     void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
   }
@@ -566,8 +592,15 @@ export class PiAdapter implements HarnessAdapter {
     }
   }
 
+  private rejectPending(error: Error): void {
+    for (const request of this.pending.values()) request.reject(error);
+    this.pending.clear();
+    this.fastModeChange?.ack.reject(error);
+  }
+
   private write(cmd: Record<string, unknown>): void {
-    if (!this.child?.stdin?.writable || this.exited) throw new Error('pi process is not running');
+    if (this.transportError) throw this.transportError;
+    if (!this.child?.stdin?.writable || this.exited || this.missionStopping || this.ordinaryStopping) throw new Error('pi process is not running');
     this.child.stdin.write(JSON.stringify(cmd) + '\n');
   }
 
@@ -590,6 +623,7 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   private handleLine(line: string): void {
+    if (this.transportError) return;
     line = this.redactMissionSecrets(line);
     let ev: Record<string, unknown>;
     try {
@@ -1294,8 +1328,8 @@ export class PiAdapter implements HarnessAdapter {
       // cumulative snapshot still reconciles them rather than counting them twice.
       this.ctx.log('debug', `get_session_stats failed: ${errorMessage(e)}`);
     }
-    // A delayed stats response/close must not publish a completed turn while ownership is stopping.
-    if (this.child !== child || (this.ctx.session().mission ? this.missionStopping : this.ordinaryStopping)) return;
+    // Accounting cannot publish a completed turn after a transport error or during teardown.
+    if (this.child !== child || this.transportError || (this.ctx.session().mission ? this.missionStopping : this.ordinaryStopping)) return;
     const completed = this.usage.finishTurn();
     // Subagent spend accrued since the last report, so analytics can put it on the model that ran it.
     const subagentCostByModel = this.pendingSubagentCost.size ? [...this.pendingSubagentCost.values()] : undefined;
@@ -1337,7 +1371,7 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   private advanceInputs(): void {
-    if (this.ctx.session().mission || this._busy || this.pendingInputs || this.turnFinishing || this.ordinaryStopping || this.exited) return;
+    if (this.ctx.session().mission || this._busy || this.pendingInputs || this.turnFinishing || this.ordinaryStopping || this.exited || this.transportError) return;
     const next = this.followUps.shift();
     this.updateQueued();
     if (next) {
@@ -1553,7 +1587,8 @@ export class PiAdapter implements HarnessAdapter {
     this.extensionCapabilities.clear();
     this.missionTools = [];
     this.declinedTools.clear();
-    this.fastModeChange?.ack.reject(new Error('Pi stopped before Fast mode was confirmed.'));
+    // Disposal can detach the runtime before close arrives (and close need not arrive at all).
+    this.rejectPending(new Error('Pi stopped before its RPC requests completed.'));
     const child = this.child;
     if (this.ctx.session().mission) {
       this.missionStopping = true;
