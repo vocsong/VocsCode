@@ -1,0 +1,562 @@
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+.btn:hover {
+  background: var(--bg-hover);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.btn-sm {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+.btn-primary:hover {
+  filter: brightness(1.08);
+  background: var(--accent);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn-subtle {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+}
+.btn-danger {
+  background: var(--red-soft);
+  border-color: transparent;
+  color: var(--red);
+}
+.btn-danger:hover {
+  background: color-mix(in srgb, var(--red) 26%, transparent);
+}
+.btn-icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
+}
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 2px 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.icon-btn {
+  display: inline-flex;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--fg-muted);
+}
+.icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+.badge-green {
+  background: var(--green-soft);
+  color: var(--green);
+}
+.badge-amber {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.badge-red {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.badge-blue {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+.badge-purple {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+.kbd {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 5px;
+  background: var(--bg-elev);
+}
+.btn .kbd {
+  font-size: 9.5px;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  border-color: color-mix(in srgb, currentColor 35%, transparent);
+  border-bottom-width: 2px;
+}
+.chip {
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.chip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.callout {
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.callout.warn {
+  border-color: var(--amber);
+  background: var(--amber-soft);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+  flex-shrink: 0;
+  display: inline-block;
+}
+.status-running,
+.status-starting {
+  background: var(--blue);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.status-awaiting {
+  background: var(--red);
+  animation: pulse 0.8s ease-in-out infinite;
+}
+.status-pr {
+  background: var(--amber);
+}
+.status-merged {
+  background: var(--green);
+}
+.status-error {
+  background: var(--red);
+}
+.status-stopped {
+  background: var(--fg-faint);
+  opacity: 0.5;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.spinner {
+  display: inline-block;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.dot-live {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  margin-left: 4px;
+}
+
+/* Dropdown & menus */
+.dropdown {
+  position: relative;
+}
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  z-index: 50;
+  min-width: 180px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 4px;
+  max-height: 60vh;
+  overflow: auto;
+}
+.dropdown-left {
+  left: 0;
+}
+.dropdown-right {
+  right: 0;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.menu-item:hover {
+  background: var(--bg-hover);
+}
+.menu-item.active {
+  color: var(--accent);
+}
+.menu-item.danger {
+  color: var(--red);
+}
+.menu-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.menu-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-item-hint {
+  color: var(--fg-faint);
+  font-size: 11px;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Right-click menu: the dropdown surface, placed at the cursor instead of under a trigger. */
+.context-menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 300;
+  min-width: 200px;
+}
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+.menu-item-gap {
+  width: 14px;
+  flex: none;
+}
+.menu-group {
+  padding: 6px 8px 2px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-faint);
+}
+.menu-empty {
+  padding: 10px;
+  color: var(--fg-muted);
+}
+.menu-scroll {
+  max-height: 50vh;
+  overflow: auto;
+}
+
+/* Model picker (searchable list with star favorites) */
+.model-picker {
+  display: flex;
+  flex-direction: column;
+}
+.mp-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+.mp-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--fg);
+  outline: none;
+  padding: 2px 0;
+  font-size: 13px;
+}
+.mp-clear {
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+}
+.mp-clear:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.mp-list {
+  max-height: 320px;
+  overflow: auto;
+}
+.mp-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+.mp-row:hover {
+  background: var(--bg-hover);
+}
+.mp-row.active .mp-name {
+  color: var(--accent);
+}
+.mp-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 6px 4px 6px 8px;
+  cursor: pointer;
+  color: inherit;
+}
+.mp-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-select .menu-item-hint {
+  flex-shrink: 0;
+  max-width: 52%;
+}
+.mp-star {
+  border: none;
+  background: none;
+  color: var(--fg-faint);
+  cursor: pointer;
+  display: flex;
+  padding: 4px 8px;
+  flex: none;
+}
+.mp-star:hover {
+  color: var(--amber);
+}
+.mp-star.on {
+  color: var(--amber);
+}
+.mp-star.on .icon {
+  fill: currentColor;
+}
+
+/* Modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 8vh;
+  z-index: 100;
+}
+.modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  max-height: 84vh;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-title {
+  font-weight: 600;
+  font-size: 15px;
+  flex: 1;
+}
+.modal-body {
+  padding: 16px;
+  overflow: auto;
+}
+.modal-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+/* A confirmation opened from a control pops up at it: no dimming, so the row it is about stays in
+   view, and a click outside still cancels. */
+.modal-backdrop.is-anchored {
+  display: block;
+  padding: 0;
+  background: transparent;
+}
+.modal.is-anchored {
+  position: fixed;
+  overflow-wrap: anywhere;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  flex: 1;
+}
+.field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.field-hint {
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+.toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin: 8px 0;
+}
+/* Hidden to the eye but still in the tab order, so the switch stays keyboard-operable. */
+.toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  margin: 0;
+  pointer-events: none;
+}
+.toggle-track {
+  width: 38px;
+  height: 22px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  position: relative;
+  transition: background 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  color: var(--bg-elev);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: left 0.15s, background 0.15s, color 0.15s;
+}
+.toggle-glyph {
+  width: 11px;
+  height: 11px;
+}
+.toggle-state {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  min-width: 20px;
+  color: var(--fg-faint);
+  transition: color 0.15s;
+}
+.toggle input:checked + .toggle-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* On a light accent (Graphite's is near-white) a white thumb vanishes, so it flips to the
+   accent's own foreground once checked — and the glyph inside flips to the accent to stay legible. */
+.toggle input:checked + .toggle-track .toggle-thumb {
+  left: 18px;
+  background: var(--accent-fg);
+  color: var(--accent);
+}
+.toggle.is-on .toggle-state {
+  color: var(--accent);
+}
+.toggle input:focus-visible + .toggle-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.toggle:hover:not(.disabled) .toggle-track {
+  border-color: var(--accent);
+}

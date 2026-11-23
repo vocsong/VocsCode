@@ -26,6 +26,7 @@ import {
   type FontRole
 } from '../src/shared/typography';
 import { defaultSettings, normalizeSettings } from '../src/main/settings';
+import { readCssBundle } from './support/read-styles';
 
 const read = (f: string): string => fs.readFileSync(path.join(process.cwd(), f), 'utf8');
 
@@ -44,7 +45,7 @@ describe('typography defaults', () => {
   });
 
   it('keeps the stylesheet fallbacks equal to the defaults, so nothing shifts before settings load', () => {
-    const styles = read('src/renderer/src/styles.css');
+    const styles = readCssBundle();
     const root = styles.slice(styles.indexOf(':root {'), styles.indexOf('}', styles.indexOf(':root {')));
     expect(root).toContain(`--font: ${SYSTEM_SANS};`);
     expect(root).toContain(`--mono: ${DEFAULT_MONO};`);
@@ -58,7 +59,7 @@ describe('typography defaults', () => {
   });
 
   it('writes the narrow and wide widths into the stylesheets with the same numbers', () => {
-    const styles = read('src/renderer/src/styles.css');
+    const styles = readCssBundle();
     const zen = read('src/renderer/src/ui-zen.css');
     for (const w of TRANSCRIPT_WIDTHS.filter((x) => x.id !== 'normal')) {
       const reading = styles.split(`:root[data-width='${w.id}'] {`)[1]?.split('}')[0] ?? '';
@@ -194,7 +195,7 @@ describe('typography settings', () => {
 
 describe('typography wiring', () => {
   it('drives the transcript, code and composer text from the variables', () => {
-    const styles = read('src/renderer/src/styles.css');
+    const styles = readCssBundle();
     const block = (selector: string): string => styles.split(`\n${selector} {`)[1]?.split('}')[0] ?? '';
     expect(block('.md')).toContain('font-family: var(--content-font);');
     expect(block('.md')).toContain('font-size: var(--content-size);');

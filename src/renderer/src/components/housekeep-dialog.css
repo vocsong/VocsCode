@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer features {
 .housekeep-dialog {
   overflow-wrap: anywhere;
 }
@@ -127,4 +129,5 @@
 
 .housekeep-excerpts dd:last-child {
   margin-bottom: 0;
+}
 }

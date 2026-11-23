@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer features {
 .onboarding-setup { min-width: 0; }
 .onboarding-setup h2 { font-size: 18px; margin: 20px 0 10px; }
 .onboarding-setup p { line-height: 1.55; }
@@ -37,4 +39,5 @@
   .setup-requirements li > button { margin-left: 22px; }
   .setup-summary { grid-template-columns: 1fr; gap: 4px; }
   .setup-summary dd { margin-bottom: 10px; }
+}
 }

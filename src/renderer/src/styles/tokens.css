@@ -1,0 +1,104 @@
+/*
+ * Design tokens.
+ *
+ * Every palette variant is data in `src/shared/themes.ts`, injected by `src/renderer/src/theme.ts`
+ * and keyed on `[data-palette][data-scheme]`. What is authored here is the Default palette's light
+ * and dark variants as a fallback, so a complete palette exists before any script runs; they must
+ * match the `default` entry in themes.ts (tests/themes.test.ts checks).
+ *
+ * A palette only needs to declare base hues: the `--*-soft` washes below are derived from them.
+ */
+:root {
+  color-scheme: light dark;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable', 'Segoe UI', Inter, Roboto, system-ui, sans-serif;
+  --mono: 'Cascadia Code', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace;
+  /* Text & fonts (shared/typography.ts): theme.ts overrides these on <html> from settings. */
+  --content-font: var(--font);
+  --content-size: 14px;
+  --content-leading: 1.65;
+  --code-size: 12.5px;
+  --bg: #f7f7f8;
+  --bg-elev: #ffffff;
+  --bg-sunken: #efeff1;
+  --bg-hover: rgba(0, 0, 0, 0.045);
+  --bg-active: rgba(0, 0, 0, 0.08);
+  --fg: #1c1c1f;
+  --fg-muted: #62666d;
+  --fg-faint: #8a8e96;
+  --border: #e3e4e8;
+  --border-strong: #cfd1d6;
+  --accent: #5b5bd6;
+  --accent-fg: #ffffff;
+  --green: #157c45;
+  --amber: #9c600a;
+  --red: #c8302f;
+  --blue: #2a64d6;
+  --purple: #8247c8;
+  --cyan: #0c7885;
+  --user-bubble: #e9e9fb;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.14);
+
+  /* Derived from the hues above, so themes never restate them. */
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --green-soft: color-mix(in srgb, var(--green) 14%, transparent);
+  --amber-soft: color-mix(in srgb, var(--amber) 16%, transparent);
+  --red-soft: color-mix(in srgb, var(--red) 14%, transparent);
+  --blue-soft: color-mix(in srgb, var(--blue) 14%, transparent);
+  --purple-soft: color-mix(in srgb, var(--purple) 14%, transparent);
+
+  /* Categorical chart series: a validated data palette, one set per light/dark base (CHART_SERIES in
+     src/shared/themes.ts, which emits the same slots for every data-driven theme). */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-other: var(--fg-faint);
+  --chart-unattributed: var(--border-strong);
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --sidebar: 280px;
+  --panel: 420px;
+  /** Must match TITLEBAR_HEIGHT in src/main/index.ts. */
+  --titlebar: 36px;
+  /* Cap prose separately: the rest of the desktop conversation can use more of the pane. */
+  --reading: 780px;
+  --conversation-gutter: clamp(12px, 2.5%, 24px);
+  --radius-lg: 14px;
+  /* Neutral elevation that reads on light and dark palettes alike (a theme's --shadow is for overlays). */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.06);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.05), 0 8px 24px -14px rgb(0 0 0 / 0.28);
+}
+/* Before theme.ts resolves a scheme, follow the OS. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-scheme]) {
+    --bg: #111318;
+    --bg-elev: #191c23;
+    --bg-sunken: #0d0f13;
+    --bg-hover: rgba(255, 255, 255, 0.06);
+    --bg-active: rgba(255, 255, 255, 0.1);
+    --fg: #e6e7ea;
+    --fg-muted: #9aa0aa;
+    --fg-faint: #6b7280;
+    --border: #262a33;
+    --border-strong: #363b47;
+    --accent: #8b8bff;
+    --accent-fg: #0e0e1a;
+    --green: #3ecf7a;
+    --amber: #f0b44c;
+    --red: #ff6b6e;
+    --blue: #6ea0ff;
+    --purple: #c084fc;
+    --cyan: #4dd0e1;
+    --user-bubble: #23263a;
+    --shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    --chart-1: #3987e5;
+    --chart-2: #d95926;
+    --chart-3: #199e70;
+    --chart-4: #c98500;
+    --chart-5: #d55181;
+    --chart-6: #008300;
+  }
+}

@@ -1,3 +1,5 @@
+@layer tokens, reset, base, components, features, themes, modes;
+@layer features {
 /* The active palette's color-scheme selects the light/dark pair (including System and custom
    themes). These are transcript-only colors, independent of the interface mode and editor. */
 .transcript {
@@ -48,4 +50,5 @@
   color: inherit;
   cursor: text;
   border-bottom: none;
+}
 }

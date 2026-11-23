@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readCssBundle } from './support/read-styles';
 import {
   CHART_SERIES,
   DEFAULT_PALETTE,
@@ -315,7 +316,7 @@ describe('themeCss', () => {
 
   it('declares only tokens that something actually consumes', () => {
     const read = (f: string): string => fs.readFileSync(path.join(process.cwd(), f), 'utf8');
-    const styles = read('src/renderer/src/styles.css');
+    const styles = readCssBundle();
     const host = read('src/renderer/src/terminal/host.ts');
     // A token is consumed either through var() in the stylesheet or by name from the terminal,
     // which reads the computed properties to build its ANSI palette.
@@ -334,7 +335,7 @@ describe('themeCss', () => {
   });
 
   it('keeps the pre-script fallback in styles.css identical to the Default palette', () => {
-    const styles = fs.readFileSync(path.join(process.cwd(), 'src/renderer/src/styles.css'), 'utf8');
+    const styles = readCssBundle();
     const rootBlock = styles.slice(styles.indexOf(':root {'), styles.indexOf('}', styles.indexOf(':root {')));
     const darkStart = styles.indexOf(':root:not([data-scheme]) {');
     expect(darkStart, 'dark fallback block').toBeGreaterThan(-1);
@@ -482,7 +483,7 @@ describe('chart series tokens', () => {
         CHART_SERIES[scheme].forEach((hex, i) => expect(block).toContain(`--chart-${i + 1}: ${hex};`));
       }
     }
-    const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'styles.css'), 'utf8');
+    const styles = readCssBundle();
     CHART_SERIES.light.forEach((hex, i) => expect(styles).toContain(`--chart-${i + 1}: ${hex};`));
     CHART_SERIES.dark.forEach((hex, i) => expect(styles).toContain(`--chart-${i + 1}: ${hex};`));
   });
