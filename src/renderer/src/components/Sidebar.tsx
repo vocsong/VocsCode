@@ -730,7 +730,12 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
           ) : (
             <div className="session-title">
               {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
-              <SessionTitle session={s} showProject={false} />
+              <SessionTitle session={s} showProject={!!folder} projectLabel={folder && (
+                <span className="session-folder" data-testid="session-folder" title={folder.root} style={folder.style?.color ? { color: folder.style.color } : undefined}>
+                  <Icon name={folder.style?.icon ?? 'folder'} size={11} />
+                  <span className="session-folder-name">{basename(folder.root)}</span>
+                </span>
+              )} />
             </div>
           )}
           <div className="row-actions" onClick={(e) => e.stopPropagation()}>
@@ -754,12 +759,6 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
           </div>
         </div>
         <div className="session-meta">
-          {folder && (
-            <span className="session-folder" data-testid="session-folder" title={folder.root} style={folder.style?.color ? { color: folder.style.color } : undefined}>
-              <Icon name={folder.style?.icon ?? 'folder'} size={11} />
-              <span className="session-folder-name">{basename(folder.root)}</span>
-            </span>
-          )}
           {s.mission && <Badge tone="purple">Mission</Badge>}
           {s.activeModel && (
             <span className="session-model" title={modelRefName(s.activeModel)}>

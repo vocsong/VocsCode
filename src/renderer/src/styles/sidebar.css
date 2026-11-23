@@ -649,20 +649,23 @@
   gap: 3px;
   min-width: 0;
 }
-/* Recent view: the project a row belongs to, since no folder header sits above it. */
+/* Recent view: leave space for the session name even when the project name is long. */
 .session-folder {
-  flex: 0 1 auto;
+  flex: 0 4 auto;
   display: flex;
   align-items: center;
   gap: 3px;
   min-width: 0;
+  max-width: min(110px, 35%);
+  overflow: hidden;
   color: var(--fg-muted);
+  font-size: 11.5px;
+  font-weight: 400;
 }
 .session-folder-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 110px;
 }
 .session-worktree-name {
   overflow: hidden;

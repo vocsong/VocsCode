@@ -423,18 +423,11 @@
   margin: 0;
   min-height: 0;
 }
-:root[data-ui='zen'] .session-meta > :not(.session-side):not(.session-folder) {
+:root[data-ui='zen'] .session-meta > :not(.session-side) {
   display: none;
 }
-/* The Recent view keeps the row's folder name (no icon) beside its status: no header names it. */
 :root[data-ui='zen'] .session-folder {
-  /* Shrinks before the status pill does, so a label like MERGED stays readable. */
-  flex: 0 4 auto;
-  min-width: 28px;
-  font-size: 11.5px;
-}
-:root[data-ui='zen'] .session-folder-name {
-  max-width: 84px;
+  max-width: min(84px, 35%);
 }
 :root[data-ui='zen'] .session-folder > .icon {
   display: none;

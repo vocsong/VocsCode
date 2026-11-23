@@ -205,10 +205,12 @@ describe('composer Fast mode request', () => {
     expect(on.getAttribute('aria-checked')).toBe('false');
     expect(off.getAttribute('aria-checked')).toBe('true');
     expect(pill.querySelector('[data-icon="bolt"]')).toBeNull();
+    expect(pill.querySelector('svg.fast-mode-electric')).toBeNull();
     await act(async () => resolve(session({ config: { ...session().config, fastMode: true }, fastModeStatus: { state: 'requested' } })));
     expect(on.getAttribute('aria-checked')).toBe('true');
     expect(off.getAttribute('aria-checked')).toBe('false');
     expect(pill.querySelector('[data-icon="bolt"]')).not.toBeNull();
+    expect(pill.querySelector('svg.fast-mode-electric')?.getAttribute('aria-hidden')).toBe('true');
     expect(pill.getAttribute('aria-label')).toContain('Fast requested');
     expect(screen.getByRole('status').textContent).toBe('Requested');
     expect(on.disabled || off.disabled).toBe(false);
