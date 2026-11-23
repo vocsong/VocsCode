@@ -26,7 +26,7 @@ describe('web invoke shims', () => {
 
   it('lets pickFolder pass through to the host', async () => {
     // The folders live on the host, and the renderer must not open native dialogs
-    // (repo invariant, tests/unit.test.ts): the shim must not intercept this channel.
+    // (repo invariant, tests/unit-git-misc.test.ts): the shim must not intercept this channel.
     expect(await webShim('app:pickFolder', { defaultPath: '/x' })).toBeUndefined();
   });
 
