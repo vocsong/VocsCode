@@ -102,6 +102,7 @@ export class ProcessTracker {
   private latest: { list: ProcessList; tracked: Map<string, TrackedProcess>; raw: RawProcess[] } | null = null;
   private inflight: Promise<ProcessList> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private soonTimer: ReturnType<typeof setTimeout> | null = null;
   private stopObserving: (() => void) | null = null;
   private savedSignature = '';
@@ -117,13 +118,16 @@ export class ProcessTracker {
   }
 
   start(): void {
-    if (this.opts.observeSpawns !== false && !this.stopObserving) this.stopObserving = observeOwnedSpawns((pid, owner) => this.claim(pid, owner));
+    if (this.closed || this.timer) return;
+    if (this.opts.observeSpawns !== false) this.stopObserving = observeOwnedSpawns((pid, owner) => this.claim(pid, owner));
     void this.load();
-    if (!this.timer) {
-      this.timer = setInterval(() => void this.refresh().catch(() => undefined), this.opts.intervalMs ?? 10_000);
-      this.timer.unref?.();
-    }
-    setTimeout(() => void this.refresh().catch(() => undefined), 2_000).unref?.();
+    this.timer = setInterval(() => void this.refresh().catch(() => undefined), this.opts.intervalMs ?? 10_000);
+    this.timer.unref?.();
+    this.startupTimer = setTimeout(() => {
+      this.startupTimer = null;
+      if (!this.closed) void this.refresh().catch(() => undefined);
+    }, 2_000);
+    this.startupTimer.unref?.();
   }
 
   /** Attributes a process the app just started; bound to its creation time on the next sample. */
@@ -243,6 +247,8 @@ export class ProcessTracker {
 
   async close(): Promise<void> {
     if (this.closed) return;
+    if (this.startupTimer) clearTimeout(this.startupTimer);
+    this.startupTimer = null;
     // One last sample saves what is alive now, so the next launch can find what outlives this run.
     // Skipped when nothing was ever sampled: starting the Windows reader during quit would only delay it.
     if (this.latest) {
