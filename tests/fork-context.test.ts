@@ -154,9 +154,16 @@ describe('cross-harness fork context', () => {
     expect(sent[0].text).toBe('continue');
   });
 
-  it.each(['codex', 'codex-exec'] as const)('hands prior conversation to a fresh same-harness %s fork without resuming the source thread', async (harness) => {
+  it.each([
+    ['codex', { codexThreadId: 'source-thread' }],
+    ['codex-exec', { codexThreadId: 'source-thread' }],
+    ['pi', { piSessionFile: 'source.jsonl' }],
+    ['cursor', { cursorAgentId: 'source-agent' }],
+    ['acp', { acpSessionId: 'source-session' }],
+    ['antigravity', { acpSessionId: 'source-session' }],
+  ] as const)('hands prior conversation to a fresh same-harness %s fork without resuming the source', async (harness, harnessRef) => {
     sent.length = 0;
-    const src = { ...source(harness), worktreeBranch: undefined, harnessRef: { codexThreadId: 'source-thread' } };
+    const src = { ...source(harness), worktreeBranch: undefined, harnessRef };
     const { manager } = makeManager(src, conversation);
     const fork = (await manager.fork(src.id))!;
     expect(fork.harnessRef).toEqual({});
