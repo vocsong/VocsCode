@@ -2,6 +2,7 @@
  *  The object is the shared Transport bound to Electron IPC; web builds bind the same Transport
  *  to a WebSocket (docs/REMOTE-ACCESS.md). */
 import { contextBridge, ipcRenderer } from 'electron';
+import { KEEP_AWAKE_CHANNEL, type KeepAwakeBridge } from '../shared/keep-awake';
 import type { Transport } from '../shared/transport';
 
 const api: Transport = {
@@ -15,3 +16,6 @@ const api: Transport = {
 };
 
 contextBridge.exposeInMainWorld('harness', api);
+
+const keepAwake: KeepAwakeBridge = { preference: (request) => ipcRenderer.invoke(KEEP_AWAKE_CHANNEL, request) };
+contextBridge.exposeInMainWorld('keepAwake', keepAwake);
