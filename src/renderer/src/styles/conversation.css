@@ -228,23 +228,48 @@
 }
 .run-controls .pill-model.is-fast {
   position: relative;
-  isolation: isolate;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
 }
-/* A brief glint behind the label, with a rest between sweeps. */
+/* Follow the pill's inner rim without changing its size or click target. */
+.fast-mode-electric {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  fill: none;
+  stroke: color-mix(in srgb, var(--blue) 80%, var(--fg));
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 1.5px var(--blue));
+}
+.fast-mode-electric path {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1;
+}
+.fast-mode-electric .fast-mode-electric-trunk {
+  stroke-width: 1.5;
+}
+/* Static branched arcs are the default; only animate when motion is welcome. */
 @media (prefers-reduced-motion: no-preference) {
-  .run-controls .pill-model.is-fast::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    background: linear-gradient(110deg, transparent 32%, color-mix(in srgb, var(--accent) 24%, transparent) 50%, transparent 68%);
-    animation: model-fast-charge 4s ease-in-out infinite;
+  .fast-mode-electric-arc {
+    animation: fast-mode-electric-crackle 1.6s ease-in-out infinite;
   }
-  @keyframes model-fast-charge {
-    from { transform: translateX(-100%); }
-    22%, to { transform: translateX(100%); }
+  .fast-mode-electric-arc + .fast-mode-electric-arc {
+    animation-delay: -0.8s;
+  }
+  .fast-mode-electric .fast-mode-electric-trunk {
+    stroke-dasharray: 0.66 0.12 0.13 0.09;
+    animation: fast-mode-electric-travel 1.6s linear infinite;
+  }
+  @keyframes fast-mode-electric-crackle {
+    0%, 100% { opacity: 0.55; }
+    8%, 40% { opacity: 1; }
+    27% { opacity: 0.72; }
+    64% { opacity: 0.45; }
+  }
+  @keyframes fast-mode-electric-travel {
+    to { stroke-dashoffset: -1; }
   }
 }
 /* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */
