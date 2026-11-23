@@ -355,6 +355,8 @@ export interface IpcContract {
   'sessions:clearTranscript': [{ id: string }, void];
   'sessions:export': [{ id: string }, { path: string | null }];
   'sessions:fork': [{ id: string; harness?: HarnessId }, SessionMeta | null];
+  /** Switches a session's harness in place, keeping its workspace, worktree, and transcript. */
+  'sessions:switchHarness': [{ id: string; harness: HarnessId; model?: ModelRef; acpAgent?: string }, SessionMeta];
   'sessions:moveTo': [{ id: string; cwd: string }, SessionMeta];
   'sessions:goal': [
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },

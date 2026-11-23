@@ -11,6 +11,7 @@ import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
+import { SwitchHarnessItems } from './SwitchHarness';
 import { SessionTitle } from './SessionTitle';
 import { openSettings } from './SettingsView';
 import { VestaLauncher } from './Vesta';
@@ -193,6 +194,7 @@ function FileMenu({ close }: { close: () => void }) {
       <MenuItem disabled={!session || !!session.mission} hint={session?.mission ? 'Mission owns execution; generic fork is unavailable.' : undefined} onClick={run(() => session && !session.mission && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Fork session
       </MenuItem>
+      {session && <SwitchHarnessItems session={session} close={close} />}
       {session && <ForkIntoItems session={session} onForked={(f) => st.setActive(f.id)} />}
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Export transcript…

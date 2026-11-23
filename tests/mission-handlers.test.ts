@@ -86,7 +86,7 @@ async function rig() {
     create: vi.fn(async () => source), send: vi.fn(async () => undefined),
     interrupt: vi.fn(), stop: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(), setArchived: vi.fn(async () => source),
     editAndResend: vi.fn(), setModel: vi.fn(), setEffort: vi.fn(), setPermissionMode: vi.fn(), compact: vi.fn(),
-    clearTranscript: vi.fn(), fork: vi.fn(), moveTo: vi.fn(), goal: vi.fn(), subagentCommand: vi.fn(),
+    clearTranscript: vi.fn(), fork: vi.fn(), switchHarness: vi.fn(), moveTo: vi.fn(), goal: vi.fn(), subagentCommand: vi.fn(),
     respondApproval: vi.fn()
   };
   const terminals = {
@@ -420,7 +420,7 @@ const mutations: Array<[string, Record<string, unknown>]> = [
   ['sessions:delete', { removeWorktree: true }], ['sessions:editAndResend', { userItemId: 'u', input: { text: 'retry' } }],
   ['sessions:interrupt', {}], ['sessions:stop', {}], ['sessions:setModel', { model: { provider: 'p', model: 'm' } }],
   ['sessions:setEffort', { effort: 'high' }], ['sessions:setPermissionMode', { mode: 'full-auto' }],
-  ['sessions:compact', {}], ['sessions:clearTranscript', {}], ['sessions:fork', {}], ['sessions:moveTo', { cwd: '/tmp' }],
+  ['sessions:compact', {}], ['sessions:clearTranscript', {}], ['sessions:fork', {}], ['sessions:switchHarness', { harness: 'claude' }], ['sessions:moveTo', { cwd: '/tmp' }],
   ['subagents:stop', { runId: 'run' }], ['subagents:steer', { runId: 'run', message: 'bypass' }]
 ];
 

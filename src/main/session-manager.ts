@@ -3084,6 +3084,130 @@ export class SessionManager {
     return this.withoutControlled(id, () => this.moveUncontrolled(id, cwd));
   }
 
+  /**
+   * Switches a session to another harness in place, keeping its workspace, worktree, and transcript.
+   * Any running harness is stopped first and prior conversation is handed over on the next message.
+   */
+  async switchHarness(id: string, harness: HarnessId, opts: { model?: ModelRef; acpAgent?: string } = {}): Promise<SessionMeta> {
+    const existing = this.get(id);
+    if (existing && !existing.archived && existing.config.harness === harness && (harness !== 'acp' || (opts.acpAgent ?? this.settings().acpAgents[0]?.id) === existing.config.acpAgent)) {
+      if (opts.model && (!existing.activeModel || existing.activeModel.provider !== opts.model.provider || existing.activeModel.model !== opts.model.model)) {
+        return this.setModel(id, opts.model);
+      }
+      this.assertUnmanaged(id);
+      this.assertNotControlled(id);
+      return existing;
+    }
+    return this.withoutControlled(id, () => this.switchHarnessUncontrolled(id, harness, opts));
+  }
+
+  private async switchHarnessUncontrolled(id: string, harness: HarnessId, opts: { model?: ModelRef; acpAgent?: string }): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (meta.archived) throw new Error('Restore this session before switching harnesses.');
+    if (!HARNESS_BY_ID[harness]) throw new Error('Unknown harness');
+    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    const settings = this.settings();
+    const targetAcpAgent = harness === 'acp' ? (opts.acpAgent ?? settings.acpAgents[0]?.id) : undefined;
+    if (meta.config.harness === harness && (harness !== 'acp' || targetAcpAgent === meta.config.acpAgent)) {
+      if (opts.model && (!meta.activeModel || meta.activeModel.provider !== opts.model.provider || meta.activeModel.model !== opts.model.model)) {
+        return this.setModel(id, opts.model);
+      }
+      return meta;
+    }
+    const active = this.active.get(id);
+    const activity = this.activity(id);
+    if (
+      (this.configDispatches.get(id) ?? 0) > 1 ||
+      active?.starting ||
+      activity.turn ||
+      activity.tools ||
+      activity.nativeChildren ||
+      activity.approvals ||
+      activity.compacting ||
+      activity.queued ||
+      activity.tearingDown ||
+      activity.uncertain ||
+      meta.status === 'running' ||
+      meta.status === 'starting' ||
+      meta.status === 'awaiting'
+    ) {
+      throw new Error('Wait for the current turn to finish before switching harnesses.');
+    }
+    if (active || meta.workspaceWriterClaims?.length) {
+      if (active) this.fencedRuntimes.add(active);
+      await this.stop(id);
+    }
+    if (this.get(id) !== meta) throw new Error('Session disappeared during harness switch.');
+    const fromHarness = meta.config.harness;
+    const items = await this.deps.store.readTranscript(id);
+    const hasConversation = items.some((item) => item.kind === 'user' || item.kind === 'assistant' || item.kind === 'tool' || item.kind === 'plan');
+    if (hasConversation) {
+      await this.deps.store.writeBlob(id, FORK_CONTEXT_FILE, renderForkContext(items, fromHarness, harness, 'switch'));
+    }
+    const before = structuredClone(meta);
+    const nextModel = opts.model ?? settings.defaultModelByHarness[harness];
+    const nextPermission = closestPermissionMode(harness, meta.config.permissionMode);
+    const permissionClamped = nextPermission !== meta.config.permissionMode;
+    const goalPaused = harness === 'antigravity' && meta.goal?.status === 'active';
+    const nextUsage = { ...meta.usage };
+    delete nextUsage.contextTokens;
+    delete nextUsage.contextWindow;
+    meta.config = {
+      ...meta.config,
+      harness,
+      model: nextModel,
+      effort: undefined,
+      fastMode: false,
+      permissionMode: nextPermission,
+      acpAgent: targetAcpAgent,
+      codexModelProvider: undefined
+    };
+    meta.activeModel = nextModel;
+    meta.activeEffort = undefined;
+    meta.fastModeStatus = { state: 'off' };
+    meta.harnessRef = {};
+    meta.harnessCommands = undefined;
+    meta.usage = nextUsage;
+    if (meta.status === 'error' || meta.status === 'stopped') {
+      meta.status = 'idle';
+      meta.statusDetail = undefined;
+      meta.lastError = undefined;
+    }
+    if (goalPaused && meta.goal) {
+      meta.goal = { ...meta.goal, status: 'paused', updatedAt: Date.now() };
+    }
+    await this.applyGoalDriver(meta);
+    meta.pendingAppInstructions = !HARNESS_BY_ID[harness].capabilities.systemPrompt ? true : undefined;
+    meta.pendingKnowledgeDigest = meta.knowledgeDigest && !HARNESS_BY_ID[harness].capabilities.systemPrompt ? true : undefined;
+    meta.pendingForkContext = hasConversation ? true : undefined;
+    meta.updatedAt = Date.now();
+    try {
+      await this.deps.store.upsert(meta);
+    } catch (error) {
+      for (const key of Object.keys(meta) as (keyof SessionMeta)[]) {
+        if (!(key in before)) delete meta[key];
+      }
+      Object.assign(meta, before);
+      throw error;
+    }
+    if (fromHarness === 'native' || harness === 'native') {
+      await this.deps.store.clearNativeHistory?.(id).catch((e) => this.deps.log('warn', `[${id}] clear native history after switch failed: ${errorMessage(e)}`));
+    }
+    this.deps.analytics.touchSession(meta);
+    this.pushSessions();
+    const fromName = HARNESS_BY_ID[fromHarness].name;
+    const toName = HARNESS_BY_ID[harness].name;
+    const parts = [`Switched harness from ${fromName} to ${toName} in the same workspace.`];
+    if (hasConversation) parts.push('The conversation above will be handed over as context on your next message.');
+    if (permissionClamped) parts.push(`Permission mode tightened to ${nextPermission}.`);
+    if (goalPaused) parts.push('Active goal paused (Antigravity requires direct user prompts).');
+    this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: parts.join(' ') } });
+    this.deps.log('info', `[${id}] harness switched ${fromHarness} → ${harness} (model=${describeModel(meta.activeModel)} permissions=${meta.config.permissionMode} cwd=${meta.cwd}${hasConversation ? '; handoff queued' : ''})`);
+    return meta;
+  }
+
   private async moveUncontrolled(id: string, cwd: string): Promise<SessionMeta> {
     this.assertUnmanaged(id);
     const meta = this.get(id);

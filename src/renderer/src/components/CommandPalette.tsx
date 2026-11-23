@@ -1,11 +1,14 @@
 /** Command palette for slash commands and quick navigation. */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { sessionTitleText } from '../../../shared/session-title';
+import { HARNESSES } from '../../../shared/harness-meta';
 import type { SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
+import { harnessShort } from '../format';
 import { canHousekeepHere, openHousekeep } from '../housekeep';
 import { useStore } from '../store';
 import { isTopLevelSession, MISSION_MANAGED_REASON, pauseMissionSession } from '../missions';
+import { switchHarnessDisabledReason, switchSessionHarness } from './SwitchHarness';
 import { createTerminal } from '../terminal/host';
 import { canSplit, sessionPanes } from '../panes';
 import { Icon } from './ui';
@@ -27,6 +30,8 @@ interface Cmd {
 export function CommandPalette() {
   const sessions = useStore((s) => s.sessions);
   const activeId = useStore((s) => s.activeId);
+  const availability = useStore((s) => s.availability);
+  const availabilityError = useStore((s) => s.availabilityError);
   const close = () => useStore.getState().openPalette(false);
   const [q, setQ] = useState('');
   const [idx, setIdx] = useState(0);
@@ -62,6 +67,22 @@ export function CommandPalette() {
         { id: 'fork', label: 'Fork session', icon: 'fork', disabled: !!active?.mission, hint: active?.mission ? MISSION_MANAGED_REASON : undefined, run: () => void invoke('sessions:fork', { id: activeId }).then((f) => f && st.setActive(f.id)) },
         { id: 'compact', label: 'Compact context', icon: 'compact', run: () => void invoke('sessions:compact', { id: activeId }) }
       );
+      if (active && !active.mission && !active.archived) {
+        const disabledReason = switchHarnessDisabledReason(active);
+        for (const h of HARNESSES) {
+          if (h.id === active.config.harness) continue;
+          const av = availability[h.id];
+          const unavailable = !!av && !av.available;
+          base.push({
+            id: `switch-harness:${h.id}`,
+            label: `Switch harness to ${harnessShort(h.id)}`,
+            hint: disabledReason ?? (unavailable ? 'Not installed' : 'Same workspace'),
+            icon: 'swap',
+            disabled: !!disabledReason || unavailable || !!availabilityError,
+            run: () => switchSessionHarness(active, h.id, st.toast)
+          });
+        }
+      }
     }
     // Split view: the pane commands only appear when they can do something.
     const layout = st.layout;
@@ -85,7 +106,7 @@ export function CommandPalette() {
       base.push({ id: `s:${session.id}`, label: sessionTitleText(session), session, icon: 'sparkles', run: () => void st.setActive(session.id) });
     }
     return base;
-  }, [sessions, activeId]);
+  }, [sessions, activeId, availability, availabilityError]);
 
   const filtered = useMemo(() => {
     const n = q.trim().toLowerCase();

@@ -7,6 +7,7 @@ import { useGitSummary } from '../gitReads';
 import { useStore } from '../store';
 import { Button, Icon, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
+import { SwitchHarnessDropdown } from './SwitchHarness';
 import { SessionTitle } from './SessionTitle';
 import { MissionHeaderControls, useMission } from './mission/MissionPanel';
 import { openMission } from '../missions';
@@ -61,6 +62,10 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
         {summary && <ChangesButton summary={summary} onOpen={() => setPanelTab('changes')} />}
         <div className="header-actions">
           <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} aria-label={showThinking ? 'Hide thinking' : 'Show thinking'} />
+          <SwitchHarnessDropdown
+            session={session}
+            trigger={() => <Button variant="ghost" size="sm" icon="swap" title="Switch harness (same workspace)" aria-label="Switch harness" />}
+          />
           <ForkIntoDropdown
             session={session}
             onForked={(f) => useStore.getState().setActive(f.id)}

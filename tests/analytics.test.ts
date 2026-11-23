@@ -1129,3 +1129,60 @@ describe('codex cached-input migration', () => {
     expect(day.cacheReadTokens).toBe(190 + 60);
   });
 });
+
+describe('in-place harness switch attribution', () => {
+  it('preserves prior harness spend and splits all-time byHarness across reload', async () => {
+    const dir = tmpDir();
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([]);
+    const t0 = Date.UTC(2026, 4, 10, 12, 0, 0);
+    const s = meta('s_multi', 'claude', usage({}), { activeModel: { provider: 'anthropic', model: 'claude-sonnet-4-5' } });
+    store.touchSession(s);
+
+    // Spend $2.00 across 2 turns and 2 tool calls on Claude.
+    s.usage = usage({ inputTokens: 1_000, outputTokens: 200, costUsd: 2.0, turns: 2 });
+    store.recordUsage(s, s.usage, t0);
+    store.recordTurn(s, turn({ id: 'turn_c1', durationMs: 2_000, usage: { outputTokens: 200 } }), t0);
+    store.recordToolCall(s.id, { id: 'tool_c1', kind: 'tool', ts: t0, name: 'Read', status: 'done', durationMs: 10 }, t0);
+    store.recordToolCall(s.id, { id: 'tool_c2', kind: 'tool', ts: t0, name: 'Edit', status: 'done', durationMs: 20 }, t0);
+
+    // Switch the same session in place to Antigravity.
+    s.config = { ...s.config, harness: 'antigravity' };
+    s.activeModel = { provider: 'antigravity', model: 'gemini-3-pro' };
+    store.touchSession(s);
+
+    // Before Antigravity runs anything, Claude keeps all $2.00 in all-time byHarness.
+    const beforeWork = store.summary(0, t0);
+    expect(beforeWork.byHarness.map((b) => [b.key, b.usage.costUsd, b.toolCalls])).toEqual([['claude', 2, 2]]);
+
+    // Now Antigravity runs 1 turn ($0.50) and 1 tool call on top of the session's cumulative totals.
+    s.usage = usage({ inputTokens: 1_500, outputTokens: 300, costUsd: 2.5, turns: 3 });
+    store.recordUsage(s, s.usage, t0 + 1_000);
+    store.recordTurn(s, turn({ id: 'turn_a1', durationMs: 1_000, usage: { outputTokens: 100 } }), t0 + 1_000);
+    store.recordToolCall(s.id, { id: 'tool_a1', kind: 'tool', ts: t0 + 1_000, name: 'Read', status: 'done', durationMs: 15 }, t0 + 1_000);
+
+    await store.flush();
+
+    const check = (summary: ReturnType<AnalyticsStore['summary']>) => {
+      expect(summary.totals.costUsd).toBeCloseTo(2.5);
+      expect(summary.totals.turns).toBe(3);
+      const claude = summary.byHarness.find((b) => b.key === 'claude')!;
+      const ag = summary.byHarness.find((b) => b.key === 'antigravity')!;
+      expect(claude.usage.costUsd).toBeCloseTo(2.0);
+      expect(claude.usage.turns).toBe(2);
+      expect(claude.toolCalls).toBe(2);
+      expect(claude.durationMs).toBe(2_000);
+      expect(ag.usage.costUsd).toBeCloseTo(0.5);
+      expect(ag.usage.turns).toBe(1);
+      expect(ag.toolCalls).toBe(1);
+      expect(ag.durationMs).toBe(1_000);
+    };
+
+    check(store.summary(0, t0 + 2_000));
+
+    // Reload from disk and verify the multi-harness split survives restart.
+    const reloaded = new AnalyticsStore(dir, { log });
+    await reloaded.load([s]);
+    check(reloaded.summary(0, t0 + 2_000));
+  });
+});
