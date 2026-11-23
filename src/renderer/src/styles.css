@@ -2294,6 +2294,11 @@ h4 {
   background: var(--bg-hover);
   color: var(--fg);
 }
+.run-controls .run-keep-awake { flex: none; }
+.run-controls .run-keep-awake[aria-checked='true'] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
 .run-controls .pill-model {
   color: var(--fg);
   font-weight: 500;
@@ -3772,7 +3777,7 @@ h4 {
 .composer-actions .run-controls > .dropdown {
   anchor-scope: --run-control;
 }
-.composer-actions .run-controls .pill {
+.composer-actions .run-controls > .dropdown .pill {
   anchor-name: --run-control;
 }
 .composer-actions .run-controls .dropdown-menu {
@@ -3792,7 +3797,7 @@ h4 {
   min-width: 38px;
   max-width: 300px;
 }
-.composer-actions .run-controls > .dropdown:last-child:not(:first-child) {
+.composer-actions .run-controls > .dropdown:not(:first-child) {
   flex: none;
 }
 .composer-send-group {
@@ -3821,7 +3826,8 @@ h4 {
 @container (max-width: 340px) {
   .composer-send-label { display: none; }
   .composer-actions .pill-model > .icon:last-child,
-  .composer-actions .pill-model .pill-effort { display: none; }
+  .composer-actions .pill-model .pill-effort,
+  .composer-actions:has(.run-keep-awake) .run-permission > .icon:last-child { display: none; }
 }
 /* Desktop session pane: the composer floats on the conversation's ground as one card — the prompt
    above, the controls it is sent with along its foot. The transcript fades out behind it. (The web
@@ -3864,6 +3870,10 @@ h4 {
   flex-wrap: nowrap;
   gap: 2px;
   padding: 4px 8px 8px 6px;
+}
+@container (max-width: 340px) {
+  /* Free room for the awake switch and the open Usage meter without shrinking their hit areas. */
+  .pane .composer-actions:has(.run-keep-awake) { gap: 1px; padding-inline: 5px; }
 }
 .composer-actions > .icon-btn {
   border: none;

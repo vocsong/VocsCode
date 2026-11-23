@@ -4,7 +4,7 @@ import { existsSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrowserWindow, Menu, Notification, app, nativeTheme, net, screen, shell } from 'electron';
+import { BrowserWindow, Menu, Notification, app, nativeTheme, net, powerSaveBlocker, screen, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import { sessionTitleText } from '../shared/session-title';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
@@ -15,6 +15,7 @@ import { watchEventLoop } from './diag';
 import { gitIdentityFacts, gitResolveCommit, setGitLog } from './git';
 import { PRODUCT_APP_ID, resolveAppIdentity } from './identity';
 import { registerIpc, pushToRenderer } from './ipc';
+import { KeepAwake } from './keep-awake';
 import { KnowledgeService } from './knowledge/service';
 import { createKnowledgeCompleter } from './knowledge/llm';
 import { createGitnexusAnchorResolver } from './knowledge/anchors';
@@ -360,6 +361,7 @@ async function main(): Promise<void> {
 
   // Fan-out hooks that need to run on every sessions change (the update prompt waits for idle).
   const sessionsChangedHooks: Array<() => void> = [];
+  const keepAwake = new KeepAwake(powerSaveBlocker, log);
   // Declared before the manager so the push callbacks can mirror transcripts; assigned once the
   // remote host exists (the callbacks only fire on real activity, long after boot).
   let remoteMirror: RemoteMirror | null = null;
@@ -391,6 +393,7 @@ async function main(): Promise<void> {
       remoteMirror?.notify(env.sessionId);
     },
     pushSessions: (list: SessionMeta[]) => {
+      keepAwake.sync(list);
       search.syncMeta(list);
       const liveIds = new Set(list.map((session) => session.id));
       for (const session of list) {
@@ -580,6 +583,7 @@ async function main(): Promise<void> {
     settings,
     secrets,
     sessions,
+    keepAwake,
     missions: missions.service,
     withWorkspaceWrite: missions.admission.dispatch.bind(missions.admission),
     terminals,
@@ -703,6 +707,7 @@ async function main(): Promise<void> {
     quitting = true;
     e.preventDefault();
     localControl.shutdown();
+    keepAwake.quit();
     updater?.stopChecking();
     const t0 = Date.now();
     log('info', `quitting: ${sessions?.list().filter((s) => s.status === 'running' || s.status === 'awaiting' || s.status === 'starting').length ?? 0} live session(s), ${terminals?.list().length ?? 0} terminal tab(s)`);
