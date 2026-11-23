@@ -38,11 +38,11 @@ const TABS: { id: PanelTab; label: string; icon: string }[] = [
 
 /** The lower half holds live session services, which is why it gets its own strip. */
 const BOTTOM_TABS: { id: PanelBottomTab; label: string; icon: string }[] = [
-  { id: 'mcp', label: 'MCP', icon: 'server' },
-  { id: 'desktop', label: 'Desktop', icon: 'cpu' },
-  { id: 'subagents', label: 'Subagents', icon: 'fork' },
-  { id: 'knowledge', label: 'Knowledge', icon: 'book' },
-  { id: 'processes', label: 'Processes', icon: 'activity' }
+  { id: 'mcp', label: 'MCP', icon: 'plug' },
+  { id: 'desktop', label: 'Desktop', icon: 'monitor' },
+  { id: 'subagents', label: 'Subagents', icon: 'robot' },
+  { id: 'knowledge', label: 'Knowledge', icon: 'bookOpen' },
+  { id: 'processes', label: 'Processes', icon: 'listTree' }
 ];
 
 export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; gitPanelCache?: GitPanelCache }) {
