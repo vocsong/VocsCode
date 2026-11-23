@@ -59,6 +59,21 @@ afterEach(cleanup);
 const panel = (container: HTMLElement) => container.querySelector('aside.panel') as HTMLElement;
 const title = (container: HTMLElement) => container.querySelector('.panel-head-title')?.textContent;
 
+it.each(['standard', 'zen'] as const)('uses distinct service icons in %s mode', async (mode) => {
+  useStore.setState({ settings: settings(mode) });
+  await act(async () => { render(<RightPanel session={session()} />); });
+  for (const [label, icon] of Object.entries({
+    MCP: 'plug',
+    Desktop: 'monitor',
+    Subagents: 'robot',
+    Knowledge: 'bookOpen',
+    Processes: 'listTree'
+  })) {
+    const button = screen.getByRole('button', { name: label });
+    expect(button.querySelector('svg')?.getAttribute('data-icon'), label).toBe(icon);
+  }
+});
+
 describe('Zen side panel rail', () => {
   it('draws one rail of eleven icons in place of the two tab strips, with the changes dot', async () => {
     const { container } = render(<RightPanel session={session()} />);
