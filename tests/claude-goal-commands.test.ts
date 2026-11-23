@@ -37,6 +37,7 @@ function stubCtx() {
     updateMeta: (patch: Partial<SessionMeta>) => {
       patches.push(patch);
       if (patch.harnessCommands) meta.harnessCommands = patch.harnessCommands;
+      if (patch.harnessCommandList) meta.harnessCommandList = patch.harnessCommandList;
     },
     log: () => {},
     readJson: async () => null,
@@ -72,6 +73,26 @@ describe('Claude adapter command reporting', () => {
 
     expect(meta.harnessCommands).toEqual(['goal', 'usage', 'cost', 'stats', 'compact']);
     expect(reported(patches)).toEqual([['goal', 'usage', 'cost', 'stats', 'compact']]);
+  });
+
+  it('publishes what the composer offers: descriptions, hints, built-in vs skill, the built-in row winning a shared name', async () => {
+    const { ctx, meta } = stubCtx();
+    const a = new ClaudeAdapter(ctx);
+    const q = {
+      supportedModels: async () => [],
+      supportedCommands: async () => [
+        { name: 'review', description: 'My own review skill', argumentHint: '' },
+        { name: 'review', description: 'Review a pull request', argumentHint: '[pr]', builtin: true },
+        { name: 'deploy', description: 'Ship it', argumentHint: '<env>' }
+      ]
+    };
+    feed(a, init, q);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(meta.harnessCommandList).toEqual([
+      { name: 'review', description: 'Review a pull request', argumentHint: '[pr]', kind: 'command' },
+      { name: 'deploy', description: 'Ship it', argumentHint: '<env>', kind: 'skill' }
+    ]);
   });
 
   it('re-reports when the CLI discovers commands mid-session, replacing the list', async () => {

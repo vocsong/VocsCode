@@ -56,7 +56,7 @@ export interface HarnessContext {
   requestApproval(draft: ApprovalDraft): Promise<ApprovalDecision>;
   updateRef(patch: Partial<HarnessRef>): void;
   updateMeta(
-    patch: Partial<Pick<SessionMeta, 'activeModel' | 'activeEffort' | 'fastModeStatus' | 'title' | 'queued' | 'statusDetail' | 'harnessCommands'>>
+    patch: Partial<Pick<SessionMeta, 'activeModel' | 'activeEffort' | 'fastModeStatus' | 'title' | 'queued' | 'statusDetail' | 'harnessCommands' | 'harnessCommandList'>>
   ): void;
   log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void;
   readJson<T>(name: string): Promise<T | null>;

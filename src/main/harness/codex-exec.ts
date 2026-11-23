@@ -11,6 +11,8 @@ import { applyCodexMcpSuppression, readCodexMcpServers } from './codex-mcp-confi
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { listCodexModels } from './codex-app-server';
+import { reportHarnessCommands } from './commands';
+import { codexSkillCommands, codexSkillInvocation, readCodexSkills, type CodexSkill } from './codex-skills';
 import { fastModePricing } from './native/fast-mode-pricing';
 import { CODEX_STATIC_MODELS, estimateCostUsd, findPricing, modelsForProvider } from '../models/static-models';
 
@@ -39,6 +41,8 @@ export class CodexExecAdapter implements HarnessAdapter {
   private codexOptions: CodexOptions | null = null;
   private fastMode = false;
   private models: ModelInfo[] = [];
+  /** This cwd's enabled skills, from a one-shot `skills/list`; empty until it answers. */
+  private skills: CodexSkill[] = [];
   private speedTiers = new Map<string, string[]>();
   private thread: Thread | null = null;
   private _busy = false;
@@ -102,6 +106,25 @@ export class CodexExecAdapter implements HarnessAdapter {
     this.usage = new TurnUsageTracker(meta.usage);
     this.ensureThread();
     this.ctx.emit({ type: 'status', status: 'idle' });
+    const appRoot = this.ctx.runtime.runtimePaths?.appRoot;
+    const skillsBin = override ?? (appRoot ? bundledCodexPath(appRoot) : undefined);
+    if (skillsBin) this.refreshSkills(skillsBin, meta.cwd, env);
+  }
+
+  /**
+   * Exec has no listing of its own, so one short-lived app-server answers `skills/list` in the
+   * background; the session is usable before it does. A failure only costs the composer its
+   * suggestions — a typed `$skill` still works.
+   */
+  private refreshSkills(bin: string, cwd: string, env: NodeJS.ProcessEnv): void {
+    const codex = this.codex;
+    void readCodexSkills(bin, cwd, env)
+      .then((skills) => {
+        if (this.codex !== codex) return;
+        this.skills = skills;
+        reportHarnessCommands(this.ctx, codexSkillCommands(skills));
+      })
+      .catch((e) => this.ctx.log('debug', `codex skills/list failed: ${errorMessage(e)}`));
   }
 
   private ensureThread(): Thread {
@@ -123,7 +146,8 @@ export class CodexExecAdapter implements HarnessAdapter {
     if (this._busy) throw new Error('Codex exec runs one turn at a time; wait for the current turn to finish.');
     let thread = this.ensureThread();
     const parts: CodexInput[] = [];
-    if (input.text) parts.push({ type: 'text', text: input.text });
+    // `codex exec` takes text only; Codex resolves the `$skill` it names (./codex-skills.ts).
+    if (input.text) parts.push({ type: 'text', text: codexSkillInvocation(input.text, this.skills.length ? this.skills : this.ctx.session().harnessCommandList ?? []).text });
     for (const img of input.images ?? []) {
       const ext = img.mimeType.split('/')[1] ?? 'png';
       const file = path.join(this.ctx.sessionDir, 'images', `${shortId('img_')}.${ext}`);

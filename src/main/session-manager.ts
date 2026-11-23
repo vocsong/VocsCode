@@ -1308,6 +1308,7 @@ export class SessionManager {
     // session is not handed to a command this harness no longer has.
     if (meta.mission) {
       meta.harnessCommands = undefined;
+      meta.harnessCommandList = undefined;
       meta.goal = undefined;
       meta.nativeGoal = undefined;
     } else if (meta.harnessCommands?.length) {
@@ -2608,8 +2609,8 @@ export class SessionManager {
     // Ownership/configuration are host-owned even if an adapter emits the broad normalized meta shape.
     if ((meta?.mission || this.controlled.has(sessionId)) && event.type === 'meta') {
       const patch = event.patch;
-      const { activeModel, activeEffort, title, queued, statusDetail, harnessCommands } = patch;
-      const allowed = { activeModel, activeEffort, title, queued, statusDetail, harnessCommands };
+      const { activeModel, activeEffort, title, queued, statusDetail, harnessCommands, harnessCommandList } = patch;
+      const allowed = { activeModel, activeEffort, title, queued, statusDetail, harnessCommands, harnessCommandList };
       event = { ...event, patch: Object.fromEntries(Object.entries(allowed).filter(([key]) => key in patch)) };
     }
     switch (event.type) {

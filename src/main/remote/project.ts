@@ -1,12 +1,13 @@
 /** What a paired browser must not receive (docs/REMOTE-ACCESS.md §5). A `SessionMeta` carries
  *  desktop-only bookkeeping and bulky fields: the project's knowledge digest can be tens of
- *  kilobytes and is the project's own context, `harnessCommands` describes the local CLI, and the
+ *  kilobytes and is the project's own context, `harnessCommands` and `harnessCommandList` describe the local CLI (the described list can run
+ *  to a hundred kilobytes with many skills installed, on every session push), and the
  *  pending-priming flags only drive the desktop session lifecycle. Everything a web shell renders
  *  (title, status, usage, config, cwd) is kept. */
 import type { SessionMeta } from '../../shared/types';
 
 /** Stripped from every meta a remote client can see, whether returned or pushed. */
-const OMITTED = ['knowledgeDigest', 'pendingKnowledgeDigest', 'pendingForkContext', 'harnessCommands'] as const;
+const OMITTED = ['knowledgeDigest', 'pendingKnowledgeDigest', 'pendingForkContext', 'harnessCommands', 'harnessCommandList'] as const;
 
 /** A copy of one session without the remote-hidden fields. */
 export function projectSessionMeta(meta: SessionMeta): SessionMeta {

@@ -256,8 +256,27 @@ its adapter exposes `setAutoCompactionWindow(tokens)`: the app hands over the to
 auto-compaction setting resolves to and the engine decides when to use it. An adapter that offers
 that method is never sent compaction requests, and `undefined` restores the engine's own default.
 
-`/goal` has a per-session driver (`src/shared/goal-driver.ts`): the Claude adapter reports the slash
-commands its CLI accepts (`supportedCommands()` on init, refreshed on `commands_changed`), and when
+Harness-native slash commands (`src/shared/harness-commands.ts`, `capabilities.slashCommands`):
+an adapter whose engine can list what it answers publishes it through `reportHarnessCommands`
+(`src/main/harness/commands.ts`) as `SessionMeta.harnessCommands` (names and aliases, for the goal
+driver) and `harnessCommandList` (described rows for the composer). Claude reports
+`supportedCommands()` on init and `commands_changed`; Pi answers `get_commands` (extension commands,
+prompt templates, `skill:<name>`) at start and after each settled turn, minus the app's own bridge
+commands; an ACP agent pushes `available_commands_update`. All of those run a command sent as
+`/name args` prompt text. Codex has no slash commands outside its TUI — app-server and exec give
+`/name` to the model as text — so both Codex adapters list skills instead (`skills/list`, re-listed
+on `skills/changed`; exec asks a one-shot app-server) and `src/main/harness/codex-skills.ts`
+rewrites a picked `/skill args` to Codex's `$skill args`, app-server also attaching the `skill` input
+item. Cursor's SDK exposes no listing (`typed`), and the native loop has no commands (`none`). The
+`/` popover leads with the harness's commands on a bare `/` and with the app's once a name is typed
+(so `/m` + Tab stays `/model`); a harness command whose name an app command takes stays
+reachable as `//name`, which the composer sends as `/name`. `harnessCommandList` survives a restart
+as the last list seen (it only offers names), and a session that has not started yet borrows the
+latest list from a same-harness session in the same project. Harnesses that cannot list commands say
+so in the popover instead of looking empty; the list is kept off remote frames.
+
+`/goal` has a per-session driver (`src/shared/goal-driver.ts`): the harness reports the slash
+commands it accepts (above), and when
 that list — or, before the harness has started, a `goal` skill on disk — names `goal`, the composer
 forwards `/goal …` to the harness and the app sets no goal of its own. Every other session keeps the
 app's goal engine. Settings → Goal defaults (`preferHarness`) forces the app driver everywhere.

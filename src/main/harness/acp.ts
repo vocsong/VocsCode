@@ -9,6 +9,8 @@ import { which } from '../runtime';
 import { toAcp } from '../mcp/effective';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
 import { requiresPathApproval } from './permissions';
+import { reportHarnessCommands } from './commands';
+import type { HarnessCommand } from '../../shared/harness-commands';
 import { shutdownChild, spawnTool } from './spawn';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -38,6 +40,16 @@ type ActivePrompt = {
   cancelTimer?: NodeJS.Timeout;
   recovering?: boolean;
 };
+
+/** An ACP `available_commands_update` list as harness commands. v1 sends `input: { hint }`; the v2 draft adds a `type`. */
+export function acpHarnessCommands(raw: unknown): HarnessCommand[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((c): HarnessCommand[] => {
+    if (!c || typeof c !== 'object' || typeof (c as { name?: unknown }).name !== 'string') return [];
+    const { name, description, input } = c as { name: string; description?: unknown; input?: { hint?: unknown } | null };
+    return [{ name, description: typeof description === 'string' ? description : undefined, argumentHint: typeof input?.hint === 'string' ? input.hint : undefined, kind: 'command' }];
+  });
+}
 
 export class AcpAdapter implements HarnessAdapter {
   private child: ChildProcess | null = null;
@@ -488,8 +500,13 @@ export class AcpAdapter implements HarnessAdapter {
         if (p.title && /^New session|^Untitled/i.test(this.ctx.session().title)) this.ctx.updateMeta({ title: p.title });
         return;
       }
+      case 'available_commands_update': {
+        // The agent re-sends its whole list whenever it changes; a command runs as `/name args`
+        // prompt text, which is what the composer already sends.
+        reportHarnessCommands(this.ctx, acpHarnessCommands((u as unknown as { availableCommands?: unknown }).availableCommands));
+        return;
+      }
       case 'current_mode_update':
-      case 'available_commands_update':
       case 'plan_update':
       case 'plan_removed':
         return;
