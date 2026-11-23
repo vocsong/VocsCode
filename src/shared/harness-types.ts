@@ -187,6 +187,13 @@ export interface HarnessCapabilities {
    * that is not the user's words is prefixed to the first message instead.
    */
   systemPrompt: boolean;
+  /**
+   * How the harness's own slash commands reach the composer. `listed`: the adapter reports them
+   * (`SessionMeta.harnessCommandList`) and the `/` popover offers them; `typed`: nothing can be
+   * listed, and `/name` text is handed to the engine unchanged for it to interpret; `none`: the
+   * engine has no commands of its own and `/name` is plain text to the model.
+   */
+  slashCommands: 'listed' | 'typed' | 'none';
   /** Which app-level permission modes are meaningful. */
   permissionModes: PermissionMode[];
   /**

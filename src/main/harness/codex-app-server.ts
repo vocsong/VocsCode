@@ -17,6 +17,8 @@ import { questionAnswerWithNote } from './question-answers';
 import { spawnTool } from './spawn';
 import { fastModePricing } from './native/fast-mode-pricing';
 import type { HarnessAdapter, HarnessContext } from './types';
+import { reportHarnessCommands } from './commands';
+import { codexSkillCommands, codexSkillInvocation, listCodexSkills, type CodexSkill } from './codex-skills';
 
 /* ---- Minimal protocol shapes (from `codex app-server generate-ts`) ---- */
 type AskForApproval = 'untrusted' | 'on-request' | 'never';
@@ -130,6 +132,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private turnStartedAt = 0;
   private readonly usage: TurnUsageTracker;
   private models: ModelInfo[] = [];
+  /** This cwd's enabled skills, from `skills/list`; empty until it answers. */
+  private skills: CodexSkill[] = [];
   private compactionWaiter: Deferred<void> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
@@ -266,6 +270,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       });
       this.ctx.emit({ type: 'status', status: 'idle' });
       void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
+      this.refreshSkills();
     } catch (e) {
       // Handshake failed after spawn: tear the transport down so no app-server (with its
       // injected API keys) is orphaned, then rethrow. close() awaits the tree kill.
@@ -276,7 +281,22 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
   }
 
+  /** Lists this cwd's skills for the composer and for `/skill` translation; a failure only costs the suggestions. */
+  private refreshSkills(): void {
+    const rpc = this.rpc;
+    if (!rpc) return;
+    void listCodexSkills(rpc, this.ctx.session().cwd)
+      .then((skills) => {
+        if (this.rpc !== rpc) return;
+        this.skills = skills;
+        reportHarnessCommands(this.ctx, codexSkillCommands(skills));
+      })
+      .catch((e) => this.ctx.log('debug', `codex skills/list failed: ${errorMessage(e)}`));
+  }
+
   private wireNotifications(rpc: JsonRpcStdioClient): void {
+    // An invalidation signal for the whole process, so it carries no thread id: list again.
+    rpc.onNotification('skills/changed', () => this.refreshSkills());
     // Codex also streams spawned threads on this connection. Only this session's thread
     // owns its turn, transcript and usage. Parent-thread subagent activity still arrives here.
     const onThreadNotification = (method: string, handle: (params: unknown) => void): void => {
@@ -731,7 +751,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     if (!this.rpc) await this.start();
     if (!this.rpc || !this.threadId) throw new Error('Codex thread is not ready');
     const content: unknown[] = [];
-    if (input.text) content.push({ type: 'text', text: input.text, text_elements: [] });
+    // A picked `/skill args` goes out as Codex's `$skill args` plus the skill item, so app-server runs
+    // that SKILL.md instead of passing the slash to the model as text (./codex-skills.ts).
+    const invocation = codexSkillInvocation(input.text ?? '', this.skills.length ? this.skills : this.ctx.session().harnessCommandList ?? []);
+    if (input.text) content.push({ type: 'text', text: invocation.text, text_elements: [] });
+    const skill = invocation.skill as Partial<CodexSkill> | undefined;
+    if (skill?.path) content.push({ type: 'skill', name: skill.name, path: skill.path });
     for (const img of input.images ?? []) {
       const ext = img.mimeType.split('/')[1] ?? 'png';
       const file = path.join(this.ctx.sessionDir, 'images', `${shortId('img_')}.${ext}`);

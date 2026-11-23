@@ -47,6 +47,8 @@ import { projectInstructionBlock } from './project-instructions';
 import { questionAnswerWithNote } from './question-answers';
 import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
+import { reportHarnessCommands } from './commands';
+import type { HarnessCommand } from '../../shared/harness-commands';
 
 const APP_ID = 'vocs-code/0.1.0';
 /**
@@ -138,16 +140,16 @@ function sameClaudeModel(replied: string, requested: string): boolean {
   return a === b || a.startsWith(`${b}-`) && /^\d{8}$/.test(a.slice(b.length + 1));
 }
 
-/** Slash command names as the user types them — aliases included, lower-cased and de-duplicated. */
-function commandNames(commands: readonly SlashCommand[]): string[] {
-  const out: string[] = [];
-  for (const c of commands) {
-    for (const raw of [c.name, ...(c.aliases ?? [])]) {
-      const name = raw.trim().toLowerCase();
-      if (name && !out.includes(name)) out.push(name);
-    }
-  }
-  return out;
+/**
+ * The CLI's command rows as the composer offers them. Rows can share a name; `/name` runs the
+ * built-in one when a built-in row has it, so that is the row kept. Anything not built in is a user,
+ * project, plugin or MCP command — all of which Claude Code now loads as skills.
+ */
+export function claudeHarnessCommands(commands: readonly SlashCommand[]): HarnessCommand[] {
+  const builtin = new Set(commands.filter((c) => c.builtin).map((c) => c.name.trim().toLowerCase()));
+  return commands
+    .filter((c) => c.builtin || !builtin.has(c.name.trim().toLowerCase()))
+    .map((c) => ({ name: c.name, description: c.description, argumentHint: c.argumentHint, aliases: c.aliases, kind: c.builtin ? 'command' : 'skill' }));
 }
 
 function toSdkMode(mode: PermissionMode): SdkPermissionMode {
@@ -852,10 +854,7 @@ export class ClaudeAdapter implements HarnessAdapter {
    * `commands_changed` re-reports it when skills appear mid-session; an unchanged list is not re-sent.
    */
   private reportCommands(commands: readonly SlashCommand[]): void {
-    const names = commandNames(commands).filter((name) => !this.ctx.session().mission || !/^(?:goal|loop|tasks|agents)(?::|$)/.test(name));
-    const current = this.ctx.session().harnessCommands;
-    if (current && current.length === names.length && current.every((n, i) => n === names[i])) return;
-    this.ctx.updateMeta({ harnessCommands: names });
+    reportHarnessCommands(this.ctx, claudeHarnessCommands(commands));
   }
 
   /**

@@ -8,7 +8,7 @@ import { PiAdapter } from '../src/main/harness/pi';
 import type { HarnessContext } from '../src/main/harness/types';
 import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, vocsMemoryBaseDef } from '../src/main/mcp/memory';
 import type { ResolvedServer } from '../src/main/mcp/effective';
-import type { SessionEvent } from '../src/shared/types';
+import type { SessionEvent, SessionMeta } from '../src/shared/types';
 // Include the shipped resource in normal strict typechecking without requiring Pi as a desktop dependency.
 import type vocsCodeTools from '../resources/pi/vocs-code-tools';
 type ShippedToolsFactory = typeof vocsCodeTools;
@@ -27,10 +27,12 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-async function setup(capabilities: string[], extensionError = false, options: { appendSystemPrompt?: string; piPath?: string; appInstructions?: string; mcpServers?: ResolvedServer[] } = {}) {
+async function setup(capabilities: string[], extensionError = false, options: { appendSystemPrompt?: string; piPath?: string; appInstructions?: string; mcpServers?: ResolvedServer[]; commands?: unknown[] } = {}) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'vocs-pi-startup-'));
   roots.push(root);
   const events: SessionEvent[] = [];
+  const scriptedCommands = options.commands;
+  const meta: Partial<SessionMeta> = { cwd: root, usage: {} as SessionMeta['usage'], harnessRef: {}, config: { appendSystemPrompt: options.appendSystemPrompt ?? 'Keep my custom instructions.' } as SessionMeta['config'] };
   const commands: Record<string, unknown>[] = [];
   const children: EventEmitter[] = [];
   let previousNonce: string | undefined;
@@ -52,7 +54,8 @@ async function setup(capabilities: string[], extensionError = false, options: { 
           if (extensionError) emit({ type: 'extension_error', extensionPath: '/resources/pi/vocs-code-tools.ts', error: 'SDK import failed' });
           previousNonce = nonce;
         }
-        emit({ type: 'response', id: command.id, command: command.type, success: true, data: command.type === 'get_available_models' ? { models: [] } : {} });
+        const data = command.type === 'get_available_models' ? { models: [] } : command.type === 'get_commands' && scriptedCommands ? { commands: scriptedCommands } : {};
+        emit({ type: 'response', id: command.id, command: command.type, success: true, data });
       });
       done();
     } });
@@ -61,14 +64,14 @@ async function setup(capabilities: string[], extensionError = false, options: { 
   });
   spawn.shutdownChild.mockImplementation(async (child) => { child.emit('close', 0); });
   const ctx = {
-    session: () => ({ cwd: root, usage: {}, harnessRef: {}, config: { appendSystemPrompt: options.appendSystemPrompt ?? 'Keep my custom instructions.' } }),
+    session: () => meta,
     settings: () => ({ pi: { extraArgs: ['--no-skills'] } }),
     runtime: { resolve: () => ({ path: options.piPath ?? '/fake/pi' }), resource: (...segments: string[]) => path.join(root, 'resources', ...segments) },
     sessionDir: root, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined, mcpServers: async () => options.mcpServers ?? [], ownedMcpIds: () => [],
     ...(options.appInstructions ? { appInstructions: async () => options.appInstructions } : {}),
-    emit: (event: SessionEvent) => events.push(event), log: () => {}, updateRef: () => {}, updateMeta: () => {},
+    emit: (event: SessionEvent) => events.push(event), log: () => {}, updateRef: () => {}, updateMeta: (patch: Partial<SessionMeta>) => Object.assign(meta, patch),
   } as unknown as HarnessContext;
-  return { adapter: new PiAdapter(ctx), events, commands, children, root };
+  return { adapter: new PiAdapter(ctx), events, commands, children, root, meta };
 }
 
 describe('Pi MCP credential handoff', () => {
@@ -103,6 +106,38 @@ describe('Pi MCP credential handoff', () => {
       expect(env.VOCS_CODE_MCP_CONFIG).toBe(persisted.length ? file : undefined);
       if (persisted.length) expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ servers: persisted });
       else await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await adapter.dispose();
+    }
+  });
+});
+
+describe('Pi command publishing', () => {
+  it('publishes extension commands, prompt templates and skills from get_commands, minus the app’s own bridge commands', async () => {
+    const { adapter, commands, meta } = await setup(['approvals', 'tools', 'subagents'], false, {
+      commands: [
+        { name: 'review', description: 'Review the diff', source: 'prompt', sourceInfo: { path: 'x', scope: 'user' } },
+        { name: 'skill:pdf', description: 'PDF tools', source: 'skill', sourceInfo: { path: 'y', scope: 'user' } },
+        { name: 'goal', description: 'Long-running goal', source: 'extension', sourceInfo: { path: 'z', scope: 'user' } },
+        { name: 'vocs-code-fast-mode', source: 'extension' },
+        { name: 'vocs-subagent-stop', source: 'extension' }
+      ]
+    });
+    try {
+      await adapter.start();
+      await vi.waitFor(() => expect(meta.harnessCommandList).toBeDefined());
+      expect(meta.harnessCommandList).toEqual([
+        { name: 'review', description: 'Review the diff', kind: 'prompt' },
+        { name: 'skill:pdf', description: 'PDF tools', kind: 'skill' },
+        { name: 'goal', description: 'Long-running goal', kind: 'extension' }
+      ]);
+      // The names drive the goal driver: Pi's own /goal extension now answers /goal.
+      expect(meta.harnessCommands).toEqual(['review', 'skill:pdf', 'goal']);
+      expect(commands.filter((c) => c.type === 'get_commands')).toHaveLength(1);
+
+      // A picked template goes to Pi verbatim, where Pi expands it.
+      await adapter.send({ text: '/review src/main' });
+      expect(commands.filter((c) => c.type === 'prompt').map((c) => c.message)).toEqual(['/review src/main']);
     } finally {
       await adapter.dispose();
     }
