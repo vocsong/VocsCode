@@ -5125,6 +5125,14 @@ body.resizing {
   max-height: 55%;
   border-bottom: 1px solid var(--border);
 }
+.file-preview-error {
+  margin: 8px;
+  overflow-wrap: anywhere;
+}
+.file-preview-error-actions {
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
 .file-preview-status {
   display: flex;
   align-items: center;
