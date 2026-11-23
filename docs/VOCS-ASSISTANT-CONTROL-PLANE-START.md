@@ -5,7 +5,11 @@
 an approved project's ordinary sessions visible from the Windows terminal and local stdio MCP,
 using the already-running desktop. Do not wait for persistent Vesta or cloud rollout to build it.
 
-## Revalidated baseline
+[Windows local control preview](LOCAL-CONTROL.md) implements the read-only CLI and stdio path for
+source checkouts. It does not change Vesta's tools or the remote MCP rollout. Windows account,
+packaged CLI, and other-platform qualification remain separate.
+
+## Revalidated baseline (at plan review)
 
 - **Desktop `3977b2f`:** the five blobs cited in the proposal still match. [Vesta](VESTA.md) is
   an in-app pi conversation with an in-memory transcript, argument-sensitive proposals and an
@@ -13,7 +17,7 @@ using the already-running desktop. Do not wait for persistent Vesta or cloud rol
   prompt; it has no general tool for sending to an existing session today. Do not treat a Vesta
   proposal or a model summary as a durable task or operation receipt.
 - **Control:** the desktop already has strict v1 request schemas, grants, project identities,
-  durable receipts and controlled turns. There is no packaged CLI or local control endpoint.
+  durable receipts and controlled turns. No packaged CLI or local endpoint existed at this baseline.
   The Electron single-instance lock is profile-specific; a second invocation focuses the app,
   not an authenticated request/reply channel. Dev, installed and test profiles stay separate.
 - **Landing `257c5d9`:** the [gateway](https://github.com/vocsong/vocs.io/blob/257c5d9/code/worker/MCP.md)
