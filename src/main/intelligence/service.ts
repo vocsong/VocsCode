@@ -74,7 +74,8 @@ import type { KnowledgeProtectedChange, KnowledgeService } from '../knowledge/se
 import type { StoredPage } from '../knowledge/store';
 import { errorMessage } from '../util/async';
 import { exists } from '../util/fs';
-import type { GraphifyProvider } from './graphify';
+import { graphCheckoutStamp } from './graph-snapshot';
+import type { GraphifyProvider, GraphScope } from './graphify';
 import type { MemoryStore, MemoryVisibility } from './memory-store';
 import { normalizeRoot, type ProjectRegistry } from './registry';
 
@@ -282,9 +283,13 @@ export class IntelligenceService {
     };
   }
 
+  private graphScopeOf(ctx: IntelligenceContext, project: ProjectIdentity): GraphScope {
+    return { projectId: project.id, projectRoot: ctx.projectRoot, cwd: ctx.cwd };
+  }
+
   private graphEnabled(project: ProjectIdentity): boolean {
     const graphify = this.settings().graphify;
-    return graphify.enabled && graphify.projects.includes(project.id);
+    return graphify.enabled && !graphify.excludedProjects.includes(project.id);
   }
 
   /** The allowlist is sent to the transcript index; collection members are never added to it. */
@@ -433,6 +438,9 @@ export class IntelligenceService {
       candidates.push(...federated.filter((item) => item.collectionId && byId.get(item.collectionId)?.wikiProjectIds.includes(item.projectId)));
     }
     ctx.signal?.throwIfAborted();
+    if (!this.graphEnabled(project)) {
+      for (let i = candidates.length - 1; i >= 0; i--) if (candidates[i].provider === 'graph') candidates.splice(i, 1);
+    }
     if (intent === 'structure') missing.push('Current code structure (callers, usages, impact) is not answered here: ask GitNexus (query, context, impact) and trust the working tree over any index.');
     return { query, intent, scope: scopeInfo, results: mergeEvidence(candidates, intent, limit), conflicts, missing };
   }
@@ -560,10 +568,12 @@ export class IntelligenceService {
   private async graphEvidence(ctx: IntelligenceContext, project: ProjectIdentity, text: string, limit: number): Promise<{ evidence: IntelligenceEvidence[]; missing?: string }> {
     const graph = this.deps.graph;
     if (!graph || !this.graphEnabled(project)) return { evidence: [] };
-    const scope = { projectRoot: ctx.projectRoot, cwd: ctx.cwd };
+    const scope = this.graphScopeOf(ctx, project);
     const status = await graph.status(scope, true);
-    if (!status.indexed) return { evidence: [], missing: status.installed ? 'Graphify is enabled for this project but has no index yet; results come from the wiki and memory only.' : 'Graphify is enabled for this project but is not installed; results come from the wiki and memory only.' };
-    const matches = await graph.query(scope, text, { limit: Math.min(limit, 8) });
+    if (!this.graphEnabled(project)) return { evidence: [] };
+    if (!status.indexed) return { evidence: [], missing: !status.installed ? 'The bundled Graphify worker is unavailable.' : status.indexing ? 'Graphify is indexing this checkout.' : 'Graphify has no index for this checkout yet.' };
+    const matches = await graph.query(scope, text, { limit: Math.min(limit, 8), revision: status.revision });
+    if (!this.graphEnabled(project)) return { evidence: [] };
     return {
       evidence: matches.map((match) => {
         const extracted = match.edges.some((e) => e.confidence === 'extracted') || match.node.type === 'code';
@@ -585,7 +595,7 @@ export class IntelligenceService {
           scope: 'project' as const,
           score: match.score,
           ...(status.revision ? { revision: status.revision } : {}),
-          freshness: status.stale ? ('stale' as const) : status.revision ? ('fresh' as const) : ('unknown' as const),
+          freshness: status.stale === true ? ('stale' as const) : status.stale === false ? ('fresh' as const) : ('unknown' as const),
           ...(status.stale ? { staleReason: 'the checkout moved past the indexed commit' } : {}),
           ...(status.indexedAt ? { updatedAt: status.indexedAt } : {}),
           why: `Graphify: ${match.why}`
@@ -610,7 +620,7 @@ export class IntelligenceService {
 
   /**
    * How two things are related, with the evidence for each step. Wiki pages are traced over the
-   * wiki's own relation graph; anything else goes to the graph provider when the project opted in.
+   * wiki's own relation graph; anything else goes to the cached code index if enabled.
    */
   async trace(ctx: IntelligenceContext, request: { from: string; to?: string }): Promise<TraceResult> {
     ctx.signal?.throwIfAborted();
@@ -659,18 +669,22 @@ export class IntelligenceService {
     if (!provider || !this.graphEnabled(project)) {
       return { source: 'none', nodes: [], edges: [], note: `"${from}" is not a wiki page id, and no graph provider is enabled for this project. For code relationships use GitNexus (context, impact).` };
     }
-    const graphScope = { projectRoot: ctx.projectRoot, cwd: ctx.cwd };
+    const graphScope = this.graphScopeOf(ctx, project);
     const status = await provider.status(graphScope, true);
     if (!status.indexed) return { source: 'none', nodes: [], edges: [], note: 'Graphify is enabled for this project but has no index yet.' };
+    const disabled = (): TraceResult => ({ source: 'none', nodes: [], edges: [], note: 'Graphify is disabled for this project.' });
+    if (!this.graphEnabled(project)) return disabled();
     const provenance = { ...(status.revision ? { revision: status.revision } : {}), ...(status.stale ? { stale: true } : {}) };
     const staleNote = status.stale ? ' The index is older than the checkout: verify against the working tree.' : '';
     if (!to) {
-      const hood = await provider.neighbors(graphScope, from, { limit: 30 });
+      const hood = await provider.neighbors(graphScope, from, { limit: 30, revision: status.revision });
+      if (!this.graphEnabled(project)) return disabled();
       if (!hood) return { source: 'graph', nodes: [], edges: [], ...provenance, note: `No graph node matches "${from}".` };
       const nodes = [{ id: hood.node.id, title: hood.node.label, ...(hood.node.type ? { kind: hood.node.type } : {}), ...(hood.node.file ? { file: hood.node.file } : {}) }, ...hood.edges.map((e) => ({ id: e.otherId, title: e.otherLabel }))];
       return { source: 'graph', nodes, edges: hood.edges.map((e) => ({ from: e.from, to: e.to, relation: e.relation, confidence: e.confidence })), ...provenance, note: `${hood.edges.length} relation(s) of ${hood.node.label} in the Graphify index.${staleNote}` };
     }
-    const route = await provider.trace(graphScope, from, to);
+    const route = await provider.trace(graphScope, from, to, { revision: status.revision });
+    if (!this.graphEnabled(project)) return disabled();
     if (!route) return { source: 'graph', nodes: [], edges: [], ...provenance, note: `No path between "${from}" and "${to}" in the Graphify index.` };
     return {
       source: 'graph',
@@ -1254,20 +1268,34 @@ export class IntelligenceService {
     const project = await this.project(ctx);
     const enabled = this.graphEnabled(project);
     if (!this.deps.graph) return { provider: 'graphify', enabled, installed: false, indexed: false };
-    return this.deps.graph.status({ projectRoot: ctx.projectRoot, cwd: ctx.cwd }, enabled);
+    return this.deps.graph.status(this.graphScopeOf(ctx, project), enabled);
   }
 
-  /** Builds the graph index. Only ever on an explicit request, and only for a project that opted in. */
+  /** Local desktop selection is the only trigger for automatic work, never search/trace. */
+  async refreshGraph(ctx: IntelligenceContext, signal: AbortSignal): Promise<void> {
+    if (!this.deps.graph || !this.settings().graphify.enabled || ctx.restricted || signal.aborted) return;
+    const checkout = await graphCheckoutStamp(ctx.cwd, signal);
+    if (!checkout || signal.aborted) return;
+    const root = normalizeRoot(ctx.cwd) === normalizeRoot(ctx.projectRoot) ? checkout : await graphCheckoutStamp(ctx.projectRoot, signal);
+    if (!root || normalizeRoot(root.commonDir) !== normalizeRoot(checkout.commonDir) || signal.aborted) return;
+    const project = await this.deps.registry.resolve(ctx.projectRoot, { commonDir: root.commonDir, signal });
+    if (!signal.aborted && this.graphEnabled(project)) {
+      await this.deps.graph.refresh(this.graphScopeOf(ctx, project), signal, checkout.revision);
+    }
+  }
+
+  /** Owner-requested refresh, with the same exclusion policy as background indexing. */
   async graphIndex(ctx: IntelligenceContext): Promise<GraphIndexStatus> {
     const project = await this.project(ctx);
     if (!this.deps.graph) return { provider: 'graphify', enabled: false, installed: false, indexed: false, error: 'No graph provider is available in this run.' };
-    if (!this.graphEnabled(project)) return { ...(await this.deps.graph.status({ projectRoot: ctx.projectRoot, cwd: ctx.cwd }, false)), error: 'Graphify is not enabled for this project.' };
-    return this.deps.graph.index({ projectRoot: ctx.projectRoot, cwd: ctx.cwd });
+    const scope = this.graphScopeOf(ctx, project);
+    if (!this.graphEnabled(project)) return { ...(await this.deps.graph.status(scope, false)), error: 'Graphify is not enabled for this project.' };
+    return this.deps.graph.index(scope);
   }
 
   /** Clears the derived graph cache. Authoritative records are untouched. */
   async graphClear(ctx: IntelligenceContext): Promise<boolean> {
-    return this.deps.graph ? this.deps.graph.clear({ projectRoot: ctx.projectRoot, cwd: ctx.cwd }) : false;
+    return this.deps.graph ? this.deps.graph.clear(this.graphScopeOf(ctx, await this.project(ctx))) : false;
   }
 
   async view(ctx: IntelligenceContext): Promise<IntelligenceView> {
