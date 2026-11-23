@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { ContextMenuHost } from '../src/renderer/src/components/ContextMenu';
 import { ImageLightbox, navigateLightbox } from '../src/renderer/src/components/ImageLightbox';
 import { UserMessage } from '../src/renderer/src/components/Transcript';
 import type { ImageAttachment, TranscriptItem } from '../src/shared/types';
@@ -46,6 +47,27 @@ describe('ImageLightbox', () => {
     expect((screen.getByRole('img') as HTMLImageElement).src).toContain('BBB');
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('dismisses the image context menu on Escape or navigation without closing the preview', () => {
+    const onClose = vi.fn();
+    render(<><ImageLightbox images={images} index={0} onClose={onClose} /><ContextMenuHost /></>);
+    const picture = screen.getByRole('img', { name: 'shot-a.png' });
+    Object.defineProperties(picture, { complete: { value: true }, naturalWidth: { value: 80 } });
+    const copyItem = () => screen.getByRole('menuitem', { name: 'Copy image' });
+
+    fireEvent.contextMenu(screen.getByRole('dialog'));
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.contextMenu(picture);
+    expect(copyItem()).toHaveProperty('disabled', false);
+    fireEvent.keyDown(copyItem(), { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    fireEvent.contextMenu(picture);
+    fireEvent.keyDown(copyItem(), { key: 'ArrowRight' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(screen.getByRole('img', { name: 'shot-b.png' })).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('keeps keyboard focus in the preview and restores the image trigger on close', async () => {
