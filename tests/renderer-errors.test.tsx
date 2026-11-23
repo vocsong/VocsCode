@@ -219,21 +219,27 @@ describe('title bar export failures', () => {
 });
 
 describe('file preview failures', () => {
-  it('toasts when reading a file is rejected', async () => {
+  it('keeps an exact file read failure in the drawer and can retry it', async () => {
     const session = makeSession('s_p');
+    let readable = false;
     invokeMock.mockImplementation((channel: string) => {
       if (channel === 'fs:list') return Promise.resolve([{ name: 'notes.txt', path: 'notes.txt', isDir: false, size: 12 }]);
-      if (channel === 'fs:read') return Promise.reject(new Error('read failed'));
+      if (channel === 'fs:read') return readable ? Promise.resolve({ content: 'Recovered notes', truncated: false }) : Promise.reject(new Error('read failed'));
       return Promise.resolve({});
     });
     useStore.setState({ panelTab: 'files', sessions: [session], activeId: session.id, layout: singlePaneLayout(session.id) });
     render(<><RightPanel session={session} /><FilePreviewPane /></>);
     fireEvent.click(await screen.findByText('notes.txt'));
 
-    await waitFor(() => expect(toastTexts().some((t) => t.includes('read failed'))).toBe(true));
-    expect(invokeMock).toHaveBeenCalledWith('fs:read', { sessionId: 's_p', path: 'notes.txt', maxBytes: 200_000 });
-    // Nothing could be shown, so the empty preview pane does not linger.
-    expect(useStore.getState().layout.filePreview).toBeUndefined();
-    expect(screen.queryByTestId('file-pane')).toBeNull();
+    expect((await screen.findByRole('alert')).textContent).toBe('read failed');
+    expect(toastTexts()).toEqual([]);
+    readable = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect((await screen.findByRole('textbox', { name: 'File contents' })).textContent).toBe('Recovered notes');
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:read')).toEqual([
+      ['fs:read', { sessionId: 's_p', path: 'notes.txt', maxBytes: 200_000 }],
+      ['fs:read', { sessionId: 's_p', path: 'notes.txt', maxBytes: 200_000 }],
+    ]);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

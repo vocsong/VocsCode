@@ -298,14 +298,16 @@ describe('file mentions open the right-panel preview', () => {
     expect(reads()).toHaveLength(0);
   });
 
-  it.each(['missing', 'incomplete'])('does not read a guessed path after a %s lookup, and closes the empty pane', async (status) => {
+  it.each(['missing', 'incomplete'])('does not read a guessed path after a %s lookup and offers an inline retry', async (status) => {
     invokeMock.mockImplementation(async (channel: string) => channel === 'fs:resolve' ? { status } : {});
     render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'api/tools.ts'));
-    await waitFor(() => expect(useStore.getState().toasts).toHaveLength(1));
-    expect(useStore.getState().toasts[0].text).toMatch(status === 'missing' ? /^api\/tools.ts was not found in G:\/proj\/a$/ : /full.*path/i);
+    expect((await screen.findByRole('alert')).textContent).toMatch(status === 'missing' ? /^api\/tools.ts was not found in G:\/proj\/a$/ : /full.*path/i);
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     expect(reads()).toHaveLength(0);
-    expect(target()).toBeUndefined();
+    expect(useStore.getState().toasts).toEqual([]);
+    expect(target()?.path).toBe('api/tools.ts');
+    fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
     expect(screen.queryByTestId('file-pane')).toBeNull();
   });
 
@@ -319,7 +321,7 @@ describe('file mentions open the right-panel preview', () => {
     act(() => useStore.getState().revealFile(session.id, 'src/first.ts'));
     await expectEditor('first file');
     act(() => useStore.getState().revealFile(session.id, 'gone.ts'));
-    await waitFor(() => expect(useStore.getState().toasts.map((t) => t.text)).toEqual(['gone.ts was not found in G:/proj/a']));
+    expect((await screen.findByRole('alert')).textContent).toBe('gone.ts was not found in G:/proj/a');
     expect(screen.getByRole('region', { name: 'Preview: src/first.ts' })).toBeTruthy();
     await expectEditor('first file');
   });
@@ -473,8 +475,8 @@ describe('file mentions open the right-panel preview', () => {
     });
     render(<FilePreviewPane />);
     act(() => useStore.getState().revealFile(session.id, 'SideGuard-Q-2026-10.zip'));
-    await waitFor(() => expect(useStore.getState().toasts.map((t) => [t.kind, t.text])).toEqual([['error', 'SideGuard-Q-2026-10.zip was not found in G:\\proj\\a']]));
-    await waitFor(() => expect(screen.queryByTestId('file-pane')).toBeNull());
+    expect((await screen.findByRole('alert')).textContent).toBe('SideGuard-Q-2026-10.zip was not found in G:\\proj\\a');
+    expect(useStore.getState().toasts).toEqual([]);
   });
 
   it('does not edit or save a binary file and offers its folder instead', async () => {
