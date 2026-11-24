@@ -1,110 +1,67 @@
 /** Owns sessions: transcripts, approvals, goals, worktrees, and resuming a session after a restart. */
-import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import type { ResolvedServer } from './mcp/effective';
 import type {
   ApprovalDecision,
   ApprovalRequest,
   AppSettings,
-  AutoCompactionThreshold,
   CreateSessionRequest,
   EffortLevel,
-  GoalState,
   HarnessId,
   HarnessRef,
-  ModelInfo,
   ModelRef,
-  OngoingItem,
-  OngoingSource,
   PermissionMode,
+  SessionConfig,
   SessionEvent,
   SessionEventEnvelope,
-  SessionConfig,
   SessionMeta,
-  SessionStatus,
   TranscriptItem,
   UserInput
 } from '../shared/types';
 import { branchNameFromText, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
-import { autoCompactionThresholdLabel, autoCompactionTokenThreshold, hasReachedAutoCompactionThreshold } from '../shared/compaction';
-import { nativeGoalCommand } from '../shared/goal-driver';
 import { fastModeSupport } from '../shared/fast-mode';
 import { HARNESS_BY_ID, assertPermissionModeOffered, closestPermissionMode } from '../shared/harness-meta';
-import { modelName } from '../shared/model-names';
-import { hasOngoingWork, sameOngoingItems } from '../shared/ongoing';
+import { hasOngoingWork } from '../shared/ongoing';
 import { validateQuestionResponse } from '../shared/question-response';
-import { skillInstalled } from './skills';
 import { createAdapter } from './harness/registry';
 import { ownedAdapter } from './process-context';
 import { renderForkContext } from './fork-context';
 import { promptWithFiles, retainMessageFiles } from './message-files';
 import { builtinServerIds, resolveForSession } from './mcp';
-import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import type { MissionHooks } from './mission-mode/hooks';
+import type { ApprovalDraft, HarnessContext } from './harness/types';
 import type { ApprovalMissionRoute, MissionMessageMeta, SessionMission } from '../shared/mission-mode';
-import { branchGitState, createForkWorktree, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
-import { tokensPerSecond, turnSpeed } from './analytics';
+import { createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type PrRef } from './git';
 import { isValidRunId, listSubagentRuns, readSubagentRun } from './subagents';
 import { subagentSupport, type AgentTypeInfo, type SubagentRun, type SubagentRunSummary } from '../shared/subagents';
 import { emptyUsage, enrichModelsFromProviders } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
-import type { RuntimeResolver } from './runtime';
-import type { SettingsStore } from './settings';
-import type { SessionStore } from './store';
-import type { AnalyticsStore } from './analytics';
-import { deferred, errorMessage, shortId, type Deferred } from './util/async';
-import { exists, readJson, writeJson } from './util/fs';
+import { deferred, errorMessage, shortId } from './util/async';
+import { readJson, writeJson } from './util/fs';
 import { generateBranchName, generateSessionTitle, titleFromPrompt } from './session-title';
 import type { ParsedChatImport } from './chat-import';
 import { representsChatImport } from './chat-import-identity';
+import { SessionCompactionController } from './session-compaction';
+import { carriedItem, exportSessionMarkdown, forkSession } from './session-fork';
+import { SessionGitStateController } from './session-git-state';
+import { SessionGoalController, type GoalAction, type GoalActionOpts } from './session-goal';
+import { SessionStreamController } from './session-stream';
+import {
+  describeModel,
+  describeResume,
+  FORK_CONTEXT_FILE,
+  isPlaceholderTitle,
+  measureUserInput,
+  missionLive,
+  type ActiveSession,
+  type ControlledTurn,
+  type ControlledTurnResult,
+  type SessionActivity,
+  type SessionManagerDeps
+} from './session-types';
 
 export { titleFromPrompt };
-
-export interface SessionManagerDeps {
-  store: SessionStore;
-  settings: SettingsStore;
-  runtime: RuntimeResolver;
-  analytics: AnalyticsStore;
-  getSecret: (providerId: string) => Promise<string | undefined>;
-  pushEvent: (env: SessionEventEnvelope) => void;
-  pushSessions: (sessions: SessionMeta[]) => void;
-  notify: (sessionId: string, title: string, body: string) => void;
-  log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
-  /** Whether this session is on screen in the focused desktop window (DesktopFocusTracker). A turn
-   *  that ends while it is not is marked "done · not viewed"; absent counts as nobody looking. */
-  isViewing?: (sessionId: string) => boolean;
-  /** The shared GitNexus MCP endpoint, started lazily. */
-  sharedGitnexus?: () => Promise<string | null>;
-  /** Path to the scope proxy the harness spawns in place of the GitNexus binary. */
-  gitnexusProxyPath?: string;
-  /** Path to resources/mcp/vocs-memory.mjs, the Layer 2 wiki server. */
-  memoryServerPath?: string;
-  /** userData path, so the memory server can recall session history (search.db). */
-  memoryUserData?: string;
-  /** Mints a session's intelligence-gateway endpoint and token; null when the gateway is off. */
-  memoryGateway?: (sessionId: string) => { url: string; token: string } | null;
-  /** Mission mode (Lead/Builder sessions); absent in hosts and tests that do not run it. */
-  mission?: () => MissionHooks | undefined;
-  /** Path to resources/mcp/vocs-mission.mjs, the Mission tools' stdio client. */
-  missionServerPath?: string;
-  /** Connected Vocs MCP Hub connections, as loopback proxy servers (`vocs-hub.ts`); absent: none. */
-  hubServers?: () => Promise<ResolvedServer[]>;
-  /** A stopping runtime loses its memory capability before disposal settles. */
-  revokeMemoryGateway?: (sessionId: string) => void;
-  /** A runtime entering Plan must stop any in-flight writes through its memory gateway. */
-  restrictMemoryGateway?: (sessionId: string) => void;
-  /** Layer 2 digest for priming a new session's system prompt; absent disables priming. */
-  knowledgeDigest?: (scope: { projectRoot: string; cwd: string; branch?: string }) => Promise<string | null>;
-  /**
-   * The app's own instruction layer for one harness (see `shared/app-instructions.ts`). Read live:
-   * the three harnesses with a system prompt take it at start, the rest through the first message.
-   */
-  appInstructions?: (harness: HarnessId) => Promise<string | undefined>;
-  /** Test seam: how long an ordinary Stop waits for its adapter's disposal before releasing the session. */
-  disposeWaitMs?: number;
-}
+export type { ControlledTurnResult, SessionActivity, SessionManagerDeps };
 
 /** How stale a session's `lastViewedAt` may get before viewing it again rewrites the stamp. */
 const VIEW_STAMP_REFRESH_MS = 5 * 60_000;
@@ -113,135 +70,13 @@ const VIEW_STAMP_REFRESH_MS = 5 * 60_000;
  * deadline) before the session is released anyway; the disposal itself carries on regardless. */
 const ORDINARY_DISPOSE_WAIT_MS = 20_000;
 
-export interface ControlledTurnResult {
-  outcome: 'succeeded' | 'failed' | 'interrupted' | 'unknown';
-  inputId: string;
-  runtimeId: string;
-  turnId?: string;
-  outputIds: string[];
-}
-
 /** A controlled turn's authorization was withdrawn before its runtime started: not a harness fault. */
 class ControlledStartRefused extends Error {}
-
-interface ControlledTurn {
-  operationId: string;
-  inputId: string;
-  runtimeId: string;
-  runtime?: ActiveSession;
-  dispatched: boolean;
-  started: boolean;
-  canceled: boolean;
-  uncertain: boolean;
-  terminal?: ControlledTurnResult['outcome'];
-  turnId?: string;
-  outputIds: Set<string>;
-  ended: Deferred<void>;
-  writes: Set<Promise<void>>;
-  writeFailed: boolean;
-  /** Synchronous grant check, run again immediately before the runtime's adapter starts. */
-  startAllowed: () => void;
-}
-
-export interface SessionActivity {
-  /** An owned runtime still exists, including during disposal or an uncertain stop. */
-  active: boolean;
-  starting: boolean;
-  turn: boolean;
-  tools: number;
-  /** Native children outlive the root turn and its delegation tool result. */
-  nativeChildren?: number;
-  /** An ordinary runtime still owns possible process writers/autonomous follow-ups. */
-  processes?: boolean;
-  approvals: number;
-  compacting: boolean;
-  queued: number;
-  tearingDown: boolean;
-  uncertain: boolean;
-  quiescent: boolean;
-}
-
-interface ActiveSession {
-  adapter: HarnessAdapter;
-  /** Input acceptance is not a terminal turn observation (including ordinary source writers). */
-  turnPending?: symbol;
-  startupDispatched: boolean;
-  tearingDown: boolean;
-  uncertain: boolean;
-  disposal: Promise<void> | null;
-  nativeChildren: Map<string, { startedAt: number; running: boolean; agent?: string; description?: string; mode?: 'foreground' | 'background'; turns?: number; toolUses?: number }>;
-  /** Live ongoing items pushed per producer channel (`tasks`, `hooks`, `wakeup`, `threads`). */
-  ongoingBySource: Map<OngoingSource, OngoingItem[]>;
-  /** Parent turn finished while autonomous background work was still active; notify once it settles. */
-  deferredTurnNotice: { ts: number; status: 'completed' | 'failed'; error?: string } | null;
-  /** App-driven goal continuation deferred while autonomous background work is still active. */
-  deferredGoalContinuation: { goal: GoalState } | null;
-  /** Short grace timer after ongoing work clears so an immediate parent wakeup turn goes first. */
-  ongoingSettleTimer: NodeJS.Timeout | null;
-  approvals: Map<string, Deferred<ApprovalDecision>>;
-  liveItems: Map<string, TranscriptItem>;
-  /** Model active when each running tool call began, retained until its terminal upsert. */
-  toolModels: Map<string, ModelRef>;
-  dirty: Set<string>;
-  lastAssistantText: string;
-  starting: Promise<void> | null;
-  /** Last list the harness reported, before app metadata and user overrides, so it can be re-published. */
-  models: ModelInfo[] | null;
-  /** Prevent repeated automatic requests until reported context falls below the threshold. */
-  autoCompactionThreshold: AutoCompactionThreshold | undefined;
-  autoCompactionLatched: boolean;
-  autoCompactionRetryAt: number;
-  autoCompactionRetryTimer: NodeJS.Timeout | null;
-  compactionInFlight: Promise<boolean | void> | null;
-  /** Window last handed to an engine that compacts itself; undefined means it still has its own. */
-  autoCompactionWindow: number | undefined;
-  /** Pending or waiting goal auto-continuation, so a newer turn can replace it instead of racing it. */
-  goalContinuationTimer: NodeJS.Timeout | null;
-  /** A goal set during another turn must first reach the harness, even when auto-continue is off. */
-  pendingGoalKickoff: { goal: GoalState; resume: boolean } | null;
-  /** Last on-disk copy of each still-streaming assistant item: when it was written and how big it was. */
-  checkpoints: Map<string, StreamCheckpoint>;
-  /** Wakes the checkpointer when an item has grown enough but was written too recently. */
-  checkpointTimer: NodeJS.Timeout | null;
-}
-
-interface StreamCheckpoint {
-  at: number;
-  size: number;
-}
-
-const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
-/**
- * A streaming answer lives in memory until it settles, so a crash would lose all of it. It is
- * checkpointed to the transcript no more often than this, and only once its text and thinking have
- * grown by STREAM_CHECKPOINT_GROWTH of the last copy: every checkpoint appends the whole item, and
- * geometric growth keeps the bytes written under (1 + 1/growth)× the final size however long it
- * streams. A crash loses at most the last interval of text or its last fifth, whichever is more.
- */
-const STREAM_CHECKPOINT_MS = 2_000;
-const STREAM_CHECKPOINT_GROWTH = 0.25;
-const AUTO_COMPACTION_RETRY_MS = 30_000;
-/** A goal continuation lands on the first free moment; a compaction can hold the session for minutes. */
-const GOAL_CONTINUATION_RETRY_MS = 5_000;
-const GOAL_CONTINUATION_MAX_ATTEMPTS = 60;
-/** Handoff text written into a cross-harness fork's session dir, consumed by its first message. */
-const FORK_CONTEXT_FILE = 'fork-context.md';
 
 /** Title calls per session per run: one on the first message, one more if that one came back empty. */
 const MAX_TITLE_ATTEMPTS = 2;
 
-/**
- * Whether the session is still waiting to be named. Sessions written before `titleIsPlaceholder`
- * existed carry no flag, so the old marker — the untouched default title — still counts.
- */
-function isPlaceholderTitle(meta: SessionMeta): boolean {
-  return meta.titleIsAutomatic !== false && (meta.titleIsPlaceholder === true || (meta.titleIsAutomatic === undefined && meta.title === 'New session'));
-}
-
 export class SessionManager {
-  /** How often a session parked on 'pr' re-checks whether its branch was merged. */
-  private static readonly GIT_STATE_RECHECK_MS = 120_000;
-
   private active = new Map<string, ActiveSession>();
   /** Reserved synchronously, including preparation and the terminal persistence barrier. */
   private controlled = new Map<string, ControlledTurn>();
@@ -265,10 +100,6 @@ export class SessionManager {
   private retiring = new Map<string, Set<ActiveSession>>();
   private listeners = new Set<(env: SessionEventEnvelope) => void>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
-  /** The timer is also the refresh generation: keep it registered until the lookup settles. */
-  private gitStateTimers = new Map<string, NodeJS.Timeout>();
-  /** Sessions whose restored git state was re-checked once after boot. */
-  private gitStateChecked = new Set<string>();
   /**
    * Title calls made for a session this run. A failed call leaves the placeholder, so the next
    * message retries with more context — but an unattended goal session sends many messages, and
@@ -280,22 +111,66 @@ export class SessionManager {
   /** Event sequence, monotonic for the lifetime of this manager; see `publish`. */
   private seq = 0;
 
-  constructor(private readonly deps: SessionManagerDeps) {}
+  private readonly gitState: SessionGitStateController;
+  private readonly compaction: SessionCompactionController;
+  private readonly goals: SessionGoalController;
+  private readonly stream: SessionStreamController;
+
+  constructor(private readonly deps: SessionManagerDeps) {
+    this.gitState = new SessionGitStateController({
+      listSessions: () => this.deps.store.list(),
+      getSession: (id) => this.get(id),
+      getActive: (id) => this.active.get(id),
+      sessionDir: (id) => this.deps.store.sessionDir(id),
+      sessionPrRefs: (id, opts) => this.sessionPrRefs(id, opts),
+      mission: () => this.deps.mission?.(),
+      schedulePersist: (meta) => this.schedulePersist(meta),
+      pushSessions: () => this.pushSessions(),
+      log: (level, message) => this.deps.log(level, message)
+    });
+    this.compaction = new SessionCompactionController({
+      assertNotControlled: (id) => this.assertNotControlled(id),
+      isControlled: (id) => this.controlled.has(id),
+      getActive: (id) => this.active.get(id),
+      getSession: (id) => this.get(id),
+      settings: () => this.settings(),
+      note: (id, text, level) => this.note(id, text, level),
+      log: (level, message) => this.deps.log(level, message)
+    });
+    this.goals = new SessionGoalController({
+      listSessions: () => this.deps.store.list(),
+      getSession: (id) => this.get(id),
+      getActive: (id) => this.active.get(id),
+      isControlled: (id) => this.controlled.has(id),
+      settings: () => this.settings(),
+      upsertSession: (meta) => this.deps.store.upsert(meta),
+      schedulePersist: (meta) => this.schedulePersist(meta),
+      pushSessions: () => this.pushSessions(),
+      emit: (sessionId, event) => this.emit(sessionId, event),
+      sendGoalPrompt: (sessionId, input) => this.sendAs(sessionId, input, 'goal'),
+      notify: (sessionId, title, body) => this.deps.notify(sessionId, title, body),
+      log: (level, message) => this.deps.log(level, message)
+    });
+    this.stream = new SessionStreamController({
+      getActive: (id) => this.active.get(id),
+      getSession: (id) => this.get(id),
+      isControlled: (id) => this.controlled.has(id),
+      isViewing: (id) => this.deps.isViewing?.(id) ?? false,
+      settings: () => this.settings(),
+      appendTranscript: (sessionId, item) => this.appendTranscript(sessionId, item),
+      writeTranscriptItem: (sessionId, item) => this.trackControlledWrite(sessionId, this.deps.store.appendTranscript(sessionId, item)),
+      publish: (sessionId, event) => this.publish(sessionId, event),
+      schedulePersist: (meta) => this.schedulePersist(meta),
+      pushSessions: () => this.pushSessions(),
+      notify: (sessionId, title, body) => this.deps.notify(sessionId, title, body),
+      advanceGoalContinuation: (meta, active) => this.goals.advanceContinuation(meta, active)
+    });
+  }
 
   list({ refreshGit = true }: { refreshGit?: boolean } = {}): SessionMeta[] {
     const list = this.deps.store.list();
     if (!refreshGit) return list;
-    // Sessions restored while parked on a PR resume polling for their merge. A harness that
-    // died while the app was closed ('stopped') gets its git-derived status re-checked once,
-    // so a quit that killed the harness does not erase a parked pr/merged badge for good.
-    // Stagger the checks: they each probe git and gh, and dozens at the same instant freeze
-    // startup (the probe storm that used to stall the event loop for seconds).
-    let stagger = 0;
-    for (const s of list) {
-      if ((s.status === 'pr' || s.status === 'stopped') && !this.gitStateChecked.has(s.id)) {
-        this.scheduleGitStateCheck(s.id, 4_000 + Math.min(stagger++, 50) * 400);
-      }
-    }
+    this.gitState.scheduleRestoredChecks(list);
     return list;
   }
 
@@ -359,24 +234,14 @@ export class SessionManager {
     this.persistTimers.delete(id);
   }
 
-  private cancelGitStateCheck(id: string): void {
-    const timer = this.gitStateTimers.get(id);
-    if (timer) clearTimeout(timer);
-    this.gitStateTimers.delete(id);
-  }
-
-  /** Schedules a PR/merge status check shortly after a turn ends in an isolated worktree. */
-  private scheduleGitStateCheck(id: string, delayMs = 4_000): void {
-    this.cancelGitStateCheck(id);
-    this.gitStateChecked.add(id);
-    const timer = setTimeout(() => { void this.checkGitState(id, timer); }, delayMs);
-    timer.unref?.();
-    this.gitStateTimers.set(id, timer);
+  /** Sessions whose restored git state was re-checked once after boot. */
+  private get gitStateChecked(): Set<string> {
+    return this.gitState.checked;
   }
 
   /** Re-runs the PR/merge state check after a local /pr or /merge completes outside a turn. */
   refreshGitState(id: string): void {
-    this.scheduleGitStateCheck(id, 1_000);
+    this.gitState.refresh(id);
   }
 
   /** Appends a persistent info line to a session's transcript (renderer-visible, survives restart). */
@@ -384,132 +249,14 @@ export class SessionManager {
     this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level, text } });
   }
 
-  /** Reflects the session branch's PR/merge state in the sidebar status label. */
-  private async checkGitState(id: string, timer: NodeJS.Timeout): Promise<void> {
-    if (this.gitStateTimers.get(id) !== timer) return;
-    const meta = this.get(id);
-    if (!meta?.worktreeBranch || !this.gitStateCheckable(meta)) {
-      this.gitStateTimers.delete(id);
-      return;
-    }
-    const { cwd, worktreeBranch } = meta;
-    const current = () => this.gitStateTimers.get(id) === timer && this.get(id) === meta &&
-      meta.cwd === cwd && meta.worktreeBranch === worktreeBranch && this.gitStateCheckable(meta);
-    try {
-      const prRefs = await this.sessionPrRefs(id, { latestOnly: true });
-      if (!current()) return;
-      const q: SessionPrQuery = prRefs.length ? { prRefs } : {
-        excludeBranches: this.deps.store.list().filter((s) => s.id !== id && s.worktreeBranch).map((s) => s.worktreeBranch!),
-        createdAfter: meta.createdAt,
-        updatedBefore: meta.updatedAt
-      };
-      const state: BranchGitState = await branchGitState(cwd, worktreeBranch, q);
-      if (!current() || state.unknown) return;
-      // A mission Lead's PR merged or closed ends the mission and frees its worktrees.
-      if (meta.mission) this.deps.mission?.()?.gitState(meta, state);
-      const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
-      // Git evidence can upgrade a stopped harness, but never downgrade it to idle.
-      if (meta.status === next || (meta.status === 'stopped' && next === 'idle')) return;
-      meta.status = next;
-      meta.statusDetail = undefined;
-      this.schedulePersist(meta);
-      this.pushSessions();
-    } catch (e) {
-      if (current()) this.deps.log('warn', `pr/merge status check failed: ${errorMessage(e)}`);
-    } finally {
-      // Poll a parked PR even after an unchanged result or a failed probe. An old
-      // completion must not clear or rearm a newer refresh's timer.
-      if (meta.status === 'pr' && current()) this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS);
-      else if (this.gitStateTimers.get(id) === timer) this.gitStateTimers.delete(id);
-    }
+  /** PRs this session itself referenced in its transcript (stat-cached per file revision). */
+  sessionPrRefs(id: string, opts?: { latestOnly?: boolean }): Promise<PrRef[]> {
+    return this.gitState.sessionPrRefs(id, opts);
   }
 
-  /** Git labels must not replace the status that drives Interrupt, even when that status lags. */
-  private gitStateCheckable(meta: SessionMeta): boolean {
-    if (meta.status !== 'idle' && meta.status !== 'pr' && meta.status !== 'stopped') return false;
-    const active = this.active.get(meta.id);
-    return !active || !(active.adapter.busy || active.turnPending || active.approvals.size);
-  }
-
-  /**
-   * PRs this session itself referenced (the agent's report links the PR) — the strongest
-   * session→PR signal, since agents may push their own branch instead of the session
-   * worktree branch, and may even work in a different repo than the session's cwd.
-   */
-  async sessionPrRefs(id: string, { latestOnly = false } = {}): Promise<PrRef[]> {
-    // The transcript can be tens of MB and every parked-pr/stopped session is scanned once at
-    // boot; stat first and reuse the result until the file actually changes.
-    let file: string;
-    try {
-      file = path.join(this.deps.store.sessionDir(id), 'transcript.jsonl');
-    } catch {
-      return [];
-    }
-    const st = await fs.stat(file).catch(() => undefined);
-    if (!st) return [];
-    const stamp = `${st.mtimeMs}:${st.size}`;
-    const cached = this.prRefsCache.get(id);
-    if (cached && cached.stamp === stamp) return latestOnly ? cached.latest : cached.refs;
-    let raw = '';
-    try {
-      raw = await fs.readFile(file, 'utf8');
-    } catch {
-      return [];
-    }
-    const refs: PrRef[] = [];
-    let last: PrRef | undefined;
-    for (const m of raw.matchAll(/github\.com[/:]([\w.-]+)\/([\w.-]+?)\/pull\/(\d+)/g)) {
-      last = { repo: `${m[1]}/${m[2]}`, number: Number(m[3]) };
-      if (!refs.some((p) => p.repo === last!.repo && p.number === last!.number)) refs.push(last);
-    }
-    // Keep /merge's full, first-mention order; the sidebar needs the last mention, even a repeat.
-    const latest = last ? [last] : [];
-    this.prRefsCache.set(id, { stamp, refs, latest });
-    return latestOnly ? latest : refs;
-  }
-
-  /** transcript stamp → PR refs, so repeated git-state checks do not re-read every transcript. */
-  private prRefsCache = new Map<string, { stamp: string; refs: PrRef[]; latest: PrRef[] }>();
-
-  /** Git roots of other sessions' repos (cached per cwd), for resolving transcript PRs from a foreign repo.
-   *
-   * Every parked-pr/stopped session runs one of these at boot, all at the same moment. Without
-   * sharing, each caller walks the same uncached list and spawns one `git rev-parse` per session
-   * cwd per caller — hundreds of concurrent git processes right as the window opens. Two guards:
-   * in-flight promises are shared per cwd, and a cwd that no longer exists is answered by one
-   * stat instead of a doomed git spawn. */
-  async knownRepoRoots(excludeId: string): Promise<string[]> {
-    const roots = new Set<string>();
-    await Promise.all(
-      this.deps.store.list().map(async (s) => {
-        if (s.id === excludeId || s.archived) return;
-        const root = await this.repoRoot(s.cwd);
-        if (root) roots.add(root);
-      })
-    );
-    return [...roots];
-  }
-
-  private repoRootCache = new Map<string, string>();
-  private repoRootPending = new Map<string, Promise<string>>();
-
-  /** One resolution per cwd at a time; the first resolution is cached for the manager's lifetime. */
-  private repoRoot(cwd: string): Promise<string> {
-    const cached = this.repoRootCache.get(cwd);
-    if (cached !== undefined) return Promise.resolve(cached);
-    let pending = this.repoRootPending.get(cwd);
-    if (!pending) {
-      pending = (async () => {
-        if (!(await exists(cwd))) return '';
-        return (await gitRoot(cwd).catch(() => null)) ?? '';
-      })().then((root) => {
-        this.repoRootCache.set(cwd, root);
-        this.repoRootPending.delete(cwd);
-        return root;
-      });
-      this.repoRootPending.set(cwd, pending);
-    }
-    return pending;
+  /** Git roots of other sessions' repos (cached per cwd), for resolving foreign-repo PRs. */
+  knownRepoRoots(excludeId: string): Promise<string[]> {
+    return this.gitState.knownRepoRoots(excludeId);
   }
 
   /** Persists every debounced meta update immediately (used on quit so trailing edits are not lost). */
@@ -684,7 +431,7 @@ export class SessionManager {
     const objective = req.goal?.trim() ?? '';
     // A session created with a goal on a harness that owns `/goal` belongs to the harness: the
     // objective is sent to it as a command and the app sets no goal state (see shared/goal-driver.ts).
-    const nativeGoal = objective ? await this.harnessGoal(cfg.harness) : null;
+    const nativeGoal = objective ? await this.goals.harnessGoal(cfg.harness) : null;
     // The objective names the session whoever runs the goal: on a harness without its own /goal the
     // first message is the app's kickoff prompt, and a title cut from that boilerplate names nothing.
     const titleSeed = req.initialPrompt ?? objective;
@@ -768,13 +515,9 @@ export class SessionManager {
       const prompt = meta.goal && promptText ? `${promptText}\n\nActive goal: ${meta.goal.objective}` : promptText;
       void this.sendAs(id, { text: prompt, images: initialImages, files: initialFiles }, 'user', promptText).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     } else if (meta.goal) {
-      void this.sendAs(id, { text: this.goalKickoffPrompt(meta.goal) }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+      void this.sendAs(id, { text: this.goals.kickoffPrompt(meta.goal) }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     }
     return meta;
-  }
-
-  private goalKickoffPrompt(goal: GoalState): string {
-    return `You have a persistent goal for this session:\n\n<goal>\n${goal.objective}\n</goal>\n\n<execution_instructions>\nWork toward the goal above autonomously. When you believe it is fully achieved and verified, run a completion audit (restate deliverables, map each requirement to concrete evidence, note gaps) and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. If anything is missing, keep working instead of declaring completion.\n</execution_instructions>`;
   }
 
   async delete(id: string, removeWt = false): Promise<void> {
@@ -809,7 +552,7 @@ export class SessionManager {
     await this.stop(id);
     await this.preserveUserInputs(meta, await this.deps.store.readTranscript(id));
     this.cancelPersist(id);
-    this.cancelGitStateCheck(id);
+    this.gitState.cancel(id);
     this.titleAttempts.delete(id);
     this.titleInFlight.delete(id);
     const tStop = Date.now();
@@ -1236,7 +979,7 @@ export class SessionManager {
     this.active.set(id, active);
     const controlled = this.controlled.get(id);
     if (controlled) controlled.runtime = active;
-    this.cancelGitStateCheck(id);
+    this.gitState.cancel(id);
     meta.status = 'starting';
     meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
     this.pushSessions();
@@ -1425,7 +1168,7 @@ export class SessionManager {
       this.fencedRuntimes.add(active);
       await this.disposeRuntime(id, active, 'idle');
       if (this.retiring.get(id)?.size) lease.uncertain = true;
-      await this.flushLive(id, active, true);
+      await this.stream.flushLive(id, active, true);
       await this.controlledBarrier(id, lease);
       return {
         outcome: lease.uncertain ? 'unknown' : lease.terminal ?? 'unknown',
@@ -1716,7 +1459,7 @@ export class SessionManager {
     // Context is now safely at the same boundary, so the persistence rewrite cannot diverge.
     active.liveItems.clear();
     active.dirty.clear();
-    this.resetCheckpoints(active);
+    this.stream.resetCheckpoints(active);
     active.lastAssistantText = '';
     await this.deps.store.rewriteTranscript(id, [...items.slice(0, index), revised]);
     this.deps.analytics.recordUserInputs(meta, [revised]);
@@ -1900,7 +1643,7 @@ export class SessionManager {
     const operation = Promise.resolve().then(async () => {
       // Install the disposal promise before notifying observers, which may themselves request stop.
       this.cancelApprovals(id, active, 'Session stopped');
-      await this.flushLive(id, active, true).catch((e) => this.deps.log('warn', `[${id}] live flush on stop failed: ${errorMessage(e)}`));
+      await this.stream.flushLive(id, active, true).catch((e) => this.deps.log('warn', `[${id}] live flush on stop failed: ${errorMessage(e)}`));
       const settled = Promise.resolve()
         .then(() => active.adapter.dispose())
         .catch((e) => this.deps.log('warn', `[${id}] dispose failed: ${errorMessage(e)}`))
@@ -2124,164 +1867,8 @@ export class SessionManager {
     return meta;
   }
 
-  async compact(id: string): Promise<{ ok: boolean; detail?: string }> {
-    this.assertNotControlled(id);
-    const active = this.active.get(id);
-    if (!active) return { ok: false, detail: 'Session is not running.' };
-    if (active.tearingDown || active.uncertain) return { ok: false, detail: 'Session runtime is stopping or uncertain.' };
-    if (!active.adapter.compact) return { ok: false, detail: 'This harness does not support compaction.' };
-    if (active.compactionInFlight) return { ok: false, detail: 'Context compaction is already in progress.' };
-    const threshold = this.settings().autoCompactionThreshold;
-    const meta = this.get(id);
-    active.autoCompactionThreshold = threshold;
-    if (threshold && meta && hasReachedAutoCompactionThreshold(threshold, meta.usage)) active.autoCompactionLatched = true;
-    this.deps.log('info', `[${id}] manual context compaction requested (context ${meta?.usage.contextTokens ?? '?'} tokens)`);
-    const operation = active.adapter.compact();
-    active.compactionInFlight = operation;
-    try {
-      const compacted = await operation;
-      if (compacted === false) {
-        active.autoCompactionLatched = false;
-        active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
-        this.scheduleAutoCompactionRetry(id, active);
-        this.deps.log('info', `[${id}] compaction skipped: not enough history yet`);
-        return { ok: false, detail: 'There is not enough conversation history to compact yet.' };
-      }
-      this.deps.log('info', `[${id}] compaction completed`);
-      return { ok: true };
-    } catch (e) {
-      active.autoCompactionLatched = false;
-      active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
-      this.scheduleAutoCompactionRetry(id, active);
-      this.deps.log('warn', `[${id}] compaction failed: ${errorMessage(e)}`);
-      throw e;
-    } finally {
-      if (active.compactionInFlight === operation) active.compactionInFlight = null;
-    }
-  }
-
-  /** Wait until adapter queue bookkeeping has settled, then compact once at a safe idle boundary. */
-  private scheduleAutoCompaction(id: string): void {
-    const active = this.active.get(id);
-    // An engine that compacts itself still needs the window kept in step with the setting, and it
-    // has to be told when the user clears the setting, so this cannot be gated on a threshold alone.
-    if (!active) return;
-    if (!this.settings().autoCompactionThreshold && !active.adapter.setAutoCompactionWindow) return;
-    queueMicrotask(() => void this.maybeAutoCompact(id));
-  }
-
-  /**
-   * Hand the token window to an engine that compacts itself, and keep the engine's own default when
-   * the user has not chosen a threshold. A threshold whose percentage cannot be resolved yet (no
-   * reported context window) is not pushed as a clear, which would disable the engine's default.
-   * The window is recorded before the call and rolled back if the engine rejects it, so usage
-   * reports arriving while it is in flight cannot queue the same setting up twice.
-   */
-  private async syncNativeAutoCompaction(id: string, active: ActiveSession, tokens: number | undefined): Promise<void> {
-    const pushed = active.autoCompactionWindow;
-    if (tokens === undefined && pushed === undefined) return;
-    if (tokens === pushed) return;
-    active.autoCompactionWindow = tokens;
-    try {
-      await active.adapter.setAutoCompactionWindow?.(tokens);
-      this.deps.log('info', `[${id}] auto-compaction window ${pushed ?? 'harness default'} → ${tokens ?? 'harness default'}`);
-    } catch (e) {
-      // Unremembered, so the next usage report tries again rather than settling for a window the
-      // engine never took.
-      active.autoCompactionWindow = pushed;
-      this.deps.log('warn', `[${id}] auto-compaction window rejected: ${errorMessage(e)}`);
-    }
-  }
-
-  private scheduleAutoCompactionRetry(id: string, active: ActiveSession): void {
-    if (!this.settings().autoCompactionThreshold || active.autoCompactionRetryTimer) return;
-    const delay = Math.max(0, active.autoCompactionRetryAt - Date.now());
-    active.autoCompactionRetryTimer = setTimeout(() => {
-      active.autoCompactionRetryTimer = null;
-      if (this.active.get(id) === active) void this.maybeAutoCompact(id);
-    }, delay);
-    active.autoCompactionRetryTimer.unref?.();
-  }
-
-  private clearAutoCompactionRetry(active: ActiveSession): void {
-    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
-    active.autoCompactionRetryTimer = null;
-    active.autoCompactionRetryAt = 0;
-  }
-
-  private async maybeAutoCompact(id: string): Promise<void> {
-    if (this.controlled.has(id)) return;
-    const active = this.active.get(id);
-    const meta = this.get(id);
-    const threshold = this.settings().autoCompactionThreshold;
-    // A cleared threshold is not a no-op: an engine that was handed a window has to be told.
-    if (!active || !meta || active.tearingDown || active.uncertain) return;
-    if (active.autoCompactionThreshold !== threshold) {
-      active.autoCompactionThreshold = threshold;
-      active.autoCompactionLatched = false;
-      this.clearAutoCompactionRetry(active);
-    }
-    // Engines that compact themselves are configured, not asked. Requesting compaction from here
-    // would also be the wrong moment for them: this runs at an idle boundary, and an idle engine has
-    // nothing to compact, while the CLI reduces context from inside the turn that needs it.
-    if (active.adapter.setAutoCompactionWindow) {
-      const window = threshold ? autoCompactionTokenThreshold(threshold, meta.usage) : undefined;
-      // A percentage whose context window is still unknown is not a clear: wait for the number.
-      if (threshold && window === undefined) return;
-      await this.syncNativeAutoCompaction(id, active, window);
-      return;
-    }
-    if (!threshold) {
-      active.autoCompactionLatched = false;
-      this.clearAutoCompactionRetry(active);
-      return;
-    }
-    if (!hasReachedAutoCompactionThreshold(threshold, meta.usage)) {
-      active.autoCompactionLatched = false;
-      this.clearAutoCompactionRetry(active);
-      return;
-    }
-    if (
-      !active.adapter.compact ||
-      active.autoCompactionLatched ||
-      active.compactionInFlight ||
-      active.starting ||
-      active.adapter.busy ||
-      meta.status !== 'idle' ||
-      (meta.queued ?? 0) > 0
-    ) {
-      return;
-    }
-    if (Date.now() < active.autoCompactionRetryAt) {
-      this.scheduleAutoCompactionRetry(id, active);
-      return;
-    }
-    active.autoCompactionLatched = true;
-    this.note(id, `Automatic context compaction requested at ${autoCompactionThresholdLabel(threshold)}.`);
-    const operation = active.adapter.compact();
-    active.compactionInFlight = operation;
-    try {
-      const compacted = await operation;
-      if (this.active.get(id) !== active || active.tearingDown) return;
-      if (compacted === false) {
-        active.autoCompactionLatched = false;
-        active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
-        this.scheduleAutoCompactionRetry(id, active);
-        this.note(id, 'Automatic context compaction is waiting for more conversation history.');
-      }
-    } catch (e) {
-      if (this.active.get(id) !== active || active.tearingDown) return;
-      active.autoCompactionLatched = false;
-      active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
-      this.scheduleAutoCompactionRetry(id, active);
-      const message = errorMessage(e);
-      this.deps.log('warn', `[${id}] automatic compaction failed: ${message}`);
-      this.note(id, `Automatic context compaction failed: ${message}`, 'warn');
-    } finally {
-      if (active.compactionInFlight === operation) {
-        active.compactionInFlight = null;
-      }
-    }
+  compact(id: string): Promise<{ ok: boolean; detail?: string }> {
+    return this.compaction.compact(id);
   }
 
   /** Recover first: the background startup scan may not have reached this transcript yet. */
@@ -2303,7 +1890,7 @@ export class SessionManager {
     const active = this.active.get(id);
     if (active) {
       active.liveItems.clear();
-      this.resetCheckpoints(active);
+      this.stream.resetCheckpoints(active);
     }
     await this.deps.store.rewriteTranscript(id, []);
     this.deps.log('info', `[${id}] transcript cleared`);
@@ -2428,7 +2015,7 @@ export class SessionManager {
         const streaming = item.kind === 'assistant' && item.streaming;
         if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (active && item.kind === 'assistant') {
-          if (streaming) this.checkpointStream(sessionId, active, item);
+          if (streaming) this.stream.checkpointStream(sessionId, active, item);
           else active.checkpoints?.delete(item.id);
         }
         if (item.kind === 'turn' && active) active.turnPending = undefined;
@@ -2453,7 +2040,7 @@ export class SessionManager {
           if (item.kind === 'assistant') {
             if (event.textDelta) item.text += event.textDelta;
             if (event.thinkingDelta) item.thinking = (item.thinking ?? '') + event.thinkingDelta;
-            if (item.streaming) this.checkpointStream(sessionId, active!, item);
+            if (item.streaming) this.stream.checkpointStream(sessionId, active!, item);
           } else if (item.kind === 'tool' && event.outputDelta) item.output = (item.output ?? '') + event.outputDelta;
           active?.dirty.add(event.id);
         }
@@ -2463,7 +2050,7 @@ export class SessionManager {
         if (meta) {
           if (event.status === 'idle' && active && active.approvals.size) break; // still awaiting
           if (event.status === 'starting' || event.status === 'running' || event.status === 'awaiting' || event.status === 'error') {
-            this.cancelGitStateCheck(sessionId);
+            this.gitState.cancel(sessionId);
           }
           if (event.status === 'running' && active) {
             if (active.ongoingSettleTimer) {
@@ -2499,7 +2086,7 @@ export class SessionManager {
           if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
             if (active) {
               // A harness that exited will never finish its streaming answer; save what it said.
-              void this.flushLive(sessionId, active, event.status === 'stopped').catch((e) => this.deps.log('warn', `[${sessionId}] live flush failed: ${errorMessage(e)}`));
+              void this.stream.flushLive(sessionId, active, event.status === 'stopped').catch((e) => this.deps.log('warn', `[${sessionId}] live flush failed: ${errorMessage(e)}`));
               if (event.status === 'stopped') {
                 // The harness exited on its own: pending approvals would hang forever and the
                 // adapter must be disposed, mirroring the fatal-error path.
@@ -2508,22 +2095,16 @@ export class SessionManager {
             }
             this.schedulePersist(meta);
           }
-          if (event.status === 'stopped' && !gitParked && meta.worktreeBranch) this.scheduleGitStateCheck(sessionId);
+          if (event.status === 'stopped' && !gitParked && meta.worktreeBranch) this.gitState.schedule(sessionId);
           // Status events are the live source of truth for the sidebar. Terminal statuses also
           // persist above, but every transition must be published immediately.
           this.pushSessions();
           if (event.status === 'idle') {
-            this.scheduleAutoCompaction(meta.id);
-            this.scheduleGitStateCheck(meta.id);
+            this.compaction.scheduleAuto(meta.id);
+            this.gitState.schedule(meta.id);
             // A goal installed while another turn was in flight belongs to the next turn, not
             // the old reply. Wait for this idle boundary even if that turn was interrupted.
-            const pending = active?.pendingGoalKickoff;
-            if (pending && meta.goal === pending.goal && meta.goal.status === 'active') {
-              const prompt = pending.resume
-                ? `Resuming the goal: ${pending.goal.objective}\nContinue where you left off.`
-                : this.goalKickoffPrompt(pending.goal);
-              this.scheduleGoalContinuation(sessionId, prompt, 0, pending);
-            }
+            this.goals.onIdle(sessionId, meta, active);
           }
         }
         break;
@@ -2532,22 +2113,9 @@ export class SessionManager {
         if (meta) {
           meta.usage = event.totals;
           this.deps.analytics.recordUsage(meta, event.totals, undefined, event.subagentCostByModel);
-          const threshold = this.settings().autoCompactionThreshold;
-          if (active) {
-            if (active.autoCompactionThreshold !== threshold) {
-              active.autoCompactionThreshold = threshold;
-              active.autoCompactionLatched = false;
-              this.clearAutoCompactionRetry(active);
-            }
-            if (!threshold || !hasReachedAutoCompactionThreshold(threshold, event.totals)) {
-              active.autoCompactionLatched = false;
-              this.clearAutoCompactionRetry(active);
-            }
-          }
           this.schedulePersist(meta);
           this.pushSessions();
-          // An engine that compacts itself needs its window before the turn grows, not after it ends.
-          if (meta.status === 'idle' || active?.adapter.setAutoCompactionWindow) this.scheduleAutoCompaction(meta.id);
+          this.compaction.onUsage(meta, active, event.totals);
         }
         break;
       case 'subagent.run': {
@@ -2563,7 +2131,7 @@ export class SessionManager {
             turns: event.run.turns,
             toolUses: event.run.toolUses
           });
-          this.syncOngoing(sessionId, active);
+          this.stream.syncOngoing(sessionId, active);
         }
         break;
       }
@@ -2572,7 +2140,7 @@ export class SessionManager {
           const sources = (active.ongoingBySource ??= new Map());
           if (event.items.length) sources.set(event.source, event.items);
           else sources.delete(event.source);
-          this.syncOngoing(sessionId, active);
+          this.stream.syncOngoing(sessionId, active);
         }
         break;
       }
@@ -2631,188 +2199,6 @@ export class SessionManager {
     this.trackControlledWrite(sessionId, this.deps.store.appendTranscript(sessionId, item)).catch((e) => this.deps.log('warn', `[${sessionId}] transcript append failed (${item.kind} ${item.id}): ${errorMessage(e)}`));
   }
 
-  /**
-   * Persists every live item changed since its last write. A streaming answer is skipped while its
-   * harness may still finish it; with `settle` the harness is gone, so the partial answer is saved
-   * as final and the renderer is told it stopped streaming.
-   */
-  private async flushLive(sessionId: string, active: ActiveSession, settle = false): Promise<void> {
-    if (settle) this.resetCheckpoints(active);
-    for (const id of [...active.dirty]) {
-      const item = active.liveItems.get(id);
-      if (!item) continue;
-      const streaming = item.kind === 'assistant' && item.streaming;
-      if (streaming && !settle) continue;
-      const saved: TranscriptItem = streaming ? { ...item, streaming: false } : item;
-      await this.trackControlledWrite(sessionId, this.deps.store.appendTranscript(sessionId, saved));
-      active.dirty.delete(id);
-      if (streaming) {
-        active.liveItems.set(id, saved);
-        this.publish(sessionId, { type: 'item.upsert', item: saved });
-      }
-    }
-  }
-
-  /**
-   * Appends a copy of a streaming answer once it is due under STREAM_CHECKPOINT_MS and
-   * STREAM_CHECKPOINT_GROWTH, so a crash mid-response leaves the partial text on disk. An item
-   * that has grown enough but was written too recently is picked up by a timer, so a stream that
-   * goes quiet is still saved; one that has not grown enough waits for its next delta.
-   */
-  private checkpointStream(sessionId: string, active: ActiveSession, item: Extract<TranscriptItem, { kind: 'assistant' }>): void {
-    const checkpoints = (active.checkpoints ??= new Map());
-    const now = Date.now();
-    const size = item.text.length + (item.thinking?.length ?? 0);
-    const last = checkpoints.get(item.id);
-    // The first sighting starts the clock; nothing is worth saving before the first interval.
-    if (!last) {
-      checkpoints.set(item.id, { at: now, size: 0 });
-      if (size > 0) this.scheduleCheckpoint(sessionId, active, STREAM_CHECKPOINT_MS);
-      return;
-    }
-    if (size - last.size < Math.max(1, Math.ceil(last.size * STREAM_CHECKPOINT_GROWTH))) return;
-    const wait = last.at + STREAM_CHECKPOINT_MS - now;
-    if (wait > 0) {
-      this.scheduleCheckpoint(sessionId, active, wait);
-      return;
-    }
-    checkpoints.set(item.id, { at: now, size });
-    // Copied: the live item keeps mutating while the append waits its turn in the write queue.
-    this.appendTranscript(sessionId, { ...item });
-  }
-
-  private scheduleCheckpoint(sessionId: string, active: ActiveSession, wait: number): void {
-    if (active.checkpointTimer) return;
-    active.checkpointTimer = setTimeout(() => {
-      active.checkpointTimer = null;
-      if (this.active.get(sessionId) !== active) return;
-      for (const id of [...(active.checkpoints?.keys() ?? [])]) {
-        const item = active.liveItems.get(id);
-        if (item?.kind === 'assistant' && item.streaming) this.checkpointStream(sessionId, active, item);
-        else active.checkpoints.delete(id);
-      }
-    }, wait);
-    active.checkpointTimer.unref?.();
-  }
-
-  private resetCheckpoints(active: ActiveSession): void {
-    if (active.checkpointTimer) clearTimeout(active.checkpointTimer);
-    active.checkpointTimer = null;
-    active.checkpoints?.clear();
-  }
-
-  /**
-   * Recomputes the session's live `meta.ongoing` list from running `nativeChildren` (`subagent.run`)
-   * plus per-source `ongoing` events (`tasks`, `hooks`, `wakeup`, `threads`). Deduplicates subagents
-   * reported on both channels by `runId` (preferring the richer `subagent.run` metadata), pushes
-   * immediately when changed (without persisting to disk), and schedules the post-settlement check
-   * when all autonomous background work finishes.
-   */
-  private syncOngoing(sessionId: string, active: ActiveSession): void {
-    if (this.active.get(sessionId) !== active || active.tearingDown) return;
-    const meta = this.get(sessionId);
-    if (!meta) return;
-    const canStopSubagent = subagentSupport(meta.config.harness).control;
-    const items: OngoingItem[] = [];
-    const seenRunIds = new Set<string>();
-    const seenIds = new Set<string>();
-    for (const [runId, child] of active.nativeChildren ?? []) {
-      if (!child.running) continue;
-      seenRunIds.add(runId);
-      const id = `subagent:${runId}`;
-      seenIds.add(id);
-      items.push({
-        id,
-        kind: 'subagent',
-        label: child.description?.trim() || child.agent || 'Subagent',
-        ...(child.agent ? { agent: child.agent } : {}),
-        runId,
-        ...(child.turns !== undefined ? { turns: child.turns } : {}),
-        ...(child.toolUses !== undefined ? { toolUses: child.toolUses } : {}),
-        startedAt: child.startedAt,
-        canStop: canStopSubagent
-      });
-    }
-    for (const sourceItems of active.ongoingBySource?.values() ?? []) {
-      for (const item of sourceItems) {
-        if (item.runId && seenRunIds.has(item.runId)) continue;
-        if (seenIds.has(item.id)) continue;
-        seenIds.add(item.id);
-        items.push(item);
-      }
-    }
-    items.sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
-    const prev = meta.ongoing;
-    const prevHadOngoing = !!prev?.length;
-    const next = items.length ? items : undefined;
-    if (!sameOngoingItems(prev, next)) {
-      meta.ongoing = next;
-      this.pushSessions();
-    }
-    if (next && active.ongoingSettleTimer) {
-      clearTimeout(active.ongoingSettleTimer);
-      active.ongoingSettleTimer = null;
-    } else if (prevHadOngoing && !next && (active.deferredTurnNotice || active.deferredGoalContinuation)) {
-      if (active.ongoingSettleTimer) clearTimeout(active.ongoingSettleTimer);
-      active.ongoingSettleTimer = setTimeout(() => {
-        active.ongoingSettleTimer = null;
-        this.onOngoingSettled(sessionId, active);
-      }, 150);
-      active.ongoingSettleTimer.unref?.();
-    }
-  }
-
-  /**
-   * Fires after autonomous background work empties and no new parent turn took over within the brief
-   * handoff window: delivers the deferred "done · not viewed" mark / OS notification and resumes any
-   * deferred app-driven `/goal` continuation.
-   */
-  private onOngoingSettled(sessionId: string, active: ActiveSession): void {
-    if (this.active.get(sessionId) !== active || active.tearingDown) return;
-    const meta = this.get(sessionId);
-    if (!meta || hasOngoingWork(meta) || meta.status !== 'idle' || active.adapter.busy) return;
-    const notice = active.deferredTurnNotice;
-    active.deferredTurnNotice = null;
-    if (notice) {
-      if (!meta.archived && !this.deps.isViewing?.(meta.id)) {
-        meta.unseenAt = Date.now();
-        if (notice.status === 'failed') meta.unseenFailed = true;
-        else delete meta.unseenFailed;
-        this.schedulePersist(meta);
-        this.pushSessions();
-      }
-      if (this.settings().notifications) {
-        this.deps.notify(meta.id, meta.title, notice.status === 'completed' ? 'Background work finished' : `Turn ${notice.status}${notice.error ? `: ${notice.error}` : ''}`);
-      }
-    }
-    const deferredGoal = active.deferredGoalContinuation;
-    active.deferredGoalContinuation = null;
-    if (deferredGoal && !this.controlled.has(meta.id) && meta.goal === deferredGoal.goal && meta.goal.status === 'active' && meta.goal.autoContinue) {
-      this.advanceGoalContinuation(meta, active);
-    }
-  }
-
-  private advanceGoalContinuation(meta: SessionMeta, active: ActiveSession): void {
-    const goal = meta.goal;
-    if (!goal || goal.status !== 'active' || !goal.autoContinue) return;
-    if (goal.iterations >= goal.maxIterations) {
-      goal.status = 'paused';
-      goal.updatedAt = Date.now();
-      this.deps.log('info', `[${meta.id}] goal paused at the ${goal.maxIterations}-iteration guard`);
-      this.schedulePersist(meta);
-      this.pushSessions();
-      this.emit(meta.id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: `Goal paused: reached the ${goal.maxIterations}-iteration guard. Resume it from the Goal panel.` } });
-      return;
-    }
-    goal.iterations += 1;
-    goal.updatedAt = Date.now();
-    this.deps.log('info', `[${meta.id}] goal continuation ${goal.iterations}/${goal.maxIterations} scheduled`);
-    this.schedulePersist(meta);
-    const prompt = `Goal check-in ${goal.iterations}/${goal.maxIterations}.\n\n<goal>\n${goal.objective}\n</goal>\n\n<execution_instructions>\nContinue executing the goal above. Use prior results as context and avoid repeating completed work; prioritize concrete progress.\nOnly when the goal is fully achieved and verified, provide a brief completion audit and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. Otherwise keep working without asking for permission to continue.\n</execution_instructions>`;
-    void active;
-    this.scheduleGoalContinuation(meta.id, prompt);
-  }
-
   private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
     this.deps.analytics.recordTurn(meta, turn);
     // One line per turn is the timeline a slow or expensive session is diagnosed from.
@@ -2846,201 +2232,23 @@ export class SessionManager {
     const text = active?.lastAssistantText ?? '';
     if (active) active.lastAssistantText = '';
     if (this.controlled.has(meta.id)) return;
-    if (active && turn.status === 'completed') this.scheduleLlmTitle(meta.id, { turnReply: text });
-    const goal = meta.goal;
-    if (!goal || goal.status !== 'active' || !active) return;
-    // This reply began before the new goal was submitted. Its token (or lack of one) says
-    // nothing about that goal; the idle transition will deliver the kickoff separately.
-    if (active.pendingGoalKickoff?.goal === goal) return;
-    if (turn.status !== 'completed') return;
-    if (text.includes(GOAL_COMPLETE_TOKEN)) {
-      goal.status = 'complete';
-      goal.updatedAt = Date.now();
-      this.deps.log('info', `[${meta.id}] goal complete after ${goal.iterations} continuation(s)`);
-      this.schedulePersist(meta);
-      this.pushSessions();
-      this.emit(meta.id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal marked complete after ${goal.iterations} continuation${goal.iterations === 1 ? '' : 's'}.` } });
-      this.deps.notify(meta.id, meta.title, 'Goal complete');
-      return;
-    }
-    if (!goal.autoContinue) return;
-    // While autonomous background subagents/tasks are still running, wait for them to report back
-    // rather than burning a goal iteration with a redundant check-in.
-    if (ongoingActive) {
-      active.deferredGoalContinuation = { goal };
-      this.deps.log('info', `[${meta.id}] goal continuation deferred while ${meta.ongoing!.length} background item(s) are running`);
-      return;
-    }
-    this.advanceGoalContinuation(meta, active);
-  }
-
-  /**
-   * Deliver a goal's auto-continuation on the first free moment. A compaction started by the turn
-   * that just ended holds the session for minutes; dropping the continuation there ended autonomous
-   * runs silently, so a busy session is waited out instead. Each attempt re-reads the session, and
-   * a newer turn's continuation replaces this one rather than racing it.
-   */
-  private scheduleGoalContinuation(id: string, prompt: string, attempt = 0, pending?: ActiveSession['pendingGoalKickoff']): void {
-    const active = this.active.get(id);
-    if (!active || this.controlled.has(id)) return;
-    const expectedGoal = pending?.goal ?? this.get(id)?.goal;
-    if (attempt === 0 && active.goalContinuationTimer) {
-      clearTimeout(active.goalContinuationTimer);
-      active.goalContinuationTimer = null;
-    }
-    const timer = setTimeout(() => {
-      active.goalContinuationTimer = null;
-      if (this.active.get(id) !== active) return;
-      const meta = this.get(id);
-      if (!meta || meta.goal !== expectedGoal || meta.goal?.status !== 'active') return;
-      if (pending && active.pendingGoalKickoff !== pending) return;
-      // A normal continuation belongs to the turn behind an approval. A new goal's kickoff,
-      // however, must survive that turn, even if it pauses for approval in the meantime.
-      if (meta.status === 'awaiting' && !pending) return;
-      if (!pending && hasOngoingWork(meta)) {
-        // Active background work can legitimately run longer than the busy retry window; wait
-        // without burning attempts.
-        this.scheduleGoalContinuation(id, prompt, Math.max(1, attempt), pending);
-        return;
-      }
-      if (meta.status === 'running' || meta.status === 'starting' || meta.status === 'awaiting' || active.adapter.busy) {
-        if (attempt + 1 >= GOAL_CONTINUATION_MAX_ATTEMPTS) {
-          this.deps.log('warn', `[${id}] goal continuation gave up after ${attempt + 1} attempts with the session busy`);
-          return;
-        }
-        this.scheduleGoalContinuation(id, prompt, attempt + 1, pending);
-        return;
-      }
-      if (pending) active.pendingGoalKickoff = null;
-      void this.sendAs(id, { text: prompt }, 'goal').catch((e) => this.deps.log('warn', `[${id}] goal continue failed: ${errorMessage(e)}`));
-    }, attempt === 0 ? 1500 : GOAL_CONTINUATION_RETRY_MS);
-    timer.unref?.();
-    active.goalContinuationTimer = timer;
-  }
-
-  async goal(id: string, action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', opts: { objective?: string; autoContinue?: boolean; maxIterations?: number }): Promise<SessionMeta> {
-    return this.withoutControlled(id, () => this.goalUncontrolled(id, action, opts));
-  }
-
-  private async goalUncontrolled(id: string, action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', opts: { objective?: string; autoContinue?: boolean; maxIterations?: number }): Promise<SessionMeta> {
-    const meta = this.get(id);
-    if (!meta) throw new Error('Session not found');
-    if (meta.config.harness === 'antigravity') throw new Error('Antigravity sessions are driven by direct user prompts.');
-    // Mission mode drives its own continuation: a goal loop beside the Lead would bypass it.
-    if (meta.mission && action !== 'clear') throw new Error('Mission sessions cannot run a goal; the Lead drives the work.');
-    const s = this.settings();
-    const active = this.active.get(id);
-    if (action !== 'update' && active) {
-      // Replacing, pausing or clearing a goal invalidates its pending kickoff/continuation.
-      if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
-      active.goalContinuationTimer = null;
-      active.pendingGoalKickoff = null;
-      active.deferredGoalContinuation = null;
-    }
-    this.deps.log('info', `[${id}] goal ${action}${opts.maxIterations !== undefined ? ` maxIterations=${opts.maxIterations}` : ''}${opts.autoContinue !== undefined ? ` autoContinue=${opts.autoContinue}` : ''}`);
-    switch (action) {
-      case 'set': {
-        meta.goal = {
-          objective: opts.objective?.trim() || meta.goal?.objective || '',
-          status: 'active',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          iterations: 0,
-          maxIterations: opts.maxIterations ?? s.goalDefaults.maxIterations,
-          autoContinue: opts.autoContinue ?? s.goalDefaults.autoContinue
-        };
-        this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal set: ${meta.goal.objective}` } });
-        this.startGoal(id, meta, false);
-
-        break;
-      }
-      case 'pause':
-        if (meta.goal) meta.goal.status = 'paused';
-        break;
-      case 'resume':
-        if (meta.goal) {
-          meta.goal.status = 'active';
-          this.startGoal(id, meta, true);
-        }
-        break;
-      case 'clear':
-        meta.goal = undefined;
-        break;
-      case 'complete':
-        if (meta.goal) meta.goal.status = 'complete';
-        break;
-      case 'update':
-        if (meta.goal) {
-          if (opts.autoContinue !== undefined) meta.goal.autoContinue = opts.autoContinue;
-          if (opts.maxIterations !== undefined) meta.goal.maxIterations = opts.maxIterations;
-          if (opts.objective !== undefined) meta.goal.objective = opts.objective;
-        }
-        break;
-    }
-    if (meta.goal) meta.goal.updatedAt = Date.now();
-    await this.deps.store.upsert(meta);
-    this.pushSessions();
-    return meta;
-  }
-
-  /** Kick off now if free; otherwise reserve the first idle boundary after the current turn. */
-  private startGoal(id: string, meta: SessionMeta, resume: boolean): void {
-    const goal = meta.goal!;
-    const prompt = resume ? `Resuming the goal: ${goal.objective}\nContinue where you left off.` : this.goalKickoffPrompt(goal);
-    const active = this.active.get(id);
-    if (active && (meta.status === 'running' || meta.status === 'awaiting' || meta.status === 'starting' || active.adapter.busy)) {
-      active.pendingGoalKickoff = { goal, resume };
-      // A busy adapter can be compacting while metadata is idle, without another status event.
-      if (meta.status === 'idle') this.scheduleGoalContinuation(id, prompt, 0, active.pendingGoalKickoff);
-    } else {
-      void this.sendAs(id, { text: prompt }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+    if (active && turn.status === 'completed') {
+      this.scheduleLlmTitle(meta.id, { turnReply: text });
+      this.goals.onTurnCompleted(meta, active, text, ongoingActive);
     }
   }
 
-  /**
-   * `/goal` belongs to the harness when it has a goal command of its own. The list the adapter reports
-   * is authoritative; before a harness has started (it starts on the first send, so a brand-new session
-   * has no list yet) a `goal` skill on disk stands in for it — Claude only, and only when the CLI is
-   * configured to load `~/.claude` at all.
-   */
-  private async resolveNativeGoal(meta: SessionMeta): Promise<string | null> {
-    return this.harnessGoal(meta.config.harness, meta.harnessCommands);
-  }
-
-  /** The same rule keyed by harness alone, for a session that does not exist yet (`create()`). */
-  private async harnessGoal(harness: HarnessId, advertised?: string[]): Promise<string | null> {
-    const preferHarness = this.settings().goalDefaults.preferHarness;
-    const installed = preferHarness && !advertised?.length ? await this.harnessGoalInstalled(harness) : false;
-    return nativeGoalCommand({ preferHarness, advertised, installed });
-  }
-
-  private async harnessGoalInstalled(harness: HarnessId): Promise<boolean> {
-    if (harness !== 'claude') return false;
-    // Without 'user' in settingSources the CLI never reads ~/.claude, so its skills cannot answer /goal.
-    if (!this.settings().claude.settingSources.includes('user')) return false;
-    return skillInstalled('claude', 'goal');
-  }
-
-  /** Applies the driver to one session; true when it changed. */
-  private async applyGoalDriver(meta: SessionMeta, current = () => true): Promise<boolean> {
-    const next = await this.resolveNativeGoal(meta);
-    if (!current()) return false;
-    if (next ? meta.nativeGoal === next : meta.nativeGoal === undefined) return false;
-    if (next) meta.nativeGoal = next;
-    else delete meta.nativeGoal;
-    return true;
+  async goal(id: string, action: GoalAction, opts: GoalActionOpts): Promise<SessionMeta> {
+    return this.withoutControlled(id, () => this.goals.applyAction(id, action, opts));
   }
 
   /** Recomputes `/goal` ownership everywhere: the preference is app-wide and the advertised lists are per harness. */
-  async refreshGoalDrivers(): Promise<void> {
-    let changed = false;
-    for (const meta of this.deps.store.list()) {
-      if (await this.applyGoalDriver(meta)) {
-        this.schedulePersist(meta);
-        changed = true;
-      }
-    }
-    if (changed) this.pushSessions();
+  refreshGoalDrivers(): Promise<void> {
+    return this.goals.refreshDrivers();
+  }
+
+  private applyGoalDriver(meta: SessionMeta, current = () => true): Promise<boolean> {
+    return this.goals.applyDriver(meta, current);
   }
 
   /**
@@ -3096,226 +2304,26 @@ export class SessionManager {
     return named ? { name: named, source: 'model' } : { name: branchNameFromText(text), source: 'prompt' };
   }
 
-  async fork(id: string, harness?: HarnessId): Promise<SessionMeta | null> {
-    const src = this.get(id);
-    if (!src) return null;
-    const items = await this.transcript(id);
-    const nid = shortId('s_');
-    const cross = !!harness && harness !== src.config.harness;
-    const target = cross ? harness! : src.config.harness;
-    const title = cross ? `${src.title} (fork → ${HARNESS_BY_ID[target].name})` : `${src.title} (fork)`;
-    // A fork of a worktree session gets a worktree — and a branch — of its own. Sharing the source's
-    // directory used to be the whole fork: archiving the source with its worktree removed deleted the
-    // folder the fork was running in. The new branch starts at the source checkout's HEAD, so
-    // committed work carries over; uncommitted changes stay in the source worktree.
-    const own = await this.forkWorktree(src, title);
-    const meta: SessionMeta = {
-      ...structuredClone(src),
-      id: nid,
-      title,
-      // The fork suffix names which session this came from; a title model would drop that.
-      titleIsPlaceholder: undefined,
-      titleIsAutomatic: false,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      status: 'idle',
-      statusDetail: undefined,
-      fastModeStatus: { state: !cross && src.config.fastMode ? 'requested' : 'off' },
-      queued: 0,
-      // A fork carries the conversation, not the ledger. The source's totals describe work this
-      // session did not do, and inheriting them charges the same dollars to two sessions — which
-      // the dashboard then adds up twice. Its own counters start at zero; the copied rows below
-      // keep their text and tokens for context but are worth nothing.
-      usage: emptyUsage(),
-      forkedFrom: src.id,
-      controlCreation: undefined,
-      importedFrom: undefined,
-      // A fork of a mission session is an ordinary session: it carries the conversation, not the role.
-      mission: undefined,
-      harnessRef: {},
-      pendingForkContext: undefined,
-      pendingKnowledgeDigest: undefined,
-      goal: undefined,
-      // A fresh fork starts unpinned and active, never in the archive.
-      pinned: undefined,
-      pinnedAt: undefined,
-      archived: undefined,
-      // Nobody has looked at a fork yet, and nothing it did has finished unviewed.
-      unseenAt: undefined,
-      unseenFailed: undefined,
-      lastViewedAt: undefined,
-
-      cwd: own?.path ?? src.cwd,
-      // Only a worktree this fork created is the fork's to remove. When it shares the source's
-      // directory it owns no worktree: claiming the source's would make archiving the fork delete it.
-      worktreeBranch: own?.branch
-    };
-    if (cross) {
-      // A different harness cannot resume the source's provider session: it starts fresh in the
-      // fork's own worktree. The copied transcript is carried over for reference only.
-      const s = this.settings();
-      meta.config = {
-        ...src.config,
-        harness: target,
-        model: s.defaultModelByHarness[target],
-        acpAgent: undefined,
-        codexModelProvider: undefined,
-        fastMode: false,
-        permissionMode: closestPermissionMode(target, src.config.permissionMode),
-        useWorktree: !!own
-      };
-      meta.activeModel = meta.config.model;
-      meta.activeEffort = undefined;
-    } else {
-      // Claude can fork a provider session only in its original directory. Native can copy
-      // its local history. Other harnesses deliberately start a new provider session.
-      if (!own && src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
-      if (src.config.harness === 'native') {
-        const hist = await this.deps.store.readNativeHistory(id);
-        if (hist) await this.deps.store.writeNativeHistory(nid, hist);
-        meta.harnessRef = { nativeHistory: true };
-      }
-    }
-    // The fork keeps the project's digest (same project) but hands it over the way
-    // its own harness can: in the system prompt, or on the first message.
-    if (meta.knowledgeDigest && !HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
-    if (!HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingAppInstructions = true;
-    const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision)).map(carriedItem);
-    // When a provider session isn't reused, the fork starts with the copied conversation as text,
-    // even if it still uses the same harness. Native disk history and Claude fork-on-resume stay as-is.
-    const lostResume = !cross && !describeResume(meta.harnessRef) && !!describeResume(src.harnessRef);
-    if (cross || lostResume || src.pendingForkContext) {
-      // Hand the prior conversation over as plain text: the first message in the fork carries it
-      // and then the flag is cleared.
-      await this.deps.store.writeBlob(nid, FORK_CONTEXT_FILE, renderForkContext(keep, src.config.harness, target));
-      meta.pendingForkContext = true;
-      keep.push({
-        id: shortId('i_'),
-        kind: 'info',
-        ts: Date.now(),
-        level: 'info',
-        text: forkNote(src, target, own, cross)
-      });
-    }
-    await this.deps.store.upsert(meta);
-    await this.deps.store.rewriteTranscript(nid, keep);
-    this.deps.log('info', `[${nid}] forked from ${id}${cross ? ` (${src.config.harness} → ${target})` : ''}; ${keep.length} transcript item(s) carried over${own ? `; worktree ${own.branch} at ${own.path}` : '; sharing the source directory'}`);
-    this.pushSessions();
-    return meta;
-  }
-
-  /**
-   * The worktree a fork runs in, when its source had one. Returns null for a source that was never
-   * isolated, and for one whose new worktree could not be created — a fork that runs in the
-   * source's directory is better than no fork, and the archive risk is only the old one.
-   */
-  private async forkWorktree(src: SessionMeta, title: string): Promise<{ path: string; branch: string } | null> {
-    if (!src.worktreeBranch) return null;
-    try {
-      return await createForkWorktree(src.config.projectRoot, slugify(title), { cwd: src.cwd, branch: src.worktreeBranch, branchPrefix: normalizeBranchPrefix(src.config.branchPrefix) });
-    } catch (e) {
-      this.deps.log('warn', `fork: could not create a worktree from ${src.cwd}: ${errorMessage(e)} — the fork shares the source directory`);
-      return null;
-    }
+  fork(id: string, harness?: HarnessId): Promise<SessionMeta | null> {
+    return forkSession(
+      {
+        store: this.deps.store,
+        getSession: (sessionId) => this.get(sessionId),
+        transcript: (sessionId) => this.transcript(sessionId),
+        settings: () => this.settings(),
+        pushSessions: () => this.pushSessions(),
+        log: (level, message) => this.deps.log(level, message)
+      },
+      id,
+      harness
+    );
   }
 
   async exportMarkdown(id: string): Promise<string> {
-    const meta = this.get(id);
-    const items = await this.transcript(id);
-    const lines: string[] = [`# ${meta?.title ?? 'Session'}`, '', `- Harness: ${meta?.config.harness}`, `- Model: ${describeModel(meta?.activeModel)}`, `- Directory: ${meta?.cwd}`, `- Cost: $${(meta?.usage.costUsd ?? 0).toFixed(4)}`, ''];
-    for (const it of items) {
-      switch (it.kind) {
-        case 'user':
-          lines.push(`## User`, '', it.text, '');
-          break;
-        case 'assistant':
-          if (it.thinking) lines.push(`<details><summary>Thinking</summary>\n\n${it.thinking}\n\n</details>`, '');
-          if (it.text) lines.push(`## Assistant${it.model ? ` (${it.model})` : ''}`, '', it.text, '');
-          break;
-        case 'tool':
-          lines.push(`### Tool: ${it.name} — ${it.summary ?? ''}`, '', '```', (it.output ?? '').slice(0, 20_000), '```', '');
-          if (it.changes) for (const c of it.changes) if (c.diff) lines.push('```diff', c.diff, '```', '');
-          break;
-        case 'approval':
-          lines.push(`> Approval: ${it.request.title} → ${it.decision?.optionId ?? 'pending'}`, '');
-          break;
-        case 'info':
-          lines.push(`> ${it.level}: ${it.text}`, '');
-          break;
-        case 'turn':
-          lines.push(`---`, `_Turn ${it.status}${it.durationMs ? ` in ${(it.durationMs / 1000).toFixed(1)}s` : ''}${speedLabel(it)}${it.costUsd ? `, $${it.costUsd.toFixed(4)}` : ''}_`, '');
-          break;
-        case 'plan':
-          lines.push('### Plan', ...it.entries.map((e) => `- [${e.status === 'completed' ? 'x' : ' '}] ${e.content}`), '');
-          break;
-      }
-    }
-    return lines.join('\n');
+    return exportSessionMarkdown(this.get(id), await this.transcript(id));
   }
 
   async projectRootFor(cwd: string): Promise<string | null> {
     return gitRoot(cwd);
   }
-}
-
-/**
- * The transcript row that says where a fork landed and why the conversation above is being trusted:
- * a fork with its own worktree gets its own branch, one that stayed behind shares the source's
- * directory and claims no worktree of its own.
- */
-function forkNote(src: SessionMeta, target: HarnessId, own: { path: string; branch: string } | null, cross: boolean): string {
-  const from = HARNESS_BY_ID[src.config.harness].name;
-  const intro = cross ? `Forked from ${from} into ${HARNESS_BY_ID[target].name}` : 'Forked';
-  const where = own
-    ? `onto a new worktree (branch ${own.branch}, from ${src.worktreeBranch})`
-    : `in the same directory${src.worktreeBranch ? ` (branch ${src.worktreeBranch})` : ''}`;
-  return `${intro} ${where}. The conversation above is handed over as context on your next message.`;
-}
-
-/**
- * One transcript row the source session hands to its fork. The row is the fork's context, not its
- * record: everything it describes happened in the session it came from, under that session's
- * counters. Text, tool calls and tokens stay — they are what the new harness can see — but a turn's
- * dollars do not, because the session that spent them already reports them.
- */
-/** A mission session still doing or owning work: Housekeep must leave it alone. */
-function missionLive(meta: SessionMeta): boolean {
-  const m = meta.mission;
-  if (!m) return false;
-  if (m.role === 'lead') return !['ended', 'stopped', 'done_local'].includes(m.state ?? 'running');
-  return !['done', 'failed', 'stopped'].includes(m.builderState ?? 'working');
-}
-
-function carriedItem(item: TranscriptItem): TranscriptItem {
-
-  return item.kind === 'turn' ? { ...item, costUsd: 0, carried: true } : item;
-}
-
-/** Model-independent estimate: Unicode code points / 4, not a provider tokenizer or bill. */
-function measureUserInput(sessionId: string, text: string): NonNullable<Extract<TranscriptItem, { kind: 'user' }>['userInput']> {
-  let characters = 0;
-  for (const _ of text) characters++;
-  return { id: shortId('input_'), sessionId, ts: Date.now(), tokens: Math.ceil(characters / 4) };
-}
-
-/** `provider/model` for log lines, or 'default' when the harness picks. */
-function describeModel(model: ModelRef | undefined): string {
-  return model ? modelName(model.provider, model.model) : 'default';
-}
-
-/** Which provider-side session a harness will try to resume, or '' for a fresh start. */
-function describeResume(ref: HarnessRef): string {
-  if (ref.claudeSessionId) return `claude:${ref.claudeSessionId}${ref.forkOnResume ? ' (fork)' : ''}`;
-  if (ref.codexThreadId) return `codex:${ref.codexThreadId}`;
-  if (ref.piSessionFile) return `pi:${path.basename(ref.piSessionFile)}`;
-  if (ref.acpSessionId) return `acp:${ref.acpSessionId}`;
-  if (ref.cursorAgentId) return `cursor:${ref.cursorAgentId}`;
-  if (ref.nativeHistory) return 'native:history';
-  return '';
-}
-
-/** `, 12.3 tok/s` for the markdown export, or '' when the turn has no speed sample. */
-function speedLabel(turn: Extract<TranscriptItem, { kind: 'turn' }>): string {
-  const tps = tokensPerSecond(turnSpeed(turn) ?? undefined);
-  return tps ? `, ${tps.toFixed(1)} tok/s` : '';
 }

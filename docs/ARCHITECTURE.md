@@ -31,7 +31,7 @@ src/main
   dictation/      composer voice to text: a provider's transcription endpoint (cloud.ts), or whisper.cpp's
                   server downloaded into <userData>/dictation and run on loopback while in use (local.ts)
   util/           fs and async helpers shared by the adapters (no Electron imports)
-  session-manager.ts  sessions, transcripts, approvals, goals, worktrees
+  session-manager.ts + session-{types,git-state,compaction,goal,fork,stream,title}.ts   sessions, transcripts, approvals, goals, compaction, forking, git/PR polling, worktrees
   knowledge/      Layer 2 project knowledge: markdown wiki store, scored retrieval, synthesis and
                   distillation jobs, publish (docs/MEMORY.md); resources/mcp/vocs-memory.mjs is
                   the stdio MCP server every harness reaches it through
