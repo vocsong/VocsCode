@@ -230,16 +230,21 @@
   stroke-linecap: butt;
   stroke-linejoin: round;
 }
-.fast-mode-electric-bolt > path {
-  /* The dash covers one whole path; the leader reveals it from the root forward. */
+.fast-mode-electric-trace,
+.fast-mode-electric-fork {
+  /* Reveal from the root; the head draws a shorter dash on the same channel. */
   stroke-dasharray: 100 100;
 }
-.fast-mode-electric-trace {
+.fast-mode-electric-trace,
+.fast-mode-electric-head {
   stroke-width: 0.95;
+}
+.fast-mode-electric-head {
+  opacity: 0; /* The static reduced-motion bolt has no moving head. */
 }
 .fast-mode-electric-fork {
   stroke-width: 0.55;
-  opacity: 0.72;
+  opacity: 0.53;
 }
 /* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */
 .pill-effort {

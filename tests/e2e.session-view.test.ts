@@ -878,8 +878,9 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
       const electric = box.locator(':scope > svg.fast-mode-electric');
-      const traces = electric.locator('path.fast-mode-electric-trace');
-      const playingTraces = () => traces.evaluateAll((paths) => paths.filter((el) => el.getAnimations().some((a) => a.playState === 'running')).length);
+      const boltCount = 3;
+      const movingStrokes = electric.locator('path:is(.fast-mode-electric-trace, .fast-mode-electric-head)');
+      const playingStrokes = () => movingStrokes.evaluateAll((paths) => paths.filter((el) => el.getAnimations().some((a) => a.playState === 'running')).length);
       await box.evaluate((el) => {
         if (el.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
       });
@@ -889,7 +890,7 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       await electric.waitFor({ state: 'visible' });
       expect(await electric.evaluate((el) => [getComputedStyle(el).pointerEvents, getComputedStyle(el).filter])).toEqual(['none', 'none']);
       expect(await electric.locator('defs, mask, [mask]').count()).toBe(0);
-      await expect.poll(playingTraces).toBe(5);
+      await expect.poll(playingStrokes).toBe(boltCount * 2);
 
       const readBolts = (animated: boolean) => electric.evaluate(async (el, animated) => {
         const svg = el as SVGSVGElement;
@@ -902,25 +903,30 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
         }
         const groups = [...svg.querySelectorAll('g.fast-mode-electric-bolt')].map((group) => {
           const trunks = group.querySelectorAll<SVGPathElement>('path.fast-mode-electric-trace');
-          if (trunks.length !== 1) throw new Error(`Expected one trunk per Fast bolt, found ${trunks.length}`);
-          return { group, trunk: trunks[0] };
+          const heads = group.querySelectorAll<SVGPathElement>('path.fast-mode-electric-head');
+          if (trunks.length !== 1 || heads.length !== 1) throw new Error(`Expected one trunk and head per Fast bolt, found ${trunks.length} and ${heads.length}`);
+          return { group, trunk: trunks[0], head: heads[0] };
         });
-        const readStroke = (path: SVGPathElement) => {
+        const readStroke = (style: CSSStyleDeclaration) => ({
+          offset: Number.parseFloat(style.strokeDashoffset),
+          opacity: Number(style.opacity) * Number(style.strokeOpacity),
+          width: Number.parseFloat(style.strokeWidth)
+        });
+        // A shared, evenly spaced clock exposes pauses and speed changes between keyframes.
+        const sweepTimes = Array.from({ length: 51 }, (_, i) => i / 50);
+        const readPath = (path: SVGPathElement, sampleTimes?: number[]) => {
+          const d = path.getAttribute('d') ?? '';
           const style = getComputedStyle(path);
-          return { offset: Number.parseFloat(style.strokeDashoffset), opacity: Number(style.opacity), width: Number.parseFloat(style.strokeWidth) };
-        };
-        const readPath = (path: SVGPathElement) => {
-          const d = path.getAttribute('d')?.trim() ?? '';
-          const style = getComputedStyle(path);
-          const [dash, gap = dash] = style.strokeDasharray.split(/[,\s]+/).map(Number.parseFloat);
-          const stroke = readStroke(path);
+          const dash = style.strokeDasharray === 'none' ? [] : style.strokeDasharray.split(/[,\s]+/).map(Number.parseFloat);
+          const stroke = readStroke(style);
           const geometry = {
             d, length: d ? path.getTotalLength() : 0, normalized: Number(path.getAttribute('pathLength')) === 100,
-            open: /^[Mm]/.test(d) && !/[MmZz]/.test(d.slice(1)),
-            crisp: style.stroke !== 'none' && style.fill === 'none' && style.filter === 'none',
-            fullDash: dash === 100 && gap >= 100,
-            stillVisible: (style.strokeDasharray === 'none' || (dash >= 100 && Math.abs(stroke.offset) < 0.01)) &&
-              Number(style.strokeOpacity) > 0 && path.checkVisibility({ opacityProperty: true, visibilityProperty: true }),
+            open: /^[Mm]/.test(d.trimStart()) && !/[MmZz]/.test(d.trimStart().slice(1)),
+            crisp: style.stroke !== 'none' && style.strokeLinecap === 'butt' && style.fill === 'none' && style.filter === 'none' &&
+              path.checkVisibility({ visibilityProperty: true }),
+            dash,
+            stillVisible: (dash.length === 0 || (dash[0] >= 100 && Math.abs(stroke.offset) < 0.01)) &&
+              stroke.opacity > 0 && path.checkVisibility({ opacityProperty: true, visibilityProperty: true }),
             stroke
           };
           if (!animated) return { ...geometry, growth: null };
@@ -930,21 +936,21 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
           const { delay = 0, duration } = effect.getTiming();
           if (typeof duration !== 'number' || duration <= 0) throw new Error('Fast bolt has no positive duration');
           const offsets = effect.getKeyframes().map(({ computedOffset }) => computedOffset);
-          const times = offsets.flatMap((offset, i) => i === 0 ? [offset] : [(offsets[i - 1] + offset) / 2, offset]);
+          const times = sampleTimes ?? offsets.flatMap((offset, i) => i === 0 ? [offset] : [(offsets[i - 1] + offset) / 2, offset]);
           // Probe computed styles on a copy so live strikes still finish naturally.
           const probe = new Animation(new KeyframeEffect(effect));
           try {
             const samples = times.map((time) => {
               probe.currentTime = delay + Math.min(time, 0.999999) * duration;
-              return readStroke(path);
+              return readStroke(getComputedStyle(path));
             });
-            return { ...geometry, growth: { delay, duration, offsets, samples } };
+            return { ...geometry, growth: { delay, duration, samples } };
           } finally {
             probe.cancel();
           }
         };
-        const snapshot = () => groups.map(({ group, trunk }) => {
-          const main = readPath(trunk);
+        const snapshot = () => groups.map(({ group, trunk, head }) => {
+          const main = readPath(trunk, sweepTimes);
           const points = Array.from({ length: Math.ceil(main.length) + 1 }, (_, i) => trunk.getPointAtLength(Math.min(i, main.length)));
           // On the long straight sides, the Y excursion is the bolt's zigzag, not a corner turn.
           const straight = points.filter(({ x }) => x > bounds.x + radius + 1 && x < bounds.x + bounds.width - radius - 1);
@@ -956,9 +962,11 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
           const slots = [...group.querySelectorAll<SVGPathElement>('path.fast-mode-electric-fork')];
           const twigs = slots.filter((path) => path.hasAttribute('d')).map((path) => {
             const root = path.getPointAtLength(0);
-            return { ...readPath(path), attached: points.some(({ x, y }) => Math.hypot(x - root.x, y - root.y) <= 0.55) };
+            const distances = points.map(({ x, y }) => Math.hypot(x - root.x, y - root.y));
+            const nearest = Math.min(...distances);
+            return { ...readPath(path), attached: nearest <= 0.55, joint: Math.min(distances.indexOf(nearest), main.length) };
           });
-          return { main, twigs, slots: slots.length, excursion,
+          return { main, head: readPath(head, sweepTimes), twigs, slots: slots.length, excursion,
             start: Number.parseFloat(group.getAttribute('data-rim-start') ?? ''),
             extent: Number.parseFloat(group.getAttribute('data-rim-extent') ?? '') };
         });
@@ -977,44 +985,73 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
           if (finished && next.every((a, i) => a?.playState === 'running' && a !== initial[i])) return [first, snapshot()];
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        throw new Error('All five Fast trunks must finish naturally and renew');
+        throw new Error('All three Fast trunks must finish naturally and renew');
       }, animated);
 
       const cycles = await readBolts(true);
       await win.emulateMedia({ reducedMotion: 'reduce' });
       await expect.poll(() => electric.evaluate((el) => el.getAnimations({ subtree: true }).length)).toBe(0);
       cycles.push(...await readBolts(false));
+      // Corner turns and one-pixel sampling can undercount the widest bend in a strike.
       const excursion = Math.max(...cycles.flatMap((bolts) => bolts.map((bolt) => bolt.excursion)));
-      expect(excursion, `${theme}: straight-edge zigzag in CSS pixels`).toBeGreaterThanOrEqual(6);
-      expect(excursion, `${theme}: straight-edge zigzag in CSS pixels`).toBeLessThanOrEqual(10.5);
+      expect(excursion, `${theme}: straight-edge zigzag in CSS pixels`).toBeGreaterThanOrEqual(5.5);
+      expect(excursion, `${theme}: straight-edge zigzag in CSS pixels`).toBeLessThanOrEqual(9.5);
+      const speed = 1.35;
       for (const [cycle, bolts] of cycles.entries()) {
         const state = `${theme}: ${['live', 'renewed', 'reduced motion'][cycle]} bolts`;
-        expect(bolts, state).toHaveLength(5);
+        expect(bolts, state).toHaveLength(boltCount);
         const spans = [...bolts].sort((a, b) => a.start - b.start);
         for (const [i, { start, extent }] of spans.entries()) {
           expect(start, state).toBeGreaterThanOrEqual(0);
           expect(start, state).toBeLessThan(100);
-          expect(extent, state).toBeGreaterThanOrEqual(3 - 0.01); // Crowded gaps may shorten a strike.
-          expect(extent, state).toBeLessThanOrEqual(17);
-          // The last interval can wrap past 100; compare it to the first in the next turn.
+          expect(extent, state).toBeGreaterThanOrEqual(11);
+          expect(extent, state).toBeLessThanOrEqual(20);
+          // Checking each neighbor on the circle covers all pairs, including across the SVG seam.
           const next = spans[i + 1]?.start ?? spans[0].start + 100;
           expect(next - (start + extent), `${state}: reservation ${i + 1} keeps its gap`).toBeGreaterThanOrEqual(2.49);
         }
-        if (cycle < 2) expect(new Set(bolts.map(({ main }) => main.growth?.offsets.join(','))).size, `${state}: varied growth timing`).toBeGreaterThan(1);
-        for (const [i, { main, twigs, slots }] of bolts.entries()) {
+        if (cycle < 2) expect(new Set(bolts.map(({ main }) => main.growth?.duration)).size, `${state}: varied strike lifetimes`).toBeGreaterThan(1);
+        for (const [i, { main, head, twigs, slots }] of bolts.entries()) {
           const label = `${state}, bolt ${i + 1}`;
           expect(main.length, label).toBeGreaterThan(0);
+          expect(head.d, `${label}: head follows exactly the trunk geometry`).toBe(main.d);
+          expect(head.open && head.normalized && head.crisp, `${label}: one open normalized head stroke`).toBe(true);
+          expect(head.dash, `${label}: short head dash with no repeat on the path`).toEqual([28, 100]);
+          expect(head.stroke.width, `${label}: head and trunk use the same hairline`).toBeCloseTo(0.95, 2);
           expect(slots, label).toBeLessThanOrEqual(10);
           expect(twigs.length, label).toBeGreaterThanOrEqual(2);
-          expect(twigs.every(({ attached, length }) => attached && length >= 1.5 && length <= 11), `${label}: short attached twigs`).toBe(true);
-          if (cycle === 1) {
-            expect(main.d, `${label}: new geometry after natural finish`).not.toBe(cycles[0][i].main.d);
-            expect(main.growth?.delay, label).toBeGreaterThanOrEqual(60);
-            expect(main.growth?.delay, label).toBeLessThanOrEqual(235);
-          }
-          if (main.growth) {
-            expect(main.growth.duration, label).toBeGreaterThanOrEqual(410);
-            expect(main.growth.duration, label).toBeLessThanOrEqual(890);
+          expect(twigs.every(({ attached, length }) => attached && length >= 1.25 && length <= 11), `${label}: short attached twigs`).toBe(true);
+          const trail = main.growth;
+          const front = head.growth;
+          if (trail && front) {
+            expect(trail.duration, label).toBeGreaterThanOrEqual(680 / speed - 1);
+            expect(trail.duration, label).toBeLessThanOrEqual(1040 / speed + 1);
+            if (cycle === 1) {
+              expect(main.d, `${label}: new geometry after natural finish`).not.toBe(cycles[0][i].main.d);
+              expect(trail.delay, label).toBeGreaterThanOrEqual(90 / speed - 1);
+              expect(trail.delay, label).toBeLessThanOrEqual(250 / speed + 1);
+            }
+            expect(front.duration, `${label}: synchronized duration`).toBeCloseTo(trail.duration, 2);
+            expect(front.delay, `${label}: synchronized delay`).toBeCloseTo(trail.delay, 2);
+            expect(front.samples[0].offset, `${label}: head starts with no exposed dash`).toBeCloseTo(28, 2);
+            expect(front.samples.at(-1)!.offset, `${label}: head reaches the tip`).toBeCloseTo(-72, 2);
+            expect(front.samples.every(({ width }) => Math.abs(width - 0.95) < 0.01), `${label}: head stays hairline`).toBe(true);
+
+            const paired = trail.samples.map((trunk, k) => ({ trunk, head: front.samples[k] }));
+            expect(paired.every(({ trunk, head }) => Math.abs(trunk.offset - head.offset - 72) < 0.1), `${label}: head stays on the revealed tip`).toBe(true);
+            const advancing = paired.filter(({ trunk }) => trunk.offset > 10 && trunk.offset < 90);
+            const strides = advancing.slice(1).map(({ trunk }, k) => advancing[k].trunk.offset - trunk.offset);
+            expect(strides.length, `${label}: sampled mid-reveal`).toBeGreaterThanOrEqual(4);
+            expect(Math.min(...strides), `${label}: no pauses during reveal`).toBeGreaterThan(0.01);
+            expect(Math.max(...strides), `${label}: no jumps during reveal`).toBeLessThan(2 * Math.min(...strides));
+            expect(strides.at(-1)! - strides[0], `${label}: gently accelerates`).toBeGreaterThan(0.05);
+            expect(advancing.every(({ trunk, head }) => head.opacity > trunk.opacity + 0.05), `${label}: bright head over a dim trail`).toBe(true);
+            const complete = paired.filter(({ trunk }) => Math.abs(trunk.offset) < 0.01 && trunk.opacity > 0.2);
+            expect(complete.some(({ head }) => head.opacity > 0.01 && head.opacity < 0.7), `${label}: head fades while the trunk is fully drawn`).toBe(true);
+            expect(complete.some(({ head }) => head.opacity < 0.01), `${label}: full trunk outlasts the head`).toBe(true);
+            expect(front.samples.at(-1)!.opacity, `${label}: head finishes dark`).toBeLessThan(0.01);
+          } else {
+            expect(head.stroke.opacity, `${label}: static bolt hides its head`).toBe(0);
           }
           for (const [j, path] of [main, ...twigs].entries()) {
             const part = `${label}, ${j === 0 ? 'trunk' : `twig ${j}`}`;
@@ -1026,8 +1063,18 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
               expect(path.stroke.width, part).toBeCloseTo(width, 2);
               continue;
             }
-            expect(path.fullDash, `${part}: a dash and gap covering the path`).toBe(true);
-            if (j > 0) expect(growth.delay, `${part}: sprouts after the trunk`).toBeGreaterThan(main.growth!.delay);
+            expect(path.dash, `${part}: a dash and gap covering the path`).toEqual([100, 100]);
+            if (j > 0) {
+              expect(growth.delay, `${part}: sprouts after the trunk starts`).toBeGreaterThan(trail!.delay);
+              expect(growth.delay, `${part}: sprouts during the strike`).toBeLessThan(trail!.delay + trail!.duration);
+              // Interpolate the already-sampled reveal at the twig's start; its root was measured to about half a pixel.
+              const sample = (growth.delay - trail!.delay) / trail!.duration * (trail!.samples.length - 1);
+              const before = trail!.samples[Math.floor(sample)].offset;
+              const after = trail!.samples[Math.ceil(sample)].offset;
+              const offset = before + (after - before) * (sample % 1);
+              expect(main.length * (1 - offset / 100), `${part}: trunk reaches the joint before it sprouts`).toBeGreaterThanOrEqual(twigs[j - 1].joint - 0.55);
+              expect(growth.samples[0].opacity, `${part}: sprout starts dark`).toBeCloseTo(0, 2);
+            }
             const { samples } = growth;
             const offsets = samples.map(({ offset }) => offset);
             expect(offsets[0], part).toBeCloseTo(100, 2);
@@ -1042,7 +1089,7 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
         }
       }
       await win.emulateMedia({ reducedMotion: 'no-preference' });
-      await expect.poll(playingTraces).toBe(5);
+      await expect.poll(playingStrokes).toBe(boltCount * 2);
       const permission = footer.getByRole('button', { name: 'Permission mode: Full', exact: true });
       await permission.waitFor();
 
@@ -1135,11 +1182,12 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     await expect.poll(() => footer.locator('.pill[title="Model"]').evaluate((el) => Number(getComputedStyle(el.closest('.dropdown')!).opacity))).toBe(0);
     const zenElectric = box.locator(':scope > svg.fast-mode-electric');
     expect(await box.evaluate((el) => el.matches(':focus-within'))).toBe(false);
-    await expect.poll(() => zenElectric.locator('path.fast-mode-electric-trace').evaluateAll((paths) => paths.some((el) => {
+    await expect.poll(() => zenElectric.locator('path.fast-mode-electric-head').evaluateAll((paths) => paths.some((el) => {
       const style = getComputedStyle(el);
+      const offset = Number.parseFloat(style.strokeDashoffset);
       return el.getAnimations().some((a) => a.playState === 'running') &&
         el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) &&
-        Number(style.opacity) > 0.05 && Number.parseFloat(style.strokeDashoffset) < 99;
+        Number(style.opacity) * Number(style.strokeOpacity) > 0.05 && offset < 27 && offset > -71;
     }))).toBe(true);
     await box.screenshot({ path: path.join(shots, 'session-view-fast-unfocused-zen.png') });
 
