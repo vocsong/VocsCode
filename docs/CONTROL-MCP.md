@@ -23,6 +23,27 @@ remain outstanding. The broader [plan](CONTROL-MCP-PLAN.md) is not all implement
   cloud storage. OAuth storage contains authorization data, not conversations; relay storage contains
   bounded nonce metadata. Existing encrypted browser access and its optional mirror remain separate.
 
+## MCP Hub discovery preview for Dots and Muse
+
+The proposed `mcp.vocs.io/vocs-code` path is separate from the older `code.vocs.io/mcp`
+controller. Its first slice is staging-only and serves discovery metadata: `computers_list`,
+`capabilities`, `projects_list`, `sessions_list` and `sessions_get`. Session titles can contain
+prompt text; no transcripts, questions, admission windows, receipts or write tools are exposed.
+The desktop still checks the independent grant. A project or session title is not a target ID.
+
+The MCP Hub must bind the relay's named `ControlDiscovery` entrypoint and call
+`discover(request, principal)`. The binding, not the caller's HTTP headers, authenticates the
+upstream Worker. Its upstream OAuth authority must derive and revalidate the relay account ID,
+controller ID, exact `control:discover` scope and expiration before dispatch. The relay signs
+exact forwarded bytes internally for a separate discovery audience and uses the same account Hub,
+nonce journal and current host-socket check. It allowlists tools separately from OAuth scopes:
+the legacy `windows.create` also requires `control:discover` but can write the journal.
+
+`CONTROL_DISCOVERY_ENABLED` is unset in the checked-in relay config; setting it on an isolated
+staging instance does not enable the legacy route. This slice does not provision the Hub's
+independent OAuth authority or its private service bindings. Real Dots/Muse OAuth and a live
+two-desktop run remain activation gates. The Windows CLI and browser Remote Access are unchanged.
+
 ## Owner setup (after a separately approved rollout)
 
 1. Enroll/connect each computer through the existing Remote access panel. Keep its project folders

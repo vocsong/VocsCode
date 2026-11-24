@@ -146,7 +146,8 @@ secret.
   test relay (`tests/fake-relay.ts`) so local suites run the production rules
 - `src/edge.ts` — the Worker's front door: the edge route table, rate limits, credential shapes, body budgets and deadlines
 - `src/rate.ts` — in-memory fixed-window rate limiter inside the Hub, and how both limiters key a caller
-- `src/worker.ts` — the Worker, per-account Hub Durable Object and short-lived EnrollmentDirectory (platform glue)
+- `src/entry.ts` — deployed exports and the optional [binding-only MCP discovery entrypoint](../docs/CONTROL-MCP.md#mcp-hub-discovery-preview-for-dots-and-muse)
+- `src/worker.ts` — the public Worker, per-account Hub Durable Object and short-lived EnrollmentDirectory (platform glue)
 - `src/web-client.ts` — the browser-side pairing, tokens, vault and e2e transport (DOM-free, unit-tested)
 - `src/page.ts` — the web page logic (bundled to `app/app.js` via `npm run relay:page` at the repo root)
 - `public/app/` — the static web client, served at `/app` (pairing, computer switcher, sessions,
