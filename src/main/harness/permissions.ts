@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { ApprovalOption, FileChange, PermissionMode } from '../../shared/types';
 import type { ApprovalDraft } from './types';
-import { isDangerousCommand } from './types';
+import { isDangerousCommand, isMissionUserCommand } from './types';
 
 /** Standard option sets for approval cards. */
 export const OPTIONS_ALLOW_DENY: ApprovalOption[] = [
@@ -24,10 +24,13 @@ export type GateVerdict = 'allow' | 'deny' | 'ask';
  */
 export function gateAction(
   mode: PermissionMode,
-  action: { mutating: boolean; isEdit: boolean; command?: string; sessionAllowed?: boolean; outsideWorkspace?: boolean }
+  action: { mutating: boolean; isEdit: boolean; command?: string; sessionAllowed?: boolean; outsideWorkspace?: boolean; missionBuilder?: boolean }
 ): GateVerdict {
   if (!action.mutating) return 'allow';
   if (mode === 'plan') return 'deny';
+  // A Mission Builder never publishes or elevates on its own, in any tier: the app pushes the
+  // mission branch once, and everything else of that class goes to the user through the Lead.
+  if (action.missionBuilder && action.command && isMissionUserCommand(action.command)) return 'ask';
   if (mode === 'full-auto') return 'allow';
   // Below full access, a dangerous command always prompts, even after "allow for session",
   // and so does any write that leaves the project directory.

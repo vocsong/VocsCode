@@ -5,8 +5,9 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import vocsCodeApprovals from '../resources/pi/vocs-code-approvals';
+import { closeMcpBridge } from '../resources/pi/vocs-code-mcp';
 
 type ToolCallHandler = (event: { toolName: string; toolCallId?: string; input: Record<string, unknown> }, ctx: object) => Promise<unknown>;
 
@@ -25,7 +26,14 @@ function register(mode: string): ToolCallHandler {
 }
 
 const tempDirs: string[] = [];
+beforeEach(() => {
+  // Only fixture-owned tool provenance belongs in these offline approvals tests.
+  vi.stubEnv('VOCS_CODE_MCP_CONFIG', undefined);
+  vi.stubEnv('VOCS_CODE_MCP_EPHEMERAL', undefined);
+});
 afterEach(async () => {
+  closeMcpBridge();
+  vi.unstubAllEnvs();
   delete process.env.VOCS_CODE_PERMISSION_MODE;
   delete process.env.VOCS_CODE_MODE_FILE;
   delete process.env.VOCS_CODE_EFFORT_FILE;
@@ -128,7 +136,7 @@ describe('pi approval extension without a UI', () => {
     });
   });
 
-  it('blocks every MCP tool in plan mode', async () => {
+  it('blocks an MCP tool without trusted provenance in plan mode', async () => {
     const handler = register('plan');
     await expect(handler({ toolName: 'mcp__gitnexus__context', input: {} }, { cwd: process.cwd() })).resolves.toMatchObject({
       block: true,

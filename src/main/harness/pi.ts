@@ -7,7 +7,7 @@ import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName, UNKNOWN_MODEL_KEY } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
-import { sessionAppendPrompt } from './system-prompt';
+import { missionPrompt, sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { reportHarnessCommands } from './commands';
@@ -19,6 +19,7 @@ import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { installPiAgentOverrides } from '../pi-agents';
 import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, VOCS_MEMORY_SERVER_ID } from '../mcp/memory';
+import { MISSION_GATEWAY_TOKEN_ENV, MISSION_GATEWAY_URL_ENV, isMissionGatewayDef } from '../mcp/mission';
 import { mergePiCatalog } from '../models/pi-catalog';
 import { estimateCostUsd } from '../models/static-models';
 import { fastModePricing } from './native/fast-mode-pricing';
@@ -56,6 +57,29 @@ interface PiSubagentDetails {
 /** A pi-subagents run is only counted once its own status is terminal. */
 function isTerminalSubagentStatus(status: string | undefined): status is string {
   return status === 'completed' || status === 'error' || status === 'stopped' || status === 'aborted';
+}
+/**
+ * pi-subagents' delegation tools, kept out of a mission session (which delegates through its
+ * Builders) alongside our own subagent extension, which such a session never loads.
+ */
+const PI_DELEGATION_TOOLS = ['Agent', 'get_subagent_result'];
+/** Tells the Pi gate (resources/pi/subagent-gate.ts) the session is a Mission Builder. */
+const MISSION_BUILDER_ENV = 'VOCS_CODE_MISSION_BUILDER';
+
+/**
+ * The user's extra arguments with the delegation tools excluded too. Pi 0.85.1 keeps only the last
+ * `--exclude-tools`, so the user's own exclusions are folded into one flag, placed last.
+ */
+function withDelegationExcluded(extraArgs: readonly string[]): string[] {
+  const rest: string[] = [];
+  const excluded: string[] = [];
+  for (let i = 0; i < extraArgs.length; i++) {
+    const arg = extraArgs[i]!;
+    const list = arg === '--exclude-tools' ? extraArgs[++i] : arg.startsWith('--exclude-tools=') ? arg.slice('--exclude-tools='.length) : undefined;
+    if (list === undefined && arg !== '--exclude-tools') rest.push(arg);
+    else excluded.push(...(list ?? '').split(',').map((name) => name.trim()).filter(Boolean));
+  }
+  return [...rest, '--exclude-tools', [...new Set([...excluded, ...PI_DELEGATION_TOOLS])].join(',')];
 }
 const PI_TOOL_PROMPT = 'Pi tools: prefer path (file_path is accepted). edit uses edits[]; a single old_string/new_string pair is accepted, including empty new_string. replace_all:true is unsupported: use unique non-overlapping edits. bash timeout is seconds; timeout_ms explicitly means milliseconds. Never send both timeout fields or guess their units.';
 
@@ -229,6 +253,8 @@ export class PiAdapter implements HarnessAdapter {
   private exited = false;
   private transportError: Error | null = null;
   private modeFile: string | null = null;
+  /** This launch is a Mission session's: no subagent extension, so its readiness is not required. */
+  private missionLaunch = false;
   private extensionNonce = '';
   private extensionCapabilities = new Set<string>();
   private extensionFailure: string | null = null;
@@ -311,14 +337,17 @@ export class PiAdapter implements HarnessAdapter {
     });
 
     const mcpServers = (await this.ctx.mcpServers()).map(({ def }) => def);
-    // The bridge consumes the gateway definition from the launch environment, never the file.
-    // Also exclude incomplete gateway definitions rather than persisting any part of them.
-    const gatewayMemory = mcpServers.filter((server) => server.id === VOCS_MEMORY_SERVER_ID
-      && (server.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || server.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined));
-    const ephemeral = gatewayMemory;
-    const persisted = mcpServers.filter((server) => !gatewayMemory.includes(server));
+    // The bridge consumes the gateway definitions (memory, Mission) from the launch environment,
+    // never the file. Also exclude incomplete gateway definitions rather than persisting any part of them.
+    const gatewayServers = mcpServers.filter((server) => isMissionGatewayDef(server) || (server.id === VOCS_MEMORY_SERVER_ID
+      && (server.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || server.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined)));
+    const ephemeral = gatewayServers;
+    const persisted = mcpServers.filter((server) => !gatewayServers.includes(server));
+    // A mission session delegates through its Builders: no subagent extension of ours, and none of
+    // pi-subagents' tools either.
+    this.missionLaunch = !!meta.mission;
     const args = ['--mode', 'rpc',
-      '-e', ext, '-e', toolsExt, '-e', this.ctx.runtime.resource('pi', 'vocs-code-fast-mode.ts'), '-e', subagentsExt, '--session-dir', sessionDir];
+      '-e', ext, '-e', toolsExt, '-e', this.ctx.runtime.resource('pi', 'vocs-code-fast-mode.ts'), ...(this.missionLaunch ? [] : ['-e', subagentsExt]), '--session-dir', sessionDir];
     if (persisted.length || ephemeral.length) args.push('-e', mcpExt);
     const mcpConfigFile = path.join(sessionDir, 'mcp.json');
     if (persisted.length) await fs.writeFile(mcpConfigFile, JSON.stringify({ servers: persisted }, null, 2) + '\n', 'utf8');
@@ -330,12 +359,12 @@ export class PiAdapter implements HarnessAdapter {
     }
     const level = piThinkingLevel(intendedEffort);
     if (level) args.push('--thinking', level);
-    const append = sessionAppendPrompt(meta, await this.ctx.appInstructions?.());
+    const append = sessionAppendPrompt(meta, await this.ctx.appInstructions?.(), await missionPrompt(this.ctx));
     if (append) {
       await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
     }
     await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
-    args.push(...extraArgs);
+    args.push(...(this.missionLaunch ? withDelegationExcluded(extraArgs) : extraArgs));
 
     this.modeFile = path.join(sessionDir, 'permission-mode.txt');
     await fs.writeFile(this.modeFile, this.ctx.permissionMode(), 'utf8');
@@ -344,11 +373,12 @@ export class PiAdapter implements HarnessAdapter {
     const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE_PROJECT_ROOT: meta.config.projectRoot, VOCS_CODE: '1' };
     // Explicit on every launch: resume and inherited parent env cannot restore stale Fast mode.
     env.VOCS_CODE_FAST_MODE = this.fastModeRequested ? '1' : '0';
-    // Never inherit another session's MCP config or memory gateway.
-    const reservedEnv = ['VOCS_CODE_MCP_EPHEMERAL', 'VOCS_CODE_MCP_CONFIG', MEMORY_GATEWAY_URL_ENV, MEMORY_GATEWAY_TOKEN_ENV];
+    // Never inherit another session's MCP config, gateway capabilities or Mission role.
+    const reservedEnv = ['VOCS_CODE_MCP_EPHEMERAL', 'VOCS_CODE_MCP_CONFIG', MEMORY_GATEWAY_URL_ENV, MEMORY_GATEWAY_TOKEN_ENV, MISSION_GATEWAY_URL_ENV, MISSION_GATEWAY_TOKEN_ENV, MISSION_BUILDER_ENV];
     for (const key of Object.keys(env)) {
       if (reservedEnv.includes(process.platform === 'win32' ? key.toUpperCase() : key)) delete env[key];
     }
+    if (meta.mission?.role === 'builder') env[MISSION_BUILDER_ENV] = '1';
     if (ephemeral.length) env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: ephemeral });
     if (persisted.length) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
     for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
@@ -424,7 +454,7 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   private assertExtensionsReady(): void {
-    const required = ['approvals', 'tools', 'subagents'];
+    const required = this.missionLaunch ? ['approvals', 'tools'] : ['approvals', 'tools', 'subagents'];
     if (this.fastModeRequested) required.push('fast-mode');
     const missing = required.filter((capability) => !this.extensionCapabilities.has(capability));
     if (this.extensionFailure || missing.length) {

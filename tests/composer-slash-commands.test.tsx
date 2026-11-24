@@ -28,13 +28,23 @@ function complete(textarea: HTMLTextAreaElement, typed: string, keys: string[] =
 }
 
 describe('slash command autocomplete', () => {
-  it('completes /m and /mo to the existing commands and offers no /mission', () => {
+  it('keeps /m and /mo on the model and mode commands and offers /mission after them', () => {
     const { container } = render(<Composer session={session} />);
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     expect(complete(textarea, '/m')).toBe('/model ');
     expect(complete(textarea, '/mo')).toBe('/model ');
     expect(complete(textarea, '/mo', ['ArrowDown'])).toBe('/mode ');
+    expect(complete(textarea, '/m', ['ArrowDown', 'ArrowDown'])).toBe('/mission ');
     expect(complete(textarea, '/me')).toBe('/merge ');
-    expect(complete(textarea, '/mi')).toBe('/mi');
+    expect(complete(textarea, '/mi')).toBe('/mission ');
+  });
+
+  it('lists /mission with its task argument and description', () => {
+    const { container } = render(<Composer session={session} />);
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: '/mi' } });
+    const row = [...container.querySelectorAll('.slash-item')].find((el) => el.querySelector('.slash-name')?.textContent === '/mission');
+    expect(row?.querySelector('.slash-args')?.textContent).toBe('<task>');
+    expect(row?.querySelector('.slash-desc')?.textContent).toBe('Send this message with Mission mode on: a Lead plans and Builders implement');
   });
 });

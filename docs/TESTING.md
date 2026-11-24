@@ -110,6 +110,8 @@ checkout and pass all changed no-provider suites in one guarded invocation. For 
 
 ```bash
 npm run build && node scripts/e2e-guard.mjs tests/e2e.themes.test.ts tests/e2e.ui-modes.test.ts
+# Mission mode review screenshots (Blueprint, tests/artifacts/mission-mode-*.png):
+VOCS_CODE_MISSION_REVIEW_SHOTS=1 node scripts/e2e-guard.mjs tests/e2e.mission-mode.test.ts
 # Standalone web-only check builds its own web output (no desktop bundle needed):
 node scripts/e2e-guard.mjs tests/e2e.web-dashboard.test.ts
 # If npm run build just passed in the same checkout and sources haven't changed, reuse its web output:
@@ -129,7 +131,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 npm run dist:dir -- --publish never && HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.update.test.ts
 ```
 
-`npm run test:e2e:ci` runs twenty-seven no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
+`npm run test:e2e:ci` runs twenty-eight no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
 seeded `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
@@ -164,6 +166,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Harness-native slash commands (adapter reporting, `/` popover, `//name` route) | `tests/harness-commands.test.ts`, `tests/composer-harness-commands.test.tsx`, `tests/claude-goal-commands.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/acp-turn-state.test.ts`, `tests/codex-skills.test.ts` + `e2e.harness-commands` |
 | Usage panel, `/usage` shortcut, and desktop subscription limits | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx`, `tests/composer-harness-commands.test.tsx`, `tests/codex-quota.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + `e2e.usage` (mocked Codex limits and vendor launches, no harness prompt) |
 | Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
+| Mission mode (`src/main/mission-mode/**`, `resources/mcp/vocs-mission.mjs`, the mission parts of `session-manager.ts`, adapters and `mcp/index.ts`, `MissionStrip.tsx`, mission cards, `nestMissionRows`) | `tests/mission-mode-service.test.ts`, `tests/mission-mode-approvals.test.ts`, `tests/mission-mode-git.test.ts`, `tests/mission-mode-gateway.test.ts`, `tests/mission-mode-text.test.ts`, `tests/mission-mode-ui.test.tsx`, `tests/mission-claude.test.ts`, `tests/mission-codex.test.ts`, `tests/mission-pi.test.ts`, `tests/mission-native.test.ts`, `tests/mission-acp.test.ts` + `e2e.mission-mode` (New Session's Mission switch, a native Lead and Builder on a scripted loopback provider, a real Git repository without a remote, quit/relaunch and the next message). Builder approval routing changes are permission changes: prove through dispatch that an always-user request never runs on a Lead approval. |
 | Settings navigation/search, `settings-catalog.ts`, `SettingsPrimitives.tsx`, `components/settings.css` | `tests/settings-navigation.test.tsx`, `tests/branch-prefix-settings-ui.test.tsx`, `tests/context-ui.test.tsx` + `e2e.layout`; update and run the affected section’s E2E below. The layout suite captures isolated light/dark review screenshots in `tests/artifacts/settings-redesign-*.png`; see [Settings UX](SETTINGS.md). |
 | Session search (`SearchModal.tsx`, `src/main/search.ts`) | `tests/search.test.ts`, `tests/search-modal.test.tsx`, `tests/handler-registry.test.ts` + `e2e.files` (switch categories with the same query and jump to a historical transcript match) |
 | Themes, `styles.css`, terminal colours | `e2e.themes`, `e2e.ui-modes` (Zen restyles the standard tree, so a `styles.css` change can move it) |

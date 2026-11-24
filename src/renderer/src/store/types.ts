@@ -2,6 +2,7 @@
  * Shared types and constants for the renderer Zustand store and its slices.
  */
 import type { AgentState } from '../../../shared/agent';
+import type { MissionView } from '../../../shared/mission-mode';
 import type { ProcessSummary } from '../../../shared/processes';
 import type { TerminalInfo } from '../../../shared/terminal';
 import type {
@@ -104,6 +105,10 @@ export interface State {
   drafts: Record<string, string>;
   /** Prompts already sent per session, newest first, so ArrowUp can recall them after a remount. */
   composerHistory: Record<string, string[]>;
+  /** Sessions whose composer Mission switch is on: the next message starts Mission mode. Renderer-local. */
+  missionArmed: Record<string, true>;
+  /** The last `mission:get` view per Lead session id, for the status strip and the transcript cards. */
+  missionViews: Record<string, MissionView>;
   /** Bumped to move keyboard focus into the active terminal. */
   terminalFocusNonce: number;
   /** Sessions with an archive request in flight; rows show a blinking Archiving pill meanwhile. */
@@ -264,6 +269,12 @@ export interface State {
   setDraft(sessionId: string, text: string): void;
   /** Records a sent prompt as the session's most recent history entry; re-sending an old prompt moves it back to the front. */
   pushComposerHistory(sessionId: string, text: string): void;
+  /** Turns a session's composer Mission switch on or off. */
+  setMissionArmed(sessionId: string, on: boolean): void;
+  /** Re-reads the mission a Lead or Builder belongs to (`mission:get`); a failed read keeps the last view. */
+  refreshMission(sessionId: string): Promise<MissionView | null>;
+  /** Records a view the host returned (`mission:stop`, `mission:resume`). */
+  putMissionView(view: MissionView): void;
   setArchiving(id: string, on: boolean): void;
   setTerminals(list: TerminalInfo[]): void;
   setActiveTerminal(sessionId: string, terminalId: string): void;

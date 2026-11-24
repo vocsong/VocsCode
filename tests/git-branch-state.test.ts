@@ -130,7 +130,7 @@ describe('branchGitState', () => {
       return replies.get(`${cmd} ${JSON.stringify(args)}`) ?? { code: 1, stdout: '', stderr: '' };
     });
     expect(await branchGitState('/repo', 'work', { prRefs: [{ repo: 'local/repo', number: 7 }, explicitRef] }))
-      .toEqual({ pr: state === 'OPEN', merged: state === 'MERGED' });
+      .toEqual({ pr: state === 'OPEN', merged: state === 'MERGED', ...(state === 'CLOSED' ? { closed: true } : {}) });
     expect(runCapture.mock.calls.filter(([cmd]) => cmd === '/usr/bin/gh').map(([, args]) => args))
       .toEqual([['pr', 'view', explicitUrl, '--json', 'number,state,url']]);
   });

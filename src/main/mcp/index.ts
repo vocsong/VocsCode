@@ -13,13 +13,17 @@ import { builtinEntries, effectiveEntries, effectiveServers, normalizeStdio, res
 import { globalStores, projectStores, readProjectMcp, readStores } from './file';
 import { GITNEXUS_SERVER_ID, gitnexusBaseDef, gitnexusSharedRoots, isBuiltinServerId, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './gitnexus';
 import { MEMORY_GATEWAY_TOKEN_ENV, VOCS_MEMORY_SERVER_ID, hasMemoryWiki, memoryServerDef, vocsMemoryBaseDef } from './memory';
+import { MISSION_GATEWAY_TOKEN_ENV, missionServerDef } from './mission';
 import { CUA_SERVER_ID, cuaBaseDef, cuaDefState } from './cua';
+import { missionSupport } from '../../shared/mission-mode';
+import type { MissionGatewayAttachment, MissionGatewayPort } from '../mission-mode/contracts';
 
 export * from './effective';
 export * from './file';
 export * from './gitnexus';
 export * from './indexer';
 export * from './memory';
+export * from './mission';
 export * from './cua';
 export * from './cua-preview';
 export { inspectServer, type InspectOptions } from './client';
@@ -47,6 +51,14 @@ export interface McpHostDeps {
    * app-minted bearer, never the Hub token. Empty while nothing is connected.
    */
   hubServers?: () => Promise<ResolvedServer[]>;
+  /**
+   * The Mission gateway, handed over only for a session in a mission. Its attachment decides: a
+   * session it does not attach gets no `vocs-mission` server. `ensureAttachment`, when present,
+   * opens the listener on first use.
+   */
+  missionGateway?: MissionGatewayPort & { ensureAttachment?(sessionId: string): Promise<MissionGatewayAttachment | null> };
+  /** Path to resources/mcp/vocs-mission.mjs, the Mission tools' stdio client. */
+  missionServerPath?: string;
 }
 
 export interface SessionScope {
@@ -182,6 +194,31 @@ async function resolveHub(scope: SessionScope, state: McpProjectState, deps: Mcp
 }
 
 /**
+ * The Mission tools' server, for a session the gateway attaches (it is in a live mission) on a
+ * harness that can take one of the roles. Not one of `builtinDefs`: no MCP-tab or per-repo switch
+ * can turn it off, and nothing about it exists for an ordinary session. A gateway failure leaves
+ * the session without the tools rather than failing its start.
+ */
+async function resolveMission(scope: SessionScope, deps: McpHostDeps): Promise<ResolvedServer[]> {
+  const gateway = deps.missionGateway;
+  if (!gateway || !scope.sessionId || !deps.missionServerPath) return [];
+  const support = missionSupport(scope.harness);
+  if (!support.lead && !support.builder) return [];
+  let attachment: MissionGatewayAttachment | null;
+  try {
+    attachment = gateway.ensureAttachment ? await gateway.ensureAttachment(scope.sessionId) : gateway.attach(scope.sessionId);
+  } catch {
+    deps.log?.('warn', 'mcp: the Mission gateway is unavailable for this session');
+    return [];
+  }
+  const def = missionServerDef({ missionServerPath: deps.missionServerPath, attachment });
+  if (!def) return [];
+  // The capability token is a secret: an adapter that flattens its MCP config into argv must hand
+  // it over through the environment instead.
+  return [{ def: normalizeStdio(def, { which: (cmd) => which(cmd) }), missing: [], secretEnvKeys: [MISSION_GATEWAY_TOKEN_ENV], secretHeaderKeys: [] }];
+}
+
+/**
  * The servers one session should be started with: merged, switched, `${VAR}`-resolved and with
  * stdio commands normalized for the platform.
  */
@@ -196,6 +233,7 @@ export async function resolveForSession(scope: SessionScope, deps: McpHostDeps):
   if (repo.error) deps.log?.('warn', `mcp: ${repo.file} could not be used: ${repo.error}`);
   for (const r of rejectedServers(globals, repo.servers)) deps.log?.('warn', `mcp ${r.id} (${r.scope}) not loaded: ${r.reason}`);
   const out: ResolvedServer[] = await resolveBuiltins(scope, state, deps);
+  out.push(...await resolveMission(scope, deps));
   out.push(...await resolveHub(scope, state, deps));
   for (const def of chosen) {
     const resolved = await resolveVars(def, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });

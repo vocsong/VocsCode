@@ -132,8 +132,8 @@ describe.runIf(enabled)('instructions UI', () => {
 
     // Every scope is offered, shared first, and none of them is set yet.
     const tabs = await win.locator('.pi-tab').allInnerTexts();
-    expect(tabs.map((t) => t.replace(/not set/g, '').trim())).toEqual(['All harnesses', 'Pi', 'Claude Agent SDK', 'Codex', 'Cursor', 'ACP agents', 'Native']);
-    await expect.poll(async () => win.locator('.pi-tab:has-text("not set")').count()).toBe(7);
+    expect(tabs.map((t) => t.replace(/not set/g, '').trim())).toEqual(['All harnesses', 'Pi', 'Claude Agent SDK', 'Codex', 'Cursor', 'ACP agents', 'Native', 'Mission Lead', 'Mission Builder']);
+    await expect.poll(async () => win.locator('.pi-tab:has-text("not set")').count()).toBe(9);
 
     // The shared file lands under this run's userData, not under a harness's own config.
     const editor = editorGroup.getByRole('textbox', { name: 'Instructions text', exact: true });
@@ -158,7 +158,7 @@ describe.runIf(enabled)('instructions UI', () => {
     await save.click();
     const globalFile = path.join(userData, 'instructions', 'global.md');
     await expect.poll(async () => fs.readFile(globalFile, 'utf8').catch(() => '')).toBe(sharedText);
-    await expect.poll(async () => win.locator('.pi-tab:has-text("not set")').count()).toBe(6);
+    await expect.poll(async () => win.locator('.pi-tab:has-text("not set")').count()).toBe(8);
     await expect.poll(() => editorGroup.getByRole('status').innerText()).toBe('Saved');
     expect(await save.isDisabled()).toBe(true);
 

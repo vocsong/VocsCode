@@ -566,7 +566,7 @@ describe('handler registry', () => {
     const dir = tmpDir('instructions');
     const { registry } = stubDeps({ appInstructions: new AppInstructions(dir) });
     const files = (await registry.invoke('instructions:read', undefined)) as AppInstructionFile[];
-    expect(files.map((f) => f.scope)).toEqual(['global', 'pi', 'claude', 'codex', 'cursor', 'acp', 'native']);
+    expect(files.map((f) => f.scope)).toEqual(['global', 'pi', 'claude', 'codex', 'cursor', 'acp', 'native', 'lead', 'builder']);
     expect(files[0]).toMatchObject({ scope: 'global', exists: false, content: '' });
 
     const written = (await registry.invoke('instructions:write', { scope: 'global', content: 'Be proactive.\n' })) as AppInstructionFile[];
@@ -583,6 +583,53 @@ describe('handler registry', () => {
     const { registry } = stubDeps();
     const channels = registry.channels();
     for (const c of agentChannels()) expect(channels, `${c} is on the agent allowlist but not registered`).toContain(c);
+  });
+
+  it('keeps Mission mode with the desktop owner and validates ids before the service sees them', async () => {
+    const lead = { leadId: 's_test' };
+    const mission = {
+      start: vi.fn(async () => lead),
+      createLead: vi.fn(async () => created),
+      get: vi.fn(() => null),
+      stop: vi.fn(async () => ({}) as never),
+      resume: vi.fn(async () => ({}) as never)
+    };
+    const { registry, deps } = stubDeps({ mission });
+    const created = deps.sessions.get('s_test')!;
+    const create = vi.fn(async () => created);
+    deps.sessions.create = create;
+    const missionCreate = { config: { harness: 'claude', projectRoot: ws, permissionMode: 'plan', useWorktree: true, branchPrefix: 'mission' }, initialPrompt: 'Add a limiter', mission: true };
+    const requests: [string, unknown][] = [
+      ['mission:start', { sessionId: 's_test', input: { text: 'Go' } }],
+      ['mission:get', { sessionId: 's_test' }],
+      ['mission:stop', { leadId: 's_test' }],
+      ['mission:resume', { leadId: 's_test' }],
+      ['sessions:create', missionCreate],
+      ['sessions:create', { ...missionCreate, mission: 'yes' }]
+    ];
+    for (const actor of ['user', 'agent'] as const) {
+      for (const [channel, req] of requests) await expect(registry.invoke(channel, req, actor), `${channel} as ${actor}`).rejects.toThrow(/Mission mode requires the local desktop owner/);
+    }
+    for (const [channel, req] of [
+      ['mission:start', { sessionId: '../s_test', input: { text: 'Go' } }],
+      ['mission:start', { sessionId: 's_test', input: { text: 'Go', transcriptItemId: 'u_forged' } }],
+      ['mission:get', { sessionId: 's test' }],
+      ['mission:stop', { leadId: '..\\s_test' }],
+      ['mission:resume', { leadId: 's_test', force: true }],
+      ['sessions:create', { ...missionCreate, mission: 'yes' }]
+    ] as const) await expect(registry.invoke(channel, req, 'desktop'), channel).rejects.toThrow();
+    for (const fn of Object.values(mission)) expect(fn).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+
+    await expect(registry.invoke('mission:start', { sessionId: 's_test', input: { text: 'Go', mode: 'now' } }, 'desktop')).resolves.toEqual(lead);
+    expect(mission.start).toHaveBeenCalledWith({ sessionId: 's_test', input: { text: 'Go' } });
+    await expect(registry.invoke('sessions:create', missionCreate, 'desktop')).resolves.toBe(created);
+    expect(mission.createLead).toHaveBeenCalledWith(missionCreate);
+    expect(create).not.toHaveBeenCalled();
+    // An ordinary create from a paired device is unaffected.
+    await registry.invoke('sessions:create', { config: missionCreate.config }, 'user');
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(registry.channels()).toEqual(expect.arrayContaining(['mission:start', 'mission:get', 'mission:stop', 'mission:resume']));
   });
 
   it('serves the Processes panel to the desktop only, and hands the tracker only well-formed targets', async () => {

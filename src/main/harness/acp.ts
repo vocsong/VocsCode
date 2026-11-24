@@ -7,7 +7,7 @@ import { HARNESS_BY_ID, assertPermissionModeOffered, isEffortLevel } from '../..
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
 import { toAcp } from '../mcp/effective';
-import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
+import { isDangerousCommand, isMissionUserCommand, type HarnessAdapter, type HarnessContext } from './types';
 import { requiresPathApproval } from './permissions';
 import { reportHarnessCommands } from './commands';
 import type { HarnessCommand } from '../../shared/harness-commands';
@@ -29,6 +29,9 @@ const ACP_ENV_KEYS: Record<string, string> = {
   xai: 'XAI_API_KEY',
   mistral: 'MISTRAL_API_KEY'
 };
+
+/** ACP's tool kinds (`ToolKind`), minus `other`. */
+const ACP_TOOL_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode']);
 
 // The ACP prompt result is the only proof of completion. Recover a quiet Antigravity
 // stream as failed, not completed, and allow an explicit interrupt even without prose.
@@ -381,12 +384,21 @@ export class AcpAdapter implements HarnessAdapter {
       const id = pick(['reject_once', 'reject_always']);
       return id ? selected(id) : cancelled; // no reject option → cancel rather than accidentally allow
     };
-    if (isRead) return allow();
+    const builder = this.ctx.session().mission?.role === 'builder';
+    // ACP does not say which tool a request is for. For a Mission Builder, anything the agent files
+    // as `other` (or a kind ACP does not define), or titles as an MCP tool, may be a third-party MCP
+    // tool that publishes, so it is asked about in every tier — the Builder's own Mission tools
+    // included, since a server-chosen title could claim to be one of them.
+    const opaque = builder && (!ACP_TOOL_KINDS.has(kind) || /^mcp__/i.test(tc.title ?? ''));
+    if (isRead && !opaque) return allow();
     if (mode === 'plan') return reject();
-    if (mode === 'full-auto') return allow();
+    // A Mission Builder never publishes or elevates on its own, in any tier (gateAction's
+    // `missionBuilder` rule): the request goes to the Lead and on to the user.
+    const missionUser = opaque || (builder && !!command && isMissionUserCommand(command));
+    if (mode === 'full-auto' && !missionUser) return allow();
     // Real-path check: a symlink or junction inside the project that leads out of it counts as outside.
     const outsideWorkspace = (await Promise.all((tc.locations ?? []).map((l) => requiresPathApproval(cwd, l.path)))).some(Boolean);
-    if (!dangerous && !outsideWorkspace) {
+    if (!dangerous && !outsideWorkspace && !missionUser) {
       if (mode === 'auto') return allow();
       if (mode === 'accept-edits' && isEdit) return allow();
       if (this.sessionAllowedKinds.has(kind)) return allow();

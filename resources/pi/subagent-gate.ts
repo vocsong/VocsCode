@@ -17,7 +17,9 @@
  *
  * The app's own read-only built-in tools (`readOnlyMcp`) run in every mode, Plan included.
  * A dangerous command or an edit outside the project always prompts below full access, even after
- * "Allow for session", which is keyed per tool name.
+ * "Allow for session", which is keyed per tool name. A Mission Builder (`VOCS_CODE_MISSION_BUILDER=1`)
+ * is asked about publish and elevation commands (`MISSION_USER`) and about every MCP tool outside
+ * `readOnlyMcp` in every tier but plan.
  */
 
 import path from 'node:path';
@@ -81,11 +83,46 @@ export const DANGEROUS: RegExp[] = [
   /:\(\)\s*\{\s*:\|:&\s*\};:/
 ];
 
+/**
+ * Commands a Mission Builder must hand to the user in every tier: publishing, elevation and
+ * downloaded payloads piped into a shell. Verbatim copy of MISSION_USER_COMMAND_PATTERNS in
+ * src/main/harness/types.ts — keep the two in sync (tests/mission-pi.test.ts pins it).
+ */
+export const MISSION_USER: RegExp[] = [
+  // any push, allowing global git options before the subcommand
+  /\bgit(?:\s+-{1,2}\S+(?:\s+"[^"]*"|\s+\S+)?)*\s+push\b/i,
+  /\b(?:npm|pnpm|yarn|bun)\s+publish\b/i,
+  /\bgh\s+(?:pr\s+(?:create|merge|close|edit|ready|review)|release|repo\s+(?:create|delete|edit|rename|archive))\b/i,
+  /\b(?:docker|podman)\s+push\b/i,
+  /\bcargo\s+publish\b/i,
+  /\btwine\s+upload\b/i,
+  /\bdotnet\s+nuget\s+push\b/i,
+  // elevation
+  /\b(?:sudo|doas|pkexec|runas)\b/i,
+  /(?:^|[|;&]\s*)\bsu(?:\s+(?!--?(?:help|version|h)\b)\S+|\s*$)/i,
+  /-verb\s+runas\b/i,
+  // downloaded or decoded payloads piped into a shell
+  /\b(?:curl|wget|base64)\b[^|;&\r\n]*\|\s*(?:ba|z)?sh\b/i,
+  /\b(?:iex|invoke-expression)\s*(?:\(\s*)?(?:iwr|invoke-webrequest|irm|invoke-restmethod)\b/i,
+  /\b(?:iwr|invoke-webrequest|irm|invoke-restmethod|curl|wget)\b[^|;&\r\n]*\|\s*(?:iex|invoke-expression)\b/i
+];
+
+/** The host sets this on a Mission Builder's launch (src/main/harness/pi.ts). */
+export const MISSION_BUILDER_ENV = 'VOCS_CODE_MISSION_BUILDER';
+
 export const PLAN_REASON = 'Plan mode is active in Vocs Code: no file edits or shell commands. Describe the plan instead.';
 export const DECLINED_REASON = 'The user declined this action in Vocs Code.';
 
 export function isDangerous(command: string): boolean {
   return DANGEROUS.some((re) => re.test(command));
+}
+
+export function isMissionUserCommand(command: string): boolean {
+  return MISSION_USER.some((re) => re.test(command));
+}
+
+export function isMissionBuilderFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[MISSION_BUILDER_ENV] === '1';
 }
 
 export function parseMode(text: string | undefined): Mode {
@@ -158,6 +195,12 @@ export interface GateInput {
    * third-party tool still follows the tier.
    */
   readOnlyMcp?: ReadonlySet<string>;
+  /**
+   * A Mission Builder: its publish/elevation commands (`MISSION_USER`) and every MCP tool outside
+   * `readOnlyMcp` ask in every tier but Plan, Full access and "Allow for session" included.
+   * Defaults to the host's launch flag.
+   */
+  missionBuilder?: boolean;
 }
 
 export type GateDecision =
@@ -169,14 +212,22 @@ export type GateDecision =
  * The single decision function. `ask` means the caller must obtain explicit approval and may only
  * execute on `Allow once` / `Allow for session`; it must never be treated as a default allow.
  */
-export async function decideToolCall({ tool, input, cwd, mode, sessionAllowed, readOnlyMcp }: GateInput): Promise<GateDecision> {
+export async function decideToolCall({ tool, input, cwd, mode, sessionAllowed, readOnlyMcp, missionBuilder = isMissionBuilderFromEnv() }: GateInput): Promise<GateDecision> {
   const isMcp = tool.startsWith(MCP_PREFIX);
   if (!MUTATING.has(tool) && !isMcp) return { action: 'allow' };
   // The app's own read-only built-in tools are reads: they run unprompted and survive plan mode.
   if (isMcp && readOnlyMcp?.has(tool)) return { action: 'allow' };
+  const command = typeof input?.command === 'string' ? (input.command as string) : undefined;
+  // A Mission Builder never publishes or elevates on its own: the app pushes the mission branch
+  // once, and anything else of that class goes to the user through the Lead. Mirrors gateAction.
+  if (missionBuilder && mode !== 'plan' && SHELL.has(tool) && command && isMissionUserCommand(command)) {
+    return { action: 'ask', summary: command, outside: false, dangerous: true };
+  }
+  // Nor does it run an MCP tool the app cannot vouch for (anything but `readOnlyMcp`) unasked: a
+  // third-party server's tool may publish too.
+  if (missionBuilder && mode !== 'plan' && isMcp) return { action: 'ask', summary: tool, outside: false, dangerous: true };
   if (mode === 'full-auto') return { action: 'allow' };
   if (mode === 'plan') return { action: 'block', reason: PLAN_REASON };
-  const command = typeof input?.command === 'string' ? (input.command as string) : undefined;
   const dangerous = SHELL.has(tool) && !!command && isDangerous(command);
   const outside = EDITS.has(tool) && (await isOutsideCwd(cwd, input?.path));
   if (!dangerous && !outside) {

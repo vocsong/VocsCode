@@ -7,7 +7,7 @@ import { TurnUsageTracker } from '../../util/turn-usage';
 import { estimateCostUsd, findContextWindow, findPricing, STATIC_MODELS_BY_PROVIDER } from '../../models/static-models';
 import { resolveProviderApiKey } from '../../models/providers';
 import { gateAction, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from '../permissions';
-import { sessionAppendPrompt } from '../system-prompt';
+import { missionPrompt, sessionAppendPrompt } from '../system-prompt';
 import type { HarnessAdapter, HarnessContext } from '../types';
 import { anthropicStep, isAnthropicProvider, openaiStep, type NativeMessage, type StepResult } from './drivers';
 import { NativeMcpSession } from './mcp-tools';
@@ -206,7 +206,7 @@ export class NativeAdapter implements HarnessAdapter {
           this.history.push({ role: 'user', text: `[steer] ${s.text}`, images: s.images });
           this.ctx.updateMeta({ queued: this.queue.length + this.steer.length });
         }
-        const system = await buildSystemPrompt(this.ctx.session().cwd, { planMode: this.ctx.permissionMode() === 'plan', append: sessionAppendPrompt(this.ctx.session(), await this.ctx.appInstructions?.()), model });
+        const system = await buildSystemPrompt(this.ctx.session().cwd, { planMode: this.ctx.permissionMode() === 'plan', append: sessionAppendPrompt(this.ctx.session(), await this.ctx.appInstructions?.(), await missionPrompt(this.ctx)), model });
         const assistant: Extract<TranscriptItem, { kind: 'assistant' }> = { id: shortId('a_'), kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, model: model.model };
         let emitted = false;
         const ensure = () => {
@@ -372,7 +372,11 @@ export class NativeAdapter implements HarnessAdapter {
       const outsideCwd = def.isEdit && typeof args.path === 'string' && await requiresPathApproval(cwd, args.path);
       // An MCP tool that is not a built-in read-only one follows the tier like a shell command: it
       // asks in Ask and Accept edits and runs in Auto and Full access.
-      const verdict = gateAction(mode, { mutating: true, isEdit: def.isEdit, command, outsideWorkspace: outsideCwd, sessionAllowed: this.sessionAllowed.has(call.name) });
+      const missionBuilder = this.ctx.session().mission?.role === 'builder';
+      let verdict = gateAction(mode, { mutating: true, isEdit: def.isEdit, command, outsideWorkspace: outsideCwd, sessionAllowed: this.sessionAllowed.has(call.name), missionBuilder });
+      // A Builder never runs an MCP tool the app cannot vouch for unasked, in any tier: it may
+      // publish. (The trusted built-in tools are not mutating and never reach this gate.)
+      if (missionBuilder && mcpTool && verdict === 'allow') verdict = 'ask';
       if (verdict === 'deny') {
         item.status = 'declined';
         item.output = PLAN_MODE_DENIAL;

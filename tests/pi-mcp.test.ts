@@ -316,7 +316,7 @@ describe('Pi ephemeral memory gateway', () => {
   ])('consumes and refuses an invalid ordinary envelope ($label)', async ({ servers }) => {
     vi.stubEnv('VOCS_CODE_MCP_EPHEMERAL', JSON.stringify({ servers }));
     const connect = vi.spyOn(PiMcpConnection, 'connect');
-    await expect(mcpToolNames()).rejects.toThrow('Invalid ephemeral memory MCP configuration.');
+    await expect(mcpToolNames()).rejects.toThrow('Invalid ephemeral MCP configuration.');
     expect(connect).not.toHaveBeenCalled();
     expect(process.env.VOCS_CODE_MCP_EPHEMERAL).toBeUndefined();
   });
