@@ -10,6 +10,7 @@
  * mission back to Running. The power API is stubbed before the app starts (a mission keeps the
  * computer awake while it works). No provider keys.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
+ * Set VOCS_CODE_MISSION_REVIEW_SHOTS=1 to capture Blueprint screenshots in tests/artifacts.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -29,6 +30,7 @@ const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
 const require = createRequire(import.meta.url);
 const desktopEntry = path.join(root, 'out', 'main', 'index.js');
+const reviewShots = process.env.VOCS_CODE_MISSION_REVIEW_SHOTS === '1';
 
 const PROVIDER = 'mission-fixture';
 const MODEL = 'fixture-mission';
@@ -214,6 +216,7 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       providers: [{ id: PROVIDER, kind: 'lmstudio', name: 'Mission fixture', enabled: true, hasApiKey: false,
         baseUrl: `http://127.0.0.1:${address.port}/v1`, models: [{ id: MODEL, provider: PROVIDER, displayName: 'Mission fixture' }] }],
       missionDefaults: { builder: { harness: 'same', permissionMode: 'auto' } },
+      ...(reviewShots ? { theme: 'light', palette: 'midnight' } : {}),
       // No utility model, knowledge or Vesta: the only model traffic is the two sessions' turns.
       agent: { enabled: false }, knowledge: { prime: false, autoDistill: false },
       mcpDisabledBuiltins: MCP_BUILTIN_IDS.filter((id) => id !== MISSION_SERVER_ID), notifications: false,
@@ -246,6 +249,18 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     const steps = (role: Role) => turns.filter((t) => t.role === role).map((t) => t.step);
 
     let win = await launch();
+    const capture = async (name: string, prepare?: () => Promise<void>) => {
+      // Restore the small viewport afterwards: the test asserts that the narrow composer still fits.
+      const narrow = await win.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+      await win.setViewportSize({ width: 1280, height: 800 });
+      try {
+        await prepare?.();
+        await win.mouse.move(0, 0);
+        await win.screenshot({ path: path.join(root, 'tests', 'artifacts', `mission-mode-${name}.png`), animations: 'disabled' });
+      } finally {
+        await win.setViewportSize(narrow);
+      }
+    };
 
     // --- New Session with Mission on: Plan, locked; a worktree, forced; a task, required.
     await openNewSession(win);
@@ -270,6 +285,13 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     await win.locator('.ns-summary').getByText(BRANCH, { exact: true }).waitFor(wait);
     expect(await win.locator('.ns-summary').innerText()).toContain('Mission Lead');
     await expect.poll(() => startMission.isEnabled(), wait).toBe(true);
+    if (reviewShots) {
+      await capture('01-new-session', () => win.locator('.ns-run-options').evaluate((options) => {
+        const body = options.closest('.modal-body')!;
+        // Frame both the switch and the task rather than the whole harness/model catalog.
+        body.scrollTop += options.getBoundingClientRect().top - body.getBoundingClientRect().top - 140;
+      }));
+    }
     await startMission.click();
 
     const leadRow = win.locator('[data-testid="session-row"][data-mission-role="lead"]');
@@ -373,6 +395,16 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       await transcriptText(page, LEAD_CLOSING);
     };
     await expectFinished(win);
+    if (reviewShots) {
+      await capture('02-lead-done', () => win.locator('.mission-tool[data-tool="accept_builder"]').evaluate((card) => {
+        const transcript = card.closest('.transcript')!;
+        // Leave room for the pinned user prompt above the visible handoff and report.
+        transcript.scrollTop += card.getBoundingClientRect().top - transcript.getBoundingClientRect().top - 54;
+      }));
+      await win.locator(`[data-testid="session-row"][data-session-id="${builderId}"]`).click(wait);
+      await win.locator('.transcript .mission-msg[data-kind="kickoff"]').waitFor(wait);
+      await capture('03-builder');
+    }
 
     // --- Quit and relaunch: still done, and nothing is dispatched to any session.
     const modelTurns = turns.length;
@@ -422,5 +454,21 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     expect(await mission()).toMatchObject({ state: 'running', builders: [expect.objectContaining({ id: 'b1', state: 'done' })] });
     await expect.poll(async () => JSON.parse(await fs.readFile(recordFile, 'utf8')).state, wait).toBe('running');
     await expect.poll(held, wait).toEqual([]);
+    if (reviewShots) {
+      await capture('04-follow-up');
+      // Also show where the switch lives before starting a mission from an ordinary session.
+      // No prompt is sent and this does not add a turn to the scripted model.
+      await capture('05-composer', async () => {
+        await openNewSession(win);
+        await win.getByRole('button', { name: /^Start session/ }).click(wait);
+        await win.locator('.modal').waitFor({ state: 'hidden', ...wait });
+        const mode = win.locator('.pane.active').getByRole('switch', { name: 'Mission mode', exact: true });
+        await expect.poll(() => mode.getAttribute('aria-checked'), wait).toBe('false');
+        await mode.click(wait);
+        expect(await mode.getAttribute('aria-checked')).toBe('true');
+        const closePanel = win.getByRole('button', { name: 'Close panel', exact: true });
+        if (await closePanel.isVisible()) await closePanel.click(wait);
+      });
+    }
   }, 180_000);
 });

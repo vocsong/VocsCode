@@ -10,7 +10,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PiAdapter } from '../src/main/harness/pi';
 import type { HarnessContext } from '../src/main/harness/types';
 import { MISSION_USER_COMMAND_PATTERNS } from '../src/main/harness/types';
@@ -28,6 +28,10 @@ vi.mock('../src/main/harness/spawn', () => spawn);
 vi.mock('../src/main/pi-agents', () => ({ installPiAgentOverrides: vi.fn() }));
 
 const roots: string[] = [];
+beforeEach(() => {
+  // Vitest can be launched from a Pi session. Only load a bridge config when the fixture supplies one.
+  vi.stubEnv('VOCS_CODE_MCP_CONFIG', undefined);
+});
 afterEach(async () => {
   closeMcpBridge();
   vi.unstubAllEnvs();

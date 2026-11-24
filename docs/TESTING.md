@@ -110,6 +110,8 @@ checkout and pass all changed no-provider suites in one guarded invocation. For 
 
 ```bash
 npm run build && node scripts/e2e-guard.mjs tests/e2e.themes.test.ts tests/e2e.ui-modes.test.ts
+# Mission mode review screenshots (Blueprint, tests/artifacts/mission-mode-*.png):
+VOCS_CODE_MISSION_REVIEW_SHOTS=1 node scripts/e2e-guard.mjs tests/e2e.mission-mode.test.ts
 # Standalone web-only check builds its own web output (no desktop bundle needed):
 node scripts/e2e-guard.mjs tests/e2e.remote-web.test.ts
 # If npm run build just passed in the same checkout and sources haven't changed, reuse its web output:
