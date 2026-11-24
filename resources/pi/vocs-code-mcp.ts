@@ -11,9 +11,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { stripVTControlCharacters } from 'node:util';
 import { PiMcpConnection, type PiMcpCallResult, type PiMcpServerConfig, type PiMcpTool } from './mcp-client';
-import { isMissionCoordinationTool, MISSION_SERVER_ID } from './vocs-code-mission';
 
 interface PiToolResult {
   content: PiMcpCallResult['content'];
@@ -44,8 +42,6 @@ export interface McpBridgeTool extends PiToolDefinition {
    * own readOnly annotation never grants it.
    */
   readOnly: boolean;
-  /** App-owned coordination mutates Mission records, NOT a read-only MCP annotation. */
-  missionCoordination?: boolean;
 }
 
 /** A pi/OpenAI-safe name segment: lowercase, `[a-z0-9_]` only, no leading digit. */
@@ -115,33 +111,6 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** A failed reply can follow a durable commit; never imply that retrying a mutation is effect-free. */
-const MISSION_ERROR_RECOVERY = 'Re-read state with mission_read before retrying; the mutation may have committed. Reuse the same idempotencyKey only for the identical request; use a new key for corrected input after checking state. If reads fail, ask the host to restore access.';
-const MISSION_ERROR_MAX = 1024;
-
-/** Only called for the ephemeral, host-owned Mission server, never a name/annotation lookalike. */
-function missionRequestFailure(detail: string | undefined, headers: Record<string, string> | undefined): Error {
-  // The SDK decorates InvalidParams messages; the production broker sends the message directly.
-  // Other SDK errors are not actionable validation/state diagnostics.
-  const rpc = detail && /^MCP error (-?\d+):\s*/.exec(detail);
-  if (rpc) detail = rpc[1] === '-32602' ? detail!.slice(rpc[0].length) : undefined;
-  if (detail) {
-    detail = stripVTControlCharacters(detail);
-    // Redact BEFORE clipping: otherwise a token crossing the bound would leak its prefix.
-    // A transport can mention the whole header OR just its bearer credential (even repeatedly).
-    const secrets = Object.values(headers ?? {}).flatMap((value) => [value, value.trim(), value.replace(/^Bearer\s+/i, '').trim()])
-      .filter(Boolean).sort((a, b) => b.length - a.length);
-    for (const secret of secrets) detail = detail.split(secret).join('[redacted]');
-    detail = detail.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, '[redacted]');
-    // Do not relay header dumps or stack/cause tails, even inside an RPC error's message.
-    detail = detail.split(/(?:\r?\n\s*(?:at\s|caused by:|\[cause\]:)|\b(?:headers|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=])/i, 1)[0]
-      .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
-    if (detail.length > MISSION_ERROR_MAX) detail = detail.slice(0, MISSION_ERROR_MAX) + '…';
-  }
-  const message = detail ? `Mission coordination request failed: ${detail}` : 'Mission coordination request failed; the connection may have been revoked.';
-  return new Error(`${message}\n${MISSION_ERROR_RECOVERY}`);
-}
-
 /** Longest snippet handed to pi: the listing is a pointer, not a replacement for the tool's own schema. */
 const SNIPPET_MAX = 120;
 
@@ -188,7 +157,7 @@ const MEMORY_GATEWAY_TOKEN_ENV = 'VOCS_MEMORY_GATEWAY_TOKEN';
  * The app's built-in server ids, mirroring `MCP_BUILTIN_IDS` in src/shared/types.ts. Their names are
  * reserved in every spelling that folds to the same tool names (see `reservedKey`).
  */
-export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', MISSION_SERVER_ID, 'vocs-openrouter'];
+export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', 'vocs-openrouter'];
 
 /**
  * Tools the app's own built-in servers expose read-only, mirroring `BUILTIN_READ_ONLY_TOOLS` in
@@ -283,60 +252,39 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
   delete process.env.VOCS_CODE_MCP_EPHEMERAL;
   delete process.env[MEMORY_GATEWAY_URL_ENV];
   delete process.env[MEMORY_GATEWAY_TOKEN_ENV];
-  const managed = !!process.env.VOCS_CODE_MISSION_POLICY;
-  // Only the host environment can attenuate a completed conversation to getters; MCP
-  // annotations or a tool payload never select this scope. The Mission gate validates policy.
-  const questionId: unknown = managed ? JSON.parse(process.env.VOCS_CODE_MISSION_POLICY!).questionId : undefined;
-  const answerOnly = typeof questionId === 'string' && !!questionId;
   let servers: PiMcpServerConfig[] = [];
   if (configPath) {
     try { servers = parseMcpConfig(JSON.parse(readFileSync(configPath, 'utf8'))); }
     catch {
-      if (managed) throw new Error('Cannot read managed Mission MCP configuration.');
       // A parse error can quote old plaintext configuration.
       console.error(`[vocs-code-mcp] cannot read or parse MCP config at ${configPath}`);
     }
   }
-  // Reserved identity cannot be supplied by a file or a sanitization collision.
-  if (servers.some((cfg) => sanitizeToolName(cfg.id) === 'vocs_mission')) throw new Error('Mission MCP configuration must be ephemeral and host-owned.');
   servers = servers.filter((cfg) => {
     if (reservedBuiltinName(cfg.id) !== MEMORY_SERVER || (cfg.env?.[MEMORY_GATEWAY_URL_ENV] === undefined && cfg.env?.[MEMORY_GATEWAY_TOKEN_ENV] === undefined)) return true;
     console.error('[vocs-code-mcp] skipping file-configured memory gateway; restart its Vocs Code session');
     return false;
   });
-  if (managed) {
+  if (ephemeral !== undefined) {
     let injected: PiMcpServerConfig[];
-    try { injected = parseMcpConfig(JSON.parse(ephemeral ?? '')); }
-    catch { throw new Error('Required ephemeral Mission MCP configuration is missing or invalid.'); }
-    if (injected.length !== 1 || injected[0].id !== MISSION_SERVER_ID || injected[0].transport !== 'http' || !injected[0].headers?.Authorization) {
-      throw new Error('Required ephemeral Mission MCP configuration is missing or invalid.');
+    try { injected = parseMcpConfig(JSON.parse(ephemeral)); }
+    catch { throw new Error('Invalid ephemeral memory MCP configuration.'); }
+    const memory = injected[0];
+    if (injected.length !== 1 || provenance(memory) !== MEMORY_SERVER || memory.transport !== 'stdio'
+      || !memory.env?.[MEMORY_GATEWAY_URL_ENV] || !memory.env?.[MEMORY_GATEWAY_TOKEN_ENV]) {
+      throw new Error('Invalid ephemeral memory MCP configuration.');
     }
-    // The broker is authenticated by this envelope, not by the `builtin` marker on file defs.
-    servers = [...injected, ...admitServers(servers)];
-  } else {
-    if (ephemeral !== undefined) {
-      let injected: PiMcpServerConfig[];
-      try { injected = parseMcpConfig(JSON.parse(ephemeral)); }
-      catch { throw new Error('Invalid ephemeral memory MCP configuration.'); }
-      const memory = injected[0];
-      if (injected.length !== 1 || provenance(memory) !== MEMORY_SERVER || memory.transport !== 'stdio'
-        || !memory.env?.[MEMORY_GATEWAY_URL_ENV] || !memory.env?.[MEMORY_GATEWAY_TOKEN_ENV]) {
-        throw new Error('Invalid ephemeral memory MCP configuration.');
-      }
-      state.gatewayMemory = memory;
-    }
-    servers = admitServers(state.gatewayMemory ? [state.gatewayMemory, ...servers] : servers);
+    state.gatewayMemory = memory;
   }
+  servers = admitServers(state.gatewayMemory ? [state.gatewayMemory, ...servers] : servers);
 
   const tools: McpBridgeTool[] = [];
   for (const cfg of servers) {
-    const mission = managed && cfg.id === MISSION_SERVER_ID;
     const memoryToken = cfg.id === MEMORY_SERVER ? cfg.env?.[MEMORY_GATEWAY_TOKEN_ENV] : undefined;
     let connection: PiMcpConnection;
     try {
       connection = await PiMcpConnection.connect(cfg);
     } catch (error) {
-      if (mission) { closeMcpBridge(); throw new Error('Required Mission MCP handshake failed.'); }
       console.error(`[vocs-code-mcp] skipping MCP server "${cfg.id}": ${memoryToken ? 'memory gateway MCP handshake failed' : errorText(error)}`);
       continue;
     }
@@ -346,25 +294,17 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
     try {
       listed = await connection.listTools();
     } catch (error) {
-      if (mission) { closeMcpBridge(); throw new Error('Required Mission MCP tool discovery failed.'); }
       console.error(`[vocs-code-mcp] listing tools for MCP server "${cfg.id}" failed${memoryToken ? '' : `: ${errorText(error)}`}`);
       continue;
     }
-    if (mission && (!listed.some((tool) => tool.name === 'mission_read') || !listed.some((tool) => tool.name === (answerOnly ? 'mission_context_read' : 'mission_report'))
-      || listed.some((tool) => !isMissionCoordinationTool(cfg.id, tool.name) || answerOnly && tool.name !== 'mission_read' && tool.name !== 'mission_context_read'))) {
-      closeMcpBridge();
-      throw new Error('Required Mission MCP surface is incompatible.');
-    }
 
     // Trust follows the host-set provenance, never the server's name or its tool annotations.
-    const builtin = mission ? undefined : provenance(cfg);
+    const builtin = provenance(cfg);
     const guidelines = builtin === CODE_GRAPH_SERVER ? CODE_GRAPH_GUIDELINES : undefined;
 
     for (const tool of listed) {
       const description = tool.description ?? 'MCP tool ' + tool.name + ' from ' + cfg.id;
-      // Managed coordination uses its own namespace, not the ordinary MCP approval category.
-      // The Mission gate validates this exact broker-derived list; these are not read-only tools.
-      const name = mission ? tool.name : toolNameFor(cfg.id, tool.name);
+      const name = toolNameFor(cfg.id, tool.name);
       // Two tool names that fold together would register one name for two tools; keep the first.
       if (tools.some((registered) => registered.name === name)) {
         console.error(`[vocs-code-mcp] skipping MCP tool "${tool.name}" from "${cfg.id}": its name collides with another tool`);
@@ -379,27 +319,19 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
         parameters: tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
         // The allowlist decides, keyed by provenance; the server's own readOnly annotation does not.
         readOnly: !!builtin && isBuiltinReadOnlyTool(builtin, tool.name),
-        ...(mission ? { missionCoordination: true } : {}),
         async execute(_id, params, signal) {
           let result;
           try { result = await connection.callTool(tool.name, params ?? {}, signal); }
           catch (error) {
-            // Cancellation is not a failed/revoked Mission connection, and must stay an AbortError.
+            // Cancellation must stay an AbortError.
             if (error instanceof Error && error.name === 'AbortError') throw error;
-            if (mission) {
-              // mcp-client only uses this exact prefix for a JSON-RPC error reply to this call.
-              // It currently drops the numeric code; transport/timeouts have different messages.
-              const prefix = `MCP request "tools/call" to "${MISSION_SERVER_ID}" failed: `;
-              const detail = error instanceof Error && error.message.startsWith(prefix) ? error.message.slice(prefix.length) : undefined;
-              throw missionRequestFailure(detail, cfg.headers);
-            }
             // The stdio client can append raw stderr (including a clipped credential).
             if (memoryToken) throw new Error('Memory gateway MCP request failed.');
             throw error;
           }
           if (result.isError) {
             const text = result.content.map((part) => part.type === 'text' ? part.text : '').filter(Boolean).join('\n') || 'MCP tool ' + tool.name + ' failed';
-            throw mission ? missionRequestFailure(text, cfg.headers) : new Error(memoryToken ? text.replaceAll(memoryToken, '[redacted]') : text);
+            throw new Error(memoryToken ? text.replaceAll(memoryToken, '[redacted]') : text);
           }
           return { content: result.content, details: { server: cfg.id, tool: tool.name } };
         }

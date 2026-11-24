@@ -142,8 +142,8 @@ jobs:
   # Prove those offline boundaries without needing a provider or installed Pi.
   windows-offline:
     name: Windows ownership and recovery (offline)
-    # Keep the expensive real-Job/real-Git suite on release-to-master and manual runs;
-    # the develop PR gate stays fast while the full platform suite remains enforced before release.
+    # Keep the Windows-only suites on release-to-master and manual runs; the develop PR gate stays
+    # fast while the platform suites remain enforced before release.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
@@ -158,15 +158,10 @@ jobs:
       - run: npm ci --include=dev
         env:
           NODE_ENV: development
-      # A broken ConPTY guardian otherwise fails only after the long real-Git recovery file.
-      # This is a fast diagnostic, not a substitute for the full no-skip gate below.
-      - name: Preflight Windows terminal ownership
-        shell: bash
-        run: npx vitest run tests/mission-restart-recovery.test.ts -t 'recovers terminal only' --reporter=verbose
       - name: Execute Windows-only boundaries
         shell: bash
         run: |
-          files=(tests/mission-check-job.test.ts tests/mission-check-startup.test.ts tests/mission-terminal-windows.test.ts tests/mission-receipt-recovery.test.ts tests/mission-restart-recovery.test.ts tests/mission-pi-recovery.test.ts tests/mission-pi-process.test.ts tests/mission-git-boundary.test.ts tests/new-session-dialog.test.tsx tests/mcp-client.test.ts tests/local-control-windows.test.ts)
+          files=(tests/new-session-dialog.test.tsx tests/mcp-client.test.ts tests/local-control-windows.test.ts)
           npx vitest run "${files[@]}" --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/windows-offline-report.json"
           node scripts/test-report-check.mjs "$RUNNER_TEMP/windows-offline-report.json" "${files[@]}"
       - run: node scripts/test-metrics.mjs "${{ runner.temp }}/windows-offline-report.json" windows-offline tests/artifacts/windows-offline-metrics.json

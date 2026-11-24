@@ -33,7 +33,7 @@ export class ControlService {
     journal: ControlJournal;
     sessions: SessionManager;
     settings: () => AppSettings;
-    /** Same Mission session/workspace guards as the desktop, not an IPC invoke tunnel. */
+    /** The desktop's session/workspace resource check, not an IPC invoke tunnel. */
     guard: ControlResourceGuard;
     now?: () => number;
   }) {}
@@ -137,7 +137,7 @@ export class ControlService {
     this.authorize(principal, method, projectId);
     const project = await this.project(projectId);
     const session = this.deps.sessions.get(sessionId);
-    if (!session || session.mission || session.archived) throw new ControlError('denied');
+    if (!session || session.archived) throw new ControlError('denied');
     const checked = sessionIdentity(session);
     await checkControlWorkspace(session, project.canonicalRoot, this.deps.guard);
     // Synchronously after the last await: the workspace, mode and harness approved above are

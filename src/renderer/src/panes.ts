@@ -27,8 +27,6 @@ export interface FilePreviewTarget {
   line?: number;
   /** An exact path (a Files row, a chosen match): read as is, without the shortened-name lookup. */
   exact?: boolean;
-  /** Mission sessions: the workspace the file is read from; undefined is the integration result. */
-  missionWorkspaceId?: string;
   /** Tells two opens of the same path apart, so clicking a link again reloads the file. */
   nonce: number;
 }

@@ -21,8 +21,6 @@ import { SessionUsage } from './SessionUsage';
 import { SubagentsTab } from './SubagentsTab';
 import { TerminalPanel } from './TerminalPanel';
 import { Badge, Button, Field, Icon, Spinner, Toggle } from './ui';
-import { MissionPanel, MissionUsage, useMission } from './mission/MissionPanel';
-import { MissionChanges, MissionWorkspacePicker } from './mission/MissionWorkspace';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
@@ -47,24 +45,7 @@ const BOTTOM_TABS: { id: PanelBottomTab; label: string; icon: string }[] = [
 
 export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; gitPanelCache?: GitPanelCache }) {
   const cache = useMemo(() => gitPanelCache ?? new GitPanelCache(), [gitPanelCache]);
-  const { record: mission } = useMission(session);
-  const [workspace, setWorkspace] = useState({ sessionId: session.id, id: '' });
-  const reveal = useStore((s) => s.fileReveal);
   const preview = useStore((s) => s.layout.filePreview);
-  const leadWorkspace = mission?.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission?.workspaces.find((w) => w.role === 'lead');
-  const workspaceId = reveal?.sessionId === session.id && leadWorkspace ? leadWorkspace.id : workspace.sessionId === session.id ? workspace.id : '';
-  useEffect(() => {
-    if (mission && preview?.sessionId === session.id) {
-      setWorkspace({ sessionId: session.id, id: preview.missionWorkspaceId ?? '' });
-    }
-  }, [preview, mission?.id, session.id]);
-  useEffect(() => {
-    if (leadWorkspace && reveal?.sessionId === session.id) {
-      setWorkspace({ sessionId: session.id, id: leadWorkspace.id });
-    }
-  }, [reveal, leadWorkspace?.id, session.id]);
-  const selectedWorkspace = mission?.workspaces.find((w) => w.id === workspaceId) ?? mission?.workspaces.find((w) => w.role === 'integration');
-  const fileSession = session.mission ? { ...session, cwd: selectedWorkspace?.path ?? session.cwd } : session;
   const tab = useStore((s) => s.panelTab);
   const setTab = useStore((s) => s.setPanelTab);
   const bottomTab = useStore((s) => s.panelBottomTab);
@@ -106,19 +87,13 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
     document.addEventListener('pointerdown', end, true);
     return () => document.removeEventListener('pointerdown', end, true);
   }, [peek]);
-  const topLabel = (id: PanelTab, label: string) => (session.mission && id === 'goal' ? 'Mission' : session.mission && id === 'changes' ? 'Mission result' : label);
-  const selectTop = (id: PanelTab) => {
-    if (session.mission && id === 'changes') setWorkspace({ sessionId: session.id, id: '' });
-    setTab(id);
-  };
-  const bottomTabs = BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents');
   const processCount = orphanedProcesses > 0 && (
     <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} running on ${orphanedProcesses === 1 ? 'its' : 'their'} own: nothing in Vocs Code will stop ${orphanedProcesses === 1 ? 'it' : 'them'}`}>
       {orphanedProcesses}
     </span>
   );
   const currentTop = TABS.find((t) => t.id === tab);
-  const currentLabel = focus === 'bottom' ? BOTTOM_TABS.find((t) => t.id === bottomTab)?.label : currentTop && topLabel(currentTop.id, currentTop.label);
+  const currentLabel = focus === 'bottom' ? BOTTOM_TABS.find((t) => t.id === bottomTab)?.label : currentTop?.label;
   return (
     <aside
       ref={ref}
@@ -132,10 +107,10 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
       {minimal && (
         <nav className="panel-rail" aria-label="Side panel">
           {TABS.map((t) => {
-            const label = topLabel(t.id, t.label);
+            const label = t.label;
             const active = focus === 'top' && tab === t.id;
             return (
-              <button key={t.id} type="button" className={`panel-tab ${active ? 'active' : ''}`} title={t.id === 'changes' && changed > 0 ? `${label} · ${changed} changed file${changed === 1 ? '' : 's'}` : label} aria-label={label} aria-current={active ? 'true' : undefined} data-testid={`panel-top-${t.id}`} onClick={() => selectTop(t.id)}>
+              <button key={t.id} type="button" className={`panel-tab ${active ? 'active' : ''}`} title={t.id === 'changes' && changed > 0 ? `${label} · ${changed} changed file${changed === 1 ? '' : 's'}` : label} aria-label={label} aria-current={active ? 'true' : undefined} data-testid={`panel-top-${t.id}`} onClick={() => setTab(t.id)}>
                 <Icon name={t.icon} size={13} />
                 {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
                 {t.id === 'changes' && changed > 0 && <span className="panel-rail-dot" data-testid="panel-changes-dot" />}
@@ -143,7 +118,7 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
             );
           })}
           <span className="panel-rail-rule" aria-hidden />
-          {bottomTabs.map((t) => {
+          {BOTTOM_TABS.map((t) => {
             const active = focus === 'bottom' && bottomTab === t.id;
             return (
               <button key={t.id} type="button" className={`panel-tab ${active ? 'active' : ''}`} title={t.label} aria-label={t.label} aria-current={active ? 'true' : undefined} data-testid={`panel-bottom-${t.id}`} onClick={() => openBottom(t.id)}>
@@ -164,8 +139,8 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
         {!minimal && (
           <div className="panel-tabs">
             {TABS.map((t) => (
-              <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => selectTop(t.id)}>
-                <Icon name={t.icon} size={13} /> {topLabel(t.id, t.label)}
+              <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
+                <Icon name={t.icon} size={13} /> {t.label}
                 {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
               </button>
             ))}
@@ -174,20 +149,19 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
           </div>
         )}
         <div className="panel-body">
-          {session.mission && (tab === 'changes' || tab === 'files') && (mission ? <MissionWorkspacePicker record={mission} value={workspaceId} onChange={(id) => setWorkspace({ sessionId: session.id, id })} /> : <div className="pad muted">Loading Mission workspace state…</div>)}
-          {tab === 'changes' && (session.mission ? mission && <MissionChanges record={mission} workspaceId={workspaceId} /> : <ChangesTab session={session} />)}
-          {tab === 'files' && (!session.mission || mission) && <FilesTab key={`${session.id}:${workspaceId}:${fileSession.cwd}`} session={fileSession} missionWorkspaceId={workspaceId || undefined} />}
-          {tab === 'branches' && (session.mission ? <div className="pad muted">Mission integration and delivery are managed by the principal engineer. Inspect the delivery target and result in Mission; generic Git publish controls are unavailable.</div> : <BranchesTab session={session} cache={cache} />)}
-          {tab === 'goal' && (session.mission ? <MissionPanel session={session} /> : <GoalTab session={session} />)}
-          {tab === 'usage' && <>{mission && <div className="pad"><MissionUsage record={mission} /><p className="muted small">The breakdown below is this lead session only, not the Mission total.</p></div>}<UsageTabPanel session={session} /></>}
-          {tab === 'terminal' && (session.mission && (session.archived || mission?.archived) ? <div className="pad muted">Archived Mission — terminals are closed. Restore the Mission to use its lead terminal.</div> : <>{session.mission && <div className="mission-ui mission-workspace"><strong>Lead interactive terminal</strong><p className="mono small">{session.cwd}</p><p className="muted small">Actual lead tool cwd. Integration and specialist workspaces have no writable terminal here.</p></div>}<TerminalPanel session={session} /></>)}
+          {tab === 'changes' && <ChangesTab session={session} />}
+          {tab === 'files' && <FilesTab key={`${session.id}:${session.cwd}`} session={session} />}
+          {tab === 'branches' && <BranchesTab session={session} cache={cache} />}
+          {tab === 'goal' && <GoalTab session={session} />}
+          {tab === 'usage' && <UsageTabPanel session={session} />}
+          {tab === 'terminal' && <TerminalPanel session={session} />}
         </div>
       </div>
       {!bottomIdle && <SplitResizer />}
       <div className="panel-section panel-bottom">
         {!minimal && (
           <div className="panel-tabs">
-            {bottomTabs.map((t) => (
+            {BOTTOM_TABS.map((t) => (
               <button key={t.id} type="button" className={`panel-tab ${!bottomIdle && bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
                 <Icon name={t.icon} size={13} /> {t.label}
                 {t.id === 'processes' && processCount}
@@ -199,7 +173,7 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
         <div className="panel-body">
           {bottomTab === 'mcp' && opened.includes('mcp') && <McpTab session={session} />}
           {bottomTab === 'desktop' && opened.includes('desktop') && <DesktopTab session={session} />}
-          {bottomTab === 'subagents' && opened.includes('subagents') && (session.mission ? <div className="pad muted">Managed specialists are in the Mission panel. Native subagent controls are unavailable here.</div> : <SubagentsTab session={session} />)}
+          {bottomTab === 'subagents' && opened.includes('subagents') && <SubagentsTab session={session} />}
           {bottomTab === 'knowledge' && opened.includes('knowledge') && <KnowledgeTab session={session} />}
           {bottomTab === 'processes' && opened.includes('processes') && <ProcessesTab session={session} />}
         </div>
@@ -333,22 +307,22 @@ function ChangesTab({ session }: { session: SessionMeta }) {
  * The session folder as a browsable list. Files open in the drawer to the left; a transcript
  * folder link opens the list on that folder.
  */
-function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missionWorkspaceId?: string }) {
+function FilesTab({ session }: { session: SessionMeta }) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const toast = useStore((s) => s.toast);
   const reveal = useStore((s) => s.fileReveal);
   const previewing = useStore((s) => {
     const file = s.layout.filePreview;
-    return file?.sessionId === session.id && file.missionWorkspaceId === missionWorkspaceId ? file.path : undefined;
+    return file?.sessionId === session.id ? file.path : undefined;
   });
-  /** Keyed by session and workspace; discard pending work after leaving this Files tab. */
+  /** Keyed by session and folder; discard pending work after leaving this Files tab. */
   const mounted = useRef(true);
   /** StrictMode runs mount effects twice; the same reveal must not be consumed twice. */
   const consumedReveal = useRef<FileReveal | null>(null);
 
   const navigate = (dir: string) => setPath(dir);
-  const openFile = (rel: string) => useStore.getState().revealFile(session.id, rel.replace(/\\/g, '/'), undefined, { exact: true, workspace: missionWorkspaceId ?? '' });
+  const openFile = (rel: string) => useStore.getState().revealFile(session.id, rel.replace(/\\/g, '/'), undefined, { exact: true });
 
   useEffect(() => {
     mounted.current = true;
@@ -366,7 +340,7 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
   useEffect(() => {
     const sid = session.id;
     let stale = false;
-    invoke('fs:list', { sessionId: sid, relPath: path || undefined, ...(session.mission ? { missionWorkspaceId } : {}) })
+    invoke('fs:list', { sessionId: sid, relPath: path || undefined })
       .then((list) => {
         if (!stale && mounted.current) setEntries(list);
       })

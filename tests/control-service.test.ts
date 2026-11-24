@@ -326,7 +326,7 @@ it.each(['workspace', 'permission mode'] as const)('rechecks the session %s afte
 
 it('rejects replaced project roots and managed aliases before privileged calls', async () => {
   const f = await fixture();
-  f.guard.mockRejectedValueOnce(new Error('Mission-owned'));
+  f.guard.mockRejectedValueOnce(new Error('Resource refused'));
   await expect(f.service.handle(f.principal, { method: 'sessions.send', params: f.params })).rejects.toBeDefined();
   await fs.rename(f.project, `${f.project}-old`); await fs.mkdir(f.project);
   await expect(f.service.handle(f.principal, { method: 'sessions.send', params: f.params })).rejects.toMatchObject({ code: 'unavailable' });

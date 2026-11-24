@@ -148,7 +148,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 
 | You changed | Offline checks, E2E to maintain, and applicable opt-ins |
 | --- | --- |
-| Transcript link destinations and file mentions, the source editor drawer (`FilePreviewPane.tsx`, `FileSourceEditor.tsx`), Files tab, workspace file resolution and saves | `tests/transcript-link-kinds.test.tsx`, `tests/file-refs.test.ts`, `tests/file-links.test.tsx`, `tests/file-editor-language.test.ts`, `tests/markdown-cache.test.ts`, `tests/workspace-files.test.ts`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.files` (computed link and syntax colors, line jumps, real saves); Mission-scoped file access also needs `tests/mission-handlers.test.ts`, `tests/mission-ui.test.tsx` + `e2e.mission` |
+| Transcript link destinations and file mentions, the source editor drawer (`FilePreviewPane.tsx`, `FileSourceEditor.tsx`), Files tab, workspace file resolution and saves | `tests/transcript-link-kinds.test.tsx`, `tests/file-refs.test.ts`, `tests/file-links.test.tsx`, `tests/file-editor-language.test.ts`, `tests/markdown-cache.test.ts`, `tests/workspace-files.test.ts`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.files` (computed link and syntax colors, line jumps, real saves) |
 | Sidebar, New Session dialog, session lifecycle | `e2e.terminal` (no key) + `e2e.electron` (live) |
 | `/housekeep` review, recent-session protection and checked worktree removal | `tests/housekeep*.test.ts(x)`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.session-view` (real temporary Git worktrees and saved settings, no provider) |
 | Keep computer awake (`keep-awake.ts`, desktop owner IPC, composer switch) | `tests/keep-awake.test.ts`, `tests/keep-awake-ui.test.tsx`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + `e2e.session-view` (Windows-capable, loopback streaming, real quit/relaunch; both power API methods stubbed before app startup) |
@@ -171,7 +171,6 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
 | Which permission tiers a harness may run (`closestPermissionMode`, create/switch/fork/remote create) | `tests/permission-tiers.test.ts`, `tests/control-service.test.ts`, `tests/cursor-harness.test.ts` |
 | Approval cards and structured questions, `harness/permissions.ts` | `tests/approval-card.test.tsx`, `tests/pi-questions.test.ts`, `tests/claude-questions.test.ts`, `tests/codex-approvals.test.ts` + `e2e.transcript` (seeded question layout/state only), `e2e.pi-tools` (real question answer/context → Pi, Skip, and restart), `e2e.approval` (live). Pi question transport also requires `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-questions.integration.test.ts` (scripted provider, cancellation/stale reply recovery). |
-| Mission configuration, orchestration, controls or managed workspaces | `tests/mission-*.test.ts` + `e2e.mission-settings`, `e2e.mission`; managed or ordinary Pi process ownership also needs `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/mission-pi.integration.test.ts tests/mission-ordinary-pi.integration.test.ts`. Suites that need Windows Job Objects (`mission-check-job`, `mission-terminal-windows`, `mission-receipt-recovery`, `mission-ordinary-pi`, the app-death part of `mission-restart-recovery`) skip on macOS/Linux, so the ubuntu CI gate does not cover them. Live demonstrations: see below and `docs/MISSION-STATUS.md`. |
 | First-time onboarding and setup recovery (`harness-setup.ts`, `OnboardingWizard`, `HarnessSetup`, `OnboardingProvider`, Home/Settings/New Session entry points) | `tests/harness-readiness.test.ts`, `tests/runtime.test.ts`, `tests/harness-setup.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/onboarding-ui.test.tsx`, `tests/handler-registry.test.ts`, `tests/review-fixes.test.ts` + `e2e.models`, `e2e.vision`, `e2e.instructions`, `e2e.session-view`. Retain draft/save failure recovery, unknown sign-in, catalog fallback, stale-response, owner-main-frame dispatch and restart coverage. Use isolated, existing vendor homes and APPDATA directories; no live OAuth or paid prompts in these suites. See [Onboarding](ONBOARDING.md). |
 | Google Antigravity CLI, account quota and ACP session dispatch | `tests/acp-turn-state.test.ts`, `tests/session-resume.test.ts`, `tests/harness-readiness.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.models`, `e2e.antigravity-turn` + live `HARNESS_SMOKE_ONLY=antigravity HARNESS_SMOKE_RESUME=1`. Verify every permission mode at dispatch (Plan denials, one-time grants only), stalled-prompt recovery, and a resumed signed-in Gemini session. |
 | Harness CLI update check (`runtime.ts` `checkUpdates`, Harness logins card) | `tests/harness-updates.test.ts`, `tests/harness-update-ui.test.tsx` + `e2e.vision` |
@@ -281,20 +280,6 @@ cannot report the actual served tier, not treated as proof of activation. Provid
 stay failures, including Claude organizations without Fast permission. Offline Fast coverage lives
 in `session-fast-mode`, `fast-mode-adapters`, `pi-fast-mode`, `fast-mode-ui` and the registered
 handler tests; `e2e.models` drives both user controls and persistence without spending credit.
-
-The Mission demonstrations (spec §22.5) have their own live driver. It runs a real Pi runtime with
-no mocks, retains its artifacts outside the checkout, and never retries automatically:
-
-```bash
-# Metadata only: lists the real Pi models, sends no prompt.
-VOCS_CODE_MISSION_METADATA=1 npx vitest run tests/mission-live.integration.test.ts -t metadata
-# One paid demonstration at a time (A, B or C); bounds are optional overrides.
-VOCS_CODE_MISSION_LIVE=1 VOCS_CODE_MISSION_LIVE_PROVIDER=<provider> VOCS_CODE_MISSION_LIVE_MODEL=<model> \
-  VOCS_CODE_MISSION_LIVE_ONLY=A VOCS_CODE_MISSION_LIVE_MAX_BUDGET_USD=20 npx vitest run tests/mission-live.integration.test.ts
-```
-
-Paid runs need the user's explicit go-ahead each time. Record every outcome, including failures, in
-`docs/MISSION-STATUS.md`.
 
 ## Packaged-app checks
 

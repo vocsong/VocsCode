@@ -207,7 +207,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.modelProvider = provider?.id;
       this.effort = this.ctx.effort();
       this.fastModeModel = meta.config.model ?? meta.activeModel;
-      this.fastMode = meta.config.fastMode === true && !meta.mission;
+      this.fastMode = meta.config.fastMode === true;
       // Prefer the runtime's exact advertised capabilities over our conservative model candidates.
       if (this.fastMode && !provider) {
         await this.listModels();
@@ -839,7 +839,6 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   async setFastMode(enabled: boolean): Promise<void> {
-    if (enabled && this.ctx.session().mission) throw new Error('Fast mode is unavailable for Missions.');
     if (enabled) await this.listModels();
     const support = this.fastModeCapability();
     if (enabled && !support.supported) throw new Error(support.reason);

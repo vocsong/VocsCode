@@ -13,8 +13,6 @@ extraResources:
     to: pi
   - from: resources/mcp
     to: mcp
-  - from: resources/mission
-    to: mission
   - from: resources/processes
     to: processes
   - from: resources/control

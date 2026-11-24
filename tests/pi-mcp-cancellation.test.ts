@@ -50,7 +50,7 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
   } finally { clearTimeout(timer); }
 }
 
-async function httpFixture(mode: 'headers' | 'body' = 'headers', mission = false) {
+async function httpFixture(mode: 'headers' | 'body' = 'headers') {
   const seen: Rpc[] = [];
   const held = new Map<number, ServerResponse>();
   const closed: number[] = [];
@@ -78,14 +78,13 @@ async function httpFixture(mode: 'headers' | 'body' = 'headers', mission = false
     }
     const result = request.method === 'initialize'
       ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'cancel-fixture', version: '1' } }
-      : { tools: (mission ? ['mission_report', 'mission_read'] : ['work', 'probe']).map((name) => ({ name, inputSchema: { type: 'object' } })) };
+      : { tools: ['work', 'probe'].map((name) => ({ name, inputSchema: { type: 'object' } })) };
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const def: PiMcpServerConfig = {
-    id: mission ? 'vocs-mission' : 'cancel-fixture', transport: 'http',
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, timeoutMs: 60_000,
-    ...(mission ? { headers: { Authorization: 'Bearer fixture-mission-capability' } } : {})
+    id: 'cancel-fixture', transport: 'http',
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, timeoutMs: 60_000
   };
   return {
     def, seen, held, closed,
@@ -218,24 +217,18 @@ describe('Pi MCP HTTP cancellation', () => {
 });
 
 describe('Pi bridge execute cancellation', () => {
-  it.each([false, true])('propagates the third execute argument across shared sessions without wrapping abort as a Mission failure (managed=%s)', async (mission) => {
-    const fixture = await httpFixture('headers', mission);
+  it('propagates the third execute argument across shared sessions without wrapping abort', async () => {
+    const fixture = await httpFixture('headers');
     const root = await mkdtemp(path.join(tmpdir(), 'vocs-pi-mcp-cancel-'));
     const config = path.join(root, 'mcp.json');
-    if (mission) {
-      vi.stubEnv('VOCS_CODE_MCP_CONFIG', '');
-      vi.stubEnv('VOCS_CODE_MISSION_POLICY', JSON.stringify({ role: 'lead', sourceAccess: 'read_only', requestedTools: [] }));
-      vi.stubEnv('VOCS_CODE_MCP_EPHEMERAL', JSON.stringify({ servers: [fixture.def] }));
-    } else {
-      await writeFile(config, JSON.stringify({ servers: [fixture.def] }));
-      vi.stubEnv('VOCS_CODE_MCP_CONFIG', config);
-    }
+    await writeFile(config, JSON.stringify({ servers: [fixture.def] }));
+    vi.stubEnv('VOCS_CODE_MCP_CONFIG', config);
     const parent: McpBridgeTool[] = [], child: McpBridgeTool[] = [];
     const controller = new AbortController();
     try {
       await registerMcpTools({ registerTool: (tool) => parent.push(tool as McpBridgeTool), on() {} });
       await registerMcpTools({ registerTool: (tool) => child.push(tool as McpBridgeTool), on() {} });
-      const name = mission ? 'mission_report' : 'mcp__cancel_fixture__work';
+      const name = 'mcp__cancel_fixture__work';
       const parentTool = parent.find((tool) => tool.name === name)!;
       const childTool = child.find((tool) => tool.name === name)!;
       expect(parentTool).toBe(childTool);

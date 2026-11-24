@@ -280,7 +280,7 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
         // The active session left the visible list: deleted outright, or archived by this same push.
         // Only the transition counts — clicking an archived row in the Archived view selects an
         // already-archived session, and the next unrelated push must not throw that selection away.
-        const activeRemoved = !!activeId && (!after || after.mission?.role === 'worker' || (!before?.archived && !!after.archived));
+        const activeRemoved = !!activeId && (!after || (!before?.archived && !!after.archived));
         if (activeRemoved && activeId) {
           departedTitle = before?.title ?? activeId;
           departedArchived = !!after?.archived;
@@ -290,7 +290,7 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
         const departed = (id: string) => {
           const was = s.sessions.find((x) => x.id === id);
           const now = sessions.find((x) => x.id === id);
-          return !now || now.mission?.role === 'worker' || (!was?.archived && !!now.archived);
+          return !now || (!was?.archived && !!now.archived);
         };
         let layout = panes.withoutSessions(s.layout, departed, activeRemoved ? replacement?.id ?? null : null);
         if (layout.panes.length < s.layout.panes.length) {

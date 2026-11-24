@@ -1,8 +1,7 @@
 /** What the activity tray lists (docs/superpowers/specs/2026-11-09-session-activity-tray-design.md):
- *  every top-level, unarchived session that needs you, is running, finished since you last looked,
+ *  every unarchived session that needs you, is running, finished since you last looked,
  *  or was viewed recently — each session in one section only, the most urgent one. */
 import type { SessionMeta } from '../../shared/types';
-import { isTopLevelSession } from './missions';
 
 /** How many recently viewed sessions the tray offers. */
 export const RECENT_LIMIT = 5;
@@ -20,7 +19,7 @@ export interface ActivitySections {
 const newest = (key: (s: SessionMeta) => number) => (a: SessionMeta, b: SessionMeta) => key(b) - key(a);
 
 export function activitySections(sessions: SessionMeta[], activeId: string | null): ActivitySections {
-  const live = sessions.filter((s) => isTopLevelSession(s) && !s.archived);
+  const live = sessions.filter((s) => !s.archived);
   const needs = live.filter((s) => s.status === 'awaiting').sort(newest((s) => s.updatedAt));
   const running = live.filter((s) => s.status === 'running' || s.status === 'starting').sort(newest((s) => s.lastUserMessageAt ?? s.updatedAt));
   const listed = new Set([...needs, ...running].map((s) => s.id));

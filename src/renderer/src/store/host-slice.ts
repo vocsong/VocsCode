@@ -1,5 +1,5 @@
 /**
- * Host lifecycle (boot/resync/reset), settings, missions, model catalog, availability,
+ * Host lifecycle (boot/resync/reset), settings, model catalog, availability,
  * onboarding, terminals, Vesta agent, updates, remote policy, and toast notifications slice.
  */
 import { EMPTY_AGENT_STATE } from '../../../shared/agent';
@@ -14,9 +14,6 @@ type HostSliceKeys =
   | 'booted'
   | 'bootError'
   | 'settings'
-  | 'missions'
-  | 'missionErrors'
-  | 'missionInspector'
   | 'modelCatalog'
   | 'availability'
   | 'availabilityError'
@@ -39,9 +36,6 @@ type HostSliceKeys =
   | 'resync'
   | 'reset'
   | 'setSettings'
-  | 'setMission'
-  | 'loadMission'
-  | 'inspectMissionSession'
   | 'setAgentState'
   | 'openVesta'
   | 'toast'
@@ -63,9 +57,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
     booted: false,
     bootError: null,
     settings: null,
-    missions: {},
-    missionErrors: {},
-    missionInspector: null,
     modelCatalog: {},
     availability: {},
     availabilityError: null,
@@ -97,7 +88,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
           try {
             on('push:sessionsChanged', (list) => get().setSessions(list));
             on('push:settingsChanged', (s) => get().setSettings(s));
-            on('push:missionsChanged', (record) => get().setMission(record));
             on('push:sessionEvent', (env) => get().applyEvent(env));
             on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId).catch(toastError));
             on('push:terminalsChanged', (list) => get().setTerminals(list));
@@ -121,12 +111,11 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
           if (canInvoke('update:state')) void invoke('update:state', undefined).then((s) => set({ updateState: s })).catch(() => undefined);
           if (canInvoke('agent:state')) void invoke('agent:state', undefined).then((s) => get().setAgentState(s)).catch(() => undefined);
           if (canInvoke('desktop:focus')) void invoke('desktop:focus', undefined).then((focus) => set({ desktopFocus: focus })).catch(() => undefined);
-          if (canInvoke('missions:list')) void invoke('missions:list', undefined).then((records) => records.forEach((record) => get().setMission(record))).catch(() => undefined);
-          const first = sessions.find((s) => !s.archived && s.mission?.role !== 'worker');
+          const first = sessions.find((s) => !s.archived);
           if (storeOptions.openFirstSessionOnBoot !== false) {
             // A split from the last run comes back when its sessions still exist; otherwise the first
             // session opens exactly as it did before split view existed.
-            const restored = panes.restoreLayout(panes.loadStoredLayout(), (id) => sessions.some((s) => s.id === id && !s.archived && s.mission?.role !== 'worker'));
+            const restored = panes.restoreLayout(panes.loadStoredLayout(), (id) => sessions.some((s) => s.id === id && !s.archived));
             if (restored && restored.panes.length > 1) await applyLayout(rt, set, get, restored);
             else if (first) await get().setActive(first.id);
             rt.persistLayout = true;
@@ -177,9 +166,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
         bootError: null,
         settings: null,
         sessions: [],
-        missions: {},
-        missionErrors: {},
-        missionInspector: null,
         activeId: null,
         layout: panes.singlePaneLayout(),
         transcripts: {},
@@ -217,35 +203,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
         const stale = !!s.settings && JSON.stringify(catalogInputs(s.settings)) !== JSON.stringify(catalogInputs(settings));
         return stale ? { settings, modelCatalog: {} } : { settings };
       });
-    },
-
-    setMission(record) {
-      set((s) => {
-        const previous = s.missions[record.id];
-        if (previous && (previous.revision > record.revision || previous.revision === record.revision && previous.lastEventSequence > record.lastEventSequence)) return {};
-        const missionErrors = { ...s.missionErrors };
-        delete missionErrors[record.id];
-        return { missions: { ...s.missions, [record.id]: record }, missionErrors, changesVersion: s.changesVersion + 1 };
-      });
-    },
-
-    async loadMission(missionId) {
-      try {
-        const record = await invoke('missions:get', { missionId });
-        if (!record) throw new Error('Mission not found. Its workspaces have not been changed.');
-        get().setMission(record);
-      } catch (error) {
-        set((s) => ({ missionErrors: { ...s.missionErrors, [missionId]: error instanceof Error ? error.message : String(error) } }));
-      }
-    },
-
-    async inspectMissionSession(missionId, sessionId, itemId) {
-      if (!get().missions[missionId]) await get().loadMission(missionId);
-      const record = get().missions[missionId];
-      if (!record) { get().toast(get().missionErrors[missionId] ?? 'Mission unavailable', 'error'); return; }
-      set({ missionInspector: { missionId, sessionId, itemId }, panelOpen: true, panelTab: 'goal', panelFocus: 'top', panelPeek: true });
-      await get().setActive(record.leadSessionId);
-      await get().loadTranscript(sessionId);
     },
 
     setAgentState(agent) {

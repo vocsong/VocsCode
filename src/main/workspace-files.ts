@@ -43,7 +43,7 @@ async function resolveInWorkspace(root: string, target = ''): Promise<{ lexicalR
   return { lexicalRoot, lexicalTarget, realRoot, realTarget };
 }
 
-/** Shared with the IPC boundary so malformed input cannot trigger even Mission scope reads. */
+/** Shared with the IPC boundary so malformed input is refused before any filesystem read. */
 export function validateWorkspaceFileTarget(target: unknown): string {
   if (typeof target !== 'string' || !target.trim() || target.length > 4096 || /[\x00-\x1f\x7f-\x9f:<>"|?*]/.test(target) || path.posix.isAbsolute(target) || path.win32.isAbsolute(target)) {
     throw new Error('Invalid workspace file path');
@@ -230,16 +230,12 @@ const SAFE_OPEN_FLAGS = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW 
 const savingFiles = new Set<string>();
 
 /** Compare and update a pinned file descriptor: never create a file or reopen the path to write. */
-export async function writeWorkspaceText(
-  root: string, target: string, content: string, expectedContent: string,
-  options: { canonicalRoot?: string; authorizeTarget?: (target: string) => Promise<void> } = {}
-): Promise<void> {
+export async function writeWorkspaceText(root: string, target: string, content: string, expectedContent: string): Promise<void> {
   const relative = validateWorkspaceFileTarget(target);
   const next = encodePreviewText(content);
   const expected = encodePreviewText(expectedContent);
   const resolved = await resolveInWorkspace(root, relative);
-  if (!resolved || (options.canonicalRoot && resolved.realRoot !== options.canonicalRoot)) throw new Error('Path outside workspace or workspace location changed.');
-  await options.authorizeTarget?.(resolved.realTarget);
+  if (!resolved) throw new Error('Path outside workspace or workspace location changed.');
   const original = await fs.lstat(resolved.realTarget, { bigint: true });
   assertWritableTextFile(original);
   const key = `${original.dev}:${original.ino}`;

@@ -8,8 +8,6 @@ import { useStore } from '../store';
 import { Button, Icon, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
 import { SessionTitle } from './SessionTitle';
-import { MissionHeaderControls, useMission } from './mission/MissionPanel';
-import { openMission } from '../missions';
 import { canClosePane, canSplit } from '../panes';
 
 /**
@@ -20,8 +18,6 @@ import { canClosePane, canSplit } from '../panes';
  * `paneId` is the split pane this header sits in; it carries the split and close-pane actions.
  */
 export function Header({ session, paneId }: { session: SessionMeta; paneId?: string }) {
-  const { record: mission, error: missionError } = useMission(session);
-  const missions = useStore((s) => s.missions);
   const panelVisible = useStore((s) => s.panelOpen || !!s.layout.filePreview);
   const togglePanel = useStore((s) => s.togglePanel);
   const setPanelTab = useStore((s) => s.setPanelTab);
@@ -70,7 +66,7 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
             variant="ghost"
             size="sm"
             icon="archive"
-            title={session.mission ? 'Archive Mission (retain worktrees)' : session.worktreeBranch ? 'Archive & remove worktree' : 'Archive'}
+            title={session.worktreeBranch ? 'Archive & remove worktree' : 'Archive'}
             aria-label="Archive session"
             disabled={!!session.archived}
             onClick={(e) => void archiveSession(session, toast, e.currentTarget)}
@@ -85,13 +81,6 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
         )}
         <Button variant={panelVisible ? 'subtle' : 'ghost'} size="sm" icon="layout" className="header-panel-toggle" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
       </div>
-
-      {session.mission && (
-        <div className="header-controls">
-          {mission ? <MissionHeaderControls record={mission} /> : <span role="status">Mission · {missionError ?? 'Loading coordination state…'}</span>}
-        </div>
-      )}
-      {!session.mission && Object.values(missions).some((m) => m.originSessionId === session.id) && <div className="mission-links row gap8 wrap">{Object.values(missions).filter((m) => m.originSessionId === session.id).map((m) => <Button size="sm" variant="ghost" key={m.id} onClick={() => void openMission(m).catch((e) => toast(String(e.message ?? e), 'error'))}>Mission: {m.title}</Button>)}</div>}
     </header>
   );
 }

@@ -67,9 +67,8 @@ export default async function vocsCodeTools(pi: Pi): Promise<void> {
     search.set(definition.name, definition);
     pi.registerTool(definition);
   }
-  // Managed workers use the broker; they must not acquire a second user-conversation channel.
-  const question = process.env.VOCS_CODE_MISSION_POLICY ? null : createQuestionTool();
-  if (question) pi.registerTool(question);
+  const question = createQuestionTool();
+  pi.registerTool(question);
   let definitions = new Map<string, Definition>();
   let ready = false;
   const notify = (ctx: Context, marker: string, payload: Record<string, unknown>) => {
@@ -78,10 +77,10 @@ export default async function vocsCodeTools(pi: Pi): Promise<void> {
   const verify = () => {
     if (!ready) throw incompatible('Tool overrides are not ready.');
     const actual = pi.getAllTools();
-    for (const [name, expected] of [...definitions, ...search, ...(question ? [[question.name, question] as const] : [])]) {
+    for (const [name, expected] of [...definitions, ...search, [question.name, question] as const]) {
       const registered = actual.find((tool) => tool.name === name);
       // A search tool Pi filtered out for --tools/--exclude-tools/--no-tools is absent on purpose.
-      if (!registered && (search.has(name) || name === question?.name)) continue;
+      if (!registered && (search.has(name) || name === question.name)) continue;
       // Public metadata reflects the winning definition. A competing extension must not win silently.
       if (!registered || registered.parameters !== expected.parameters || registered.description !== expected.description) {
         throw incompatible(`Another extension replaced ${name}. Disable the conflicting tool override.`);
@@ -133,7 +132,7 @@ export default async function vocsCodeTools(pi: Pi): Promise<void> {
       pi.setActiveTools(active);
       ready = true;
       verify();
-      notify(ctx, READY, { capability: 'tools', tools: [...definitions.keys(), ...search.keys(), ...(question ? [question.name] : [])] });
+      notify(ctx, READY, { capability: 'tools', tools: [...definitions.keys(), ...search.keys(), question.name] });
     } catch (error) {
       fail(ctx, error);
       throw error;

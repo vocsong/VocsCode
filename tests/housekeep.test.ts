@@ -79,11 +79,14 @@ describe('Housekeep review and apply', () => {
   });
 
   it('does not send excerpts at preview or treat a merged label, unverified answer, live writer or protected session as complete', async () => {
-    const { service, review, external, inspect } = await setup([
+    const { service, manager, review, external, inspect } = await setup([
       meta('s_old'), meta('s_open'), meta('s_recent', { lastViewedAt: NOW - DAY }), meta('s_pinned', { pinned: true }),
-      meta('s_merged', { status: 'merged' }), meta('s_queued', { queued: 1 }), meta('s_runtime', { workspaceWriterClaims: ['unknown'] }),
+      meta('s_merged', { status: 'merged' }), meta('s_queued', { queued: 1 }), meta('s_runtime'),
       meta('s_draft'), meta('s_archive', { archived: true }), meta('s_dirty', { worktreeBranch: 'vocscode/dirty', cwd: path.join(os.tmpdir(), 'dirty') })
     ], { s_merged: completeTurn().slice(0, 3) });
+    // A runtime whose writers are still live is not safely idle.
+    const canHousekeep = manager.canHousekeep.bind(manager);
+    vi.spyOn(manager, 'canHousekeep').mockImplementation((id) => id !== 's_runtime' && canHousekeep(id));
     external.add('s_open');
     inspect.mockImplementation(async input => input.cwd.endsWith('dirty') ? { kind: 'blocked', reason: 'Local files.' } : { kind: 'none' });
     const preview = await service.preview(['s_draft']);

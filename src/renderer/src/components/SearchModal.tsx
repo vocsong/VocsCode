@@ -92,7 +92,7 @@ export function SearchModal() {
                 <span className="search-body">
                   <span className="search-title">
                     {s ? <SessionTitle session={s} /> : r.sessionId}
-                    {s && <span className="search-meta">{s.mission?.role === 'worker' ? 'Mission specialist (read-only) · ' : ''}{relTime(s.updatedAt)}</span>}
+                    {s && <span className="search-meta">{relTime(s.updatedAt)}</span>}
                   </span>
                   <span className="search-snippet">
                     <HighlightedSnippet text={r.snippet} />

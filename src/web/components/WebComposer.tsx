@@ -9,8 +9,6 @@ import type { FileAttachment, SessionMeta, SendMode } from '@shared/types';
 // Base64 and the sealed remote frame expand these bytes; keep the per-file cap conservative.
 const MAX_FILE_BYTES = 128 * 1024;
 const MAX_FILES = 2;
-// A lost reply must not become a second Mission action when the composer remounts.
-const pendingMissionSends = new Map<string, { payload: string; key: string }>();
 
 async function encodeFile(file: File): Promise<FileAttachment> {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -77,15 +75,9 @@ export function WebComposer({ session, offline }: { session: SessionMeta; offlin
     const text = draft.trim();
     if ((!text && !files.length) || sending || readingRef.current || !readable) return;
     const input = { text, ...(files.length ? { files } : {}), ...(mode !== 'now' ? { mode } : {}) };
-    const payload = JSON.stringify({ sessionId: session.id, input });
-    if (session.mission && pendingMissionSends.get(session.id)?.payload !== payload) {
-      pendingMissionSends.set(session.id, { payload, key: globalThis.crypto.randomUUID() });
-    }
-    const key = session.mission ? pendingMissionSends.get(session.id)!.key : undefined;
     setSending(true);
     try {
-      await invoke('sessions:send', { id: session.id, input, ...(key ? { idempotencyKey: key } : {}) });
-      if (key && pendingMissionSends.get(session.id)?.key === key) pendingMissionSends.delete(session.id);
+      await invoke('sessions:send', { id: session.id, input });
       if (useStore.getState().drafts[session.id] === draft) setDraft(session.id, '');
       setFiles([]);
       setFileError('');

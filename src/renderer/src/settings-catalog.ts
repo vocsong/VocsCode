@@ -51,10 +51,6 @@ export const SETTINGS_PAGES = [
   { id: 'instructions', label: 'Instructions', icon: 'edit', group: 'Agent behavior', description: 'Tell your agents how you like to work. Shared rules, with room for exceptions.', saveHint: 'Use Save to apply your edits', topics: [
     { label: 'Shared & harness instructions', description: 'Edit the app’s global and per-harness instruction files.', keywords: 'system prompt rules global markdown AGENTS CLAUDE APPEND_SYSTEM', anchor: 'instructions-editor' },
   ] },
-  { id: 'mission', label: 'Mission', icon: 'flag', group: 'Agent behavior', description: 'Build your agent team. Set model pools, working limits and project overrides.', saveHint: 'Use Save Mission settings to apply edits', topics: [
-    { label: 'Mission model pools', description: 'Tier assignments, presets and the default principal engineer.', keywords: 'T1 T2 T3 T4 T5 workers lead tier preset model pools' },
-    { label: 'Mission limits & projects', description: 'Concurrency, account capacity, budgets and project overrides.', keywords: 'budget cost tokens capacity limits account project delegation', anchor: 'mission-limits' },
-  ] },
   { id: 'assistant', label: 'Vesta & utility', icon: 'sparkles', group: 'Agent behavior', description: 'Choose the models that help behind the scenes.', saveHint: AUTO, topics: [
     { label: 'Utility model', description: 'A fast model for session titles and worktree names.', keywords: 'background cheap naming flash model', anchor: 'assistant-models' },
     { label: 'Vesta assistant', description: 'Show or hide the floating assistant and choose its Pi model.', keywords: 'floating agent vesta pi assistant enabled', anchor: 'assistant-vesta' },

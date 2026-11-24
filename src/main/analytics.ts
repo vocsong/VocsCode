@@ -762,8 +762,6 @@ export class AnalyticsStore {
     let scannedInputs = false;
     for (const meta of existing) {
       const replayExecutions = !this.executions.isBackfilled(meta.id);
-      const scanInputs = !meta.mission;
-      if (!replayExecutions && !scanInputs) continue;
       let items: TranscriptItem[];
       try {
         items = await readTranscript(meta.id);
@@ -771,10 +769,8 @@ export class AnalyticsStore {
         this.deps.log('warn', `analytics: could not read transcript of ${meta.id} for replay`);
         continue;
       }
-      if (scanInputs) {
-        this.recordUserInputs(meta, items);
-        scannedInputs = true;
-      }
+      this.recordUserInputs(meta, items);
+      scannedInputs = true;
       if (replayExecutions) {
         const count = this.executions.backfillTranscript(meta.id, items, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel));
         await this.executions.markBackfilled(meta.id, count);
@@ -818,7 +814,7 @@ export class AnalyticsStore {
 
   private collectUserInput(meta: SessionMeta, item: Extract<TranscriptItem, { kind: 'user' }>): void {
     const receipt = item.userInput;
-    if (meta.mission || !receipt || receipt.sessionId !== meta.id || typeof receipt.id !== 'string' || !receipt.id) return;
+    if (!receipt || receipt.sessionId !== meta.id || typeof receipt.id !== 'string' || !receipt.id) return;
     if (!Number.isSafeInteger(receipt.tokens) || receipt.tokens <= 0 || !Number.isFinite(receipt.ts) || !Number.isFinite(new Date(receipt.ts).getTime())) return;
     const key = JSON.stringify([meta.id, receipt.id]);
     if (this.recordedUserInputs.has(key)) return;

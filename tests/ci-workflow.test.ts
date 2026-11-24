@@ -28,7 +28,7 @@ describe('CI tier boundaries', () => {
     expect(prFiles.every((file) => file.startsWith('tests/') && !file.startsWith('tests/e2e.'))).toBe(true);
     expect(prFiles.every((file) => existsSync(path.join(root, file)))).toBe(true);
     expect(prFiles).toEqual(expect.arrayContaining([
-      'tests/review-fixes.test.ts', 'tests/mcp-oauth.test.ts', 'tests/mcp-oauth-transport-race.test.ts', 'tests/vocs-account.test.ts', 'tests/vocs-account-settings.test.tsx', 'tests/session-resume.test.ts', 'tests/mission-store.test.ts',
+      'tests/review-fixes.test.ts', 'tests/mcp-oauth.test.ts', 'tests/mcp-oauth-transport-race.test.ts', 'tests/vocs-account.test.ts', 'tests/vocs-account-settings.test.tsx', 'tests/session-resume.test.ts',
       'tests/relay-core.test.ts', 'tests/qr.test.ts', 'tests/web-transport.test.ts', 'tests/workspace-files.test.ts'
     ]));
     expect(gate).toMatch(releaseCondition);
@@ -42,7 +42,7 @@ describe('CI tier boundaries', () => {
   it('keeps the full offline and no-provider E2E suites in their release-only jobs', () => {
     expect(job('gate')).toContain('npm test --');
     expect(job('e2e')).toContain('npm run test:e2e:ci');
-    expect(job('windows-offline')).toContain('tests/mission-receipt-recovery.test.ts');
+    expect(job('windows-offline')).toContain('tests/local-control-windows.test.ts');
   });
 });
 

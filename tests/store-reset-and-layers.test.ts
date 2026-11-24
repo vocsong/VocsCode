@@ -9,12 +9,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { useStore } from '../src/renderer/src/store';
-import type { MissionRecord } from '../src/shared/mission';
 
 const CANONICAL_LAYERS = '@layer tokens, reset, base, components, features, themes, modes;';
 
 describe('store reset isolation', () => {
-  it('clears per-host mission/overlay state and drops queued streaming deltas on reset', () => {
+  it('clears per-host overlay state and drops queued streaming deltas on reset', () => {
     const rafQueue: FrameRequestCallback[] = [];
     const origRaf = globalThis.requestAnimationFrame;
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
@@ -25,9 +24,6 @@ describe('store reset isolation', () => {
       useStore.setState({
         sessions: [],
         transcripts: { s1: [{ id: 'a1', kind: 'assistant', ts: 1, text: 'hi' }] },
-        missions: { m1: { id: 'm1', revision: 1, lastEventSequence: 1 } as unknown as MissionRecord },
-        missionErrors: { m1: 'boom' },
-        missionInspector: { missionId: 'm1', sessionId: 's1' },
         archiving: { s1: true },
         fileReveal: { sessionId: 's1', path: 'src' },
         subagentReveal: { sessionId: 's1', runId: 'r1' },
@@ -46,9 +42,6 @@ describe('store reset isolation', () => {
       // Reset for a host switch, then install a fresh session sharing id `s1`.
       useStore.getState().reset();
       const afterReset = useStore.getState();
-      expect(afterReset.missions).toEqual({});
-      expect(afterReset.missionErrors).toEqual({});
-      expect(afterReset.missionInspector).toBeNull();
       expect(afterReset.archiving).toEqual({});
       expect(afterReset.fileReveal).toBeNull();
       expect(afterReset.subagentReveal).toBeNull();
@@ -88,9 +81,7 @@ describe('renderer CSS cascade layers', () => {
       'src/renderer/src/components/file-editor.css',
       'src/renderer/src/components/housekeep-dialog.css',
       'src/renderer/src/components/transcript-links.css',
-      'src/renderer/src/components/knowledge/knowledge.css',
-      'src/renderer/src/components/mission/mission.css',
-      'src/renderer/src/components/mission/MissionSettings.css'
+      'src/renderer/src/components/knowledge/knowledge.css'
     ];
     for (const file of layered) {
       const content = read(file);

@@ -37,9 +37,9 @@ function LiveControls() {
 
 function seed(meta = session()) {
   useStore.setState({
-    settings: { ...settings }, sessions: [meta], activeId: meta.id, newSessionKind: 'normal', newSessionRoot: 'G:/repo', availability: {},
-    models: {}, modelCatalog: { native: { models, loading: false } }, missions: {}, missionErrors: {}, toasts: [],
-    openNewSession: vi.fn(), setActive: vi.fn().mockResolvedValue(undefined), loadMission: vi.fn()
+    settings: { ...settings }, sessions: [meta], activeId: meta.id, newSessionRoot: 'G:/repo', availability: {},
+    models: {}, modelCatalog: { native: { models, loading: false } }, toasts: [],
+    openNewSession: vi.fn(), setActive: vi.fn().mockResolvedValue(undefined)
   });
 }
 
@@ -293,19 +293,15 @@ describe('composer Fast mode request', () => {
     expect(screen.queryByText('Enable Fast mode?')).toBeNull();
   });
 
-  it('honors connection capability and hides Fast Mode for Missions', () => {
+  it('honors connection capability and offers Fast Mode in the composer run controls', () => {
     gate.allowed = false;
     const view = render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
     expect(fastOption('On').disabled && fastOption('Off').disabled).toBe(true);
     view.unmount();
-    // The composer carries the run controls for an ordinary session, and none for a Mission lead.
-    const ordinary = render(<Composer session={session()} />);
+    // The composer carries the session's run controls.
+    render(<Composer session={session()} />);
     fireEvent.click(screen.getByTitle('Model'));
     expect(screen.getByRole('group', { name: 'Fast Mode' })).toBeTruthy();
-    ordinary.unmount();
-    render(<Composer session={session({ mission: { missionId: 'm1', role: 'lead' } as SessionMeta['mission'] })} />);
-    expect(screen.getByPlaceholderText(/Message the principal engineer/)).toBeTruthy();
-    expect(screen.queryByRole('group', { name: 'Fast Mode' })).toBeNull();
   });
 });

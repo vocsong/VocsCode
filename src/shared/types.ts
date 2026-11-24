@@ -21,7 +21,7 @@ export type * from './analytics/summary';
 export type * from './settings-types';
 
 /** Ids of the MCP servers this app ships itself. A same-named user entry is not theirs to edit, so it is ignored everywhere. */
-export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus', 'vocs-memory', 'cua-driver', 'vocs-mission', 'vocs-openrouter'];
+export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus', 'vocs-memory', 'cua-driver', 'vocs-openrouter'];
 
 export const CUA_PERMISSION_MODES: readonly CuaPermissionMode[] = ['standard', 'bounded', 'unrestricted'];
 

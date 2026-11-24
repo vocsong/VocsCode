@@ -197,7 +197,7 @@ describe('handler registry', () => {
       await expect(registry.invoke('settings:update', { intelligence: { gateway: false, personalMemory: true } }, actor)).rejects.toThrow(/desktop owner/);
     }
     expect(settingsUpdate).not.toHaveBeenCalled();
-    await expect(registry.invoke('intelligence:view', { sessionId: '../s_test' }, 'desktop')).rejects.toThrow(/Invalid Mission\/session identifier/);
+    await expect(registry.invoke('intelligence:view', { sessionId: '../s_test' }, 'desktop')).rejects.toThrow(/Invalid session identifier/);
     await expect(registry.invoke('intelligence:view', { sessionId: 's_unknown' }, 'desktop')).rejects.toThrow('Session not found');
     await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: '../../another' }, 'desktop')).rejects.toThrow('A memory record id is required');
     expect(view).not.toHaveBeenCalled();
@@ -747,7 +747,7 @@ describe('handler registry', () => {
     const open = vi.spyOn(fs, 'open');
     for (const invalid of [undefined, null, {}, { ...req, expectedContent: undefined }, { ...req, content: 1 },
       { ...req, root: r.sibling }, { ...req, sessionId: '../s_test' }, { ...req, sessionId: 'missing' },
-      { ...req, missionWorkspaceId: 1 }, { ...req, path: 'escape/edit.txt' }, { ...req, path: '../edit.txt' },
+      { ...req, workspaceId: 1 }, { ...req, path: 'escape/edit.txt' }, { ...req, path: '../edit.txt' },
       { ...req, path: outside }, { ...req, path: 'edit.txt:stream' }, { ...req, path: 'missing.txt' }]) {
       await expect(r.registry.invoke('fs:writeText', invalid, 'desktop')).rejects.toThrow();
     }
@@ -819,7 +819,7 @@ describe('handler registry', () => {
       undefined, null, {}, { sessionId: 's_test' }, { path: 'a.txt' },
       { sessionId: '', path: 'a.txt' }, { sessionId: '../s_test', path: 'a.txt' }, { sessionId: 1, path: 'a.txt' },
       { sessionId: 's_missing', path: 'a.txt' }, { sessionId: 's_test', path: null }, { sessionId: 's_test', path: 1 },
-      { sessionId: 's_test', path: 'a.txt', root: ws }, { sessionId: 's_test', path: 'a.txt', missionWorkspaceId: 1 }
+      { sessionId: 's_test', path: 'a.txt', root: ws }, { sessionId: 's_test', path: 'a.txt', workspaceId: 1 }
     ]) await expect(registry.invoke('fs:resolve', req)).rejects.toThrow();
     for (const p of ['', '\0', '/etc/passwd', 'C:\\private\\file.txt', 'C:/private/file.txt', '//server/share/file.txt', '\\\\server\\share\\file.txt', '../a.txt', 'sub/../../a.txt', 'sub/../a.txt', '..\\a.txt']) {
       await expect(registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).rejects.toThrow();
@@ -1247,14 +1247,17 @@ describe('external control owner boundary', () => {
     for (const channel of ['control:get', 'control:enable', 'control:grant', 'control:revoke']) expect(isRemoteChannel(channel)).toBe(false);
   });
 
-  it('checks project and session ownership for control without starting Git status refreshes', async () => {
+  it('checks control resources canonically without starting Git status refreshes', async () => {
     const root = tmpDir('control-resource');
     const { registry, deps } = stubDeps();
     deps.sessions.get('s_test')!.cwd = root;
     const list = vi.spyOn(deps.sessions, 'list');
     await registry.assertControlResource!({ projectRoot: root });
     await registry.assertControlResource!({ sessionId: 's_test' });
-    expect(list.mock.calls).toEqual([[{ refreshGit: false }], [{ refreshGit: false }]]);
+    await expect(registry.assertControlResource!({ projectRoot: 'relative/folder' })).rejects.toThrow('Invalid control resource.');
+    await expect(registry.assertControlResource!({ projectRoot: path.join(root, 'missing') })).rejects.toThrow();
+    await expect(registry.assertControlResource!({ sessionId: 's_unknown' })).rejects.toThrow('Session not found');
+    expect(list.mock.calls.filter(([options]) => options?.refreshGit !== false)).toEqual([]);
   });
 
   it('does not route local grant setup through browser access or an agent', async () => {

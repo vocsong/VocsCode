@@ -29,8 +29,6 @@ export interface TerminalRoot {
   sessionId: string;
   terminalId: string;
   title?: string;
-  /** In a Mission-style Job of its own: its tree is never put into a session's Job. */
-  owned?: boolean;
 }
 
 export interface ProcessTrackerOptions {
@@ -54,11 +52,6 @@ export interface ProcessTrackerOptions {
   platform?: NodeJS.Platform;
   /** Whether to observe ChildProcess spawns (tests drive `claim` directly). */
   observeSpawns?: boolean;
-  /**
-   * Whether a session's process may join that session's Job Object. Mission sessions keep the Job
-   * ownership they prove quiescence with and are left out. Defaults to every session-owned process.
-   */
-  adoptable?: (owner: ProcessOwner) => boolean;
 }
 
 interface Claim {
@@ -142,7 +135,7 @@ export class ProcessTracker {
   /** The Job a process working for `owner` joins, or null when it joins none. */
   private jobKey(owner: ProcessOwner): string | null {
     if (!this.opts.source.adopt || !owner.sessionId || !JOB_OWNER.test(owner.sessionId)) return null;
-    return (this.opts.adoptable?.(owner) ?? true) ? owner.sessionId : null;
+    return owner.sessionId;
   }
 
   private async adopt(job: string, targets: { pid: number; startedAt: number }[]): Promise<void> {
@@ -295,8 +288,8 @@ export class ProcessTracker {
       return { error: e instanceof Error ? e.message : String(e), sampledAt: at, processes: [] };
     }
     const members = this.opts.source.jobs ? await this.opts.source.jobs().catch(() => new Map<string, number[]>()) : new Map<string, number[]>();
-    const { tracked, sealed } = this.classify(raw, at, members);
-    await this.adoptNew(tracked, members, sealed);
+    const tracked = this.classify(raw, at, members);
+    await this.adoptNew(tracked, members);
     await this.fillCommands(tracked);
     // Chromium helpers that getAppMetrics did not name (crashpad) carry the app's own image and a --type switch.
     const root = raw.find((p) => p.pid === this.opts.rootPid);
@@ -326,12 +319,12 @@ export class ProcessTracker {
   }
 
   /** Puts every session process not yet in its session's Job into it, so its future children are too. */
-  private async adoptNew(tracked: Map<string, TrackedProcess>, members: Map<string, number[]>, sealed: Set<string>): Promise<void> {
+  private async adoptNew(tracked: Map<string, TrackedProcess>, members: Map<string, number[]>): Promise<void> {
     const pending = new Map<string, { pid: number; startedAt: number }[]>();
     for (const [key, p] of tracked) {
       const job = this.jobKey(p.owner);
       // What an earlier run left is not this run's session work: it stays left behind.
-      if (!job || p.previousRun || sealed.has(key) || this.unadoptable.has(key) || CONSOLE_HOSTS.has(p.name.toLowerCase())) continue;
+      if (!job || p.previousRun || this.unadoptable.has(key) || CONSOLE_HOSTS.has(p.name.toLowerCase())) continue;
       if (members.get(job)?.includes(p.pid)) continue;
       if (!pending.has(job)) pending.set(job, []);
       pending.get(job)!.push({ pid: p.pid, startedAt: p.startedAt });
@@ -342,23 +335,20 @@ export class ProcessTracker {
 
   /**
    * The tracked set for one sample: the walk from the app, then whatever a session's Job holds that
-   * the walk missed, then orphans and their subtrees. `sealed` is the part no session Job may take.
+   * the walk missed, then orphans and their subtrees.
    */
-  private classify(raw: RawProcess[], at: number, members: Map<string, number[]> = new Map()): { tracked: Map<string, TrackedProcess>; sealed: Set<string> } {
+  private classify(raw: RawProcess[], at: number, members: Map<string, number[]> = new Map()): Map<string, TrackedProcess> {
     const byKey = new Map(raw.map((p) => [processKey(p), p]));
     const children = childMap(raw);
     const internal = new Set([this.opts.rootPid, ...(this.opts.internalPids?.() ?? [])]);
     if (this.opts.source.helperPid) internal.add(this.opts.source.helperPid);
     const terminals = new Map<number, ProcessOwner>();
-    const ownedTerminals = new Set<number>();
     for (const t of this.opts.terminalRoots?.() ?? []) {
       if (!t.pid) continue;
       terminals.set(t.pid, { sessionId: t.sessionId, terminalId: t.terminalId, label: t.title });
-      if (t.owned) ownedTerminals.add(t.pid);
     }
     const tracked = new Map<string, TrackedProcess>();
     const visited = new Set<string>();
-    const sealed = new Set<string>();
 
     const ownerOf = (p: RawProcess, inherited: ProcessOwner): ProcessOwner => {
       const claim = this.claims.get(p.pid);
@@ -369,14 +359,12 @@ export class ProcessTracker {
       return terminals.get(p.pid) ?? inherited;
     };
     const walk = (start: RawProcess, owner: ProcessOwner, flags: { orphaned?: boolean; previousRun?: boolean }, includeStart: boolean) => {
-      const queue: [RawProcess, ProcessOwner, boolean][] = [[start, owner, false]];
+      const queue: [RawProcess, ProcessOwner][] = [[start, owner]];
       while (queue.length) {
-        const [p, inherited, inSealed] = queue.shift()!;
+        const [p, inherited] = queue.shift()!;
         const key = processKey(p);
         if (visited.has(key)) continue;
         visited.add(key);
-        const isSealed = inSealed || ownedTerminals.has(p.pid);
-        if (isSealed) sealed.add(key);
         let own = inherited;
         if (p !== start || includeStart) {
           if (!internal.has(p.pid)) {
@@ -386,7 +374,7 @@ export class ProcessTracker {
         }
         // Children work for the same session or terminal; a label names only the root that was started.
         const forChildren = own.label === undefined ? own : withoutLabel(own);
-        for (const child of children.get(p.pid) ?? []) if (startedUnder(child, p)) queue.push([child, forChildren, isSealed]);
+        for (const child of children.get(p.pid) ?? []) if (startedUnder(child, p)) queue.push([child, forChildren]);
       }
     };
 
@@ -428,7 +416,7 @@ export class ProcessTracker {
         walk(p, withoutLabel(parent.owner), { orphaned: true }, true);
       }
     }
-    return { tracked, sealed };
+    return tracked;
   }
 
   /** Windows reads command lines separately; each is read once per process and cached. */

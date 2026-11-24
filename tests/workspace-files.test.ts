@@ -8,7 +8,6 @@ import { listWorkspaceFiles, MAX_IMAGE_BYTES, readWorkspaceFile, readWorkspaceIm
 import { FILE_PREVIEW_MAX_BYTES } from '../src/shared/ipc';
 import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import type { SessionMeta } from '../src/shared/types';
-import { missionFixture } from './support/mission-fixture';
 
 const tempDirs: string[] = [];
 
@@ -434,34 +433,13 @@ describe('resolveWorkspaceFile', () => {
     const get = vi.fn(() => ({ id: 'session', cwd: root, config: { projectRoot: sibling } } as SessionMeta));
     const registry = createHandlerRegistry({ sessions: { get }, desktop: {}, runtime: {}, log: vi.fn(), push: vi.fn() } as unknown as HandlerDeps);
     const realpath = vi.spyOn(fs, 'realpath');
-    for (const input of [null, [], {}, { sessionId: 'session', path: 4 }, { sessionId: 'session', path: '../file' }, { sessionId: '../bad', path: 'file' }, { sessionId: 'session', path: 'file', missionWorkspaceId: 4 }, { sessionId: 'session', path: 'file', missionWorkspaceId: '../bad' }, { sessionId: 'session', path: 'file', cwd: sibling }]) {
+    for (const input of [null, [], {}, { sessionId: 'session', path: 4 }, { sessionId: 'session', path: '../file' }, { sessionId: '../bad', path: 'file' }, { sessionId: 'session', path: 'file', cwd: sibling }]) {
       await expect(registry.invoke('fs:resolve', input)).rejects.toThrow();
     }
     expect(realpath).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
     await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'current.md' })).resolves.toEqual({ status: 'resolved', path: 'nested/current.md' });
     await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'project-only.md' })).resolves.toEqual({ status: 'missing' });
-    await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'current.md', missionWorkspaceId: 'unowned' })).rejects.toThrow(/owning Mission lead/);
-    await registry.shutdown();
-  });
-
-  it('resolves Mission leads against integration by default and honors an explicit owned workspace', async () => {
-    const { root, sibling } = workspace();
-    await put(root, 'lead/selected.md');
-    await put(sibling, 'integration/selected.md');
-    const leadPath = await fs.realpath(root);
-    const integrationPath = await fs.realpath(sibling);
-    const session = { id: 'lead', cwd: leadPath, config: { projectRoot: leadPath }, mission: { missionId: 'mission', role: 'lead' } } as SessionMeta;
-    const record = missionFixture({
-      id: 'mission', leadSessionId: 'lead', workspaces: [
-        { id: 'lead-workspace', role: 'lead', path: leadPath, branch: 'mission/lead', ownerSessionId: 'lead', base: { baseCommitSha: 'base', contentHash: 'tree' } },
-        { id: 'integration-workspace', role: 'integration', path: integrationPath, branch: 'mission/integration', base: { baseCommitSha: 'base', contentHash: 'tree' } }
-      ]
-    });
-    const registry = createHandlerRegistry({ sessions: { get: () => session }, missions: { get: () => record }, desktop: {}, runtime: {}, log: vi.fn(), push: vi.fn() } as unknown as HandlerDeps);
-    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md' })).resolves.toEqual({ status: 'resolved', path: 'integration/selected.md' });
-    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md', missionWorkspaceId: 'lead-workspace' })).resolves.toEqual({ status: 'resolved', path: 'lead/selected.md' });
-    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md', missionWorkspaceId: 'unknown' })).rejects.toThrow(/unavailable or cleaned/);
     await registry.shutdown();
   });
 });

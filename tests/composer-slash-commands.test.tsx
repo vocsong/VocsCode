@@ -28,13 +28,13 @@ function complete(textarea: HTMLTextAreaElement, typed: string, keys: string[] =
 }
 
 describe('slash command autocomplete', () => {
-  it('keeps /m and /mo on the existing commands; /mission completes from its own prefix', () => {
+  it('completes /m and /mo to the existing commands and offers no /mission', () => {
     const { container } = render(<Composer session={session} />);
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     expect(complete(textarea, '/m')).toBe('/model ');
     expect(complete(textarea, '/mo')).toBe('/model ');
     expect(complete(textarea, '/mo', ['ArrowDown'])).toBe('/mode ');
     expect(complete(textarea, '/me')).toBe('/merge ');
-    expect(complete(textarea, '/mi')).toBe('/mission ');
+    expect(complete(textarea, '/mi')).toBe('/mi');
   });
 });

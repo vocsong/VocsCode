@@ -24,7 +24,7 @@ availability/sign-in only; **Check for updates** checks CLI versions.
 | Group | Pages |
 | --- | --- |
 | Workspace | General, Appearance, Shortcuts, Terminal, Voice |
-| Agent behavior | Session defaults, Instructions, Mission, Vesta & utility |
+| Agent behavior | Session defaults, Instructions, Vesta & utility |
 | Connections | Vocs account, Providers & keys, Harnesses, Pi, ACP agents |
 | System | Import chats, Remote access, Housekeep, About & doctor |
 

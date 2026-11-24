@@ -277,10 +277,10 @@ describe('remote composer attachments', () => {
     await rtl.waitFor(() => expect(rtl.screen.queryByRole('button', { name: 'Remove todo.md' })).toBeNull());
   });
 
-  it('reuses a Mission file send key after a lost reply, but not after changing the payload', async () => {
-    const fixture = await open({ ...session, mission: { missionId: 'mission', role: 'lead', generation: 1, sourceAccess: 'read_only', requestedTools: [], reasoningDefault: true } });
+  it('retries a refused file send with the same input and no idempotency key', async () => {
+    const fixture = await open();
     const picker = rtl.screen.getByLabelText('Choose files');
-    rtl.fireEvent.change(picker, { target: { files: [file('notes.txt', 'mission')] } });
+    rtl.fireEvent.change(picker, { target: { files: [file('notes.txt', 'notes')] } });
     await rtl.waitFor(() => expect(rtl.screen.getByRole('button', { name: 'Remove notes.txt' })).toBeTruthy());
     fixture.state.sendFails = true;
     rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'Send' }));
@@ -288,9 +288,9 @@ describe('remote composer attachments', () => {
     fixture.state.sendFails = false;
     rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'Send' }));
     await rtl.waitFor(() => expect(fixture.invokes.filter(([channel]) => channel === 'sessions:send')).toHaveLength(2));
-    const [first, second] = fixture.invokes.filter(([channel]) => channel === 'sessions:send').map(([, value]) => value as { idempotencyKey: string; input: unknown });
-    expect(first.idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
-    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+    const [first, second] = fixture.invokes.filter(([channel]) => channel === 'sessions:send').map(([, value]) => value as { idempotencyKey?: string; input: unknown });
+    expect(first).not.toHaveProperty('idempotencyKey');
+    expect(second).not.toHaveProperty('idempotencyKey');
     expect(second.input).toEqual(first.input);
     await rtl.waitFor(() => expect(rtl.screen.queryByRole('button', { name: 'Remove notes.txt' })).toBeNull());
   });

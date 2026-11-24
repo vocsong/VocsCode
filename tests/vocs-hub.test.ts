@@ -526,7 +526,7 @@ describe('session injection', () => {
   }
   const proxied: ResolvedServer = { def: { id: 'vocs-openrouter', transport: 'http', url: 'http://127.0.0.1:1/hub/openrouter', headers: { Authorization: 'Bearer proxy-capability' }, builtin: 'vocs-openrouter' }, missing: [], secretEnvKeys: [], secretHeaderKeys: ['Authorization'] };
 
-  it('is offered to every injecting or client harness while connected, and to no managed Mission run', async () => {
+  it('is offered to every injecting or client harness while connected', async () => {
     const hubServers = vi.fn(async () => [proxied]);
     for (const harness of ['claude', 'codex', 'codex-exec', 'pi', 'antigravity', 'acp', 'native'] as const) {
       const out = await resolveForSession(await scope(harness), { getSecret: async () => undefined, hubServers });
@@ -534,7 +534,6 @@ describe('session injection', () => {
       expect(out[0].secretHeaderKeys).toEqual(['Authorization']);
     }
     expect(await resolveForSession(await scope('cursor'), { getSecret: async () => undefined, hubServers })).toEqual([]);
-    expect(await resolveForSession(await scope('claude', { managed: true }), { getSecret: async () => undefined, hubServers })).toEqual([]);
     const off = await scope('claude');
     off.settings.mcpDisabledBuiltins = [...off.settings.mcpDisabledBuiltins!, 'vocs-openrouter'];
     expect(await resolveForSession(off, { getSecret: async () => undefined, hubServers })).toEqual([]);

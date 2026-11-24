@@ -397,7 +397,7 @@ describe('codex custom provider wiring', () => {
 
   it('disables inherited built-ins without introducing invalid entries for absent ones', async () => {
     const meta = makeMeta();
-    const { ctx } = makeCtx(meta, defaultSettings(), ['gitnexus', 'vocs-mission']);
+    const { ctx } = makeCtx(meta, defaultSettings(), ['gitnexus', 'vocs-openrouter']);
     const child = makeFakeChild();
     mocks.spawnChildren.push(child);
     const server = scriptServer(child).on('config/read', () => ({ config: {
@@ -410,7 +410,7 @@ describe('codex custom provider wiring', () => {
       expect(server.requests.find((r) => r.method === 'config/read')?.params).toEqual({ cwd: meta.cwd });
       const thread = server.requests.find((r) => r.method === 'thread/start');
       expect(thread?.params.config?.mcp_servers).toEqual({
-        gitnexus: { enabled: false }, 'vocs-mission': { enabled: false, command: '' }
+        gitnexus: { enabled: false }, 'vocs-openrouter': { enabled: false, command: '' }
       });
     } finally {
       await adapter.dispose();

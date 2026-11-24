@@ -41,14 +41,12 @@ describe('memory MCP resolver', () => {
     expect(JSON.stringify(display)).not.toContain(token);
   });
 
-  it('fails closed, permits legacy only when opted out, and keeps Mission sessions out of both', async () => {
+  it('fails closed and permits legacy only when opted out', async () => {
     const { scope, deps, attach } = await fixture();
     await mkdir(path.join(scope.projectRoot, '.vocs-code', 'wiki'), { recursive: true });
     expect(await resolveForSession(scope, { ...deps, memoryGateway: () => null })).toEqual([]);
     expect(await resolveForSession({ ...scope, sessionId: undefined }, deps)).toEqual([]);
-    expect(await resolveForSession({ ...scope, managed: true }, deps)).toEqual([]);
     scope.settings.intelligence = { ...resolveIntelligenceSettings(undefined), gateway: false };
-    expect(await resolveForSession({ ...scope, managed: true }, deps)).toEqual([]);
     const out = await resolveForSession(scope, deps);
     expect(out).toHaveLength(1);
     expect(out[0].def.env).toMatchObject({ VOCS_MEMORY_PROJECT_ROOT: scope.projectRoot });

@@ -96,7 +96,7 @@ describe('sidebar navigation', () => {
     await act(async () => {
       fireEvent.click(button);
     });
-    expect(useStore.getState()).toMatchObject({ newSessionOpen: true, newSessionRoot: 'G:/proj/a', newSessionKind: 'normal', quickSessionOpen: false });
+    expect(useStore.getState()).toMatchObject({ newSessionOpen: true, newSessionRoot: 'G:/proj/a', quickSessionOpen: false });
     expect(invokeMock).not.toHaveBeenCalledWith('app:pickFolder', expect.anything());
   });
 
