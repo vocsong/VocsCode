@@ -5,12 +5,16 @@
  * segmented control switches between. Rendered as real component code over a plain props feed, so
  * these assert what the user reads rather than what the stats model returns.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { SessionUsage } from '../src/renderer/src/components/SessionUsage';
+import type { AntigravityQuota } from '../src/shared/harness-setup';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const T = Date.now() - 60_000;
 
@@ -39,8 +43,65 @@ const items: TranscriptItem[] = [
 ];
 
 const detail = (name: 'Turns' | 'Tools' | 'Errors') => screen.getByRole('radio', { name });
+const antigravity = session({ config: { projectRoot: 'G:/repo', harness: 'antigravity', permissionMode: 'ask' } });
+const quota = (): ReturnType<typeof within> => within(screen.getByRole('region', { name: 'Antigravity account quota' }));
+const quotaReply: AntigravityQuota = { groups: [{ name: 'Gemini models', buckets: [
+  { name: 'Gemini Pro', remainingFraction: 0.726, resetAt: '2030-01-01T12:00:00Z' },
+  { name: 'Gemini Flash', remainingFraction: 0 }
+] }] };
 
 describe('Usage panel', () => {
+  it('checks Antigravity account quota only on click and meters it separately from session context', async () => {
+    let finish!: (value: AntigravityQuota) => void;
+    const invoke = vi.fn(() => new Promise<AntigravityQuota>((resolve) => { finish = resolve; }));
+    vi.stubGlobal('harness', { invoke });
+    render(<SessionUsage session={antigravity} />);
+
+    const card = quota();
+    expect(invoke).not.toHaveBeenCalled();
+    expect(card.queryByRole('meter')).toBeNull();
+    const check = card.getByRole('button', { name: 'Check quota' });
+    fireEvent.click(check);
+    fireEvent.click(check);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('harness:antigravityQuota', undefined);
+    expect(card.getByRole('status').textContent).toContain('Checking Antigravity quota');
+
+    finish(quotaReply);
+    expect((await card.findByRole('meter', { name: 'Gemini Pro' })).getAttribute('aria-valuenow')).toBe('73');
+    expect(card.getByRole('meter', { name: 'Gemini Flash' }).getAttribute('aria-valuenow')).toBe('0');
+    expect(card.getByText(/^Resets /)).toBeTruthy();
+    expect(card.getByText('Gemini models')).toBeTruthy();
+    expect(screen.getByRole('meter', { name: 'Context window' }).getAttribute('aria-valuenow')).toBe('90');
+  });
+
+  it('shows a quota check error without inventing percentages and allows a retry', async () => {
+    const invoke = vi.fn().mockRejectedValueOnce(new Error("Error invoking remote method 'harness:antigravityQuota': Error: Sign in with Google first."))
+      .mockResolvedValueOnce(quotaReply);
+    vi.stubGlobal('harness', { invoke });
+    render(<SessionUsage session={antigravity} />);
+
+    const card = quota();
+    fireEvent.click(card.getByRole('button', { name: 'Check quota' }));
+    expect((await card.findByRole('alert')).textContent).toBe('Sign in with Google first.');
+    expect(card.queryByRole('meter')).toBeNull();
+    fireEvent.click(card.getByRole('button', { name: 'Check quota' }));
+    await card.findByRole('meter', { name: 'Gemini Pro' });
+    expect(card.queryByRole('alert')).toBeNull();
+    expect(card.getByRole('button', { name: 'Refresh quota' })).toBeTruthy();
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves other harnesses unchanged and does not offer a quota check to a remote transport', () => {
+    const invoke = vi.fn();
+    vi.stubGlobal('harness', { invoke, can: () => false });
+    const { rerender } = render(<SessionUsage session={session()} />);
+    expect(screen.queryByRole('region', { name: 'Antigravity account quota' })).toBeNull();
+    rerender(<SessionUsage session={antigravity} />);
+    expect(quota().getByText(/available in the desktop app/)).toBeTruthy();
+    expect(quota().queryByRole('button')).toBeNull();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('leads with session spend and the headline counters', () => {
     render(<SessionUsage session={session()} items={items} />);
 

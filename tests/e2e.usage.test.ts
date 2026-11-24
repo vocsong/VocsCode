@@ -1,8 +1,9 @@
 /**
  * Electron end-to-end for the right panel's Usage dashboard. A session, its totals and a transcript
  * carrying turns, tool calls, file changes and failures are seeded on disk, so the whole page is
- * driven through the real UI with no harness and no provider key. Requires `npm run build` first;
- * gated by VOCS_CODE_E2E_UI=1.
+ * driven through the real UI with no harness and no provider key. Antigravity quota is stubbed at
+ * IPC; the test verifies `/usage` never sends a prompt or checks the account on its own.
+ * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -45,7 +46,7 @@ function transcript(): TranscriptItem[] {
 }
 
 describe.runIf(enabled)('electron e2e: usage dashboard', () => {
-  it('shows spend, counters, meters and all three detail views for a seeded session', async () => {
+  it('opens with /usage and shows session metrics separately from on-demand Antigravity quota', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-usage-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -58,7 +59,7 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
       title: 'Usage dashboard',
       createdAt: T,
       updatedAt: T,
-      config: { harness: 'native', projectRoot: project, permissionMode: 'ask', maxBudgetUsd: 1.5 },
+      config: { harness: 'antigravity', projectRoot: project, permissionMode: 'ask', maxBudgetUsd: 1.5 },
       cwd: project,
       status: 'idle',
       harnessRef: {},
@@ -78,6 +79,21 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const win: Page = await app.firstWindow();
     await win.waitForSelector('.brand', { timeout: 60_000 });
     await expectQuietWindow(app);
+    await app.evaluate(({ ipcMain }) => {
+      const calls = { quota: 0, prompts: 0 };
+      Reflect.set(globalThis, '__vocsUsageCalls', calls);
+      ipcMain.removeHandler('sessions:send');
+      ipcMain.handle('sessions:send', () => { calls.prompts++; throw new Error('Usage must not send a prompt'); });
+      ipcMain.removeHandler('harness:antigravityQuota');
+      ipcMain.handle('harness:antigravityQuota', () => {
+        calls.quota++;
+        return { groups: [{ name: 'Gemini models', buckets: [
+          { name: 'Gemini Pro', remainingFraction: 0.726, resetAt: '2030-01-01T12:00:00Z' },
+          { name: 'Gemini Flash', remainingFraction: 0.16 }
+        ] }] };
+      });
+    });
+    const vendorCalls = () => app!.evaluate(() => Reflect.get(globalThis, '__vocsUsageCalls'));
     const wideViewport = { width: 1440, height: 900 };
     await win.setViewportSize(wideViewport);
 
@@ -124,10 +140,23 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     expect(await meter.getAttribute('aria-expanded')).toBe('false');
 
     await win.setViewportSize(wideViewport);
-    await meter.click();
+    const prompt = composer.locator('textarea');
+    await prompt.fill('/usage');
+    await prompt.press('Enter');
     await panel.waitFor({ timeout: 10_000 });
+    expect(await vendorCalls()).toEqual({ quota: 0, prompts: 0 });
+    expect(await prompt.inputValue()).toBe('');
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'usage-00-summary.png') });
+
+    const quota = panel.getByRole('region', { name: 'Antigravity account quota', exact: true });
+    await quota.getByRole('button', { name: 'Check quota', exact: true }).click();
+    const pro = quota.getByRole('meter', { name: 'Gemini Pro', exact: true });
+    expect(await pro.getAttribute('aria-valuenow')).toBe('73');
+    expect(await quota.getByRole('meter', { name: 'Gemini Flash' }).getAttribute('aria-valuenow')).toBe('16');
+    expect(await quota.getByText(/^Resets /).innerText()).toBeTruthy();
+    expect(await vendorCalls()).toEqual({ quota: 1, prompts: 0 });
+    await win.screenshot({ path: path.join(shots, 'usage-00-account-quota.png') });
 
     // Summary block: spend, and counters the page derives from the transcript rather than the totals.
     expect(await win.locator('.usage-hero-value').innerText()).toBe('$0.75');
@@ -177,6 +206,17 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const body = await win.locator('.panel-section.panel-top .panel-body').boundingBox();
     const content = await panel.boundingBox();
     expect(content!.height).toBeGreaterThan(body!.height * 0.9);
+
+    // The same shortcut peeks open the Zen drawer and the quota result survives the layout switch.
+    await win.locator('.menubar').getByRole('button', { name: 'View', exact: true }).click();
+    await win.locator('.menubar-panel').getByRole('button', { name: 'Zen interface', exact: true }).click();
+    await win.locator('html[data-ui="zen"]').waitFor();
+    await prompt.fill('/usage');
+    await prompt.press('Enter');
+    await quota.getByRole('button', { name: 'Refresh quota', exact: true }).hover();
+    expect(await pro.getAttribute('aria-valuenow')).toBe('73');
+    expect(await vendorCalls()).toEqual({ quota: 1, prompts: 0 });
+    await win.screenshot({ path: path.join(shots, 'usage-00-account-quota-zen.png'), animations: 'disabled' });
   }, 180_000);
 });
 
