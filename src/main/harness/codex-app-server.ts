@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { EffortLevel, FileChange, ModelInfo, ModelRef, OngoingItem, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
 import { fastModeSupport } from '../../shared/fast-mode';
 import { assertEndpointUrl } from '../../shared/endpoint-policy';
@@ -135,6 +135,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   /** This cwd's enabled skills, from `skills/list`; empty until it answers. */
   private skills: CodexSkill[] = [];
   private compactionWaiter: Deferred<void> | null = null;
+  /** Live child subagent threads observed on this shared app-server connection. */
+  private childThreads = new Map<string, { threadId: string; label: string; startedAt: number }>();
+  /** Most recent parent-thread subagent tool label, used to name child threads that carry no title. */
+  private lastSubagentLabel: string | undefined;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
@@ -189,6 +193,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.rpc.onClose = (code) => {
         this.compactionWaiter?.reject(new Error(`Codex stopped during context compaction (${code}).`));
         this._busy = false;
+        this.clearChildThreads();
         this.ctx.emit({ type: 'status', status: 'stopped', detail: `codex app-server exited (${code})` });
       };
       this.wireNotifications(this.rpc);
@@ -313,8 +318,24 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: `Codex selected service tier: ${this.serviceTier}` } });
       }
     });
-    onThreadNotification('turn/started', (p) => {
-      const n = p as { turn: { id: string } };
+    rpc.onNotification('thread/closed', (p) => {
+      const n = p as { threadId?: string };
+      if (n.threadId && this.childThreads.delete(n.threadId)) this.emitChildThreads();
+    });
+    rpc.onNotification('turn/started', (p) => {
+      const n = p as { threadId?: string; turn: { id: string } };
+      if (!this.threadId) return;
+      if (n.threadId !== this.threadId) {
+        if (n.threadId && !this.childThreads.has(n.threadId)) {
+          this.childThreads.set(n.threadId, {
+            threadId: n.threadId,
+            label: this.lastSubagentLabel || 'Codex subagent',
+            startedAt: Date.now()
+          });
+          this.emitChildThreads();
+        }
+        return;
+      }
       this.turnId = n.turn.id;
       this._busy = true;
       if (!this.turnStartedAt) this.usage.beginTurn();
@@ -382,8 +403,13 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, outputDelta: n.delta });
       }
     });
-    onThreadNotification('turn/completed', (p) => {
-      const n = p as { turn: { id: string; status: 'completed' | 'interrupted' | 'failed' | 'inProgress'; error: { message: string } | null; durationMs: number | null } };
+    rpc.onNotification('turn/completed', (p) => {
+      const n = p as { threadId?: string; turn: { id: string; status: 'completed' | 'interrupted' | 'failed' | 'inProgress'; error: { message: string } | null; durationMs: number | null } };
+      if (!this.threadId) return;
+      if (n.threadId !== this.threadId) {
+        if (n.threadId && this.childThreads.delete(n.threadId)) this.emitChildThreads();
+        return;
+      }
       this._busy = false;
       this.turnId = null;
       for (const item of this.items.values()) if (item.kind === 'assistant' && item.streaming) this.ctx.emit({ type: 'item.upsert', item: { ...item, streaming: false } });
@@ -702,8 +728,16 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         break;
       case 'subAgentActivity':
       case 'collabAgentToolCall': {
-        const it = item as { id: string; tool?: string; [k: string]: unknown };
-        out = { id: it.id, kind: 'tool', ts, name: typeof it.tool === 'string' ? `agent.${it.tool}` : 'subagent', hint: 'agent', input: it, summary: 'Sub-agent activity', status: completed ? 'done' : 'running' };
+        const it = item as { id: string; tool?: string; prompt?: string; description?: string; [k: string]: unknown };
+        const label = typeof it.description === 'string' && it.description.trim()
+          ? it.description.trim()
+          : typeof it.prompt === 'string' && it.prompt.trim()
+            ? truncate(it.prompt.trim(), 80, '…')
+            : typeof it.tool === 'string'
+              ? `agent.${it.tool}`
+              : 'Codex subagent';
+        if (!completed) this.lastSubagentLabel = label;
+        out = { id: it.id, kind: 'tool', ts, name: typeof it.tool === 'string' ? `agent.${it.tool}` : 'subagent', hint: 'agent', input: it, summary: label, status: completed ? 'done' : 'running' };
         break;
       }
       case 'enteredReviewMode':
@@ -902,8 +936,28 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
   }
 
+  private emitChildThreads(): void {
+    const items: OngoingItem[] = [...this.childThreads.values()].map((t) => ({
+      id: `thread:${t.threadId}`,
+      kind: 'subagent',
+      label: t.label,
+      agent: 'Subagent',
+      startedAt: t.startedAt,
+      canStop: false
+    }));
+    this.ctx.emit({ type: 'ongoing', source: 'threads', items });
+  }
+
+  private clearChildThreads(): void {
+    if (!this.childThreads.size) return;
+    this.childThreads.clear();
+    this.lastSubagentLabel = undefined;
+    this.ctx.emit({ type: 'ongoing', source: 'threads', items: [] });
+  }
+
   async dispose(): Promise<void> {
     this.compactionWaiter?.reject(new Error('Codex stopped during context compaction.'));
+    this.clearChildThreads();
     const rpc = this.rpc;
     this.rpc = null;
     if (!rpc) return;

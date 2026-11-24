@@ -419,6 +419,125 @@
   font-size: 12px;
   padding: 4px 0;
 }
+.header-ongoing-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--blue) 30%, transparent);
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 120ms ease;
+}
+.header-ongoing-pill:hover {
+  background: color-mix(in srgb, var(--blue) 22%, transparent);
+}
+.ongoing-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ongoing-strip {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle, var(--bg-elev));
+  font-size: 12px;
+  overflow: hidden;
+}
+.ongoing-strip.ongoing-autonomous {
+  border-color: color-mix(in srgb, var(--blue) 32%, var(--border));
+  background: color-mix(in srgb, var(--blue-soft) 55%, var(--bg-elev));
+}
+.ongoing-strip.ongoing-processes {
+  border-color: var(--border);
+  background: var(--bg-elev);
+}
+.ongoing-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  min-height: 30px;
+  color: var(--fg);
+}
+.ongoing-toggle,
+.ongoing-toggle-inline {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.ongoing-toggle {
+  width: 100%;
+}
+.ongoing-toggle-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+}
+.ongoing-headline {
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ongoing-autonomous .ongoing-headline {
+  color: var(--blue);
+}
+.ongoing-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.ongoing-agent {
+  font-weight: 600;
+  color: var(--fg-muted);
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.ongoing-row-name {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+.ongoing-meta,
+.ongoing-hint {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ongoing-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 10px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  padding-top: 6px;
+}
+.ongoing-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--fg);
+}
+.ongoing-row > .icon {
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
 .jump-bottom {
   position: absolute;
   z-index: 2;

@@ -67,6 +67,7 @@ export class SessionStore {
         reset++;
       }
       s.queued = 0;
+      delete s.ongoing;
       // A previous process's tier observation is never evidence for a resumed request.
       if (s.fastModeStatus || s.config?.fastMode === true) s.fastModeStatus = { state: s.config?.fastMode === true ? 'requested' : 'off' };
     }
@@ -110,7 +111,7 @@ export class SessionStore {
           await writeText(path.join(dir, 'fork-context.md'), context);
           // Do not expose the new metadata to concurrent snapshots until its index write succeeds.
           const publish = this.writeQueue.then(async () => {
-            await writeJson(this.indexFile, structuredClone([meta, ...this.sessions]));
+            await writeJson(this.indexFile, this.persistedSnapshot([meta, ...this.sessions]));
             this.sessions.unshift(meta);
           });
           this.writeQueue = publish.catch(() => undefined);
@@ -194,13 +195,22 @@ export class SessionStore {
     return next;
   }
 
+  /** Strip ephemeral live fields (such as `ongoing`) before persisting `sessions.json`. */
+  private persistedSnapshot(list: readonly SessionMeta[]): SessionMeta[] {
+    return list.map((s) => {
+      if (!s.ongoing) return structuredClone(s);
+      const { ongoing: _ongoing, ...rest } = s;
+      return structuredClone(rest);
+    });
+  }
+
   private flushIndex(): Promise<void> {
     // Synchronous bursts and updates during a write share the next snapshot's promise.
     if (this.pendingIndexWrite) return this.pendingIndexWrite;
     const run = this.writeQueue.then(() => {
       this.pendingIndexWrite = null;
       // writeJson serializes after asynchronous filesystem work; detach nested mutable meta now.
-      return writeJson(this.indexFile, structuredClone(this.sessions));
+      return writeJson(this.indexFile, this.persistedSnapshot(this.sessions));
     });
     this.pendingIndexWrite = run;
     // Reject this generation's callers visibly, without blocking queued or future generations.

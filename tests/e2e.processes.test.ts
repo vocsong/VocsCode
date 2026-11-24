@@ -135,12 +135,17 @@ describe.runIf(enabled)('electron e2e: processes', () => {
     const detachedRow = sessionGroup.locator(`[data-testid="process-row"][title*="${marker}"]`);
     await detachedRow.waitFor({ timeout: 30_000 });
     expect(await detachedRow.getByTestId('process-detached').innerText()).toBe('detached');
+    // The idle transcript surfaces the detached session process inline so it cannot go unnoticed.
+    const ongoingProcs = win.getByTestId('ongoing-processes');
+    await ongoingProcs.waitFor({ timeout: 30_000 });
+    expect(await ongoingProcs.innerText()).toContain('detached');
     expect(await win.getByTestId('process-group-orphaned').locator(`[title*="${marker}"]`).count(), 'not left behind: it is the session\'s').toBe(0);
     detached = Number(await detachedRow.getAttribute('data-pid'));
     expect(alive(detached)).toBe(true);
     await detachedRow.getByTestId('process-end').click();
     await expect.poll(() => alive(detached!), { timeout: 20_000 }).toBe(false);
     await expect.poll(async () => detachedRow.count(), { timeout: 20_000 }).toBe(0);
+    await expect.poll(async () => ongoingProcs.count(), { timeout: 20_000 }).toBe(0);
 
     // Ending the row ends the real shell, and the row goes with it.
     await shellRow.getByTestId('process-end').click();
