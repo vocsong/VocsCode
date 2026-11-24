@@ -1393,5 +1393,13 @@ describe('sessions:switchHarness IPC handler', () => {
       model: { provider: 'antigravity', model: 'gemini-3-pro' },
       acpAgent: undefined
     });
+
+    const discardPendingHandoff = vi.fn(async (id: string) => ({ ...updated, id, pendingForkContext: undefined }));
+    (deps.sessions as unknown as { discardPendingHandoff: typeof discardPendingHandoff }).discardPendingHandoff = discardPendingHandoff;
+    await expect(registry.invoke('sessions:discardHandoff', { id: '../escape' })).rejects.toThrow();
+    await expect(registry.invoke('sessions:discardHandoff', { id: 's_missing' })).rejects.toThrow(/Session not found/);
+    await expect(registry.invoke('sessions:discardHandoff', { id: 's_test', extra: true })).rejects.toThrow();
+    await registry.invoke('sessions:discardHandoff', { id: 's_test' });
+    expect(discardPendingHandoff).toHaveBeenCalledExactlyOnceWith('s_test');
   });
 });

@@ -184,6 +184,7 @@ interface ActiveSession {
   startupDispatched: boolean;
   tearingDown: boolean;
   uncertain: boolean;
+  disposalFailed?: boolean;
   disposal: Promise<void> | null;
   nativeChildren: Map<string, { startedAt: number; running: boolean }>;
   /** Persisted ordinary writer claim owned by this exact runtime, not earlier launches. */
@@ -2087,8 +2088,11 @@ export class SessionManager {
         .then(() => active.adapter.dispose())
         .then(() => {
           const writers = active.adapter.workspaceWriterState?.();
-          return writers === undefined || writers === 'quiescent';
+          const quiescent = writers === undefined || writers === 'quiescent';
+          if (!quiescent) active.disposalFailed = true;
+          return quiescent;
         }, (e) => {
+          active.disposalFailed = true;
           this.deps.log('warn', `[${id}] dispose failed: ${errorMessage(e)}`);
           return false;
         })
@@ -3127,7 +3131,15 @@ export class SessionManager {
     if (!HARNESS_BY_ID[harness]) throw new Error('Unknown harness');
     if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
     const settings = this.settings();
-    const targetAcpAgent = harness === 'acp' ? (opts.acpAgent ?? settings.acpAgents[0]?.id) : undefined;
+    let targetAcpAgent: string | undefined;
+    if (harness === 'acp') {
+      const requested = opts.acpAgent ?? settings.acpAgents[0]?.id;
+      const preset = requested ? settings.acpAgents.find((a) => a.id === requested) : undefined;
+      if (!preset) {
+        throw new Error(opts.acpAgent ? `Unknown ACP agent preset: ${opts.acpAgent}` : 'No ACP agent preset configured.');
+      }
+      targetAcpAgent = preset.id;
+    }
     if (meta.config.harness === harness && (harness !== 'acp' || targetAcpAgent === meta.config.acpAgent)) {
       if (opts.model && (!meta.activeModel || meta.activeModel.provider !== opts.model.provider || meta.activeModel.model !== opts.model.model)) {
         return this.setModel(id, opts.model);
@@ -3166,9 +3178,12 @@ export class SessionManager {
     const { id } = meta;
     // Fence even a previously stopped runtime: ordinary Stop alone permits late callbacks.
     this.runtimeSeq.set(id, (this.runtimeSeq.get(id) ?? 0) + 1);
+    const priorActive = this.active.get(id);
     await this.stopOrdinary(id);
     const activity = this.activity(id);
-    if (activity.tearingDown || activity.uncertain) throw new Error('Previous runtime disposal is unproven; wait for it to stop before switching harnesses.');
+    if (activity.tearingDown || activity.uncertain || priorActive?.disposalFailed) {
+      throw new Error('Previous runtime disposal did not complete cleanly; wait for it to stop before switching harnesses.');
+    }
 
     const fromHarness = meta.config.harness;
     const items = await this.deps.store.readTranscript(id);
@@ -3221,14 +3236,47 @@ export class SessionManager {
     this.deps.analytics.touchSession(meta);
     this.pushSessions();
     const fromName = HARNESS_BY_ID[fromHarness].name;
-    const toName = HARNESS_BY_ID[harness].name;
+    const acpPreset = harness === 'acp' && targetAcpAgent ? this.settings().acpAgents.find((a) => a.id === targetAcpAgent) : undefined;
+    const toName = acpPreset ? `${HARNESS_BY_ID[harness].name} (${acpPreset.name})` : HARNESS_BY_ID[harness].name;
     const parts = [`Switched harness from ${fromName} to ${toName} in the same workspace.`];
-    if (hasConversation) parts.push('The conversation above will be handed over as context on your next message.');
+    if (hasConversation) parts.push('The conversation above will be handed over as context on your next message unless you choose to continue without prior chat.');
     if (permissionClamped) parts.push(`Permission mode tightened to ${nextPermission}.`);
     if (goalPaused) parts.push('Active goal paused (Antigravity requires direct user prompts).');
     this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: parts.join(' ') } });
-    this.deps.log('info', `[${id}] harness switched ${fromHarness} → ${harness} (model=${describeModel(meta.activeModel)} permissions=${meta.config.permissionMode} cwd=${meta.cwd}${hasConversation ? '; handoff queued' : ''})`);
+    this.deps.log('info', `[${id}] harness switched ${fromHarness} → ${harness}${targetAcpAgent ? `:${targetAcpAgent}` : ''} (model=${describeModel(meta.activeModel)} permissions=${meta.config.permissionMode} cwd=${meta.cwd}${hasConversation ? '; handoff queued' : ''})`);
     return meta;
+  }
+
+  /** Clears a pending cross-harness/fork conversation handoff while keeping the workspace and local transcript. */
+  async discardPendingHandoff(id: string): Promise<SessionMeta> {
+    return this.withoutControlled(id, async () => {
+      this.assertUnmanaged(id);
+      const meta = this.get(id);
+      if (!meta) throw new Error('Session not found');
+      if (!meta.pendingForkContext) return meta;
+      await this.deps.store.commitSessionPatch(meta, {
+        pendingForkContext: undefined,
+        pendingForkContextAlternate: undefined,
+        updatedAt: Date.now()
+      });
+      await Promise.all([
+        this.deps.store.deleteBlob?.(id, FORK_CONTEXT_FILE).catch(() => undefined),
+        this.deps.store.deleteBlob?.(id, ALTERNATE_FORK_CONTEXT_FILE).catch(() => undefined)
+      ]);
+      this.pushSessions();
+      this.emit(id, {
+        type: 'item.upsert',
+        item: {
+          id: shortId('i_'),
+          kind: 'info',
+          ts: Date.now(),
+          level: 'info',
+          text: 'Continuing without sending prior chat context. Your workspace and local transcript are unchanged.'
+        }
+      });
+      this.deps.log('info', `[${id}] pending conversation handoff discarded by user`);
+      return meta;
+    });
   }
 
   private async moveUncontrolled(id: string, cwd: string): Promise<SessionMeta> {

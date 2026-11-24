@@ -1,12 +1,15 @@
 /** "Switch harness": changes a session's harness in place, keeping its workspace, worktree, and transcript. */
-import type { ReactNode } from 'react';
-import type { HarnessId, SessionMeta } from '../../../shared/types';
+import { useState, type ReactNode } from 'react';
+import type { AcpAgentPreset, HarnessId, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID, HARNESSES } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { harnessShort } from '../format';
 import { useStore } from '../store';
 import { MISSION_MANAGED_REASON } from '../missions';
+import { AcpPresetMenuList } from './AcpPresetSelect';
 import { Dropdown, Icon, MenuItem } from './ui';
+
+const NO_ACP_PRESETS: AcpAgentPreset[] = [];
 
 export function isSessionBusyForSwitch(session: SessionMeta): boolean {
   return session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
@@ -23,13 +26,16 @@ export function switchSessionHarness(
   session: SessionMeta,
   harness: HarnessId,
   toast: (text: string, tone?: 'info' | 'success' | 'error') => void,
-  onSwitched?: (updated: SessionMeta) => void
+  onSwitched?: (updated: SessionMeta) => void,
+  acpAgent?: string
 ): void {
-  if (harness === session.config.harness) return;
-  void invoke('sessions:switchHarness', { id: session.id, harness })
+  if (harness === session.config.harness && (harness !== 'acp' || !acpAgent || acpAgent === session.config.acpAgent)) return;
+  void invoke('sessions:switchHarness', { id: session.id, harness, ...(harness === 'acp' && acpAgent ? { acpAgent } : {}) })
     .then((updated) => {
       if (updated) {
-        toast(`Switched to ${harnessShort(updated.config.harness)} in the same workspace`, 'success');
+        const preset = harness === 'acp' && acpAgent ? useStore.getState().settings?.acpAgents.find((a) => a.id === acpAgent)?.name : undefined;
+        const label = preset ? `${harnessShort(updated.config.harness)} (${preset})` : harnessShort(updated.config.harness);
+        toast(`Switched to ${label} in the same workspace`, 'success');
         onSwitched?.(updated);
       }
     })
@@ -51,9 +57,30 @@ export function SwitchHarnessOptions({
   const availability = useStore((s) => s.availability);
   const availabilityError = useStore((s) => s.availabilityError);
   const refreshAvailability = useStore((s) => s.refreshAvailability);
+  const acpAgents = useStore((s) => s.settings?.acpAgents ?? NO_ACP_PRESETS);
   const toast = useStore((s) => s.toast);
+  const [pickingAcp, setPickingAcp] = useState(false);
   const h = HARNESS_BY_ID[session.config.harness];
   const reason = switchHarnessDisabledReason(session);
+
+  if (pickingAcp) {
+    return (
+      <>
+        <button type="button" className="menu-item model-menu-back" aria-label="Back to harnesses" onClick={() => setPickingAcp(false)}>
+          <Icon name="arrowLeft" size={13} /> <span className="menu-item-label">ACP agent</span>
+        </button>
+        <AcpPresetMenuList
+          presets={acpAgents}
+          currentId={session.config.harness === 'acp' ? session.config.acpAgent : undefined}
+          disabled={!!reason}
+          onSelect={(preset) => {
+            close();
+            switchSessionHarness(session, 'acp', toast, onSwitched, preset.id);
+          }}
+        />
+      </>
+    );
+  }
 
   return (
     <>
@@ -68,13 +95,29 @@ export function SwitchHarnessOptions({
         const av = availability[x.id];
         const unavailable = !!av && !av.available;
         const current = x.id === session.config.harness;
+        const isAcp = x.id === 'acp';
+        const noAcpPresets = isAcp && acpAgents.length === 0;
+        const currentAcpName = current && isAcp ? acpAgents.find((a) => a.id === session.config.acpAgent)?.name : undefined;
         return (
           <MenuItem
             key={x.id}
             active={current}
-            disabled={!!reason || unavailable || !!availabilityError}
-            hint={current ? 'Current' : unavailable ? 'Not installed' : undefined}
+            disabled={!!reason || unavailable || noAcpPresets || !!availabilityError}
+            hint={
+              current
+                ? currentAcpName ? `Current · ${currentAcpName}` : 'Current'
+                : unavailable
+                  ? 'Not installed'
+                  : noAcpPresets
+                    ? 'No preset'
+                    : undefined
+            }
+            trailing={isAcp && !noAcpPresets ? <Icon name="chevronRight" size={13} /> : undefined}
             onClick={() => {
+              if (isAcp) {
+                setPickingAcp(true);
+                return;
+              }
               close();
               if (!current) switchSessionHarness(session, x.id, toast, onSwitched);
             }}
@@ -125,6 +168,7 @@ export function SwitchHarnessItems({ session, onSwitched, close }: { session: Se
   const availability = useStore((s) => s.availability);
   const availabilityError = useStore((s) => s.availabilityError);
   const refreshAvailability = useStore((s) => s.refreshAvailability);
+  const acpAgents = useStore((s) => s.settings?.acpAgents ?? NO_ACP_PRESETS);
   const toast = useStore((s) => s.toast);
   const reason = switchHarnessDisabledReason(session);
   if (session.mission) return <MenuItem disabled hint={MISSION_MANAGED_REASON}>Switch harness unavailable for Mission</MenuItem>;
@@ -137,10 +181,28 @@ export function SwitchHarnessItems({ session, onSwitched, close }: { session: Se
           Could not check harnesses — retry
         </MenuItem>
       )}
-      {HARNESSES.filter((h) => h.id !== session.config.harness).map((h) => {
+      {HARNESSES.flatMap((h) => {
         const av = availability[h.id];
         const unavailable = !!av && !av.available;
-        return (
+        if (h.id === 'acp') {
+          return acpAgents
+            .filter((preset) => !(session.config.harness === 'acp' && session.config.acpAgent === preset.id))
+            .map((preset) => (
+              <MenuItem
+                key={`acp:${preset.id}`}
+                disabled={!!reason || unavailable || !!availabilityError}
+                hint={reason ? undefined : unavailable ? 'Not installed' : undefined}
+                onClick={() => {
+                  close();
+                  switchSessionHarness(session, 'acp', toast, onSwitched, preset.id);
+                }}
+              >
+                {`${harnessShort('acp')} · ${preset.name}`}
+              </MenuItem>
+            ));
+        }
+        if (h.id === session.config.harness) return [];
+        return [(
           <MenuItem
             key={h.id}
             disabled={!!reason || unavailable || !!availabilityError}
@@ -152,7 +214,7 @@ export function SwitchHarnessItems({ session, onSwitched, close }: { session: Se
           >
             {harnessShort(h.id)}
           </MenuItem>
-        );
+        )];
       })}
     </>
   );

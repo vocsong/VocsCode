@@ -11,6 +11,7 @@ import { FileAttachmentChips, readAttachments } from '../attachments';
 import { rememberEffort, rememberWithoutEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
+import { AcpPresetSelect } from './AcpPresetSelect';
 import { ModelPicker } from './ModelPicker';
 import { FolderPicker } from './FolderPicker';
 import { folderChoices } from '../folderChoices';
@@ -414,16 +415,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             </>
           )}
           {harness === 'acp' && (
-            <Field label="ACP agent">
-              <select value={acpAgent} onChange={(e) => setAcpAgent(e.target.value)}>
-                {settings.acpAgents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-              <span className="field-hint">{settings.acpAgents.find((a) => a.id === acpAgent)?.description}</span>
-            </Field>
+            <AcpPresetSelect presets={settings.acpAgents} value={acpAgent} onChange={setAcpAgent} />
           )}
         </section>
 

@@ -3904,7 +3904,8 @@ h4 {
 }
 .pane .composer-hint,
 .pane .attachments,
-.pane .composer-warn {
+.pane .composer-warn,
+.pane .composer-handoff {
   max-width: var(--conversation-width);
 }
 .dictation {
@@ -4048,8 +4049,23 @@ h4 {
   font-size: 12px;
   line-height: 1.4;
 }
-.composer-warn svg {
+.composer-warn svg,
+.composer-handoff svg {
   flex: none;
+}
+.composer-handoff {
+  max-width: 920px;
+  margin: 0 auto 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 .override-row {
   padding: 4px 0;

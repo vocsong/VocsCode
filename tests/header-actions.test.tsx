@@ -14,6 +14,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Header } from '../src/renderer/src/components/Header';
+import { Composer } from '../src/renderer/src/components/Composer';
 import { SessionControls } from '../src/renderer/src/components/SessionControls';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { rememberEffort, setSessionEffort } from '../src/renderer/src/sessionActions';
@@ -382,5 +383,40 @@ describe('composer run controls', () => {
     fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
     const harnessGroup = within(screen.getByRole('group', { name: 'Harness' }));
     expect((harnessGroup.getByRole('menuitem', { name: /Switch harness/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('drills into ACP presets when switching to ACP and sends the selected acpAgent id', () => {
+    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    act(() => {
+      useStore.setState({
+        settings: {
+          acpAgents: [
+            { id: 'dsh', name: 'DeepSeek Harness', description: 'DeepSeek ACP', command: 'dsh', args: [] },
+            { id: 'gemini-cli', name: 'Gemini CLI', description: 'Gemini ACP', command: 'gemini', args: [] }
+          ]
+        } as never
+      });
+    });
+    fireEvent.click(container.querySelector('[aria-label="Switch harness"]') as HTMLElement);
+    fireEvent.click(screen.getByRole('menuitem', { name: /^ACP/ }));
+    expect(screen.getByRole('button', { name: 'Back to harnesses' })).toBeTruthy();
+    invokeMock.mockResolvedValueOnce(session('s_h', { config: { harness: 'acp', acpAgent: 'gemini-cli', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Gemini CLI/ }));
+    expect(invokeMock).toHaveBeenCalledWith('sessions:switchHarness', { id: 's_h', harness: 'acp', acpAgent: 'gemini-cli' });
+  });
+
+  it('shows the receiving harness handoff banner in the composer and lets the user continue without prior chat', async () => {
+    reset();
+    const s = session('s_h', {
+      config: { harness: 'antigravity', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'],
+      pendingForkContext: true
+    });
+    useStore.setState({ sessions: [s], layout: { panes: [{ id: 'p1', sessionId: 's_h' }], activePaneId: 'p1', split: null } as never });
+    render(<Composer session={s} />);
+    const banner = screen.getByTestId('composer-handoff-banner');
+    expect(banner.textContent).toContain('Google Antigravity');
+    expect(banner.textContent).toContain('prior chat context');
+    fireEvent.click(within(banner).getByRole('button', { name: 'Continue without prior chat' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:discardHandoff', { id: 's_h' }));
   });
 });

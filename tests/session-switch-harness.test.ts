@@ -77,7 +77,7 @@ afterEach(async () => {
   }
 });
 
-async function rig(userData?: string) {
+async function rig(userData?: string, opts: { disposeWaitMs?: number } = {}) {
   const dir = userData ?? await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-switch-harness-'));
   if (!userData) tempDirs.push(dir);
   const store = new SessionStore(dir);
@@ -101,7 +101,8 @@ async function rig(userData?: string) {
     pushSessions: (list) => pushed.push(list),
     notify: () => undefined,
     log: () => undefined,
-    appInstructions: async () => 'Always keep tests green.'
+    appInstructions: async () => 'Always keep tests green.',
+    ...(opts.disposeWaitMs !== undefined ? { disposeWaitMs: opts.disposeWaitMs } : {})
   });
   cleanups.push(async () => {
     await manager.stopAll();
@@ -449,5 +450,82 @@ describe('SessionManager.switchHarness', () => {
     expect(adapterState.created[0]!.id).toBe('antigravity');
     expect(adapterState.created[0]!.sent[0]!.text).toContain('built the parser');
     expect(adapterState.created[0]!.sent[0]!.text.endsWith('now add unit tests')).toBe(true);
+  });
+
+  it('keeps the old harness selected when previous runtime disposal times out or rejects', async () => {
+    const { dir, manager } = await rig(undefined, { disposeWaitMs: 30 });
+    const s1 = await manager.create({ config: { harness: 'claude', projectRoot: '/repo', permissionMode: 'ask' } });
+    await manager.send(s1.id, { text: 'turn 1' });
+    const slowDispose = deferred<void>();
+    adapterState.created[0]!.beforeDispose = () => slowDispose.promise;
+
+    await expect(manager.switchHarness(s1.id, 'antigravity')).rejects.toThrow(/disposal did not complete cleanly/);
+    expect(manager.get(s1.id)!.config.harness).toBe('claude');
+    const onDisk1 = new SessionStore(dir);
+    await onDisk1.load();
+    expect(onDisk1.get(s1.id)!.config.harness).toBe('claude');
+
+    // Once the hung disposal finally settles, a retry succeeds cleanly.
+    slowDispose.resolve();
+    await new Promise((r) => setTimeout(r, 20));
+    const recovered = await manager.switchHarness(s1.id, 'antigravity');
+    expect(recovered.config.harness).toBe('antigravity');
+
+    // A rejecting dispose() also fails closed and keeps the previous harness selected.
+    const s2 = await manager.create({ config: { harness: 'claude', projectRoot: '/repo', permissionMode: 'ask' } });
+    await manager.send(s2.id, { text: 'turn 2' });
+    adapterState.created.at(-1)!.beforeDispose = async () => { throw new Error('EPERM kill failed'); };
+    await expect(manager.switchHarness(s2.id, 'native')).rejects.toThrow(/disposal did not complete cleanly/);
+    expect(manager.get(s2.id)!.config.harness).toBe('claude');
+    const onDisk2 = new SessionStore(dir);
+    await onDisk2.load();
+    expect(onDisk2.get(s2.id)!.config.harness).toBe('claude');
+  });
+
+  it('allows discarding a pending handoff so the next message sends without prior chat context across restart', async () => {
+    const first = await rig();
+    const s = await first.manager.create({ config: { harness: 'claude', projectRoot: '/repo', permissionMode: 'ask' } });
+    await first.manager.send(s.id, { text: 'secret earlier prompt' });
+    await first.manager.switchHarness(s.id, 'native');
+    expect(first.manager.get(s.id)!.pendingForkContext).toBe(true);
+
+    const discarded = await first.manager.discardPendingHandoff(s.id);
+    expect(discarded.pendingForkContext).toBeUndefined();
+    expect(discarded.pendingForkContextAlternate).toBeUndefined();
+    // Transcript stays intact locally and notes the choice.
+    const items = await first.store.readTranscript(s.id);
+    expect(items.some((i) => i.kind === 'user' && i.text === 'secret earlier prompt')).toBe(true);
+    expect(items.some((i) => i.kind === 'info' && i.text.includes('Continuing without sending prior chat context'))).toBe(true);
+
+    // Cold restart keeps pendingForkContext cleared and sends no handoff text.
+    adapterState.created.length = 0;
+    const second = await rig(first.dir);
+    expect(second.manager.get(s.id)!.pendingForkContext).toBeUndefined();
+    await second.manager.send(s.id, { text: 'fresh prompt' });
+    expect(adapterState.created).toHaveLength(1);
+    expect(adapterState.created[0]!.sent[0]!.text).toBe('fresh prompt');
+  });
+
+  it('validates ACP agent presets and allows switching between configured presets', async () => {
+    const { manager, settings } = await rig();
+    settings.acpAgents = [
+      { id: 'dsh', name: 'DeepSeek Harness', description: 'DeepSeek', command: 'dsh', args: ['--profile', 'acp'] },
+      { id: 'gemini-cli', name: 'Gemini CLI', description: 'Gemini', command: 'gemini', args: ['--acp'] }
+    ];
+    const s = await manager.create({ config: { harness: 'claude', projectRoot: '/repo', permissionMode: 'ask' } });
+
+    await expect(manager.switchHarness(s.id, 'acp', { acpAgent: 'does-not-exist' })).rejects.toThrow(/Unknown ACP agent preset/);
+    expect(manager.get(s.id)!.config.harness).toBe('claude');
+
+    const toGemini = await manager.switchHarness(s.id, 'acp', { acpAgent: 'gemini-cli' });
+    expect(toGemini.config.harness).toBe('acp');
+    expect(toGemini.config.acpAgent).toBe('gemini-cli');
+
+    const toDsh = await manager.switchHarness(s.id, 'acp', { acpAgent: 'dsh' });
+    expect(toDsh.config.harness).toBe('acp');
+    expect(toDsh.config.acpAgent).toBe('dsh');
+
+    settings.acpAgents = [];
+    await expect(manager.switchHarness(s.id, 'acp')).rejects.toThrow(/No ACP agent preset configured/);
   });
 });

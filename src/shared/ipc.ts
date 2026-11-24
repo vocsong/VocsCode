@@ -358,6 +358,8 @@ export interface IpcContract {
   'sessions:fork': [{ id: string; harness?: HarnessId }, SessionMeta | null];
   /** Switches a session's harness in place, keeping its workspace, worktree, and transcript. */
   'sessions:switchHarness': [{ id: string; harness: HarnessId; model?: ModelRef; acpAgent?: string }, SessionMeta];
+  /** Clears a pending cross-harness/fork handoff so the next message starts without prior chat text. */
+  'sessions:discardHandoff': [{ id: string }, SessionMeta];
   'sessions:moveTo': [{ id: string; cwd: string }, SessionMeta];
   'sessions:goal': [
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },

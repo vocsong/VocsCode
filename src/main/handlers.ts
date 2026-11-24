@@ -210,7 +210,7 @@ const missionInputSchema = z.strictObject({ text: z.string().max(100_000), image
 const MISSION_SESSION_CONTROLS = new Set<string>([
   'sessions:delete', 'sessions:editAndResend', 'sessions:interrupt', 'sessions:stop', 'sessions:setModel',
   'sessions:setEffort', 'sessions:setFastMode', 'sessions:setPermissionMode', 'sessions:compact', 'sessions:clearTranscript',
-  'sessions:fork', 'sessions:switchHarness', 'sessions:moveTo', 'sessions:goal', 'subagents:stop', 'subagents:steer',
+  'sessions:fork', 'sessions:switchHarness', 'sessions:discardHandoff', 'sessions:moveTo', 'sessions:goal', 'subagents:stop', 'subagents:steer',
   'agents:save', 'agents:delete', 'agents:track', 'claude-agents:setModel', 'claude-agents:create'
 ]);
 const MISSION_GIT_MUTATIONS = new Set<string>([
@@ -1468,6 +1468,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const session = await sessions.switchHarness(parsed.id, parsed.harness, { model: parsed.model, acpAgent: parsed.acpAgent });
     scheduleGitnexus(session, 'session-start');
     return session;
+  });
+  handle('sessions:discardHandoff', (input) => {
+    const { id } = z.strictObject({ id: z.string().regex(/^[A-Za-z0-9_-]+$/) }).parse(input);
+    sessionFor(id);
+    return sessions.discardPendingHandoff(id);
   });
   handle('sessions:moveTo', ({ id, cwd }) => sessions.moveTo(id, cwd));
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));

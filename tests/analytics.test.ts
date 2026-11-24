@@ -1131,7 +1131,7 @@ describe('codex cached-input migration', () => {
 });
 
 describe('in-place harness switch attribution', () => {
-  it('preserves prior harness spend and splits all-time byHarness across reload', async () => {
+  it('preserves prior harness and model spend across byHarness, byModel, and byHarnessModel before/after new turns and across reload', async () => {
     const dir = tmpDir();
     const store = new AnalyticsStore(dir, { log });
     await store.load([]);
@@ -1139,23 +1139,33 @@ describe('in-place harness switch attribution', () => {
     const s = meta('s_multi', 'claude', usage({}), { activeModel: { provider: 'anthropic', model: 'claude-sonnet-4-5' } });
     store.touchSession(s);
 
-    // Spend $2.00 across 2 turns and 2 tool calls on Claude.
+    // Spend $2.00 across 2 turns and 2 tool calls on Claude / Sonnet.
     s.usage = usage({ inputTokens: 1_000, outputTokens: 200, costUsd: 2.0, turns: 2 });
     store.recordUsage(s, s.usage, t0);
     store.recordTurn(s, turn({ id: 'turn_c1', durationMs: 2_000, usage: { outputTokens: 200 } }), t0);
     store.recordToolCall(s.id, { id: 'tool_c1', kind: 'tool', ts: t0, name: 'Read', status: 'done', durationMs: 10 }, t0);
     store.recordToolCall(s.id, { id: 'tool_c2', kind: 'tool', ts: t0, name: 'Edit', status: 'done', durationMs: 20 }, t0);
 
-    // Switch the same session in place to Antigravity.
+    // Switch the same session in place to Antigravity with NO model selected yet: prior Claude/Sonnet bucket must stay intact.
     s.config = { ...s.config, harness: 'antigravity' };
+    s.activeModel = undefined;
+    store.touchSession(s);
+
+    const beforeModelSelected = store.summary(0, t0);
+    expect(beforeModelSelected.byHarness.map((b) => [b.key, b.usage.costUsd, b.toolCalls])).toEqual([['claude', 2, 2]]);
+    expect(beforeModelSelected.byModel.map((b) => [b.key, b.usage.costUsd, b.toolCalls])).toEqual([['anthropic/claude-sonnet-4-5', 2, 2]]);
+    expect(beforeModelSelected.byHarnessModel.map((b) => [b.key, b.usage.costUsd, b.toolCalls])).toEqual([['claude|anthropic/claude-sonnet-4-5', 2, 2]]);
+
+    // Selecting Gemini before Gemini runs a turn must NOT move Claude's $2.00 onto Gemini.
     s.activeModel = { provider: 'antigravity', model: 'gemini-3-pro' };
     store.touchSession(s);
 
-    // Before Antigravity runs anything, Claude keeps all $2.00 in all-time byHarness.
     const beforeWork = store.summary(0, t0);
     expect(beforeWork.byHarness.map((b) => [b.key, b.usage.costUsd, b.toolCalls])).toEqual([['claude', 2, 2]]);
+    expect(beforeWork.byModel.map((b) => [b.key, b.usage.costUsd, b.toolCalls])).toEqual([['anthropic/claude-sonnet-4-5', 2, 2]]);
+    expect(beforeWork.byHarnessModel.map((b) => [b.key, b.usage.costUsd, b.toolCalls])).toEqual([['claude|anthropic/claude-sonnet-4-5', 2, 2]]);
 
-    // Now Antigravity runs 1 turn ($0.50) and 1 tool call on top of the session's cumulative totals.
+    // Now Antigravity / Gemini runs 1 turn ($0.50) and 1 tool call on top of the session's cumulative totals.
     s.usage = usage({ inputTokens: 1_500, outputTokens: 300, costUsd: 2.5, turns: 3 });
     store.recordUsage(s, s.usage, t0 + 1_000);
     store.recordTurn(s, turn({ id: 'turn_a1', durationMs: 1_000, usage: { outputTokens: 100 } }), t0 + 1_000);
@@ -1176,11 +1186,31 @@ describe('in-place harness switch attribution', () => {
       expect(ag.usage.turns).toBe(1);
       expect(ag.toolCalls).toBe(1);
       expect(ag.durationMs).toBe(1_000);
+
+      const sonnet = summary.byModel.find((b) => b.key === 'anthropic/claude-sonnet-4-5')!;
+      const gemini = summary.byModel.find((b) => b.key === 'antigravity/gemini-3-pro')!;
+      expect(sonnet.usage.costUsd).toBeCloseTo(2.0);
+      expect(sonnet.usage.turns).toBe(2);
+      expect(sonnet.toolCalls).toBe(2);
+      expect(sonnet.durationMs).toBe(2_000);
+      expect(gemini.usage.costUsd).toBeCloseTo(0.5);
+      expect(gemini.usage.turns).toBe(1);
+      expect(gemini.toolCalls).toBe(1);
+      expect(gemini.durationMs).toBe(1_000);
+
+      const claudeSonnet = summary.byHarnessModel.find((b) => b.key === 'claude|anthropic/claude-sonnet-4-5')!;
+      const agGemini = summary.byHarnessModel.find((b) => b.key === 'antigravity|antigravity/gemini-3-pro')!;
+      expect(claudeSonnet.usage.costUsd).toBeCloseTo(2.0);
+      expect(claudeSonnet.usage.turns).toBe(2);
+      expect(claudeSonnet.toolCalls).toBe(2);
+      expect(agGemini.usage.costUsd).toBeCloseTo(0.5);
+      expect(agGemini.usage.turns).toBe(1);
+      expect(agGemini.toolCalls).toBe(1);
     };
 
     check(store.summary(0, t0 + 2_000));
 
-    // Reload from disk and verify the multi-harness split survives restart.
+    // Reload from disk and verify the multi-harness and multi-model splits survive restart.
     const reloaded = new AnalyticsStore(dir, { log });
     await reloaded.load([s]);
     check(reloaded.summary(0, t0 + 2_000));

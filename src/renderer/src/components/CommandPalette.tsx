@@ -69,10 +69,25 @@ export function CommandPalette() {
       );
       if (active && !active.mission && !active.archived) {
         const disabledReason = switchHarnessDisabledReason(active);
+        const acpAgents = st.settings?.acpAgents ?? [];
         for (const h of HARNESSES) {
-          if (h.id === active.config.harness) continue;
           const av = availability[h.id];
           const unavailable = !!av && !av.available;
+          if (h.id === 'acp') {
+            for (const preset of acpAgents) {
+              if (active.config.harness === 'acp' && active.config.acpAgent === preset.id) continue;
+              base.push({
+                id: `switch-harness:acp:${preset.id}`,
+                label: `Switch harness to ${harnessShort('acp')} (${preset.name})`,
+                hint: disabledReason ?? (unavailable ? 'Not installed' : 'Same workspace'),
+                icon: 'swap',
+                disabled: !!disabledReason || unavailable || !!availabilityError,
+                run: () => switchSessionHarness(active, 'acp', st.toast, undefined, preset.id)
+              });
+            }
+            continue;
+          }
+          if (h.id === active.config.harness) continue;
           base.push({
             id: `switch-harness:${h.id}`,
             label: `Switch harness to ${harnessShort(h.id)}`,

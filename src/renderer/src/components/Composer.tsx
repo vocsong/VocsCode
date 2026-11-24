@@ -70,12 +70,26 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
   const fileInput = useRef<HTMLInputElement>(null);
   const toast = useStore((s) => s.toast);
   const providers = useStore((s) => s.settings?.providers) ?? [];
+  const acpAgents = useStore((s) => s.settings?.acpAgents) ?? [];
+  const [discardingHandoff, setDiscardingHandoff] = useState(false);
   const composerInsert = useStore((s) => s.composerInsert);
   const clearComposerInsert = useStore((s) => s.clearComposerInsert);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
   /** `!cmd` runs locally in the terminal; the Run button replaces send/steer/queue while it is typed. */
   const shellDraft = text.trimStart().startsWith('!');
   const harness = HARNESS_BY_ID[session.config.harness];
+  const acpPresetName = session.config.harness === 'acp' && session.config.acpAgent ? acpAgents.find((a) => a.id === session.config.acpAgent)?.name : undefined;
+  const receivingHarness = acpPresetName ? `${harness.name} (${acpPresetName})` : harness.name;
+  const discardHandoff = async () => {
+    setDiscardingHandoff(true);
+    try {
+      await invoke('sessions:discardHandoff', { id: session.id });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setDiscardingHandoff(false);
+    }
+  };
   const caps = harness.capabilities;
   const uiMode = useUiMode();
   const { models } = useSessionModels(session);
@@ -642,6 +656,18 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
         </>
       )}
       <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
+      {!session.mission && session.pendingForkContext && (
+        <div className="composer-handoff" role="status" data-testid="composer-handoff-banner">
+          <Icon name="info" size={14} />
+          <span>
+            Next message to <strong>{receivingHarness}</strong> will include prior chat context (messages, plans, tool summaries and error excerpts).
+          </span>
+          <span className="spacer" />
+          <Button size="sm" variant="ghost" disabled={discardingHandoff || busy} onClick={() => void discardHandoff()}>
+            Continue without prior chat
+          </Button>
+        </div>
+      )}
       <div className="composer-box">
         <textarea
           ref={ref}

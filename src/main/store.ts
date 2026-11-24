@@ -325,4 +325,8 @@ export class SessionStore {
     await fs.writeFile(file, content, 'utf8');
     return file;
   }
+
+  async deleteBlob(id: string, name: string): Promise<void> {
+    await removeWrittenFile(path.join(this.sessionDir(id), name));
+  }
 }

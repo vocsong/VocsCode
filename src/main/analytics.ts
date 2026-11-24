@@ -257,17 +257,21 @@ function emptyHarnessSlice(): UsageHarnessSlice {
   return { usage: { ...EMPTY_USAGE }, toolCalls: 0, durationMs: 0, speed: emptySpeed() };
 }
 
-function cloneByHarness(byHarness: UsageSessionRecord['byHarness']): UsageSessionRecord['byHarness'] {
-  if (!byHarness) return undefined;
-  const out: Partial<Record<HarnessId, UsageHarnessSlice>> = {};
-  for (const [k, v] of Object.entries(byHarness)) {
+function cloneSlice(slice: UsageHarnessSlice): UsageHarnessSlice {
+  return {
+    usage: { ...slice.usage },
+    toolCalls: slice.toolCalls,
+    durationMs: slice.durationMs,
+    speed: slice.speed ? { ...slice.speed } : emptySpeed()
+  };
+}
+
+function cloneSliceMap<K extends string>(map: Partial<Record<K, UsageHarnessSlice>> | undefined): Partial<Record<K, UsageHarnessSlice>> | undefined {
+  if (!map) return undefined;
+  const out: Partial<Record<K, UsageHarnessSlice>> = {};
+  for (const [k, v] of Object.entries(map) as Array<[K, UsageHarnessSlice | undefined]>) {
     if (!v) continue;
-    out[k as HarnessId] = {
-      usage: { ...v.usage },
-      toolCalls: v.toolCalls,
-      durationMs: v.durationMs,
-      speed: v.speed ? { ...v.speed } : emptySpeed()
-    };
+    out[k] = cloneSlice(v);
   }
   return out;
 }
@@ -276,24 +280,44 @@ function hasHarnessSliceActivity(slice: UsageHarnessSlice): boolean {
   return slice.usage.costUsd > 0 || slice.usage.turns > 0 || slice.toolCalls > 0 || slice.durationMs > 0 || totalTokens(slice.usage) > 0;
 }
 
+function sessionModelKey(provider?: string, model?: string): string | undefined {
+  return model ? `${provider ?? ''}/${model}` : undefined;
+}
+
 function ensureHarnessSlice(session: UsageSessionRecord, harness: HarnessId): UsageHarnessSlice {
   const by = (session.byHarness ??= {});
   return (by[harness] ??= emptyHarnessSlice());
 }
 
+function ensureRecordSlice(map: Record<string, UsageHarnessSlice>, key: string): UsageHarnessSlice {
+  return (map[key] ??= emptyHarnessSlice());
+}
+
 function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSessionRecord {
-  let byHarness = cloneByHarness(prev?.byHarness);
-  // First in-place harness switch for this session: freeze prior totals under the old harness
-  // so all-time harness rollups do not re-attribute earlier spend to the new harness.
-  if (prev && prev.harness !== meta.config.harness && !byHarness) {
-    byHarness = {
-      [prev.harness]: {
+  let byHarness = cloneSliceMap(prev?.byHarness);
+  let byModel = cloneSliceMap(prev?.byModel) as Record<string, UsageHarnessSlice> | undefined;
+  let byHarnessModel = cloneSliceMap(prev?.byHarnessModel) as Record<string, UsageHarnessSlice> | undefined;
+  const prevModelKey = sessionModelKey(prev?.provider, prev?.model);
+  const nextModelKey = sessionModelKey(meta.activeModel?.provider, meta.activeModel?.model);
+  const harnessChanged = !!prev && prev.harness !== meta.config.harness;
+  const modelChanged = !!prev && prevModelKey !== nextModelKey;
+  const prevActivity: UsageHarnessSlice | undefined = prev
+    ? {
         usage: { ...prev.usage },
         toolCalls: prev.toolCalls,
         durationMs: prev.durationMs ?? 0,
         speed: prev.speed ? { ...prev.speed } : emptySpeed()
       }
-    };
+    : undefined;
+  const hadPriorActivity = !!prevActivity && hasHarnessSliceActivity(prevActivity);
+  // First in-place harness or model switch after recorded activity: freeze prior totals under
+  // the earlier harness/model so all-time rollups never re-attribute earlier spend.
+  if (prev && harnessChanged && !byHarness) {
+    byHarness = { [prev.harness]: cloneSlice(prevActivity!) };
+  }
+  if (prev && (harnessChanged || modelChanged) && hadPriorActivity) {
+    if (!byModel) byModel = prevModelKey ? { [prevModelKey]: cloneSlice(prevActivity!) } : {};
+    if (!byHarnessModel) byHarnessModel = prevModelKey ? { [harnessModelKey(prev.harness, prevModelKey)]: cloneSlice(prevActivity!) } : {};
   }
   return {
     id: meta.id,
@@ -308,7 +332,9 @@ function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSes
     toolCalls: prev?.toolCalls ?? 0,
     durationMs: prev?.durationMs ?? 0,
     speed: prev?.speed ? { ...prev.speed } : emptySpeed(),
-    ...(byHarness ? { byHarness } : {})
+    ...(byHarness ? { byHarness } : {}),
+    ...(byModel ? { byModel } : {}),
+    ...(byHarnessModel ? { byHarnessModel } : {})
   };
 }
 
@@ -564,6 +590,35 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     return [...map.values()].sort((a, b) => b.usage.costUsd - a.usage.costUsd || b.usage.turns - a.usage.turns);
   };
 
+  const rollupSlices = (
+    slicesOf: (s: UsageSessionRecord) => Record<string, UsageHarnessSlice | undefined> | undefined,
+    fallback: (s: UsageSessionRecord) => { key: string; label: string } | null,
+    labelOf: (key: string) => string
+  ): UsageBucket[] => {
+    const map = new Map<string, UsageBucket>();
+    const add = (key: string, label: string, slice: UsageHarnessSlice) => {
+      const b = map.get(key) ?? { key, label, usage: { ...EMPTY_USAGE }, toolCalls: 0, durationMs: 0, sessions: 0, speed: emptySpeed() };
+      addTotals(b.usage, slice.usage);
+      b.toolCalls += slice.toolCalls;
+      b.durationMs += slice.durationMs;
+      addSpeed(b.speed, slice.speed);
+      b.sessions += 1;
+      map.set(key, b);
+    };
+    for (const s of sessions) {
+      const sliceMap = slicesOf(s);
+      if (sliceMap !== undefined) {
+        for (const [k, slice] of Object.entries(sliceMap)) {
+          if (slice && hasHarnessSliceActivity(slice)) add(k, labelOf(k), slice);
+        }
+        continue;
+      }
+      const fb = fallback(s);
+      if (fb) add(fb.key, fb.label, { usage: s.usage, toolCalls: s.toolCalls, durationMs: s.durationMs ?? 0, speed: s.speed ?? emptySpeed() });
+    }
+    return [...map.values()].sort((a, b) => b.usage.costUsd - a.usage.costUsd || b.usage.turns - a.usage.turns);
+  };
+
   const byHarness = (() => {
     const map = new Map<string, UsageBucket>();
     const add = (key: string, slice: UsageHarnessSlice) => {
@@ -587,16 +642,22 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     }
     return [...map.values()].sort((a, b) => b.usage.costUsd - a.usage.costUsd || b.usage.turns - a.usage.turns);
   })();
-  const byModel = rollup((s) => {
-    if (!s.model) return null;
-    const key = `${s.provider ?? ''}/${s.model}`;
-    return { key, label: modelKeyLabel(key) };
-  });
-  const byHarnessModel = rollup((s) => {
-    if (!s.model) return null;
-    const key = `${s.provider ?? ''}/${s.model}`;
-    return { key: harnessModelKey(s.harness, key), label: modelKeyLabel(key) };
-  });
+  const byModel = rollupSlices(
+    (s) => s.byModel,
+    (s) => {
+      const key = sessionModelKey(s.provider, s.model);
+      return key ? { key, label: modelKeyLabel(key) } : null;
+    },
+    (key) => modelKeyLabel(key)
+  );
+  const byHarnessModel = rollupSlices(
+    (s) => s.byHarnessModel,
+    (s) => {
+      const key = sessionModelKey(s.provider, s.model);
+      return key ? { key: harnessModelKey(s.harness, key), label: modelKeyLabel(key) } : null;
+    },
+    (key) => modelKeyLabel(key.slice(key.indexOf('|') + 1))
+  );
   const byProject = rollup((s) => ({ key: s.projectRoot, label: s.projectRoot }));
   // Effective rates per model: blended $/M tokens across input, output and cache, and $/call where
   // one call is one model turn. Rates stay undefined while the denominator was never measured.
@@ -1005,17 +1066,22 @@ export class AnalyticsStore {
     const delta = usageDelta(prev ?? { ...EMPTY_USAGE }, totals);
     this.data.recorded[meta.id] = { ...totals };
     const session = (this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]));
+    const usageIncrement: UsageTotals = {
+      inputTokens: delta.inputTokens ?? 0,
+      outputTokens: delta.outputTokens ?? 0,
+      cacheReadTokens: delta.cacheReadTokens ?? 0,
+      cacheWriteTokens: delta.cacheWriteTokens ?? 0,
+      reasoningTokens: delta.reasoningTokens ?? 0,
+      costUsd: delta.costUsd ?? 0,
+      turns: delta.turns ?? 0
+    };
     if (session.byHarness) {
-      const slice = ensureHarnessSlice(session, meta.config.harness);
-      addTotals(slice.usage, {
-        inputTokens: delta.inputTokens ?? 0,
-        outputTokens: delta.outputTokens ?? 0,
-        cacheReadTokens: delta.cacheReadTokens ?? 0,
-        cacheWriteTokens: delta.cacheWriteTokens ?? 0,
-        reasoningTokens: delta.reasoningTokens ?? 0,
-        costUsd: delta.costUsd ?? 0,
-        turns: delta.turns ?? 0
-      });
+      addTotals(ensureHarnessSlice(session, meta.config.harness).usage, usageIncrement);
+    }
+    const modelKey = sessionModelKey(meta.activeModel?.provider, meta.activeModel?.model);
+    if (modelKey) {
+      if (session.byModel) addTotals(ensureRecordSlice(session.byModel, modelKey).usage, usageIncrement);
+      if (session.byHarnessModel) addTotals(ensureRecordSlice(session.byHarnessModel, harnessModelKey(meta.config.harness, modelKey)).usage, usageIncrement);
     }
     const day = this.dayFor(dayKey(now));
     addDay(day, delta);
@@ -1043,6 +1109,11 @@ export class AnalyticsStore {
       if (session) {
         session.toolCalls += uses;
         if (session.byHarness) ensureHarnessSlice(session, meta.config.harness).toolCalls += uses;
+        const modelKey = completion.model === null ? undefined : sessionModelKey(completion.model?.provider ?? meta.activeModel?.provider, completion.model?.model ?? meta.activeModel?.model);
+        if (modelKey) {
+          if (session.byModel) ensureRecordSlice(session.byModel, modelKey).toolCalls += uses;
+          if (session.byHarnessModel) ensureRecordSlice(session.byHarnessModel, harnessModelKey(meta.config.harness, modelKey)).toolCalls += uses;
+        }
       }
       // Live per-harness outcomes, so the reliability table accounts for delegated work too.
       addToolUsage(((this.data.harnessTools[meta.config.harness] ??= {})[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
@@ -1155,6 +1226,19 @@ export class AnalyticsStore {
       slice.durationMs += durationMs;
       if (speed) addSpeed(slice.speed, speed);
     }
+    const modelKey = sessionModelKey(meta.activeModel?.provider, meta.activeModel?.model);
+    if (modelKey) {
+      if (session.byModel) {
+        const slice = ensureRecordSlice(session.byModel, modelKey);
+        slice.durationMs += durationMs;
+        if (speed) addSpeed(slice.speed, speed);
+      }
+      if (session.byHarnessModel) {
+        const slice = ensureRecordSlice(session.byHarnessModel, harnessModelKey(meta.config.harness, modelKey));
+        slice.durationMs += durationMs;
+        if (speed) addSpeed(slice.speed, speed);
+      }
+    }
     this.scheduleWrite();
   }
 
@@ -1201,6 +1285,10 @@ export class AnalyticsStore {
     const provider = activeModel?.provider ?? session?.provider;
     const model = activeModel?.model ?? session?.model;
     const modelKey = model ? `${provider ?? ''}/${model}` : undefined;
+    if (session && modelKey) {
+      if (session.byModel) ensureRecordSlice(session.byModel, modelKey).toolCalls += 1;
+      if (session.byHarnessModel) ensureRecordSlice(session.byHarnessModel, harnessModelKey(session.harness, modelKey)).toolCalls += 1;
+    }
     if (modelKey) {
       addToolUsage(((this.data.modelTools[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
       addToolUsage(((by.modelTool[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);

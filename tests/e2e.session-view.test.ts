@@ -1110,16 +1110,75 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     await expect.poll(() => rowIds(win)).toEqual(['s_recent_a_new', 's_recent_a_old', 's_recent_b_new', 's_recent_b_mid']);
   }, 180_000);
 
-  it('switches a worktree session harness in place without creating a second session or worktree, and persists across restart', async ({ onTestFinished }) => {
+  it('switches a worktree session harness in place without creating a second session or worktree, persists across restart, and delivers or skips handoff once against a loopback native provider', async ({ onTestFinished }) => {
     const tmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-switch-e2e-')));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
     const wtPath = path.join(project, '.vocs-code', 'worktrees', 'shared-wt');
+    const noShareWtPath = path.join(project, '.vocs-code', 'worktrees', 'noshare-wt');
+    const providerId = 'switch-fixture';
+    const chatModel = 'fixture-switch-chat';
+    type Completion = { model: string; stream?: boolean; messages: { role: string; content: unknown }[] };
+    const requests: { body: Completion; response: ServerResponse }[] = [];
+    const server = createServer((req, response) => {
+      if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
+        response.writeHead(404).end();
+        return;
+      }
+      let json = '';
+      req.setEncoding('utf8').on('data', (chunk: string) => { json += chunk; });
+      req.on('end', () => {
+        try {
+          requests.push({ body: JSON.parse(json) as Completion, response });
+        } catch {
+          response.writeHead(400).end();
+        }
+      });
+    });
     onTestFinished(async () => {
       await app?.close().catch(() => undefined);
       app = null;
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
       await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5 });
     });
+    const listening = once(server, 'listening');
+    server.listen(0, '127.0.0.1');
+    await listening;
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Switch fixture did not bind a TCP address');
+
+    const textOf = (content: unknown): string =>
+      typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content.map((p) => (p && typeof p === 'object' && 'text' in p ? String((p as { text?: unknown }).text ?? '') : '')).join('\n')
+          : '';
+    const waitForRequest = async (count: number) => {
+      await expect.poll(() => requests.length, { timeout: 15_000, message: `native request ${count}` }).toBe(count);
+      return requests[count - 1]!;
+    };
+    const reply = ({ body, response }: (typeof requests)[number], text: string) => {
+      if (body.stream) {
+        const chunk = (delta: Record<string, string>, finish_reason: 'stop' | null) =>
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(chunk({ role: 'assistant', content: text }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n');
+      } else {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: text }, finish_reason: 'stop' }] }));
+      }
+    };
+    const waitForIdle = async (page: Page, sessionId: string) => {
+      await expect.poll(() => page.evaluate(async (id) => {
+        const meta = await window.harness.invoke('sessions:get', { id });
+        return meta?.status;
+      }, sessionId), { timeout: 15_000 }).toBe('idle');
+    };
+    const branchOf = (cwd: string) => execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(project, 'README.md'), 'Initial.\n');
     git(project, 'init', '-q', '-b', 'main');
@@ -1129,14 +1188,26 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     git(project, 'commit', '-qm', 'init');
     await fs.mkdir(path.dirname(wtPath), { recursive: true });
     git(project, 'worktree', 'add', '-qb', 'vocscode/shared-wt', wtPath);
+    git(project, 'worktree', 'add', '-qb', 'vocscode/noshare-wt', noShareWtPath);
     await fs.writeFile(path.join(wtPath, 'uncommitted.txt'), 'keep me in place\n');
+    await fs.writeFile(path.join(noShareWtPath, 'local-edit.txt'), 'stay dirty without handoff\n');
     await fs.mkdir(userData, { recursive: true });
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
-    const seeded: SessionMeta = {
+    const provider: ProviderConfig = {
+      id: providerId, kind: 'lmstudio', name: 'Scripted switch fixture', enabled: true, hasApiKey: false,
+      baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      models: [{ id: chatModel, provider: providerId, displayName: chatModel }]
+    };
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      defaultModelByHarness: { native: { provider: providerId, model: chatModel } },
+      providers: [provider],
+      agent: { enabled: false }, knowledge: { prime: false, autoDistill: false }, mcpDisabledBuiltins: MCP_BUILTIN_IDS
+    }));
+
+    const seededHandoff: SessionMeta = {
       id: 's_switch_e2e',
       title: 'Continue in same worktree',
       createdAt: T,
-      updatedAt: T,
+      updatedAt: T + 10,
       lastUserMessageAt: T,
       config: { harness: 'claude', projectRoot: project, permissionMode: 'ask', useWorktree: true },
       cwd: wtPath,
@@ -1145,9 +1216,24 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       harnessRef: { claudeSessionId: 'claude_old_1' },
       usage: usage({ costUsd: 1.25, turns: 1 })
     };
-    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([seeded]));
-    const sDir = path.join(userData, 'sessions', seeded.id);
+    const seededNoShare: SessionMeta = {
+      id: 's_switch_noshare',
+      title: 'Skip handoff in same worktree',
+      createdAt: T,
+      updatedAt: T,
+      lastUserMessageAt: T,
+      config: { harness: 'claude', projectRoot: project, permissionMode: 'ask', useWorktree: true },
+      cwd: noShareWtPath,
+      worktreeBranch: 'vocscode/noshare-wt',
+      status: 'idle',
+      harnessRef: { claudeSessionId: 'claude_old_2' },
+      usage: usage({ costUsd: 0.75, turns: 1 })
+    };
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([seededHandoff, seededNoShare]));
+    const sDir = path.join(userData, 'sessions', seededHandoff.id);
+    const noShareDir = path.join(userData, 'sessions', seededNoShare.id);
     await fs.mkdir(sDir, { recursive: true });
+    await fs.mkdir(noShareDir, { recursive: true });
     await fs.writeFile(
       path.join(sDir, 'transcript.jsonl'),
       [
@@ -1155,37 +1241,127 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
         { id: 'a1', kind: 'assistant', ts: T + 1, text: 'Edited uncommitted.txt' }
       ].map((item) => JSON.stringify(item)).join('\n') + '\n'
     );
+    await fs.writeFile(
+      path.join(noShareDir, 'transcript.jsonl'),
+      [
+        { id: 'u2', kind: 'user', ts: T, text: 'Private Claude notes' },
+        { id: 'a2', kind: 'assistant', ts: T + 1, text: 'Kept local-edit.txt dirty' }
+      ].map((item) => JSON.stringify(item)).join('\n') + '\n'
+    );
 
     let win = await launch(userData);
     await win.setViewportSize({ width: 1280, height: 800 });
+
+    // 1. Switch s_switch_e2e in place (keeping prior-chat handoff pending).
     await win.locator('[data-session-id="s_switch_e2e"]').click();
     await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'claude', pill: 'Claude', project: 'project', name: 'Continue in same worktree' });
-
-    // Switch harness in place via the composer model menu -> Switch harness -> Native.
     await win.locator('.pane.active [title="Model"]').click();
     await win.getByRole('menuitem', { name: /Switch harness/ }).click();
     await win.getByRole('menuitem', { name: /^Native/ }).click();
 
     await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'native', pill: 'Native', project: 'project', name: 'Continue in same worktree' });
-    // Still exactly one session row and the exact same worktree directory + uncommitted file.
-    expect(await win.locator('.sidebar-list [data-testid="session-row"]').count()).toBe(1);
-    expect(await fs.readdir(path.join(project, '.vocs-code', 'worktrees'))).toEqual(['shared-wt']);
-    expect(await fs.readFile(path.join(wtPath, 'uncommitted.txt'), 'utf8')).toBe('keep me in place\n');
+    const handoffBanner = win.locator('.pane.active [data-testid="composer-handoff-banner"]');
+    await handoffBanner.waitFor({ timeout: 10_000 });
+    expect(await handoffBanner.textContent()).toContain('Native loop');
     await expect.poll(() => win.locator('.pane.active .transcript').textContent()).toContain('Switched harness from Claude Agent SDK to Native loop in the same workspace.');
 
-    // Cold restart with the same userData proves persistence of the switched harness and handoff blob.
+    // 2. Switch s_switch_noshare in place, then opt out with "Continue without prior chat".
+    await win.locator('[data-session-id="s_switch_noshare"]').click();
+    await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'claude', pill: 'Claude', project: 'project', name: 'Skip handoff in same worktree' });
+    await win.locator('.pane.active [title="Model"]').click();
+    await win.getByRole('menuitem', { name: /Switch harness/ }).click();
+    await win.getByRole('menuitem', { name: /^Native/ }).click();
+    await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'native', pill: 'Native', project: 'project', name: 'Skip handoff in same worktree' });
+    await handoffBanner.waitFor({ timeout: 10_000 });
+    await handoffBanner.getByRole('button', { name: 'Continue without prior chat', exact: true }).click();
+    await handoffBanner.waitFor({ state: 'detached', timeout: 10_000 });
+    await expect.poll(() => win.locator('.pane.active .transcript').textContent()).toContain('Continuing without sending prior chat context.');
+
+    // Switching alone (and discarding handoff) must make zero provider requests and create no extra sessions or worktrees.
+    expect(requests).toHaveLength(0);
+    expect(await win.locator('.sidebar-list [data-testid="session-row"]').count()).toBe(2);
+    expect((await fs.readdir(path.join(project, '.vocs-code', 'worktrees'))).sort()).toEqual(['noshare-wt', 'shared-wt']);
+    expect(await fs.readFile(path.join(wtPath, 'uncommitted.txt'), 'utf8')).toBe('keep me in place\n');
+    expect(await fs.readFile(path.join(noShareWtPath, 'local-edit.txt'), 'utf8')).toBe('stay dirty without handoff\n');
+
+    // 3. Cold restart with the same userData proves persistence of both switched sessions and handoff choices.
     await app!.close();
     app = null;
+    const persistedBeforeSend = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+    expect(persistedBeforeSend).toHaveLength(2);
+    const savedHandoff = persistedBeforeSend.find((s) => s.id === 's_switch_e2e')!;
+    const savedNoShare = persistedBeforeSend.find((s) => s.id === 's_switch_noshare')!;
+    expect(savedHandoff.config.harness).toBe('native');
+    expect(savedHandoff.cwd).toBe(wtPath);
+    expect(savedHandoff.worktreeBranch).toBe('vocscode/shared-wt');
+    expect(savedHandoff.pendingForkContext).toBe(true);
+    expect(await fs.readFile(path.join(sDir, 'fork-context.md'), 'utf8')).toContain('Started on Claude');
+    expect(savedNoShare.config.harness).toBe('native');
+    expect(savedNoShare.cwd).toBe(noShareWtPath);
+    expect(savedNoShare.worktreeBranch).toBe('vocscode/noshare-wt');
+    expect(savedNoShare.pendingForkContext).toBeFalsy();
+    await expect(fs.access(path.join(noShareDir, 'fork-context.md'))).rejects.toThrow();
+
     win = await launch(userData);
     await win.setViewportSize({ width: 1280, height: 800 });
+
+    // 4. Send two turns on the handoff session: request 1 carries the switch handoff exactly once; request 2 has no second handoff prefix.
     await win.locator('[data-session-id="s_switch_e2e"]').click();
     await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'native', pill: 'Native', project: 'project', name: 'Continue in same worktree' });
-    const persisted = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
-    expect(persisted).toHaveLength(1);
-    expect(persisted[0]!.config.harness).toBe('native');
-    expect(persisted[0]!.cwd).toBe(wtPath);
-    expect(persisted[0]!.worktreeBranch).toBe('vocscode/shared-wt');
-    expect(persisted[0]!.pendingForkContext).toBe(true);
-    expect(await fs.readFile(path.join(sDir, 'fork-context.md'), 'utf8')).toContain('Started on Claude');
+    await win.locator('.pane.active [data-testid="composer-handoff-banner"]').waitFor({ timeout: 10_000 });
+    expect(requests).toHaveLength(0);
+
+    await win.getByPlaceholder(/^Message the agent/).fill('First turn after switch');
+    await win.getByRole('button', { name: 'Send', exact: true }).click();
+    const req1 = await waitForRequest(1);
+    const req1Last = req1.body.messages.at(-1);
+    expect(req1Last?.role).toBe('user');
+    const req1Text = textOf(req1Last?.content);
+    expect(req1Text.split('# Handoff from Claude Agent SDK to Native loop').length - 1).toBe(1);
+    expect(req1Text).toContain('Started on Claude');
+    expect(req1Text).toContain('Edited uncommitted.txt');
+    expect(req1Text.endsWith('First turn after switch')).toBe(true);
+    reply(req1, 'Acknowledged handoff.');
+    await waitForIdle(win, 's_switch_e2e');
+    await win.locator('.pane.active [data-testid="composer-handoff-banner"]').waitFor({ state: 'detached', timeout: 10_000 });
+    await expect.poll(async () => {
+      const list = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+      return list.find((s) => s.id === 's_switch_e2e')?.pendingForkContext ?? false;
+    }, { timeout: 10_000 }).toBe(false);
+
+    await win.getByPlaceholder(/^Message the agent/).fill('Second turn after switch');
+    await win.getByRole('button', { name: 'Send', exact: true }).click();
+    const req2 = await waitForRequest(2);
+    const req2Last = req2.body.messages.at(-1);
+    expect(req2Last?.role).toBe('user');
+    const req2Text = textOf(req2Last?.content);
+    expect(req2Text).toBe('Second turn after switch');
+    expect(req2Text).not.toContain('# Handoff from');
+    reply(req2, 'Second turn done.');
+    await waitForIdle(win, 's_switch_e2e');
+
+    // 5. Send a turn on the no-share session after restart: zero handoff prefix or prior Claude transcript is sent.
+    await win.locator('[data-session-id="s_switch_noshare"]').click();
+    await expectSessionLabel(win.locator('.pane.active .header'), { harness: 'native', pill: 'Native', project: 'project', name: 'Skip handoff in same worktree' });
+    expect(await win.locator('.pane.active [data-testid="composer-handoff-banner"]').count()).toBe(0);
+    await win.getByPlaceholder(/^Message the agent/).fill('Fresh turn without prior chat');
+    await win.getByRole('button', { name: 'Send', exact: true }).click();
+    const req3 = await waitForRequest(3);
+    const req3Last = req3.body.messages.at(-1);
+    expect(req3Last?.role).toBe('user');
+    expect(textOf(req3Last?.content)).toBe('Fresh turn without prior chat');
+    const req3AllText = req3.body.messages.map((m) => textOf(m.content)).join('\n');
+    expect(req3AllText).not.toContain('# Handoff from');
+    expect(req3AllText).not.toContain('Private Claude notes');
+    reply(req3, 'Clean start confirmed.');
+    await waitForIdle(win, 's_switch_noshare');
+
+    // Both worktrees keep their exact branch and uncommitted edits throughout.
+    expect(branchOf(wtPath)).toBe('vocscode/shared-wt');
+    expect(await fs.readFile(path.join(wtPath, 'uncommitted.txt'), 'utf8')).toBe('keep me in place\n');
+    expect(branchOf(noShareWtPath)).toBe('vocscode/noshare-wt');
+    expect(await fs.readFile(path.join(noShareWtPath, 'local-edit.txt'), 'utf8')).toBe('stay dirty without handoff\n');
+    expect((await fs.readdir(path.join(project, '.vocs-code', 'worktrees'))).sort()).toEqual(['noshare-wt', 'shared-wt']);
+    expect(await win.locator('.sidebar-list [data-testid="session-row"]').count()).toBe(2);
   }, 180_000);
 });

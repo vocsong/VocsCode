@@ -154,6 +154,10 @@ export interface UsageSessionRecord {
   speed?: UsageSpeed;
   /** Per-harness totals when a session switched harnesses in place; absent for single-harness sessions. */
   byHarness?: Partial<Record<HarnessId, UsageHarnessSlice>>;
+  /** Per-model (`provider/model`) totals when a session switched models or harnesses in place. */
+  byModel?: Record<string, UsageHarnessSlice>;
+  /** Per-(`harness|provider/model`) totals when a session switched models or harnesses in place. */
+  byHarnessModel?: Record<string, UsageHarnessSlice>;
 }
 
 /** Usage rollup for one dimension (harness, model, project). */
