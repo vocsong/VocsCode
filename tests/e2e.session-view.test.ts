@@ -901,6 +901,17 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
         if (width !== svg.clientWidth || height !== svg.clientHeight || getComputedStyle(rim).visibility !== 'hidden') {
           throw new Error('Fast rim sampler must be hidden and measured in CSS pixels');
         }
+        // Where the rim sits against the composer's visible border line, in CSS pixels per side.
+        const host = svg.parentElement!.getBoundingClientRect();
+        const frame = svg.getBoundingClientRect();
+        const line = Number.parseFloat(getComputedStyle(svg.parentElement!).borderTopWidth) / 2;
+        const rimOffBorder = Math.max(
+          Math.abs(frame.left + bounds.x - (host.left + line)),
+          Math.abs(frame.top + bounds.y - (host.top + line)),
+          Math.abs(frame.left + bounds.x + bounds.width - (host.right - line)),
+          Math.abs(frame.top + bounds.y + bounds.height - (host.bottom - line))
+        );
+        const overflow = getComputedStyle(svg).overflow;
         const groups = [...svg.querySelectorAll('g.fast-mode-electric-bolt')].map((group) => {
           const trunks = group.querySelectorAll<SVGPathElement>('path.fast-mode-electric-trace');
           const heads = group.querySelectorAll<SVGPathElement>('path.fast-mode-electric-head');
@@ -959,6 +970,8 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
             const ys = straight.filter(({ y }) => (y < middle) === top).map(({ y }) => y);
             return ys.length ? Math.max(...ys) - Math.min(...ys) : 0;
           }));
+          // Signed distance from the border line on the long sides: positive is inside the composer.
+          const across = straight.map(({ y }) => y < middle ? y - bounds.y : bounds.y + bounds.height - y);
           const slots = [...group.querySelectorAll<SVGPathElement>('path.fast-mode-electric-fork')];
           const twigs = slots.filter((path) => path.hasAttribute('d')).map((path) => {
             const root = path.getPointAtLength(0);
@@ -966,7 +979,8 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
             const nearest = Math.min(...distances);
             return { ...readPath(path), attached: nearest <= 0.55, joint: Math.min(distances.indexOf(nearest), main.length) };
           });
-          return { main, head: readPath(head, sweepTimes), twigs, slots: slots.length, excursion,
+          return { main, head: readPath(head, sweepTimes), twigs, slots: slots.length, excursion, rimOffBorder, overflow,
+            inside: across.length ? Math.max(...across) : 0, outside: across.length ? -Math.min(...across) : 0,
             start: Number.parseFloat(group.getAttribute('data-rim-start') ?? ''),
             extent: Number.parseFloat(group.getAttribute('data-rim-extent') ?? '') };
         });
@@ -996,6 +1010,14 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       const excursion = Math.max(...cycles.flatMap((bolts) => bolts.map((bolt) => bolt.excursion)));
       expect(excursion, `${theme}: straight-edge zigzag in CSS pixels`).toBeGreaterThanOrEqual(5.5);
       expect(excursion, `${theme}: straight-edge zigzag in CSS pixels`).toBeLessThanOrEqual(9.5);
+      // The current rides the composer's border: centred on its line, crossing out and back in.
+      const all = cycles.flat();
+      expect(all.every(({ overflow }) => overflow === 'visible'), `${theme}: strikes can leave the box`).toBe(true);
+      expect(Math.max(...all.map(({ rimOffBorder }) => rimOffBorder)), `${theme}: rim on the border line`).toBeLessThan(0.05);
+      expect(Math.max(...all.map(({ inside }) => inside)), `${theme}: no deeper than the band inside`).toBeLessThanOrEqual(3.5);
+      expect(Math.max(...all.map(({ outside }) => outside)), `${theme}: no further than the band outside`).toBeLessThanOrEqual(3.5);
+      expect(Math.max(...all.map(({ inside }) => inside)), `${theme}: crosses into the box`).toBeGreaterThanOrEqual(2);
+      expect(Math.max(...all.map(({ outside }) => outside)), `${theme}: crosses out of the box`).toBeGreaterThanOrEqual(2);
       const speed = 1.35;
       for (const [cycle, bolts] of cycles.entries()) {
         const state = `${theme}: ${['live', 'renewed', 'reduced motion'][cycle]} bolts`;
@@ -1190,7 +1212,6 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
         Number(style.opacity) * Number(style.strokeOpacity) > 0.05 && offset < 27 && offset > -71;
     }))).toBe(true);
     await box.screenshot({ path: path.join(shots, 'session-view-fast-unfocused-zen.png') });
-
     const saved = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
     expect(saved).toHaveLength(1);
     expect(saved[0].status).toBe('idle');
