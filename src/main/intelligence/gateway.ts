@@ -19,6 +19,7 @@ import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { EVIDENCE_PROVIDERS, INTELLIGENCE_ACTIONS, type EvidenceProvider, type EvidenceSource, type IntelligenceAction, type IntelligenceEvidence, type MemoryType } from '../../shared/intelligence';
+import { KNOWLEDGE_USAGE_LOOKUPS, type KnowledgeUsageLookup, type KnowledgeUsageSource } from '../../shared/knowledge-usage';
 import {
   KNOWLEDGE_KINDS,
   authorityLabel,
@@ -33,7 +34,10 @@ import {
 import type { KnowledgeService } from '../knowledge/service';
 import type { StoredPage } from '../knowledge/store';
 import { errorMessage } from '../util/async';
+import { LOCAL_LEARNING_ORIGIN } from './memory-store';
 import type { IntelligenceContext, IntelligenceService } from './service';
+import type { FinishKnowledgeLookup, KnowledgeUsageSample } from './usage';
+import { usageForCount, usageForEvidence, usageForPacket } from './usage-observation';
 
 export const GATEWAY_URL_ENV = 'VOCS_MEMORY_GATEWAY_URL';
 export const GATEWAY_TOKEN_ENV = 'VOCS_MEMORY_GATEWAY_TOKEN';
@@ -244,7 +248,7 @@ type ToolServices = {
  * Runs one memory tool for one session. Every tool is answered from the session's own scope; the
  * arguments can narrow what is returned but can never name another project.
  */
-export async function callIntelligenceTool(deps: ToolServices, session: GatewaySession, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+export async function callIntelligenceTool(deps: ToolServices, session: GatewaySession, name: string, args: Record<string, unknown>, signal?: AbortSignal, observe?: (sample: KnowledgeUsageSample) => void): Promise<ToolResult> {
   if (!isToolName(name)) return errorResult('Unknown memory tool.');
   const problem = permissionProblem(session, name, args) ?? argumentProblem(name, args);
   if (problem) return errorResult(problem);
@@ -265,11 +269,13 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
         const page = byId.get(r.id);
         return page ? [pageSummary(page, { degree: degrees.get(r.id), snippet: r.snippet, score: r.score })] : [];
       });
+      if (observe) observe(usageForCount(out.length, 'wiki'));
       return textResult({ project: knowledge.store.repoDir(scope), count: out.length, results: out });
     }
     case 'knowledge_read': {
       const id = str(args.page);
       const page = await knowledge.store.read(scope, id);
+      if (observe) observe(usageForCount(page ? 1 : 0, 'wiki'));
       if (!page) return errorResult(`No knowledge page "${id}". Use knowledge_search first.`);
       const meta = page.meta;
       return textResult({
@@ -299,7 +305,10 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
       const pathArg = str(args.path).replace(/\\/g, '/');
       const matching = pathArg ? pages.filter((p) => p.meta.anchors.some((a) => a.file.replace(/\\/g, '/') === pathArg) || p.meta.sources.some((s) => s.ref.replace(/\\/g, '/') === pathArg)) : [];
       const base = explicit ?? matching[0];
-      if (!base) return errorResult(`No page or anchor matched ${pathArg || '(no page given)'}.`);
+      if (!base) {
+        observe?.({ outcome: 'empty' });
+        return errorResult(`No page or anchor matched ${pathArg || '(no page given)'}.`);
+      }
       const best = new Map<string, { type: string; weight: number }>();
       for (const edge of buildKnowledgeGraph(pages).edges) {
         if (edge.from !== base.meta.id && edge.to !== base.meta.id) continue;
@@ -313,6 +322,7 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
         .filter(([id]) => byId.has(id))
         .sort((a, b) => b[1].weight - a[1].weight)
         .map(([id, edge]) => ({ id, title: byId.get(id)?.meta.title ?? id, edge: edge.type }));
+      if (observe) observe(usageForCount(related.length, 'wiki'));
       return textResult({ page: base.meta.id, related });
     }
     case 'knowledge_propose': {
@@ -384,6 +394,7 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
       const query = str(args.query);
       if (!query.split(/[^\p{L}\p{N}_*]+/u).some((term) => term.replace(/\*/g, '').length > 1)) return errorResult('session_history_search needs a query of at least two letters.');
       const found = await intelligence.historySearch(context, query, { limit: Number(args.limit) || 6, includeArchived: args.include_archived === true, strict: true });
+      if (observe) observe(found.available ? usageForCount(found.results.length, 'history') : { outcome: 'failed' });
       if (!found.available) return textResult({ available: false, reason: 'Session history is unavailable (no index).' });
       if (!found.sessions) return textResult({ available: true, projectRoot: session.projectRoot, count: 0, results: [], note: 'No sessions recorded for this project yet.' });
       return textResult({
@@ -404,6 +415,7 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
         ...(Number(args.limit) ? { limit: Number(args.limit) } : {}),
         includeHistorical: args.include_historical === true
       });
+      if (observe) observe(usageForEvidence(found.results));
       return textResult({
         query: found.query,
         intent: found.intent,
@@ -417,11 +429,16 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
     }
     case 'intelligence_trace': {
       const from = str(args.from);
-      return textResult(await intelligence.trace(context, { from, ...(str(args.to) ? { to: str(args.to) } : {}) }));
+      const trace = await intelligence.trace(context, { from, ...(str(args.to) ? { to: str(args.to) } : {}) });
+      if (observe) observe(trace.source === 'none' ? { outcome: 'empty' } : {
+        ...usageForCount(trace.nodes.length, trace.source), staleGraph: trace.source === 'graph' && trace.nodes.length > 0 && trace.stale === true
+      });
+      return textResult(trace);
     }
     case 'context_compile': {
       const query = str(args.query);
       const packet = await intelligence.compile(context, { query, ...(Number(args.budget_tokens) ? { budgetTokens: Number(args.budget_tokens) } : {}), scope: args.scope === 'collection' ? 'collection' : 'project' });
+      if (observe) observe(usageForPacket(packet));
       return textResult(packet.text);
     }
     case 'memory_recall': {
@@ -432,6 +449,12 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
         ...(Number(args.limit) ? { limit: Number(args.limit) } : {}),
         includeUnverified: args.include_unverified !== false
       });
+      if (observe) {
+        const sources = new Set<KnowledgeUsageSource>();
+        if (recalled.history.length) sources.add('history');
+        for (const record of recalled.records) sources.add(record.origin === LOCAL_LEARNING_ORIGIN ? 'passive' : record.scope === 'collection' ? 'collection' : 'memory');
+        observe({ outcome: sources.size ? 'hit' : 'empty', sources: [...sources] });
+      }
       return textResult({
         count: recalled.records.length,
         records: recalled.records.map((r) => ({
@@ -509,7 +532,9 @@ export interface IntelligenceGatewayDeps {
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** The app's current record of a session, or null once it is gone or may no longer use the tools. */
   session: (sessionId: string) => GatewaySession | null;
-  call: (session: GatewaySession, tool: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<ToolResult>;
+  call: (session: GatewaySession, tool: string, args: Record<string, unknown>, signal: AbortSignal, observe?: (sample: KnowledgeUsageSample) => void) => Promise<ToolResult>;
+  /** Metadata only, and only for retrieval calls that pass both the initial and final live grants. */
+  beginUsage?: (session: GatewaySession, tool: KnowledgeUsageLookup) => FinishKnowledgeLookup | undefined;
   /** The Settings switch; off means no session is handed a token and existing ones stop working. */
   enabled: () => boolean;
   now?: () => number;
@@ -747,12 +772,19 @@ export class IntelligenceGateway {
     const expiry = setTimeout(() => this.drop(cap), Math.max(0, cap.expiresAt - this.now()));
     expiry.unref();
     try {
+      let finish: FinishKnowledgeLookup | undefined;
+      if ((KNOWLEDGE_USAGE_LOOKUPS as readonly string[]).includes(tool)) {
+        try { finish = this.deps.beginUsage?.(grant.session, tool as KnowledgeUsageLookup); }
+        catch { this.deps.log('warn', 'knowledge usage: could not start counting a lookup'); }
+      }
       let result: ToolResult;
+      let sample: KnowledgeUsageSample | undefined;
       try {
-        result = await this.deps.call(grant.session, tool, args, controller.signal);
+        result = await this.deps.call(grant.session, tool, args, controller.signal, finish ? (value) => { sample = value; } : undefined);
       } catch {
         if (!controller.signal.aborted) this.deps.log('debug', 'intelligence: gateway tool failed');
         result = errorResult('The intelligence gateway could not complete the tool call.');
+        sample = { outcome: 'failed' };
       }
       if (res.destroyed) return;
       const live = this.authorize(cap);
@@ -763,6 +795,15 @@ export class IntelligenceGateway {
       // A narrower read grant during dispatch must also prevent a wider in-flight result escaping.
       if ((!grant.session.restricted && live.session.restricted) || (grant.session.allowCollections && !live.session.allowCollections)) {
         return this.json(res, 200, { result: errorResult('This session’s memory grant changed before the call completed.') });
+      }
+      if (finish && sample) {
+        const record = finish;
+        const observation = sample;
+        res.once('finish', () => {
+          // Count the completed local response, not a prompt/token or a claim the model read it.
+          try { record({ ...observation, responseBytes: Buffer.byteLength(result.content[0].text.replaceAll(token, '<redacted>')) }); }
+          catch { this.deps.log('warn', 'knowledge usage: could not count a lookup'); }
+        });
       }
       this.json(res, 200, { result }, token);
     } finally {

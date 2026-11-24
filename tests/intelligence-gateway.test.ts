@@ -45,13 +45,13 @@ function session(id = 's1', extra: Partial<GatewaySession> = {}): GatewaySession
   return { sessionId: id, projectRoot, cwd: projectRoot, actions: ['read', 'record'], ...extra };
 }
 
-async function fixture(first = session(), call: IntelligenceGatewayDeps['call'] = async (context, name, args) => ok({ sessionId: context.sessionId, name, args })) {
+async function fixture(first = session(), call: IntelligenceGatewayDeps['call'] = async (context, name, args) => ok({ sessionId: context.sessionId, name, args }), beginUsage?: IntelligenceGatewayDeps['beginUsage']) {
   const sessions = new Map([[first.sessionId, first]]);
   const live = { enabled: true, now: Date.now() };
   const lookup = vi.fn((id: string) => sessions.get(id) ?? null);
   const dispatch = vi.fn(call);
   const log = vi.fn<IntelligenceGatewayDeps['log']>();
-  const gateway = new IntelligenceGateway({ enabled: () => live.enabled, now: () => live.now, session: lookup, call: dispatch, log });
+  const gateway = new IntelligenceGateway({ enabled: () => live.enabled, now: () => live.now, session: lookup, call: dispatch, log, beginUsage });
   await gateway.start();
   cleanup.push(() => gateway.close());
   const attach = (id = first.sessionId) => {
@@ -311,15 +311,43 @@ describe('authenticated intelligence gateway', () => {
 
   it('aborts an in-flight grant on revocation and suppresses a late result even if the service ignores it', async () => {
     const release = latch();
-    const { config, gateway, dispatch } = await fixture(session(), async () => { await release.done; return ok('late authorized-only data'); });
-    const pending = post(config);
+    const record = vi.fn();
+    const begin = vi.fn(() => record);
+    const { config, gateway, dispatch } = await fixture(session(), async (_session, _tool, _args, _signal, observe) => {
+      await release.done;
+      observe?.({ outcome: 'hit', sources: ['wiki'] });
+      return ok('late authorized-only data');
+    }, begin);
+    const pending = post(config, wire('knowledge_search', { query: 'fixture' }));
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1), waitOpts);
+    expect(begin).toHaveBeenCalledTimes(1);
     const signal = dispatch.mock.calls[0][3];
     expect(signal.aborted).toBe(false);
     gateway.revoke('s1');
     expect(signal.aborted).toBe(true);
     release.open();
     expect((await pending).json).toEqual({ error: 'Unauthorized' });
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('reports only authorized retrieval outcomes, including history-only recall and a header-only packet without altering the MCP reply', async () => {
+    const held = session();
+    const services = core(knowledgeForTests());
+    services.intelligence.recall = async () => ({ records: [], history: [{ sessionId: 'private-session', session: 'Title', kind: 'user', at: null, snippet: 'clé privée fixture' }], note: 'Only ordinary history matched.' });
+    const record = vi.fn();
+    const begin = vi.fn(() => record);
+    const { config } = await fixture(held, (s, tool, args, signal, observed) => callIntelligenceTool(services, s, tool, args, signal, observed), begin);
+    const args = { query: 'fixture prompt not sent to metrics' };
+    const expected = await callIntelligenceTool(services, held, 'memory_recall', args);
+    expect((await post(config, wire('memory_recall', args))).json).toEqual({ result: expected });
+    expect(record).toHaveBeenNthCalledWith(1, { outcome: 'hit', sources: ['history'], responseBytes: Buffer.byteLength(expected.content[0].text) });
+    expect((await post(config, wire('context_compile', args))).json.result?.content[0].text).toContain(args.query);
+    expect(record).toHaveBeenNthCalledWith(2, { outcome: 'empty', sources: [], staleGraph: false, truncated: false, responseBytes: expect.any(Number) });
+    await post(config, wire('intelligence_search', { query: args.query, scope: 'collection' }));
+    await post(config, wire('memory_recall', { query: false }));
+    await post(config, wire('knowledge_record', { ...proposal, memory_type: 'episodic' }));
+    expect(begin).toHaveBeenCalledTimes(2);
+    expect(record).toHaveBeenCalledTimes(2);
   });
 });
 

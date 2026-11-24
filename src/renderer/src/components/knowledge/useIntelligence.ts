@@ -2,8 +2,8 @@ import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import type { IntelligenceView } from '../../../../shared/intelligence';
 import { invoke } from '../../api';
 
-export type KnowledgeSection = 'knowledge' | 'memory' | 'collections' | 'evidence' | 'sources';
-type TaskOwner = KnowledgeSection | 'load';
+export type KnowledgeSection = 'knowledge' | 'memory' | 'collections' | 'evidence' | 'usage' | 'sources';
+type TaskOwner = Exclude<KnowledgeSection, 'usage'> | 'load';
 type Work = (current: () => boolean) => Promise<IntelligenceView | void>;
 export type RunIntelligence = (work: Work) => Promise<boolean>;
 
