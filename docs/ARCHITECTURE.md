@@ -487,7 +487,8 @@ production (`auth.vocs.io` issuer, `mcp.vocs.io` catalog) unless main is launche
 catalog that names the other realm is rejected.
 It configures the native OAuth controller with a static public client and fixed loopback callback,
 keeps five-minute access tokens only in main-process memory, and validates the exact Hub catalog
-contract before returning descriptive state. Each cancellation/sign-out/expiry invalidates its
+contract before returning descriptive state (a connection's `accountScopes` may be any
+duplicate-free subset of `models:read`, `speech:write`, `audio:read` that includes `models:read`). Each cancellation/sign-out/expiry invalidates its
 generation and clears catalog data; refreshing never treats stale metadata as authorization.
 
 **Kept sign-in.** A realm offers "Keep me signed in on this computer" only when its config has a
@@ -522,10 +523,25 @@ token revokes the device server-side). Rolling the server flag back makes refres
 vault and shows `offline` with Retry. Sign-out clears the vault first, then revokes the refresh
 token; a rotation that answers after sign-out is revoked, never stored. Quitting keeps the vault.
 
-The five `vocsAccount:*` requests accept no URLs, credentials or arbitrary configuration; sign-in
-takes only `{ persist: boolean }`. Both the transport-agnostic registry and Electron
-owner-main-frame boundary reject remote/agent callers. Main owns expiry and request cancellation;
-renderer revisions/generations prevent stale UI results. Registry shutdown disposes the broker
-(memory only, plus the bounded revoke above). This does not mutate MCP configuration, grant tool access or require login for
-local editing. Settings presents the
-catalog read-only; live desktop acceptance is documented in `ACCOUNT-STAGING-TEST.md`.
+The `vocsAccount:*` requests accept no URLs, credentials or arbitrary configuration; sign-in
+takes only `{ persist: boolean }` and the three Hub requests (`hubConnect`, `hubCancel`,
+`hubDisconnect`) only `{ connectionId }` from the known catalog ids. Both the transport-agnostic
+registry and Electron owner-main-frame boundary reject remote/agent callers. Main owns expiry and
+request cancellation; renderer revisions/generations prevent stale UI results. Registry shutdown
+disposes the broker (memory only, plus the bounded revokes above). Signing in alone does not
+mutate MCP configuration, grant tool access or require login for local editing; live desktop
+acceptance is documented in `ACCOUNT-STAGING-TEST.md`.
+
+**Hub connections.** A catalog connection becomes usable by agents only through an explicit
+Connect (`main/vocs-hub.ts`, details in [MCP.md](MCP.md#vocs-mcp-hub-connections-app-owned-vocs-openrouter)):
+a separate OAuth grant from the Hub itself (`mcp.vocs.io`, dynamic public client, the
+catalog's scopes), whose rotating refresh token lives only in the keychain under
+`vocs-hub:<realm>:<connection>` (`keychainOnly`, reserved like `vocs-account:*`) and whose
+15-minute access tokens stay in memory. While connected, new sessions of every `inject`/`client`
+harness get the app-owned `vocs-openrouter` server, a loopback MCP proxy with an app-minted
+bearer that forwards POSTs to the exact Hub resource with the real token; no harness sees the
+Hub token. The account broker hands Connect only the connection and account id it verified, and
+ends Hub connections on sign-out, on a catalog naming another account, and when a connection
+leaves the catalog (revoked at the Hub, best effort). A connection outlives a temporary sign-in
+by design: production sign-ins last five minutes, the Hub grant 30 days. A refresh answered
+`invalid_grant` (revoked on the Hub dashboard) clears it locally.

@@ -234,6 +234,26 @@ describe('handler registry', () => {
     await registry.shutdown(); expect(account.dispose).toHaveBeenCalledTimes(1);
   });
 
+  it('takes only a known Hub connection id from the desktop owner, never a resource, issuer, scope or token', async () => {
+    const snapshot = { realm: 'staging', status: 'signed_in', refreshing: false, revision: 0, connections: [], hub: [] } as const;
+    const account = { get: vi.fn(() => snapshot), hubConnect: vi.fn(async () => snapshot), hubCancel: vi.fn(() => snapshot), hubDisconnect: vi.fn(async () => snapshot), dispose: vi.fn() };
+    const { registry } = stubDeps({ vocsAccount: account as unknown as NonNullable<HandlerDeps['vocsAccount']> });
+    for (const action of ['hubConnect', 'hubCancel', 'hubDisconnect'] as const) {
+      const channel = `vocsAccount:${action}`;
+      expect(registry.channels()).toContain(channel);
+      for (const actor of ['user', 'agent'] as const) await expect(registry.invoke(channel, { connectionId: 'openrouter' }, actor)).rejects.toThrow(/desktop owner/);
+      for (const input of [undefined, null, {}, { connectionId: 'other' }, { connectionId: 'OpenRouter' }, { connectionId: 'openrouter', resource: 'https://evil.invalid/mcp' },
+        { connectionId: 'openrouter', issuer: 'https://evil.invalid' }, { connectionId: 'openrouter', scopes: ['admin'] }, { connectionId: 'openrouter', token: 'secret' }, 'openrouter']) {
+        await expect(registry.invoke(channel, input, 'desktop')).rejects.toThrow(/do not accept configuration/);
+      }
+      expect(account[action]).not.toHaveBeenCalled();
+      await expect(registry.invoke(channel, { connectionId: 'openrouter' }, 'desktop')).resolves.toEqual(snapshot);
+      expect(account[action]).toHaveBeenCalledExactlyOnceWith('openrouter');
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels().includes(channel as never)).toBe(false);
+    }
+  });
+
   it('allows bounded sign-in only for the desktop owner and refuses forged launch arguments before execution', async () => {
     const { registry } = stubDeps();
     const login = vi.mocked(openHarnessLogin).mockReset().mockResolvedValue({ ok: true });
@@ -660,7 +680,7 @@ describe('handler registry', () => {
     const { registry, deps } = stubDeps();
     await deps.settings.load();
     const set = vi.spyOn(deps.secrets, 'set'), clear = vi.spyOn(deps.secrets, 'clear'), get = vi.spyOn(deps.secrets, 'get');
-    for (const id of ['vocs-account:production', 'vocs-account:staging', 'remote-host', 'remote-enroll']) {
+    for (const id of ['vocs-account:production', 'vocs-account:staging', 'vocs-hub:production:openrouter', 'vocs-hub:staging:openrouter', 'remote-host', 'remote-enroll']) {
       await expect(registry.invoke('secrets:set', { providerId: id, apiKey: '{"v":1}' })).rejects.toThrow(/reserved/);
       await expect(registry.invoke('secrets:clear', { providerId: id })).rejects.toThrow(/reserved/);
       await expect(registry.invoke('providers:save', { id, kind: 'openai', name: 'Evil', baseUrl: 'https://evil.example/v1', hasApiKey: false, models: [] })).rejects.toThrow(/reserved/);

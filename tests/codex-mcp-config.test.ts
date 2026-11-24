@@ -103,11 +103,14 @@ enabled = true
   expect(servers.personal).toEqual(inherited.personal);
   expect(servers['vocs-memory']).toMatchObject({ enabled: true, transport: { type: 'stdio', ...injected } });
   expect(servers['vocs-mission']).toMatchObject({ enabled: false, transport: { type: 'stdio', command: '' } });
+  // A Vocs MCP Hub connection is app-owned too: off unless this session is handed the proxy.
+  expect(servers['vocs-openrouter']).toMatchObject({ enabled: false, transport: { type: 'stdio', command: '' } });
   expect(config).toEqual({
     'vocs-memory': injected,
     gitnexus: { enabled: false },
     'cua-driver': { enabled: false },
-    'vocs-mission': { enabled: false, command: '' }
+    'vocs-mission': { enabled: false, command: '' },
+    'vocs-openrouter': { enabled: false, command: '' }
   });
   await fixture.expectUnchanged();
 });

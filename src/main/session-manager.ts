@@ -80,6 +80,8 @@ export interface SessionManagerDeps {
   memoryUserData?: string;
   /** Mints a session's intelligence-gateway endpoint and token; null when the gateway is off. */
   memoryGateway?: (sessionId: string) => { url: string; token: string } | null;
+  /** Connected Vocs MCP Hub connections, as loopback proxy servers (`vocs-hub.ts`); absent: none. */
+  hubServers?: () => Promise<ResolvedServer[]>;
   /** A stopping runtime loses its memory capability before disposal settles. */
   revokeMemoryGateway?: (sessionId: string) => void;
   /** A runtime entering Plan must stop any in-flight writes through its memory gateway. */
@@ -1247,6 +1249,7 @@ export class SessionManager {
             memoryServerPath: this.deps.memoryServerPath,
             memoryUserData: this.deps.memoryUserData,
             memoryGateway: (sessionId) => available() ? this.deps.memoryGateway?.(sessionId) ?? null : null,
+            ...(this.deps.hubServers ? { hubServers: this.deps.hubServers } : {}),
             log: (level, message) => this.deps.log(level, `[${id}] ${message}`)
           }
         );
