@@ -10,8 +10,9 @@ export interface PowerBlocker {
 
 /**
  * A desktop-host choice, never session metadata. Only work in a live, opted-in, unarchived session
- * counts, regardless of where the turn came from. One blocker prevents idle sleep, not explicit
- * system sleep, and does not require the display to stay on.
+ * counts, regardless of where the turn came from — plus Mission mode sessions, which keep the
+ * computer awake while their Lead or Builders work without an opt-in. One blocker prevents idle
+ * sleep, not explicit system sleep, and does not require the display to stay on.
  */
 export class KeepAwake {
   private optedIn = new Set<string>();
@@ -33,17 +34,19 @@ export class KeepAwake {
   }
 
   sync(sessions: readonly SessionMeta[]): void {
-    if (this.optedIn.size === 0 && this.blockerId === null) return;
+    if (this.optedIn.size === 0 && this.blockerId === null && !sessions.some((s) => s.mission)) return;
     let wanted = false;
-    if (!this.quitting && this.optedIn.size) {
+    if (!this.quitting) {
       const eligible = new Set<string>();
-      for (const { id, status, archived } of sessions) {
-        if (!this.optedIn.has(id) || archived) continue;
-        eligible.add(id);
-        wanted ||= status === 'starting' || status === 'running' || status === 'awaiting';
+      for (const { id, status, archived, mission } of sessions) {
+        if (archived) continue;
+        const working = status === 'starting' || status === 'running' || status === 'awaiting';
+        if (this.optedIn.has(id)) eligible.add(id);
+        else if (!mission) continue;
+        wanted ||= working;
       }
       // Deleting or archiving a session revokes the choice rather than leaving stale opt-ins.
-      this.optedIn = eligible;
+      if (this.optedIn.size) this.optedIn = eligible;
     }
     if (!wanted) this.release();
     else if (this.blockerId === null) {
