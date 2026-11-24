@@ -48,7 +48,7 @@ export function SessionHeader({ session, onBack, onTerminal }: { session: Sessio
         <SessionTitle session={session} className="w-session-name" />
         {session.cwd !== session.config.projectRoot && <span className="w-session-path" title={session.cwd}>{basename(session.cwd)}</span>}
       </div>
-      <StatusChip status={session.status} label={session.statusLabel} />
+      <StatusChip status={session.status} label={session.statusLabel} ongoing={session.ongoing} />
       <button type="button" className="w-icon-btn" onClick={() => setMenu(true)} aria-label="Session actions"><Icon name="more" size={18} /></button>
       {menu && (
         <BottomSheet title="Session" onClose={() => setMenu(false)}>

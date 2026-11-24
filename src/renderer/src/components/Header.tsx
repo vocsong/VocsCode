@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { GitSummary, SessionMeta } from '../../../shared/types';
+import { hasOngoingWork, ongoingBadgeLabel } from '../../../shared/ongoing';
 import { invoke } from '../api';
 import { basename } from '../format';
 import { archiveSession } from '../sessionActions';
@@ -37,13 +38,16 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
   const folder = basename(session.cwd);
   const distinctFolder = folder !== basename(session.config.projectRoot);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
+  const ongoing = hasOngoingWork(session);
+  const dotStatus = !busy && ongoing ? 'ongoing' : session.status;
+  const firstSubagentRunId = session.ongoing?.find((item) => item.runId)?.runId;
   const ref = useRef<HTMLElement>(null);
   const width = useHeaderWidth(ref);
 
   return (
     <header className="header" ref={ref} data-width={width}>
       <div className="header-title">
-        <StatusDot status={session.status} />
+        <StatusDot status={dotStatus} />
         <SessionTitle session={session} className="header-name" nameTestId="session-title" />
         <span className="header-crumbs">
           <button type="button" className="header-path" title={session.cwd} aria-label="Open session folder" onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
@@ -57,6 +61,20 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
           )}
         </span>
         {session.statusDetail && busy && <span className="header-status muted">{session.statusDetail}</span>}
+        {!busy && ongoing && (
+          <button
+            type="button"
+            className="header-ongoing-pill"
+            data-testid="header-ongoing"
+            title={session.ongoing!.map((i) => i.label).join(' · ')}
+            onClick={() => {
+              if (firstSubagentRunId) useStore.getState().revealSubagentRun(session.id, firstSubagentRunId);
+              else useStore.getState().setPanelBottomTab('subagents');
+            }}
+          >
+            {ongoingBadgeLabel(session.ongoing!)}
+          </button>
+        )}
         <span className="spacer" />
         {summary && <ChangesButton summary={summary} onOpen={() => setPanelTab('changes')} />}
         <div className="header-actions">

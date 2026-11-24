@@ -6,6 +6,7 @@ import { Button, Icon } from '@renderer/components/ui';
 import { basename, relTime } from '@renderer/format';
 import { sortSessionRows } from '@renderer/sessionOrder';
 import { useStore } from '@renderer/store';
+import { hasOngoingWork } from '@shared/ongoing';
 import type { SessionMeta } from '@shared/types';
 import { StatusChip } from '../components/StatusChip';
 
@@ -22,8 +23,8 @@ export function SessionList({ focus, active = null, onNew, onOpen }: { focus: st
     const candidate = focus ? byId.get(focus) : undefined;
     const foc = candidate && !candidate.archived && matches(candidate) ? candidate : undefined;
     const needs = sortSessionRows(visible.filter((s) => s.status === 'awaiting' && s.id !== focus));
-    const live = sortSessionRows(visible.filter((s) => (s.status === 'running' || s.status === 'starting') && s.id !== focus));
-    const rest = sortSessionRows(visible.filter((s) => s.id !== focus && s.status !== 'awaiting' && s.status !== 'running' && s.status !== 'starting'));
+    const live = sortSessionRows(visible.filter((s) => (s.status === 'running' || s.status === 'starting' || (s.status !== 'awaiting' && hasOngoingWork(s))) && s.id !== focus));
+    const rest = sortSessionRows(visible.filter((s) => s.id !== focus && s.status !== 'awaiting' && s.status !== 'running' && s.status !== 'starting' && !hasOngoingWork(s)));
     const grouped = new Map<string, SessionMeta[]>();
     for (const s of rest) grouped.set(s.config.projectRoot, [...(grouped.get(s.config.projectRoot) ?? []), s]);
     return { focused: foc, needsYou: needs, running: live, folders: [...grouped.entries()], archived: sessions.filter((s) => s.archived && matches(s)) };
@@ -37,7 +38,7 @@ export function SessionList({ focus, active = null, onNew, onOpen }: { focus: st
           <span className="w-session-row-meta">{relTime(s.updatedAt)}</span>
         </span>
         {s.status === 'awaiting' && s.statusDetail ? <span className="w-row-detail">{s.statusDetail}</span> : null}
-        <StatusChip status={s.status} label={s.statusLabel} />
+        <StatusChip status={s.status} label={s.statusLabel} ongoing={s.ongoing} />
         <Icon name="chevronRight" size={14} />
       </button>
     </li>

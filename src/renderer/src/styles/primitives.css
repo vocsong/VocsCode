@@ -165,7 +165,8 @@
   display: inline-block;
 }
 .status-running,
-.status-starting {
+.status-starting,
+.status-ongoing {
   background: var(--blue);
   animation: pulse 1.2s ease-in-out infinite;
 }

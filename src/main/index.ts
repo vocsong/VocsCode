@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, net, powerSaveBlocker, screen, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
+import { hasOngoingWork } from '../shared/ongoing';
 import { sessionTitleText } from '../shared/session-title';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { DEFAULT_PALETTE, chromeFor, themeSourceFor, type PaletteId } from '../shared/themes';
@@ -398,6 +399,7 @@ async function main(): Promise<void> {
   // Declared before the manager so the push callbacks can mirror transcripts; assigned once the
   // remote host exists (the callbacks only fire on real activity, long after boot).
   let remoteMirror: RemoteMirror | null = null;
+  let processesRef: ProcessTracker | null = null;
   sessions = new SessionManager({
     store,
     settings,
@@ -421,6 +423,9 @@ async function main(): Promise<void> {
     pushEvent: (env: SessionEventEnvelope) => {
       pushAll(PUSH_CHANNELS.sessionEvent, env);
       remoteMirror?.notify(env.sessionId);
+      if (env.event.type === 'status' && (env.event.status === 'idle' || env.event.status === 'stopped')) {
+        processesRef?.soon(300);
+      }
     },
     pushSessions: (list: SessionMeta[]) => {
       keepAwake.sync(list);
@@ -518,6 +523,7 @@ async function main(): Promise<void> {
     onSummary: (summary) => pushAll(PUSH_CHANNELS.processSummary, summary),
     log
   });
+  processesRef = processes;
   processes.start();
 
   // In-app auto-update (issue #198): packaged builds only — never in dev, and opt-out for e2e runs.
@@ -526,7 +532,7 @@ async function main(): Promise<void> {
     updater = new UpdateService({
       facade: electronUpdaterFacade(logTo),
       isPackaged: true,
-      isAnySessionLive: () => !!sessionsRef.list().some((s) => s.status === 'starting' || s.status === 'running' || s.status === 'awaiting'),
+      isAnySessionLive: () => !!sessionsRef.list().some((s) => s.status === 'starting' || s.status === 'running' || s.status === 'awaiting' || hasOngoingWork(s)),
       push: (state) => pushAll(PUSH_CHANNELS.updateState, state),
       log
     });

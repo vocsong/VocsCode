@@ -376,11 +376,13 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
   // parent turn. The host's process ownership must span the idle gap and the resulting follow-up.
   const scheduleCompletion = (run: ActiveRun): void => {
     pendingCompletions.push(run);
+    notify({ kind: 'wakeup', pending: true, count: pendingCompletions.length, startedAt: Date.now() });
     if (completionTimer) clearTimeout(completionTimer);
     completionTimer = setTimeout(() => {
       completionTimer = null;
       const finished = pendingCompletions;
       pendingCompletions = [];
+      notify({ kind: 'wakeup', pending: false });
       if (shuttingDown || !finished.length || !pi.sendMessage) return;
       const lines = finished.map((r) => {
         const where = runDir ? ` Full transcript: ${path.join(runDir, `${r.id}.jsonl`)}` : '';
@@ -729,6 +731,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     shuttingDown = true;
     if (completionTimer) clearTimeout(completionTimer);
     completionTimer = null;
+    if (pendingCompletions.length) notify({ kind: 'wakeup', pending: false });
     pendingCompletions = [];
     ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce: process.env.VOCS_CODE_PI_NONCE, capability: 'subagents', ready: false }), 'info');
     const active = [...runs.values()].filter((run) => run.status === 'running');
