@@ -59,11 +59,6 @@ export function itemText(item: TranscriptItem): { kind: SearchResult['kind']; te
   }
 }
 
-/** The per-session meta row: title, label, root and goal, searched as the top tier. */
-export function metaText(s: SessionMeta): string {
-  return [s.title, s.statusLabel, s.config.projectRoot, s.goal?.objective].filter((t): t is string => !!t && t.length > 0).join('\n');
-}
-
 /**
  * Turns free user input into a safe FTS5 MATCH expression: every term is quoted (so FTS syntax
  * characters cannot inject operators or throw), joined implicitly with AND. A trailing `*` on a
@@ -120,6 +115,12 @@ export class SearchIndex {
       this.db = new DatabaseSync(path.join(this.userData, 'search.db'));
       this.db.exec('PRAGMA journal_mode = WAL');
       this.db.exec('PRAGMA synchronous = NORMAL');
+      this.db.exec('BEGIN');
+      // Rebuild just the derived metadata tier when upgrading from the single text column.
+      // Transcript rows and their coverage stamps are unchanged.
+      if (this.db.prepare("SELECT 1 FROM pragma_table_info('session_meta') WHERE name = 'text'").get()) {
+        this.db.exec('DROP TABLE session_meta; DROP TABLE meta_fts;');
+      }
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS items (
           id INTEGER PRIMARY KEY,
@@ -147,20 +148,22 @@ export class SearchIndex {
         CREATE TABLE IF NOT EXISTS session_meta (
           id INTEGER PRIMARY KEY,
           sessionId TEXT UNIQUE NOT NULL,
-          text TEXT NOT NULL
+          title TEXT NOT NULL,
+          goal TEXT NOT NULL,
+          context TEXT NOT NULL
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS meta_fts USING fts5(
-          text, content='session_meta', content_rowid='id', tokenize='porter unicode61'
+          title, goal, context, content='session_meta', content_rowid='id', tokenize='porter unicode61'
         );
         CREATE TRIGGER IF NOT EXISTS meta_ai AFTER INSERT ON session_meta BEGIN
-          INSERT INTO meta_fts(rowid, text) VALUES (new.id, new.text);
+          INSERT INTO meta_fts(rowid, title, goal, context) VALUES (new.id, new.title, new.goal, new.context);
         END;
         CREATE TRIGGER IF NOT EXISTS meta_ad AFTER DELETE ON session_meta BEGIN
-          INSERT INTO meta_fts(meta_fts, rowid, text) VALUES ('delete', old.id, old.text);
+          INSERT INTO meta_fts(meta_fts, rowid, title, goal, context) VALUES ('delete', old.id, old.title, old.goal, old.context);
         END;
         CREATE TRIGGER IF NOT EXISTS meta_au AFTER UPDATE ON session_meta BEGIN
-          INSERT INTO meta_fts(meta_fts, rowid, text) VALUES ('delete', old.id, old.text);
-          INSERT INTO meta_fts(rowid, text) VALUES (new.id, new.text);
+          INSERT INTO meta_fts(meta_fts, rowid, title, goal, context) VALUES ('delete', old.id, old.title, old.goal, old.context);
+          INSERT INTO meta_fts(rowid, title, goal, context) VALUES (new.id, new.title, new.goal, new.context);
         END;
         CREATE TABLE IF NOT EXISTS files (
           sessionId TEXT PRIMARY KEY,
@@ -168,7 +171,10 @@ export class SearchIndex {
           size INTEGER NOT NULL
         );
       `);
+      this.syncMeta(this.deps.store.list());
+      this.db.exec('COMMIT');
     } catch (e) {
+      this.db?.close();
       this.db = null;
       this.deps.log('warn', `search index failed to open: ${e instanceof Error ? e.message : String(e)}`);
       return;
@@ -232,14 +238,14 @@ export class SearchIndex {
   syncMeta(list: SessionMeta[]): void {
     if (!this.db) return;
     const upsert = this.stmt(
-      'INSERT INTO session_meta(sessionId, text) VALUES (?, ?) ON CONFLICT(sessionId) DO UPDATE SET text = excluded.text'
+      `INSERT INTO session_meta(sessionId, title, goal, context) VALUES (?, ?, ?, ?)
+       ON CONFLICT(sessionId) DO UPDATE SET title = excluded.title, goal = excluded.goal, context = excluded.context
+       WHERE title <> excluded.title OR goal <> excluded.goal OR context <> excluded.context`
     );
     const alive = new Set<string>();
     for (const s of list) {
       alive.add(s.id);
-      const text = metaText(s);
-      const row = this.stmt('SELECT text FROM session_meta WHERE sessionId = ?').get(s.id) as { text: string } | undefined;
-      if (!row || row.text !== text) upsert.run(s.id, text);
+      upsert.run(s.id, s.title, s.goal?.objective ?? '', [s.statusLabel, s.config.projectRoot].filter(Boolean).join('\n'));
     }
     // Meta rows for deleted sessions go too.
     for (const r of this.db.prepare('SELECT sessionId FROM session_meta').all() as { sessionId: string }[]) {
@@ -253,40 +259,44 @@ export class SearchIndex {
     if (!this.db) return { available: false, results: [] };
     const match = ftsQuery(q ?? '');
     if (!match) return { available: true, results: [] };
-    const cap = Math.min(limit ?? 60, 200);
-    const scope = this.sessionScope(filters);
-    if (scope.size === 0) return { available: true, results: [] };
+    const cap = Math.min(Math.max(0, Math.trunc(limit ?? 60) || 0), 200);
+    const ids = [...this.sessionScope(filters)];
+    if (!ids.length || cap === 0) return { available: true, results: [] };
+    const category = filters?.category ?? 'all';
     const results: SearchResult[] = [];
-    if (scope.size === 0) return { available: true, results: [] };
+    const sessionParams = ids.map(() => '?').join(',');
 
-    // Tier 1: titles, labels, project roots, goals.
-    const metaRows = this.db
-      .prepare(
-        `SELECT m.sessionId AS sessionId, snippet(meta_fts, 0, char(1), char(2), char(8230), 24) AS snip
-         FROM meta_fts JOIN session_meta m ON m.id = meta_fts.rowid
-         WHERE meta_fts MATCH ? ORDER BY bm25(meta_fts) LIMIT 40`
-      )
-      .all(match) as { sessionId: string; snip: string }[];
-    for (const r of metaRows) {
-      if (!scope.has(r.sessionId)) continue;
-      const s = this.deps.store.get(r.sessionId);
-      results.push({ sessionId: r.sessionId, kind: 'meta', ts: s?.updatedAt ?? 0, snippet: r.snip });
+    // Tier 1: select the FTS column before ranking, or search all metadata columns.
+    if (category === 'all' || category === 'title' || category === 'goal') {
+      const metaMatch = category === 'all' ? match : `${category} : (${match})`;
+      const metaRows = this.db
+        .prepare(
+          `SELECT m.sessionId AS sessionId, snippet(meta_fts, ?, char(1), char(2), char(8230), 24) AS snip
+           FROM meta_fts JOIN session_meta m ON m.id = meta_fts.rowid
+           WHERE meta_fts MATCH ? AND m.sessionId IN (${sessionParams})
+           ORDER BY bm25(meta_fts) LIMIT ?`
+        )
+        .all(category === 'title' ? 0 : category === 'goal' ? 1 : -1, metaMatch, ...ids, category === 'all' ? Math.min(cap, 40) : cap) as { sessionId: string; snip: string }[];
+      for (const r of metaRows) {
+        const s = this.deps.store.get(r.sessionId);
+        results.push({ sessionId: r.sessionId, kind: 'meta', ts: s?.updatedAt ?? 0, snippet: r.snip });
+      }
+    }
+    if (results.length >= cap || (category !== 'all' && category !== 'transcript' && category !== 'tool')) {
+      return { available: true, results };
     }
 
-    // Tier 2: transcript content, capped per session so one chatty session cannot drown the rest.
-    const args: string[] = [match];
-    const ids = [...scope];
-    const scopeSql = ` AND i.sessionId IN (${ids.map(() => '?').join(',')})`;
-    args.push(...ids);
+    // Tier 2: narrow before ranking/limiting so tool output cannot exhaust the transcript budget.
+    const kindSql = category === 'transcript' ? " AND i.kind IN ('user', 'assistant')" : category === 'tool' ? " AND i.kind = 'tool'" : '';
     const bodyRows = this.db
       .prepare(
         `SELECT i.sessionId AS sessionId, i.itemId AS itemId, i.kind AS kind, i.ts AS ts,
                 snippet(fts, 0, char(1), char(2), char(8230), 18) AS snip
          FROM fts JOIN items i ON i.id = fts.rowid
-         WHERE fts MATCH ?${scopeSql}
+         WHERE fts MATCH ? AND i.sessionId IN (${sessionParams})${kindSql}
          ORDER BY bm25(fts) LIMIT 400`
       )
-      .all(...args) as { sessionId: string; itemId: string; kind: SearchResult['kind']; ts: number; snip: string }[];
+      .all(match, ...ids) as { sessionId: string; itemId: string; kind: SearchResult['kind']; ts: number; snip: string }[];
     const perSession = new Map<string, number>();
     for (const r of bodyRows) {
       const n = perSession.get(r.sessionId) ?? 0;
