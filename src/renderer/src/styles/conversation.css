@@ -217,16 +217,13 @@
 .run-controls .pill-model > .icon:first-child {
   color: var(--accent);
 }
-.run-controls .pill-model.is-fast {
-  position: relative;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
-}
-/* Follow the pill's inner rim without changing its size or click target. */
+/* The current stays on the composer even when its controls are hidden. */
 .fast-mode-electric {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+  border-radius: inherit;
   pointer-events: none;
   fill: none;
   stroke: color-mix(in srgb, var(--blue) 74%, var(--fg));
@@ -234,12 +231,32 @@
   stroke-linejoin: round;
   filter: drop-shadow(0 0 0.8px var(--blue));
 }
-.fast-mode-electric path {
+.fast-mode-electric-trace {
   stroke-width: 0.8;
 }
-.fast-mode-electric .fast-mode-electric-fork {
+.fast-mode-electric-fork {
   stroke-width: 0.5;
   opacity: 0.72;
+}
+/* The mask carries the current; it reveals the fine trace without flashing it on or off. */
+.fast-mode-electric-flow {
+  stroke: white;
+  stroke-width: 8;
+  stroke-linecap: butt;
+  stroke-dasharray: var(--fast-dashes);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .fast-mode-electric-flow {
+    animation: fast-current-lap 7s linear infinite, fast-current-length 3.8s ease-in-out infinite alternate;
+  }
+  @keyframes fast-current-lap {
+    from { stroke-dashoffset: 0; }
+    to { stroke-dashoffset: -100; }
+  }
+  @keyframes fast-current-length {
+    from { stroke-dasharray: var(--fast-dashes); }
+    to { stroke-dasharray: var(--fast-dashes-expanded); }
+  }
 }
 /* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */
 .pill-effort {
@@ -1810,6 +1827,7 @@
   background: var(--bg-elev);
 }
 .composer-box {
+  position: relative;
   max-width: 920px;
   margin: 0 auto;
   border: 1px solid var(--border-strong);

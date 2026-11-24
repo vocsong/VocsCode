@@ -21,6 +21,7 @@ import { Button, Dropdown, Icon, MenuItem } from './ui';
 import { insertTranscript } from '../../../shared/dictation';
 import { DictationControl, type DictationHandle } from './DictationControl';
 import { SessionControls, SessionMeter } from './SessionControls';
+import { FastModeElectric } from './FastModeElectric';
 import { useUiMode } from '../ui-mode';
 
 /** With one pane the composer is the only one; in a split, only the active pane's takes focus and inserts. */
@@ -665,6 +666,7 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
       )}
       <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
       <div className="composer-box">
+        {session.config.fastMode && <FastModeElectric />}
         <textarea
           ref={ref}
           value={text}
