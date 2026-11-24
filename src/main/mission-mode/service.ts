@@ -385,12 +385,24 @@ export class MissionService implements MissionHooks, MissionToolHandler {
   async recover(): Promise<void> {
     for (const meta of this.deps.sessions.list({ refreshGit: false })) {
       if (meta.mission?.role !== 'lead') continue;
+      // One unreadable or failing mission must not keep the others from loading.
+      try {
+        await this.recoverOne(meta as SessionMeta & { mission: NonNullable<SessionMeta['mission']> });
+      } catch (e) {
+        this.deps.log('warn', `mission: could not recover the mission led by ${meta.id}: ${errorMessage(e)}`);
+      }
+    }
+    if (this.records.size) this.deps.log('info', `mission: loaded ${this.records.size} mission record(s)`);
+  }
+
+  private async recoverOne(meta: SessionMeta & { mission: NonNullable<SessionMeta['mission']> }): Promise<void> {
+    {
       const raw = await readJson<unknown>(this.recordFile(meta.id), null, { log: this.deps.log });
       const record = parseRecord(raw, meta);
       if (!record) {
         this.deps.log('warn', `mission: no readable record for Lead ${meta.id}; it no longer runs a mission`);
         if (meta.mission.state !== 'stopped' && meta.mission.state !== 'ended') this.deps.sessions.setMission(meta.id, { state: 'stopped' });
-        continue;
+        return;
       }
       const next = structuredClone(record);
       if (next.state === 'running' || next.state === 'waiting_user') next.state = 'interrupted';
@@ -401,21 +413,21 @@ export class MissionService implements MissionHooks, MissionToolHandler {
       next.inbox.builders = {};
       // Permission requests died with their runtimes.
       next.inbox.lead = next.inbox.lead.filter((e) => e.kind !== 'approval');
-      let loaded = record;
       if (JSON.stringify(next) !== JSON.stringify(record)) {
         next.updatedAt = Date.now();
         try {
           await this.writeRecord(next);
-          loaded = next;
         } catch (e) {
+          // Interrupted is the conservative state either way: nothing dispatches until Resume, and
+          // the next start turns the stale on-disk `running` into `interrupted` again.
           this.deps.log('warn', `mission ${record.id}: could not save its restart state: ${errorMessage(e)}`);
         }
       }
-      this.records.set(loaded.id, loaded);
-      this.sync(undefined, loaded);
+      this.records.set(next.id, next);
+      this.sync(undefined, next);
     }
-    if (this.records.size) this.deps.log('info', `mission: loaded ${this.records.size} mission record(s)`);
   }
+
 
   /**
    * Startup housekeeping: Builder worktrees of ended or stopped missions are removed once landed or

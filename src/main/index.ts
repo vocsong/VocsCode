@@ -476,6 +476,14 @@ async function main(): Promise<void> {
 
   const sessionsRef = sessions;
 
+  // One push fan-out for the window and web clients alike. Declared before Mission recovery, whose
+  // session updates already push the session list through it.
+  const pushAll = (channel: string, payload: unknown) => {
+    pushToRenderer(mainWindow, channel, payload);
+    webServer?.broadcast(channel, payload);
+    void remoteHost?.broadcastPush(channel, payload);
+  };
+
   // Mission mode: the loopback gateway carries the Mission tools; it opens on the first mission
   // session. A mission that was running when the app closed comes back interrupted, never resumed.
   const missionGateway = new MissionGateway({
@@ -494,13 +502,6 @@ async function main(): Promise<void> {
   const missionRef = missionService;
   await missionRef.recover().catch((e) => log('warn', `mission: recovery failed: ${errorMessage(e)}`));
   void missionRef.sweep().catch((e) => log('warn', `mission: startup sweep failed: ${errorMessage(e)}`));
-
-  // One push fan-out for the window and web clients alike.
-  const pushAll = (channel: string, payload: unknown) => {
-    pushToRenderer(mainWindow, channel, payload);
-    webServer?.broadcast(channel, payload);
-    void remoteHost?.broadcastPush(channel, payload);
-  };
 
   // Which session the desktop window is on, pushed to paired browsers so they can open the same
   // one. The window's focus/blur is wired in `createWindow`; the list reconcile forgets a target

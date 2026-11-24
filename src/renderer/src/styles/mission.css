@@ -18,6 +18,15 @@
   color: var(--purple);
   background: var(--purple-soft);
 }
+/* The Lead's tier label is long: in a narrow composer it shortens with an ellipsis, like the model
+   pill, instead of pushing Send out of the composer. */
+.composer-actions .run-controls > .dropdown:has(.run-permission.is-mission) {
+  flex: 0 1 auto;
+  min-width: 38px;
+}
+.composer-actions .run-controls .pill.run-permission.is-mission {
+  max-width: 100%;
+}
 .pane .composer-box.is-mission {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
 }

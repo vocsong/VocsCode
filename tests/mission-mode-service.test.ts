@@ -5,7 +5,7 @@
  * with the user, restart without dispatch and the one Resume message, and record writes that fail.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, promises as fs } from 'node:fs';
+import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -420,6 +420,38 @@ describe('restart and persistence', () => {
     expect(sent(leadId)).toHaveLength(1);
     expect(vi.mocked(createAdapter).mock.calls.map(([, ctx]) => ctx.sessionId)).toEqual([leadId]);
     await expect(service.resume(leadId)).rejects.toThrow(/Only an interrupted mission/);
+  });
+
+  it('recovers every other mission when one of them fails to load', async () => {
+    const first = await idleLead('Add a rate limiter to the API');
+    const second = await idleLead('Write the release notes');
+    service.dispose();
+    await manager.stopAll();
+    await manager.flushPendingPersists();
+    const reloaded = new SessionStore(userData);
+    await reloaded.load();
+    vi.mocked(createAdapter).mockClear();
+    runtimes = [];
+    ({ mgr: manager, svc: service } = boot(reloaded));
+    store = reloaded;
+    // The first mission recovered hits a failure while its rows are updated.
+    vi.spyOn(manager, 'setMission').mockImplementationOnce(() => { throw new Error('injected row failure'); });
+    await expect(service.recover()).resolves.toBeUndefined();
+    expect([first, second].map(({ leadId }) => service.get(leadId)?.state)).toEqual(['interrupted', 'interrupted']);
+    await settle();
+    expect(createAdapter).not.toHaveBeenCalled();
+  });
+
+  it('runs at startup only once the session-list push fan-out exists', () => {
+    // recover() updates the Lead and Builder rows (setMission), which pushes the session list
+    // through index.ts's fan-out. Declared after recovery, that first push threw: recovery stopped
+    // after one mission, whose sessions were never indexed, so their events were dropped.
+    const source = readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+    const fanOut = source.indexOf('const pushAll = ');
+    const recovery = source.indexOf('missionRef.recover()');
+    expect(fanOut, 'index.ts must declare the push fan-out').toBeGreaterThan(-1);
+    expect(recovery, 'index.ts must recover the missions at startup').toBeGreaterThan(-1);
+    expect(fanOut).toBeLessThan(recovery);
   });
 
   it('leaves the mission unchanged and reports it when the record cannot be written', async () => {
