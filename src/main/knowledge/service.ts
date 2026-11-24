@@ -10,7 +10,7 @@
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { AppSettings } from '../../shared/types';
+import type { AppSettings, ModelRef } from '../../shared/types';
 import {
   KNOWLEDGE_PUBLISH_DIR,
   authorityOf,
@@ -36,7 +36,8 @@ import {
   type KnowledgeView
 } from '../../shared/knowledge';
 import { errorMessage } from '../util/async';
-import { KnowledgeProtectedError, KnowledgeStore, writeFileAtomic, type StoredPage } from './store';
+import { selectKnowledgeUtilityModel, type KnowledgeCompleter } from './llm';
+import { isAutomaticDraftId, KnowledgeProtectedError, KnowledgeStore, writeFileAtomic, type KnowledgeDraftResult, type StoredPage } from './store';
 import { bootstrapKnowledge, distillKnowledge, type KnowledgeJobResult, type KnowledgeSynthDeps } from './synth';
 import type { AnchorResolver } from './anchors';
 
@@ -84,8 +85,8 @@ export class KnowledgeService {
   readonly store: KnowledgeStore;
   private readonly deps: KnowledgeServiceDeps;
   private readonly jobs = new Map<string, Promise<KnowledgeJobResult>>();
-  /** Projects whose one passive bootstrap attempt has already been made this app run. */
-  private readonly seedAttempts = new Set<string>();
+  /** Reserve each project's passive seed until the background job takes over. */
+  private readonly scheduledSeeds = new Set<string>();
   /** Last job outcome per project; the panel shows it so a failure cannot vanish into a toast. */
   private readonly lastJobs = new Map<string, KnowledgeJobState>();
   private protectedSink: ((change: KnowledgeProtectedChange) => Promise<void>) | null = null;
@@ -124,8 +125,16 @@ export class KnowledgeService {
   /* ------------------------------------------------------------------ */
 
   async status(scope: KnowledgeScope): Promise<KnowledgeStatusSummary> {
-    const pages = await this.store.load(scope);
-    const proposals = await this.store.proposals(scope);
+    const [pages, proposals] = await Promise.all([this.store.load(scope), this.pendingProposals(scope)]);
+    return this.summarizeStatus(scope, pages, proposals.length);
+  }
+
+  private async pendingProposals(scope: KnowledgeScope): Promise<KnowledgePage[]> {
+    const [legacy, drafts] = await Promise.all([this.store.proposals(scope), this.store.drafts(scope)]);
+    return [...legacy, ...drafts];
+  }
+
+  private async summarizeStatus(scope: KnowledgeScope, pages: KnowledgePage[], proposals: number): Promise<KnowledgeStatusSummary> {
     let stale = 0;
     for (const page of pages.slice(0, 100)) {
       try {
@@ -140,10 +149,9 @@ export class KnowledgeService {
     return {
       hasWiki: await this.store.hasWiki(scope),
       pages: pages.length,
-      // A deprecated or superseded page is history, not a pending decision. With ingestion
-      // automated, only pages still in the legacy queue are pending at all.
+      // Pending live pages are legacy; the separate proposal queue has its own count.
       needsReview: pages.filter((p) => isPendingStatus(p.meta.status)).length,
-      proposals: proposals.length,
+      proposals,
       stale,
       ...(updated ? { lastUpdated: updated } : {}),
       ...(running ? { generating: true } : {}),
@@ -152,8 +160,7 @@ export class KnowledgeService {
   }
 
   async view(scope: KnowledgeScope): Promise<KnowledgeView> {
-    // Opening the panel is a passive trigger, and anything left in the old review queue is accepted
-    // on sight: ingestion is automatic now.
+    // Opening the panel may seed the wiki but cannot accept automatic evidence drafts.
     void this.ensureSeeded(scope);
     return this.render(scope);
   }
@@ -170,9 +177,9 @@ export class KnowledgeService {
 
   private async render(scope: KnowledgeScope): Promise<KnowledgeView> {
     await this.autoAcceptLegacy(scope);
-    const [pages, proposals, rejectedClaims] = await Promise.all([this.store.load(scope), this.store.proposals(scope), this.store.rejectedClaims(scope)]);
+    const [pages, proposals, rejectedClaims] = await Promise.all([this.store.load(scope), this.pendingProposals(scope), this.store.rejectedClaims(scope)]);
     const summaries = pages.map((p) => this.summarize(p)).sort(byKindThenUpdated);
-    const status = await this.status(scope);
+    const status = await this.summarizeStatus(scope, pages, proposals.length);
     return {
       projectRoot: scope.projectRoot,
       cwd: scope.cwd,
@@ -191,7 +198,8 @@ export class KnowledgeService {
   }
 
   async detail(scope: KnowledgeScope, id: string): Promise<KnowledgePageDetail | null> {
-    const page = await this.store.read(scope, id);
+    const draft = isAutomaticDraftId(id);
+    const page = draft ? await this.store.readDraft(scope, id) : await this.store.read(scope, id);
     if (!page) return null;
     const all = await this.store.load(scope);
     const relatedIds = new Set(page.meta.related);
@@ -203,7 +211,7 @@ export class KnowledgeService {
     const related = all.filter((p) => relatedIds.has(p.meta.id) && p.meta.id !== id).map((p) => this.summarize(p));
     const { stale, reasons } = await this.store.staleness(scope, page);
     const anchors = this.deps.anchors ? await this.deps.anchors.resolve(scope, page.meta.anchors) : page.meta.anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'Anchor resolution is unavailable.' }));
-    return { page: toPage(page), related, anchors, stale, staleReasons: reasons };
+    return { page: { meta: page.meta, body: page.body, path: draft ? page.path : `${id}.md` }, related, anchors, stale, staleReasons: reasons };
   }
 
   /**
@@ -257,9 +265,11 @@ export class KnowledgeService {
     return out.sort((a, b) => b.score - a.score).slice(0, Math.min(opts.limit ?? 12, 40));
   }
 
-  /** The bounded, always-on block a new session is primed with; null when there is nothing to say. */
-  async digest(scope: KnowledgeScope): Promise<string | null> {
+  /** The bounded priming block; optionally schedule a seed from the same snapshot if it is empty. */
+  async digest(scope: KnowledgeScope, opts: { seedIfEmpty?: boolean } = {}): Promise<string | null> {
+    const utility = opts.seedIfEmpty && this.canSeed(scope) ? this.automaticModel() : undefined;
     const pages = await this.store.load(scope);
+    if (utility && !pages.length) this.scheduleSeed(scope, utility);
     const summaries = pages.filter((p) => p.meta.status === 'current' || p.meta.status === 'uncertain').map((p) => this.summarize(p));
     if (!summaries.length) return null;
     return renderKnowledgeDigest(summaries, { projectName: path.basename(scope.projectRoot), wikiDir: this.store.repoDir(scope) });
@@ -268,6 +278,18 @@ export class KnowledgeService {
   /* ------------------------------------------------------------------ */
   /* Writing                                                            */
   /* ------------------------------------------------------------------ */
+
+  /** Queue a live-evidence finding for explicit desktop review, without changing the live wiki. */
+  async draft(scope: KnowledgeScope, input: KnowledgeProposalInput, signal?: AbortSignal): Promise<KnowledgeDraftResult> {
+    signal?.throwIfAborted();
+    let projectId: string | undefined;
+    try {
+      projectId = await this.projectIdOf?.(scope);
+    } catch {
+      // Identity is provenance, not a prerequisite for an app-local draft.
+    }
+    return this.store.writeDraft(scope, { ...input, projectId }, signal);
+  }
 
   /**
    * Records durable knowledge. Ingestion is fully automated: the claim becomes a `current` page
@@ -323,6 +345,16 @@ export class KnowledgeService {
 
   /** Accept (human review) or reject a proposal or an unreviewed page. */
   async review(scope: KnowledgeScope, id: string, action: 'accept' | 'reject', opts: { by?: string; body?: string; title?: string; note?: string } = {}): Promise<KnowledgePageSummary | null> {
+    if (isAutomaticDraftId(id)) {
+      if (action === 'reject') {
+        if (await this.store.deleteDraft(scope, id, { by: opts.by })) this.deps.log('info', `knowledge: draft rejected (${id})`);
+        return null;
+      }
+      const page = await this.store.reviewDraft(scope, id, opts);
+      if (!page) return null;
+      this.deps.log('info', `knowledge: draft accepted (${id} → ${page.meta.id})`);
+      return this.summarize(page);
+    }
     const proposals = await this.store.proposals(scope);
     const proposal = proposals.find((p) => p.meta.id === id);
     if (proposal) return this.reviewProposal(scope, proposal, action, opts);
@@ -413,6 +445,9 @@ export class KnowledgeService {
       if (!isPendingStatus(page.meta.status)) continue;
       if (await this.reviewPage(scope, page.meta.id, 'accept', { by: opts.by })) accepted++;
     }
+    for (const draft of await this.store.drafts(scope)) {
+      if (await this.review(scope, draft.meta.id, 'accept', opts)) accepted++;
+    }
     this.deps.log('info', `knowledge: accepted ${accepted} item(s)`);
     return { accepted };
   }
@@ -460,28 +495,34 @@ export class KnowledgeService {
     } catch (e) {
       this.deps.log('warn', `knowledge: could not record episode: ${errorMessage(e)}`);
     }
-    if (this.settings().autoDistill && this.deps.synth?.completer) {
-      void this.generate(scope, 'distill').catch((e) => this.deps.log('warn', `knowledge: auto-distill failed: ${errorMessage(e)}`));
+    this.scheduleDistillation(scope, 'distill');
+  }
+
+  /** Passive seed from project docs, attempted at most once per project per app run. */
+  async ensureSeeded(scope: KnowledgeScope): Promise<void> {
+    if (!this.canSeed(scope)) return;
+    const utility = this.automaticModel();
+    if (!utility) return;
+    try {
+      if (!(await this.store.load(scope)).length) this.scheduleSeed(scope, utility);
+    } catch {
+      // Seeding is opportunistic; a failed read must not fail the view.
     }
   }
 
-  /**
-   * Passive seed: the first time a project with no pages is opened, draft the wiki from its own
-   * docs. Attempted once per project per app run; a project with too little documentation simply
-   * gets no wiki until it has some.
-   */
-  async ensureSeeded(scope: KnowledgeScope): Promise<void> {
-    if (!this.deps.synth?.completer) return;
-    if (this.seedAttempts.has(scope.projectRoot) || this.jobs.has(scope.projectRoot) || this.lastJobs.has(scope.projectRoot)) return;
-    let pages = 0;
-    try {
-      pages = (await this.store.load(scope)).length;
-    } catch {
-      return;
-    }
-    if (pages) return;
-    this.seedAttempts.add(scope.projectRoot);
-    void this.generate(scope, 'bootstrap').catch((e) => this.deps.log('debug', `knowledge: passive seed skipped: ${errorMessage(e)}`));
+  private canSeed(scope: KnowledgeScope): boolean {
+    return !this.scheduledSeeds.has(scope.projectRoot) && !this.lastJobs.has(scope.projectRoot);
+  }
+
+  private scheduleSeed(scope: KnowledgeScope, utility: ModelRef): void {
+    // Reads from multiple sessions can finish together; only the first may schedule the job.
+    if (!this.canSeed(scope)) return;
+    this.scheduledSeeds.add(scope.projectRoot);
+    setImmediate(() => {
+      this.scheduledSeeds.delete(scope.projectRoot);
+      if (this.lastJobs.has(scope.projectRoot) || !selectKnowledgeUtilityModel(this.deps.settings(), utility)) return;
+      this.runAutomaticJob(scope, 'bootstrap', utility);
+    });
   }
 
   /** The relation graph for this project, rebuilt from the markdown and cached best-effort. */
@@ -495,9 +536,9 @@ export class KnowledgeService {
     return graph;
   }
 
-  /** Deletes one page without tombstoning its claim; a rejected claim is what stays refused. */
+  /** Deletes one page or draft without tombstoning its claim. */
   async remove(scope: KnowledgeScope, id: string): Promise<boolean> {
-    return this.store.deletePage(scope, id);
+    return isAutomaticDraftId(id) ? this.store.deleteDraft(scope, id) : this.store.deletePage(scope, id);
   }
 
   /**
@@ -512,12 +553,26 @@ export class KnowledgeService {
     } catch (e) {
       this.deps.log('warn', `knowledge: could not record PR episode: ${errorMessage(e)}`);
     }
-    if (this.settings().autoDistill && this.deps.synth?.completer) {
-      void this.generate(scope, 'reflect').catch((e) => this.deps.log('warn', `knowledge: PR reflection failed: ${errorMessage(e)}`));
-    }
+    this.scheduleDistillation(scope, 'reflect');
   }
 
-  /** Accepts any candidate left over from the old review queue, so nothing ever waits for a human. */
+  private automaticModel(): ModelRef | undefined {
+    if (!this.deps.synth?.completer) return;
+    const choice = selectKnowledgeUtilityModel(this.deps.settings());
+    return choice ? { provider: choice.provider.id, model: choice.model } : undefined;
+  }
+
+  private scheduleDistillation(scope: KnowledgeScope, mode: 'distill' | 'reflect'): void {
+    if (!this.settings().autoDistill) return;
+    const utility = this.automaticModel();
+    if (utility) this.runAutomaticJob(scope, mode, utility);
+  }
+
+  private runAutomaticJob(scope: KnowledgeScope, mode: KnowledgeJobState['mode'], utility: ModelRef): void {
+    void this.runJob(scope, mode, utility).catch((e) => this.deps.log('warn', `knowledge: automatic ${mode} failed: ${errorMessage(e)}`));
+  }
+
+  /** Preserve migration of the old queue, but do not read drafts from the new queue here. */
   private async autoAcceptLegacy(scope: KnowledgeScope): Promise<void> {
     for (const proposal of await this.store.proposals(scope)) {
       try {
@@ -533,7 +588,7 @@ export class KnowledgeService {
         };
         delete meta.targetPageId;
         delete meta.review;
-        await this.store.write(scope, meta, proposal.body);
+        await this.store.write(scope, meta, proposal.body, { preserveReview: true });
         await this.store.removeProposal(scope, proposal.meta.id);
       } catch (e) {
         this.deps.log('debug', `knowledge: could not auto-accept ${proposal.meta.id}: ${errorMessage(e)}`);
@@ -546,18 +601,35 @@ export class KnowledgeService {
         const meta: KnowledgePageMeta = { ...page.meta, status: 'current', updatedBy: 'auto:accept' };
         delete meta.targetPageId;
         delete meta.review;
-        await this.store.write(scope, meta, page.body);
+        await this.store.write(scope, meta, page.body, { preserveReview: true });
       } catch (e) {
         this.deps.log('debug', `knowledge: could not auto-accept ${page.meta.id}: ${errorMessage(e)}`);
       }
     }
   }
 
+  /** Deliberate generation retains the generic background model selection. */
+  generate(scope: KnowledgeScope, mode: KnowledgeJobState['mode']): Promise<KnowledgeJobResult> {
+    return this.runJob(scope, mode);
+  }
+
   /** One job per project; the panel polls status and sees `generating`. */
-  async generate(scope: KnowledgeScope, mode: 'bootstrap' | 'distill' | 'reflect'): Promise<KnowledgeJobResult> {
-    if (!this.deps.synth?.completer) return { ok: false, error: 'No background model is configured (Settings → General → Utility model).' };
+  private async runJob(scope: KnowledgeScope, mode: KnowledgeJobState['mode'], onlyUtilityModel?: ModelRef): Promise<KnowledgeJobResult> {
+    const base = this.deps.synth?.completer;
+    if (!base) return { ok: false, error: 'No background model is configured (Settings → General → Utility model).' };
     const running = this.jobs.get(scope.projectRoot);
     if (running) return running;
+    const completer: KnowledgeCompleter = onlyUtilityModel ? {
+      label: () => `${onlyUtilityModel.provider}/${onlyUtilityModel.model}`,
+      complete: async (req) => {
+        const reply = await base.complete({ ...req, onlyUtilityModel });
+        // If the selection was revoked, stop a bootstrap before it records unsent docs as scanned.
+        if (mode === 'bootstrap' && reply === null && !selectKnowledgeUtilityModel(this.deps.settings(), onlyUtilityModel)) {
+          throw new Error('The selected utility model is no longer available.');
+        }
+        return reply;
+      }
+    } : base;
     const deps: KnowledgeSynthDeps = {
       store: this.store,
       log: this.deps.log,
@@ -566,9 +638,10 @@ export class KnowledgeService {
       // Distillation writes through the service so its dedupe, evidence and rejection rules apply.
       // Tests may inject their own `propose` through deps.synth below.
       propose: (input, origin, sessionId) => this.propose(scope, input, origin, sessionId),
-      ...this.deps.synth
+      ...this.deps.synth,
+      completer
     };
-    const model = this.deps.synth.completer.label() ?? undefined;
+    const model = completer.label() ?? undefined;
     this.setJob(scope, { mode, state: 'running', at: new Date().toISOString(), ...(model ? { model } : {}) });
     const job = (mode === 'bootstrap' ? bootstrapKnowledge(scope, deps) : distillKnowledge(scope, deps, { mode: mode === 'reflect' ? 'reflect' : 'distill' }))
       .catch((e): KnowledgeJobResult => ({ ok: false, error: errorMessage(e) }))
@@ -611,7 +684,7 @@ export class KnowledgeService {
       status: meta.status,
       scope: meta.scope,
       ...(meta.branch ? { branch: meta.branch } : {}),
-      path: `${meta.id}.md`,
+      path: isAutomaticDraftId(meta.id) ? page.path : `${meta.id}.md`,
       ...(meta.claim ? { claim: meta.claim } : {}),
       ...(meta.targetPageId ? { targetPageId: meta.targetPageId } : {}),
       keywords: meta.keywords,
@@ -631,10 +704,6 @@ export class KnowledgeService {
 /* ------------------------------------------------------------------ */
 /* Pure helpers                                                       */
 /* ------------------------------------------------------------------ */
-
-function toPage(page: StoredPage): KnowledgePage {
-  return { meta: page.meta, body: page.body, path: `${page.meta.id}.md` };
-}
 
 function byKindThenUpdated(a: KnowledgePageSummary, b: KnowledgePageSummary): number {
   const rank = (s: KnowledgePageSummary) => (s.status === 'proposed' || s.status === 'draft' ? 1 : 0);

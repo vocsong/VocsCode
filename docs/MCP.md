@@ -335,8 +335,11 @@ and ACP. Log lines redact resolved values.
 not to a project name supplied in a tool call. With the gateway on, the stdio process forwards
 only to the app's loopback listener and cannot fall back to a disk reader. Stop revokes the
 capability; switching the gateway off restores legacy mode for new ordinary wiki sessions only.
-Membership, promotion approvals and Forget are desktop-owner operations. See [Local Knowledge
-and Memory](INTELLIGENCE.md) for tool availability and data scope.
+Membership, promotion approvals and Forget are desktop-owner operations. `memory_recall` and
+`context_compile` can return matching passive notes as cited history under the existing same-project
+history scope. `knowledge_record` with `draft: true` files a new review-only wiki proposal with
+checkout evidence. It neither updates a current page nor changes the existing tool approval rules.
+See [Local Knowledge and Memory](INTELLIGENCE.md) for tool availability and data scope.
 
 **Tool calls stay behind the existing gates.** Claude's `canUseTool` already treats
 `mcp__*` as mutating (it is not in `READ_ONLY_TOOLS`), so MCP tools prompt below Full

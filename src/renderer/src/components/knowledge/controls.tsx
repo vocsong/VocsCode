@@ -2,7 +2,10 @@ import React, { useId, useState } from 'react';
 import type { IntelligenceView } from '../../../../shared/intelligence';
 import { Button, Spinner } from '../ui';
 
-export const REFLECTION_PRIVACY_NOTICE = 'Reflection can send excerpts from the session transcript to your configured background model provider to extract candidate lessons.';
+export const LOCAL_REFLECTION_NOTE = 'After completed turns, Local can save a short lesson or outcome on this device. Capture makes no model calls.';
+export const LOCAL_RECALL_NOTE = 'With Local selected, an agent in this project can query for up to 3 short, topic-matched notes from source sessions it can access. There is no list or broad fallback. Recalled notes are history, not guidance. Verification changes their authority in Memory, not recall access.';
+export const LOCAL_RECALL_PRIVACY_NOTICE = 'Notes are not automatically added to prompts. Recall makes no extra provider request, but the session’s model can receive the notes in tool results, even when it’s cloud-backed. Off keeps saved notes visible on the desktop but withholds them from agents.';
+export const REFLECTION_PRIVACY_NOTICE = 'Clicking Reflect on this session can send excerpts from the session transcript to your configured background model provider to extract candidate lessons.';
 
 export function shortDate(at: string) {
   const date = new Date(at);

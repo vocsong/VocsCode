@@ -574,7 +574,8 @@ export const PUSH_CHANNELS = {
   desktopFocus: 'push:desktopFocus',
   updateState: 'push:updateState',
   processSummary: 'push:processSummary',
-  dictationStatus: 'push:dictationStatus'
+  dictationStatus: 'push:dictationStatus',
+  projectMemoryChanged: 'push:projectMemoryChanged'
 } as const;
 
 export type PushPayloads = {
@@ -601,6 +602,8 @@ export type PushPayloads = {
   'push:processSummary': ProcessSummary;
   /** Local dictation engine: download progress and server state. Desktop only. */
   'push:dictationStatus': DictationLocalStatus;
+  /** Desktop-only invalidation after a passive capture; carries no memory content. */
+  'push:projectMemoryChanged': { sessionId: string };
 };
 
 export type PushChannel = keyof PushPayloads;

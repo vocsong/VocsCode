@@ -3,11 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { createKnowledgeCompleter } from '../src/main/knowledge/llm';
 import { KnowledgeStore } from '../src/main/knowledge/store';
 import { KnowledgeService } from '../src/main/knowledge/service';
-import type { AppSettings } from '../src/shared/types';
-import { claimKey, type KnowledgePageMeta, type KnowledgeScope } from '../src/shared/knowledge';
+import { defaultSettings } from '../src/main/settings';
+import type { AppSettings, ModelRef } from '../src/shared/types';
+import { claimKey, serializeKnowledgeDocument, type KnowledgeEpisode, type KnowledgePageMeta, type KnowledgeProposalInput, type KnowledgeScope } from '../src/shared/knowledge';
 import { withKnowledgeWriteLock } from '../resources/mcp/knowledge-write.mjs';
 
 const dirs: string[] = [];
@@ -416,6 +418,165 @@ describe('knowledge service ingestion', () => {
   });
 });
 
+describe('automatic knowledge drafts', () => {
+  const finding: KnowledgeProposalInput = {
+    title: 'Draftonly ownership', claim: 'Only the main process owns a PTY.', body: 'Keep ownership in the main process.',
+    kind: 'gotcha', sources: [{ type: 'file', ref: 'src/main/pty.ts', revision: 'abcdef' }]
+  };
+
+  it('keeps evidence in the desktop queue across views and reload, out of the live wiki', async () => {
+    const projectRoot = tmpDir('vocs-kb-draft-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    const saved = await svc.draft(scope, finding);
+    expect(saved.saved).toBe(true);
+    expect(saved.id).toMatch(/^auto-draft\//);
+    await svc.store.writeProposal(scope, {
+      id: 'concept/legacy', meta: pageMeta({ id: 'concept/legacy', status: 'proposed' }), body: 'A legacy proposal.'
+    });
+
+    for (const app of [svc, service()]) {
+      const view = await app.view(scope);
+      expect(view.proposals).toEqual([expect.objectContaining({ id: saved.id, status: 'draft', scope: 'repo', updatedBy: 'auto:evidence-draft' })]);
+      expect(view.status.proposals).toBe(1);
+      expect(view.pages.map((page) => page.id)).toEqual(['concept/legacy']);
+      expect((await app.detail(scope, saved.id))?.page).toMatchObject({ body: finding.body, meta: { sources: finding.sources } });
+      expect(await app.store.read(scope, saved.id)).toBeNull();
+      expect(await app.search(scope, 'draftonly', { includeHistorical: true })).toEqual([]);
+      expect(await app.digest(scope)).not.toContain('Draftonly');
+      expect((await app.graph(scope)).nodes.map((node) => node.id)).toEqual(['concept/legacy']);
+      expect(await app.publish(scope, [saved.id, 'gotcha/draftonly-ownership'])).toMatchObject({ ok: true, written: [] });
+      // Standalone MCP only counts Markdown files at the top of the legacy proposal directory.
+      expect((await fs.readdir(app.store.proposalsDir(scope))).filter((file) => file.endsWith('.md'))).toEqual([]);
+    }
+  });
+
+  it('uses the local Git exclude on draft creation and promotion', async () => {
+    const projectRoot = tmpDir('vocs-kb-draft-ignore-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const exclude = path.join(projectRoot, '.git', 'info', 'exclude');
+    await fs.mkdir(path.dirname(exclude), { recursive: true });
+    await fs.writeFile(exclude, '# Git fixture\n');
+    const { id } = await service().draft(scope, finding);
+    expect(await fs.readFile(exclude, 'utf8')).toBe('# Git fixture\n.vocs-code/\n');
+
+    await fs.writeFile(exclude, '# Git fixture\n');
+    await service().review(scope, id, 'accept');
+    expect(await fs.readFile(exclude, 'utf8')).toBe('# Git fixture\n.vocs-code/\n');
+  });
+
+  it.each(['linked Git metadata directory', 'shared exclude inode'] as const)('does not edit a %s when saving a draft', async (kind) => {
+    const projectRoot = tmpDir('vocs-kb-draft-exclude-');
+    const outside = tmpDir('vocs-kb-exclude-neighbor-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const original = '# Unchanged local fixture\n';
+    const target = path.join(outside, 'exclude');
+    const info = path.join(projectRoot, '.git', 'info');
+    await fs.writeFile(target, original);
+    if (kind === 'linked Git metadata directory') {
+      await fs.mkdir(path.dirname(info));
+      await fs.symlink(outside, info, process.platform === 'win32' ? 'junction' : 'dir');
+    } else {
+      await fs.mkdir(info, { recursive: true });
+      await fs.link(target, path.join(info, 'exclude'));
+    }
+    const { id } = await service().draft(scope, finding);
+    expect((await service().view(scope)).proposals).toMatchObject([{ id, status: 'draft' }]);
+    expect(await fs.readFile(target, 'utf8')).toBe(original);
+  });
+
+  it('coalesces a claim across writers and creates a reviewed current page only on explicit review', async () => {
+    const projectRoot = tmpDir('vocs-kb-draft-repeat-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    await svc.store.write(scope, pageMeta({ review: { state: 'reviewed' } }), 'Existing reviewed body');
+    const first = await svc.draft(scope, { ...finding, supersedes: ['conventions/harness-lifecycle'] });
+    const submissions = await Promise.all(Array.from({ length: 3 }, (_, i) => service().draft(scope, {
+      ...finding, title: `Different title ${i}`, claim: 'Only the main  process owns a PTY.', body: 'Replacement body.'
+    })));
+    expect(submissions).toEqual(Array(3).fill({ id: first.id, saved: false }));
+    const reviewed = await service().review(scope, first.id, 'accept', { by: 'human', note: 'Checked' });
+    expect(reviewed).toMatchObject({ id: 'gotcha/draftonly-ownership', status: 'current', authority: 2 });
+    expect(await svc.store.read(scope, reviewed!.id)).toMatchObject({ body: finding.body, meta: { sources: finding.sources, supersedes: [], review: { state: 'reviewed', by: 'human', note: 'Checked' } } });
+    expect(await svc.store.read(scope, 'conventions/harness-lifecycle')).toMatchObject({ body: 'Existing reviewed body', meta: { status: 'current' } });
+    expect((await svc.view(scope)).proposals).toEqual([]);
+    expect(await svc.draft(scope, finding)).toEqual({ id: first.id, saved: false });
+    await expect(svc.draft(scope, { ...finding, pageId: reviewed!.id })).rejects.toThrow(/pageId/);
+  });
+
+  it('tombstones explicit rejections but keeps plain deletion distinct', async () => {
+    const projectRoot = tmpDir('vocs-kb-draft-reject-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    const { id } = await svc.draft(scope, finding);
+    expect(await svc.remove(scope, id)).toBe(true);
+    expect(await svc.remove(scope, id)).toBe(false);
+    expect(await svc.draft(scope, finding)).toEqual({ id, saved: true });
+    await svc.review(scope, id, 'reject', { by: 'human' });
+    const ledger = JSON.parse(await fs.readFile(path.join(svc.store.repoDir(scope), '_rejected.json'), 'utf8'));
+    expect(ledger[claimKey(finding.claim)]).toMatchObject({ claim: finding.claim, by: 'human' }); // standalone MCP lookup
+    expect(await service().draft(scope, { ...finding, claim: 'ONLY the main process owns a PTY!' })).toMatchObject({ saved: false, rejected: true });
+    expect(await service().view(scope)).toMatchObject({ proposals: [], rejectedClaims: [finding.claim] });
+    expect(await svc.detail(scope, id)).toBeNull();
+  });
+
+  it('isolates draft lookup, review and tombstones even for branches with colliding slugs', async () => {
+    const projectRoot = tmpDir('vocs-kb-draft-branch-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const branch = { ...scope, branch: 'topic/one' };
+    const otherBranch = { ...scope, branch: 'topic-one' };
+    const svc = service();
+    const branchFinding = { ...finding, scope: 'branch' as const };
+    await expect(svc.draft(scope, branchFinding)).rejects.toThrow(/branch/i);
+    const repoDraft = await svc.draft(branch, { ...finding, claim: 'This fact applies to the whole repository.' });
+    const privateDraft = await svc.draft(branch, branchFinding);
+    expect((await svc.view(branch)).proposals.map((p) => p.id).sort()).toEqual([privateDraft.id, repoDraft.id].sort());
+    for (const wrong of [scope, otherBranch]) {
+      expect((await svc.view(wrong)).proposals.map((p) => p.id)).toEqual([repoDraft.id]);
+      expect(await svc.detail(wrong, privateDraft.id)).toBeNull();
+      expect(await svc.review(wrong, privateDraft.id, 'accept')).toBeNull();
+      expect(await svc.review(wrong, privateDraft.id, 'reject')).toBeNull();
+      expect(await svc.remove(wrong, privateDraft.id)).toBe(false);
+    }
+    await svc.review(branch, privateDraft.id, 'reject');
+    expect((await svc.draft(branch, branchFinding)).rejected).toBe(true);
+    expect((await svc.view(otherBranch)).rejectedClaims).toEqual([]);
+    const sibling = await svc.draft(otherBranch, branchFinding);
+    expect(sibling).toMatchObject({ saved: true });
+    expect(sibling.id).not.toBe(privateDraft.id);
+    const reviewed = await svc.review(otherBranch, sibling.id, 'accept');
+    expect(reviewed).toMatchObject({ scope: 'branch', branch: otherBranch.branch });
+    expect(await svc.store.read(branch, reviewed!.id)).toBeNull();
+    expect(await svc.store.read(scope, reviewed!.id)).toBeNull();
+  });
+
+  it.each(['collision', 'tombstone'] as const)('refuses a draft review racing a %s under the wiki lock', async (kind) => {
+    const projectRoot = tmpDir('vocs-kb-draft-race-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    const { id } = await svc.draft(scope, finding);
+    const wiki = svc.store.repoDir(scope);
+    const pageId = 'gotcha/draftonly-ownership';
+    const file = path.join(wiki, `${pageId}.md`);
+    const current = serializeKnowledgeDocument(pageMeta({ id: pageId, claim: 'A different claim just won the lock.', review: { state: 'reviewed' } }), 'New human text');
+    let review!: Promise<unknown>;
+    await withKnowledgeWriteLock(wiki, async () => {
+      review = svc.review(scope, id, 'accept');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (kind === 'collision') {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, current);
+      } else {
+        await fs.writeFile(path.join(wiki, '_rejected.json'), JSON.stringify({ [claimKey(finding.claim)]: { claim: finding.claim, at: new Date().toISOString() } }));
+      }
+    });
+    await expect(review).rejects.toThrow(kind === 'collision' ? /already exists/ : /rejected/);
+    expect(await svc.detail(scope, id)).not.toBeNull();
+    if (kind === 'collision') expect(await fs.readFile(file, 'utf8')).toBe(current);
+    else expect(await svc.store.read(scope, pageId)).toBeNull();
+  });
+});
+
 describe('knowledge search and digest', () => {
   it('requires every query term and hides historical pages by default', async () => {
     const projectRoot = tmpDir('vocs-kb-');
@@ -639,5 +800,122 @@ describe('knowledge search and digest', () => {
     const after = await svc.view(scope);
     expect(after.proposals).toHaveLength(0);
     expect(after.pages.some((p) => p.id === 'gotcha/pty-guard' && p.status === 'current')).toBe(true);
+  });
+});
+
+describe('automatic wiki jobs', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const utility = { provider: 'selected', model: 'utility' };
+  const commit: KnowledgeEpisode = { kind: 'commit', sessionId: 's1', at: '2026-09-15T10:00:00.000Z', summary: 'Add a guard' };
+  const pr: KnowledgeEpisode = { ...commit, kind: 'pr', summary: 'PR into develop', detail: 'Diff:\n+ guard the reconnect' };
+  const entry = {
+    title: 'Standing decision',
+    claim: 'The main process owns state.',
+    body: 'The renderer keeps no durable state of its own; every update crosses the typed bridge so ownership stays in the main process.'
+  };
+
+  function fixture(utilityModel?: ModelRef) {
+    const projectRoot = tmpDir('vocs-kb-automatic-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const settings: AppSettings = {
+      ...defaultSettings(),
+      utilityModel,
+      providers: ['fallback', 'selected'].map((id) => ({
+        id, kind: 'openai-compatible', name: id, enabled: true, hasApiKey: true, baseUrl: `https://${id}.example/v1`,
+        models: [{ id: 'default', displayName: 'Default model', provider: id }]
+      }))
+    };
+    const reply = JSON.stringify({ pages: [entry], proposals: [entry] });
+    const network = vi.fn<typeof fetch>(async () => Response.json({ choices: [{ message: { content: reply }, finish_reason: 'stop' }] }));
+    vi.stubGlobal('fetch', network);
+    const log = () => undefined;
+    const transcript = vi.fn(async () => ['user: Fix the guard']);
+    const completer = createKnowledgeCompleter({ settings: () => settings, getSecret: async () => 'fixture-key', log });
+    const complete = vi.spyOn(completer, 'complete');
+    const svc = new KnowledgeService({ settings: () => settings, log, transcript, synth: { completer } });
+    return { scope, settings, svc, network, complete, transcript };
+  }
+
+  async function writeDocs(scope: KnowledgeScope): Promise<void> {
+    await fs.writeFile(path.join(scope.cwd, 'README.md'), `# Demo\n\n${entry.body.repeat(4)}\n`, 'utf8');
+  }
+
+  it('uses one page snapshot per digest and schedules only one passive seed off path', async () => {
+    const { scope, svc, network, complete } = fixture(utility);
+    await writeDocs(scope);
+    const scan = vi.spyOn(svc.store, 'readScan');
+    expect(await svc.digest(scope)).toBeNull();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(scan).not.toHaveBeenCalled();
+
+    // Release three overlapping reads in the same turn while the on-disk wiki is empty.
+    const load = vi.spyOn(svc.store, 'load').mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const digest = () => svc.digest(scope, { seedIfEmpty: true });
+    expect(await Promise.all([digest(), digest(), digest()])).toEqual([null, null, null]);
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(scan).not.toHaveBeenCalled();
+
+    await vi.waitFor(async () => expect((await svc.status(scope)).job).toMatchObject({ mode: 'bootstrap', state: 'done', model: 'selected/utility' }));
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ onlyUtilityModel: utility }));
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(await digest()).toContain('concept/standing-decision.md');
+  });
+
+  it.each(['not selected', 'disabled'])('keeps wiki jobs local when the utility is %s, but permits deliberate Generate', async (reason) => {
+    const { scope, settings, svc, network, complete, transcript } = fixture(reason === 'disabled' ? utility : undefined);
+    if (reason === 'disabled') settings.providers[1].enabled = false;
+    await writeDocs(scope);
+    await svc.digest(scope, { seedIfEmpty: true });
+    await svc.view(scope);
+    expect(await svc.store.hasWiki(scope)).toBe(false);
+
+    expect((await svc.createWiki(scope)).pages).toEqual([]);
+    await svc.recordEpisode(scope, commit);
+    await svc.reflectPr(scope, pr);
+    expect((await svc.store.readEpisodes(scope)).map((episode) => episode.kind).sort()).toEqual(['commit', 'pr']);
+    expect((await svc.status(scope)).job).toBeUndefined();
+    expect(transcript).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+    expect(network).not.toHaveBeenCalled();
+
+    await expect(svc.generate(scope, 'bootstrap')).resolves.toMatchObject({ ok: true });
+    expect(network).toHaveBeenCalledTimes(1);
+    const [url, init] = network.mock.calls[0];
+    expect(String(url)).toBe('https://fallback.example/v1/chat/completions');
+    expect(JSON.parse(String(init?.body)).model).toBe('default');
+  });
+
+  it.each(['distill', 'reflect'] as const)('runs automatic %s on the explicit provider and exact model', async (mode) => {
+    const { scope, svc, network, complete } = fixture(utility);
+    await svc.store.write(scope, pageMeta(), 'body');
+    if (mode === 'distill') await svc.recordEpisode(scope, commit);
+    else await svc.reflectPr(scope, pr);
+
+    await vi.waitFor(async () => expect((await svc.status(scope)).job).toMatchObject({ mode, state: 'done', model: 'selected/utility' }));
+    expect(complete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ onlyUtilityModel: utility }));
+    expect(network).toHaveBeenCalledTimes(1);
+    const [url, init] = network.mock.calls[0];
+    expect(String(url)).toBe('https://selected.example/v1/chat/completions');
+    expect(JSON.parse(String(init?.body)).model).toBe(utility.model);
+    expect((await svc.store.read(scope, 'concept/standing-decision'))?.meta).toMatchObject({ status: 'current', updatedBy: `agent:${mode}` });
+  });
+
+  it('does not let a revoked seed mark unsent docs scanned for a later deliberate Generate', async () => {
+    const { scope, settings, svc, network } = fixture(utility);
+    await writeDocs(scope);
+    const readScan = svc.store.readScan.bind(svc.store);
+    vi.spyOn(svc.store, 'readScan').mockImplementationOnce(async (scope) => {
+      settings.utilityModel = undefined;
+      return readScan(scope);
+    });
+    await svc.digest(scope, { seedIfEmpty: true });
+    await vi.waitFor(async () => expect((await svc.status(scope)).job?.state).toBe('failed'));
+    expect(network).not.toHaveBeenCalled();
+    expect(await svc.store.hasWiki(scope)).toBe(false);
+
+    await expect(svc.generate(scope, 'bootstrap')).resolves.toMatchObject({ ok: true });
+    expect(network).toHaveBeenCalledTimes(1);
   });
 });
