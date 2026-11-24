@@ -177,6 +177,8 @@ export class RemoteHost {
       viewOnly?: () => boolean;
       /** The mirror key changed (a browser holding it lost its pairing): re-seal and re-upload. */
       onMirrorRotated?: () => void;
+      /** The relay socket opened as this registered computer (each connect and reconnect). */
+      onOnline?: () => void;
       /** First retry delay for a mirror clear the relay did not confirm; tests shrink it. */
       mirrorRetryMs?: number;
       /** Delay before repeating a clear after an upload failed in transit; tests shrink it. */
@@ -515,6 +517,13 @@ export class RemoteHost {
     }
     if (!res?.ok) this.deps.log('warn', `remote: mirror upload refused (${res?.status ?? 'network error'})`);
     return !!res?.ok;
+  }
+
+  /** An analytics call as this computer (docs/WEB-DASHBOARD.md), or null while remote access is
+   *  off or this computer is not registered with the relay. */
+  async analyticsRequest(path: string, init: RequestInit = {}): Promise<Response | null> {
+    if (this.status === 'off' || !this.enrolled()) return null;
+    return this.relayFetch(path, init);
   }
 
   /** Drops the whole mirror at the relay (mirroring turned off, or the key rotated). Waits for
@@ -859,6 +868,7 @@ export class RemoteHost {
       this.push();
       if (enrolled) void this.reconcile();
       if (enrolled && this.mirrorClearPending()) void this.runOwedMirrorClear();
+      if (enrolled) this.deps.onOnline?.();
     });
     ws.on('message', (data) => void this.onMessage(String(data), ws));
     ws.on('close', (code: number) => {
