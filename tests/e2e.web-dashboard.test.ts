@@ -4,7 +4,8 @@
  * process join through the dashboard's own Connect with Vocs page (one through the retired /app
  * link a released desktop opens), upload their analytics snapshots, and the page shows both under
  * its static CSP: combined totals, the computer switcher, per-computer reliability, session rows
- * naming their computer, and a computer that stops sharing.
+ * naming their computer, and a computer that stops sharing. The populated dashboard also gets
+ * responsive layout, keyboard navigation and light/dark screenshot coverage.
  * Gated by VOCS_CODE_E2E_UI=1 (the e2e guard sets it); needs no app build and no account, but does
  * build the web bundle (src/web) in beforeAll unless a validated CI prebuild is opted in.
  */
@@ -204,6 +205,97 @@ async function addFromPage(page: Page, computer: Computer, checkCode: string): P
   await expect.poll(() => computer.host.state().status, { timeout: 30_000 }).toBe('online');
 }
 
+async function checkNarrowTabs(page: Page): Promise<void> {
+  const strip = page.getByRole('tablist', { name: 'Analytics sections' });
+  const { client, content, overflow } = await strip.evaluate((el) => ({
+    client: el.clientWidth, content: el.scrollWidth, overflow: getComputedStyle(el).overflowX,
+  }));
+  expect(content).toBeGreaterThan(client);
+  expect(overflow).toMatch(/^(auto|scroll)$/);
+
+  const overview = strip.getByRole('tab', { name: 'Overview' });
+  await overview.press('End', { timeout: 5_000 });
+  const sessions = strip.getByRole('tab', { name: 'Sessions', selected: true });
+  await sessions.waitFor({ timeout: 5_000 });
+  expect(await sessions.evaluate((el) => el === document.activeElement)).toBe(true);
+  await expect.poll(() => strip.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+  await page.keyboard.press('Home');
+  await strip.getByRole('tab', { name: 'Overview', selected: true }).waitFor({ timeout: 5_000 });
+}
+
+async function checkDashboardAppearance(page: Page): Promise<void> {
+  const shell = page.locator('html[data-product="code"] .v-root');
+  const heading = shell.getByRole('heading', { name: 'Analytics', level: 1, exact: true }).and(shell.locator('h1'));
+  const brand = shell.getByRole('link', { name: /Vocs Code/i }).and(shell.locator('.v-brand'));
+  const signOut = shell.locator('form[method="post" i][action="/logout"]').getByRole('button', { name: 'Sign out', exact: true });
+  const switcher = shell.locator('details.v-switcher');
+  const summary = switcher.locator(':scope > summary[aria-label="Vocs products"]');
+  await heading.waitFor({ timeout: 5_000 });
+  expect(await heading.evaluate((el) => getComputedStyle(el).fontFamily.split(',')[0].replace(/['"]/g, '').trim())).toBe('Inter');
+  const loaded = await page.evaluate(async () => {
+    const faces = await Promise.all([
+      document.fonts.load('16px Inter', 'Analytics'),
+      document.fonts.load('16px "Geist Mono"', '0123456789'),
+    ]);
+    return faces.flat().filter((face) => face.status === 'loaded').map((face) => face.family.replace(/['"]/g, ''));
+  });
+  // A missing family can pass document.fonts.check() via fallback; require the actual loaded faces.
+  expect(loaded).toEqual(expect.arrayContaining(['Inter', 'Geist Mono']));
+
+  const shots = path.join(root, 'tests', 'artifacts');
+  await fs.mkdir(shots, { recursive: true });
+  const desktop = { width: 1440, height: 1000 };
+  for (const [colorScheme, background] of [['light', 'rgb(245, 245, 247)'], ['dark', 'rgb(0, 0, 0)']] as const) {
+    await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' });
+    for (const { width, height, shot } of [
+      { ...desktop, shot: 'desktop' },
+      { width: 768, height: 900 },
+      { width: 390, height: 844, shot: 'mobile' },
+      { width: 320, height: 800 },
+    ]) {
+      await page.setViewportSize({ width, height });
+      for (const element of [heading, brand, summary, signOut]) await element.waitFor({ timeout: 5_000 });
+      const size = await shell.evaluate((el) => ({
+        background: getComputedStyle(el).backgroundColor,
+        client: document.documentElement.clientWidth,
+        content: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+      }));
+      const view = `${colorScheme} at ${width}px`;
+      expect(size.background, view).toBe(background);
+      expect(size.content, `${view}: page horizontal overflow`).toBeLessThanOrEqual(size.client + 1);
+      if (shot) {
+        // Capture the same populated Overview from the top, not from the last control in focus.
+        await page.evaluate(() => window.scrollTo({ left: 0, top: 0, behavior: 'instant' }));
+        await page.screenshot({ path: path.join(shots, `web-dashboard-${colorScheme}-${shot}.png`), animations: 'disabled', timeout: 10_000 });
+      }
+    }
+  }
+
+  // The narrowest viewport still has a keyboard-operable product nav. Never activate its links.
+  const url = page.url();
+  const panel = switcher.getByRole('navigation', { name: 'Vocs products' });
+  expect(await switcher.getAttribute('open')).toBeNull();
+  await summary.press('Enter', { timeout: 5_000 });
+  await panel.waitFor({ timeout: 5_000 });
+  expect(await panel.getByRole('link', { name: /^Vocs Code\b/ }).getAttribute('aria-current')).toMatch(/^(true|page)$/);
+  const hub = panel.getByRole('link', { name: /^MCP Hub\b/ });
+  expect(await hub.getAttribute('href')).toBe('https://mcp.vocs.io/');
+  expect(await switcher.getByRole('link', { name: /Millie/i, includeHidden: true }).or(switcher.locator('a[href*="millie" i]')).count()).toBe(0);
+  for (const link of await panel.getByRole('link').all()) {
+    await page.keyboard.press('Tab');
+    expect(await link.evaluate((el) => el === document.activeElement)).toBe(true);
+  }
+  await page.keyboard.press('Escape');
+  await panel.waitFor({ state: 'hidden', timeout: 5_000 });
+  expect(await switcher.getAttribute('open')).toBeNull();
+  expect(await summary.evaluate((el) => el === document.activeElement)).toBe(true);
+  expect(page.url()).toBe(url);
+
+  await checkNarrowTabs(page);
+  await page.setViewportSize(desktop);
+  await page.emulateMedia({ colorScheme: null, reducedMotion: null });
+}
+
 describe.runIf(enabled)('web dashboard in a real browser', () => {
   it('adds two computers through Connect with Vocs, then shows their analytics together and apart', async () => {
     relay = await startLocalRelay();
@@ -221,7 +313,9 @@ describe.runIf(enabled)('web dashboard in a real browser', () => {
     const mac = await connectingComputer('Vocs Macmini', landing.origin, analyticsOf('mac', 'Vocs-Code', 4, 5));
     const retired = new URL(mac.link);
     retired.pathname = '/app';
-    await page.goto(retired.toString());
+    const response = await page.goto(retired.toString());
+    const policy = await response?.headerValue('content-security-policy');
+    expect(policy?.split(';').map((directive) => directive.trim().split(/\s+/)).filter(([name]) => name === 'font-src')).toEqual([['font-src', "'self'"]]);
     await addFromPage(page, mac.computer, mac.checkCode);
     expect(new URL(page.url()).pathname).toBe('/dashboard/');
     expect(await mac.computer.sync.sync()).toBe('uploaded');
@@ -237,6 +331,7 @@ describe.runIf(enabled)('web dashboard in a real browser', () => {
     expect(await page.getByTestId('computer-spend').allInnerTexts()).toEqual(['$4.00', '$3.00']);
     await page.getByTestId('by-computer').waitFor();
     expect(await page.getByText('$7.00').count()).toBeGreaterThan(0);
+    await checkDashboardAppearance(page);
 
     // Sessions name the computer they ran on; reliability is shown per computer.
     await page.getByRole('tab', { name: 'Sessions' }).click();
