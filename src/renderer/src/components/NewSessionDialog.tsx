@@ -463,27 +463,20 @@ export function NewSessionDialog() {
             </Field>
             <div className="field">
               <label className="field-label" htmlFor={permissionsId}>Permissions</label>
-              <div className="ns-permission-row">
-                <select
-                  id={permissionsId}
-                  aria-describedby={permissionsHintId}
-                  value={permissionMode}
-                  disabled={mission}
-                  title={mission ? 'A Mission Lead always runs in Plan mode' : undefined}
-                  onChange={(e) => setMode(e.target.value as PermissionMode)}
-                >
-                  {modes.map((m) => (
-                    <option key={m} value={m}>
-                      {PERMISSION_MODE_LABELS[m].label}
-                    </option>
-                  ))}
-                </select>
-                {canLead && (
-                  <span className="ns-mission" title="Mission mode: a Lead plans and coordinates; Builder sessions implement">
-                    <Toggle checked={mission} onChange={setMissionWanted} disabled={creating} label="Mission" ariaLabel="Mission mode" />
-                  </span>
-                )}
-              </div>
+              <select
+                id={permissionsId}
+                aria-describedby={permissionsHintId}
+                value={permissionMode}
+                disabled={mission}
+                title={mission ? 'A Mission Lead always runs in Plan mode' : undefined}
+                onChange={(e) => setMode(e.target.value as PermissionMode)}
+              >
+                {modes.map((m) => (
+                  <option key={m} value={m}>
+                    {PERMISSION_MODE_LABELS[m].label}
+                  </option>
+                ))}
+              </select>
               <span id={permissionsHintId} className="field-hint">
                 {mission
                   ? `Mission mode: the Lead plans in Plan mode and never edits; Builders run in ${PERMISSION_MODE_LABELS[missionDefaultsOf(settings).builder.permissionMode].label} (Settings → Session defaults).`
@@ -504,7 +497,14 @@ export function NewSessionDialog() {
 
         <section className="ns-span2">
           <div className="field">
-            <label className="field-label" htmlFor={promptId}>{mission ? 'Mission task (required)' : 'First prompt (optional)'}</label>
+            <div className="ns-prompt-heading">
+              <label className="field-label" htmlFor={promptId}>{mission ? 'Mission task (required)' : 'First prompt (optional)'}</label>
+              {canLead && (
+                <span className="row" title="Mission mode: a Lead plans and coordinates; Builder sessions implement">
+                  <Toggle checked={mission} onChange={setMissionWanted} disabled={creating} label="Mission" ariaLabel="Mission mode" />
+                </span>
+              )}
+            </div>
             {images.length > 0 && (
               <div className="attachments ns-attachments">
                 {images.map((im, i) => (

@@ -172,6 +172,15 @@
   max-width: none;
   margin: 0 0 6px;
 }
+.ns-prompt-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.ns-prompt-heading .toggle {
+  margin: 0;
+}
 .ns-prompt-box {
   position: relative;
 }
