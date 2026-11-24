@@ -9,7 +9,6 @@ vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), canInvoke: () =
 
 import { NewSessionDialog } from '../src/renderer/src/components/NewSessionDialog';
 import { Composer } from '../src/renderer/src/components/Composer';
-import { SessionControls } from '../src/renderer/src/components/SessionControls';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
 
@@ -29,10 +28,10 @@ function session(patch: Partial<SessionMeta> = {}): SessionMeta {
   };
 }
 
-/** The run controls under the composer, re-rendered from the store as an IPC reply lands. */
+/** The composer and its controls re-render from the store as an IPC reply lands. */
 function LiveControls() {
   const meta = useStore((s) => s.sessions[0]);
-  return <><SessionControls session={meta} /><ConfirmHost /></>;
+  return <><Composer session={meta} /><ConfirmHost /></>;
 }
 
 function seed(meta = session()) {
@@ -184,7 +183,8 @@ describe('composer Fast mode request', () => {
   it('requires visible cost confirmation, waits for IPC, and never claims requested means on', async () => {
     let resolve!: (meta: SessionMeta) => void;
     invoke.mockImplementation((channel: string) => channel === 'sessions:setFastMode' ? new Promise((r) => { resolve = r; }) : Promise.resolve({}));
-    render(<LiveControls />);
+    const { container } = render(<LiveControls />);
+    const electric = () => container.querySelector('.composer-box > svg.fast-mode-electric');
     const pill = screen.getByTitle('Model');
     fireEvent.click(pill);
     const on = fastOption('On');
@@ -205,12 +205,13 @@ describe('composer Fast mode request', () => {
     expect(on.getAttribute('aria-checked')).toBe('false');
     expect(off.getAttribute('aria-checked')).toBe('true');
     expect(pill.querySelector('[data-icon="bolt"]')).toBeNull();
-    expect(pill.querySelector('svg.fast-mode-electric')).toBeNull();
+    expect(electric()).toBeNull();
     await act(async () => resolve(session({ config: { ...session().config, fastMode: true }, fastModeStatus: { state: 'requested' } })));
     expect(on.getAttribute('aria-checked')).toBe('true');
     expect(off.getAttribute('aria-checked')).toBe('false');
     expect(pill.querySelector('[data-icon="bolt"]')).not.toBeNull();
-    expect(pill.querySelector('svg.fast-mode-electric')?.getAttribute('aria-hidden')).toBe('true');
+    expect(pill.querySelector('svg.fast-mode-electric')).toBeNull();
+    expect(electric()?.getAttribute('aria-hidden')).toBe('true');
     expect(pill.getAttribute('aria-label')).toContain('Fast requested');
     expect(screen.getByRole('status').textContent).toBe('Requested');
     expect(on.disabled || off.disabled).toBe(false);

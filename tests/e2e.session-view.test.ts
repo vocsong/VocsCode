@@ -877,73 +877,49 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       await expect.poll(() => modelPill.locator('.pill-text').innerText()).toBe(`${model.provider}/${displayName}`);
       expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
-      const electric = modelPill.locator('svg.fast-mode-electric');
-      const readArcs = (observeMs = 0) => electric.evaluate(async (svg, duration) => {
-        const snapshot = () => {
-          const geometry: string[] = [];
-          const visible: { d: string; strokeWidth: number; x: number; y: number }[] = [];
-          const { width, height } = (svg as SVGSVGElement).viewBox.baseVal;
-          for (const path of svg.querySelectorAll('path')) {
-            const d = path.getAttribute('d')?.trim();
-            if (!d) continue;
-            geometry.push(d);
-            const style = getComputedStyle(path);
-            if (style.stroke !== 'none' && Number(style.strokeOpacity) > 0 && path.getTotalLength() > 0
-              && path.checkVisibility({ opacityProperty: true, visibilityProperty: true })) {
-              const box = path.getBBox();
-              visible.push({ d, strokeWidth: Number.parseFloat(style.strokeWidth), x: (box.x + box.width / 2) / width, y: (box.y + box.height / 2) / height });
-            }
-          }
-          return { geometry: geometry.sort(), visible };
-        };
-        const nextFrame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
-        if (duration > 0) {
-          // Let the media-query change and its redraw settle before checking for continued motion.
-          await nextFrame();
-          await nextFrame();
-        }
-        const first = snapshot();
-        const signature = JSON.stringify(first);
-        const until = performance.now() + duration;
-        while (performance.now() < until) {
-          await nextFrame();
-          if (JSON.stringify(snapshot()) !== signature) return { ...first, stable: false };
-        }
-        return { ...first, stable: true };
-      }, observeMs);
-
+      const electric = box.locator(':scope > svg.fast-mode-electric');
+      const flow = electric.locator('.fast-mode-electric-flow');
+      await box.evaluate((el) => {
+        if (el.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+      });
+      expect(await box.evaluate((el) => el.matches(':focus-within'))).toBe(false);
+      expect(await modelPill.locator('svg.fast-mode-electric').count()).toBe(0);
       await win.emulateMedia({ reducedMotion: 'no-preference' });
       await electric.waitFor({ state: 'visible' });
       expect(await electric.evaluate((el) => getComputedStyle(el).pointerEvents)).toBe('none');
-      let initialGeometry: Set<string> | undefined;
-      const strokeWidths = new Set<number>();
-      const rims = new Set<string>();
-      let changed = false;
-      await expect.poll(async () => {
-        const { geometry, visible } = await readArcs();
-        if (!visible.length) return false;
-        for (const { strokeWidth, x, y } of visible) {
-          strokeWidths.add(strokeWidth);
-          if (x < 0.08) rims.add('left');
-          if (x > 0.92) rims.add('right');
-          if (y < 0.25) rims.add('top');
-          if (y > 0.75) rims.add('bottom');
+      const samples = await flow.evaluate(async (el) => {
+        const samples = [];
+        for (let i = 0; i < 4; i++) {
+          const style = getComputedStyle(el);
+          samples.push({ now: performance.now(), offset: Number.parseFloat(style.strokeDashoffset), lengths: style.strokeDasharray.split(',').map(Number.parseFloat).filter((_, index) => index % 2 === 0) });
+          if (i < 3) await new Promise((resolve) => setTimeout(resolve, 180));
         }
-        // A fade or a change in which existing paths are visible isn't new arc geometry.
-        const initial = initialGeometry ??= new Set(geometry);
-        changed ||= visible.some(({ d }) => !initial.has(d));
-        return changed && rims.size === 4;
-      }, { interval: 80, timeout: 5_000, message: `${theme}: new visible Fast arcs reach all four sides` }).toBe(true);
+        return samples;
+      });
+      for (let i = 1; i < samples.length; i++) {
+        const advance = (samples[i - 1].offset - samples[i].offset + 100) % 100;
+        const rate = advance / (samples[i].now - samples[i - 1].now) * 1000;
+        expect(rate, `${theme}: steady clockwise travel in laps per second × 100`).toBeGreaterThan(5);
+        expect(rate).toBeLessThan(26);
+      }
+      expect(samples.every(({ lengths }) => lengths.length === 3 && Math.min(...lengths) >= 10 && new Set(lengths).size > 1)).toBe(true);
+      expect(new Set(samples.map(({ lengths }) => lengths.join(','))).size).toBeGreaterThan(1);
 
       await win.emulateMedia({ reducedMotion: 'reduce' });
-      const reduced = await readArcs(1_000);
-      expect(reduced.visible.length, `${theme}: reduced motion still shows Fast arcs`).toBeGreaterThan(0);
-      expect(reduced.stable, `${theme}: reduced motion keeps the Fast arcs static`).toBe(true);
-      for (const arc of reduced.visible) strokeWidths.add(arc.strokeWidth);
-      for (const width of strokeWidths) {
-        expect(width, `${theme}: visible Fast arc stroke width in CSS px`).toBeGreaterThan(0);
-        expect(width, `${theme}: visible Fast arc stroke width in CSS px`).toBeLessThan(1);
-      }
+      await expect.poll(() => flow.evaluate((el) => el.getAnimations().length)).toBe(0);
+      const trace = electric.locator('.fast-mode-electric-trace');
+      const still = await trace.evaluate((el) => {
+        const path = el as SVGPathElement;
+        const { width, height } = path.ownerSVGElement!.viewBox.baseVal;
+        const bounds = path.getBBox();
+        const style = getComputedStyle(path);
+        return {
+          coversRim: bounds.x < 5 && bounds.y < 5 && bounds.x + bounds.width > width - 5 && bounds.y + bounds.height > height - 5,
+          hairline: Number.parseFloat(style.strokeWidth) > 0 && Number.parseFloat(style.strokeWidth) < 1,
+          visible: style.stroke !== 'none' && style.mask !== 'none' && path.checkVisibility({ opacityProperty: true, visibilityProperty: true })
+        };
+      });
+      expect(still).toEqual({ coversRim: true, hairline: true, visible: true });
       await win.emulateMedia({ reducedMotion: 'no-preference' });
       const permission = footer.getByRole('button', { name: 'Permission mode: Full', exact: true });
       await permission.waitFor();
@@ -1025,6 +1001,21 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
         await win.locator('.panel-top').getByRole('button', { name: 'Changes', exact: true }).click();
       }
     }
+    // Zen hides the model control outside the composer, but Fast stays visible on the box.
+    await win.mouse.move(600, 80);
+    await box.evaluate((el) => {
+      if (el.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+    });
+    const zen: PushPayloads['push:settingsChanged'] = { ...settings, theme: 'dark', uiMode: 'zen' };
+    await app!.evaluate(({ BrowserWindow }, payload) => {
+      BrowserWindow.getAllWindows()[0]!.webContents.send('push:settingsChanged', payload);
+    }, zen);
+    await expect.poll(() => footer.locator('.pill[title="Model"]').evaluate((el) => Number(getComputedStyle(el.closest('.dropdown')!).opacity))).toBe(0);
+    const zenElectric = box.locator(':scope > svg.fast-mode-electric');
+    expect(await zenElectric.locator('.fast-mode-electric-trace').evaluate((el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }))).toBe(true);
+    await expect.poll(() => zenElectric.locator('.fast-mode-electric-flow').evaluate((el) => el.getAnimations().some((animation) => animation.playState === 'running'))).toBe(true);
+    await box.screenshot({ path: path.join(shots, 'session-view-fast-unfocused-zen.png') });
+
     const saved = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
     expect(saved).toHaveLength(1);
     expect(saved[0].status).toBe('idle');
