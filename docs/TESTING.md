@@ -162,7 +162,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |
 | Harness-native slash commands (adapter reporting, `/` popover, `//name` route) | `tests/harness-commands.test.ts`, `tests/composer-harness-commands.test.tsx`, `tests/claude-goal-commands.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/acp-turn-state.test.ts`, `tests/codex-skills.test.ts` + `e2e.harness-commands` |
-| Usage panel, `src/renderer/src/session-usage.ts` | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx` + `e2e.usage` |
+| Usage panel, `/usage` shortcut and on-demand Antigravity account quota | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx`, `tests/composer-harness-commands.test.tsx` + `e2e.usage` (mocked quota IPC, no harness prompt) |
 | Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
 | Settings navigation/search, `settings-catalog.ts`, `SettingsPrimitives.tsx`, `components/settings.css` | `tests/settings-navigation.test.tsx`, `tests/branch-prefix-settings-ui.test.tsx`, `tests/context-ui.test.tsx` + `e2e.layout`; update and run the affected section’s E2E below. The layout suite captures isolated light/dark review screenshots in `tests/artifacts/settings-redesign-*.png`; see [Settings UX](SETTINGS.md). |
 | Themes, `styles.css`, terminal colours | `e2e.themes`, `e2e.ui-modes` (Zen restyles the standard tree, so a `styles.css` change can move it) |

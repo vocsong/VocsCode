@@ -275,6 +275,13 @@ as the last list seen (it only offers names), and a session that has not started
 latest list from a same-harness session in the same project. Harnesses that cannot list commands say
 so in the popover instead of looking empty; the list is kept off remote frames.
 
+The app-owned `/usage` opens the right-hand Usage tab without sending a prompt. An advertised
+harness command of the same name still runs via `//usage`. The Antigravity account quota card
+uses the existing desktop-owner-only `harness:antigravityQuota` request on an explicit click, not
+when the panel opens. Its results are renderer-local and separate from the session's token, cost,
+and context measurements. The account request uses the vendor CLI's read-only `/usage`, not an
+ACP prompt.
+
 `/goal` has a per-session driver (`src/shared/goal-driver.ts`): the harness reports the slash
 commands it accepts (above), and when
 that list — or, before the harness has started, a `goal` skill on disk — names `goal`, the composer
