@@ -88,30 +88,42 @@ describe('OngoingActivityStrip', () => {
     expect(screen.queryAllByTestId('ongoing-item')).toHaveLength(0);
   });
 
-  it('shows Category 2 background OS processes only when parent turn is not running, with Processes link and End button', async () => {
+  it('shows inline PID, hides foreground harness children while running, surfaces detached/terminal processes immediately, and supports Processes/End actions', async () => {
     useStore.setState({
       processSummary: {
-        count: 2,
+        count: 3,
         orphaned: 1,
         bySession: {
-          s1: [{ pid: 4242, startedAt: NOW - 30_000, name: 'node.exe', label: 'npm run dev', detached: true }]
+          s1: [
+            { pid: 4100, startedAt: NOW - 15_000, name: 'vitest.exe', label: 'vitest run' },
+            { pid: 4242, startedAt: NOW - 30_000, name: 'node.exe', label: 'npm run dev', detached: true }
+          ]
         }
       }
     });
     const runningSession = makeSession({ status: 'running' });
     const { rerender } = render(<OngoingActivityStrip session={runningSession} />);
-    expect(screen.queryByTestId('ongoing-processes')).toBeNull();
+    // While parent turn is running: detached process still shows (with PID), non-detached child stays hidden.
+    const runningProcStrip = screen.getByTestId('ongoing-processes');
+    expect(runningProcStrip.textContent).toContain('npm run dev');
+    expect(runningProcStrip.textContent).toContain('PID 4242');
+    expect(runningProcStrip.textContent).toContain('detached');
+    expect(runningProcStrip.textContent).not.toContain('vitest run');
 
+    // Once parent turn is idle: both processes surface with inline PIDs on expansion.
     rerender(<OngoingActivityStrip session={makeSession({ status: 'idle' })} />);
-    const procStrip = screen.getByTestId('ongoing-processes');
-    expect(procStrip.textContent).toContain('npm run dev');
-    expect(procStrip.textContent).toContain('detached');
+    expect(screen.getByTestId('ongoing-processes').textContent).toContain('2 background processes running');
+    fireEvent.click(screen.getByTestId('ongoing-processes-toggle'));
+    const rows = screen.getAllByTestId('ongoing-process-item');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.textContent).toContain('PID 4100');
+    expect(rows[1]!.textContent).toContain('PID 4242');
 
     fireEvent.click(screen.getByTestId('ongoing-open-processes'));
     expect(useStore.getState().panelBottomTab).toBe('processes');
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('ongoing-end-process'));
+      fireEvent.click(screen.getAllByTestId('ongoing-end-process')[1]!);
     });
     expect(invokeMock).toHaveBeenCalledWith('processes:end', { targets: [{ pid: 4242, startedAt: NOW - 30_000 }] });
   });
@@ -147,8 +159,13 @@ describe('Sidebar, Header, Composer, RightPanel, and Web shell ongoing indicator
     expect(row.getAttribute('data-ongoing')).toBe('true');
     expect(within(row).getByTestId('session-ongoing-status').textContent).toBe('1 subagent');
 
-    // Header shows pulsing ongoing pill.
+    // Header shows pulsing ongoing pill and quiet processes pill when idle.
     expect(screen.getByTestId('header-ongoing').textContent).toBe('1 subagent');
+    const procPill = screen.getByTestId('header-processes');
+    expect(procPill.textContent).toContain('1 process');
+    expect(procPill.getAttribute('title')).toContain('PID 777');
+    fireEvent.click(procPill);
+    expect(useStore.getState().panelBottomTab).toBe('processes');
 
     // Composer keeps Send enabled with a background-work placeholder hint.
     const textarea = container.querySelector('.composer textarea') as HTMLTextAreaElement;
@@ -157,5 +174,19 @@ describe('Sidebar, Header, Composer, RightPanel, and Web shell ongoing indicator
     // RightPanel badges both Subagents (live running count) and Processes (active session process count).
     expect(screen.getByTestId('subagents-running-count').textContent).toBe('1');
     expect(screen.getByTestId('processes-session-count').textContent).toBe('1');
+  });
+
+  it('hides the quiet Header processes pill while the session is actively running', () => {
+    const running = makeSession({ status: 'running' });
+    useStore.setState({
+      sessions: [running],
+      processSummary: {
+        count: 1,
+        orphaned: 0,
+        bySession: { s1: [{ pid: 888, startedAt: NOW - 5_000, name: 'node.exe', label: 'vite', detached: true }] }
+      }
+    });
+    render(<Header session={running} />);
+    expect(screen.queryByTestId('header-processes')).toBeNull();
   });
 });

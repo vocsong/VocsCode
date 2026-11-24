@@ -293,8 +293,22 @@ export function rootsOf(rows: ProcessRow[]): TrackedProcess[] {
   return rows.filter((row) => row.depth === 0).map((row) => row.process);
 }
 
+const HARNESS_BINARIES = new Set(['claude', 'codex', 'agy', 'dsh', 'gemini', 'cursor-agent']);
+const HARNESS_SCRIPT_PATTERN = /(?:pi-coding-agent|@anthropic-ai\/claude-agent-sdk|@cursor\/sdk|@deepseek-ai\/dsh)/i;
 const HARNESS_WRAPPED_PATTERN = /(?:pi-coding-agent|claude(?:\.exe|\b)|codex(?:\.exe|\b)|@cursor\/sdk|\bagy\b|\bdsh\b|\bgemini\b|@anthropic-ai\/claude-agent-sdk)/i;
 const MCP_INFRA_PATTERN = /(?:vocs-memory|gitnexus-scope|cua-driver|@modelcontextprotocol|mcp[-_.]?(?:server|proxy|bridge)|--mcp\b|\bmcp\b)/i;
+
+/** True when the process itself is a harness CLI/runtime (e.g. spawned under a Windows cmd.exe shim). */
+function isHarnessRuntime(p: TrackedProcess): boolean {
+  const exe = stem(p.name).toLowerCase();
+  if (HARNESS_BINARIES.has(exe)) return true;
+  if (INTERPRETERS.has(exe) && p.command) {
+    const args = splitCommandLine(p.command);
+    const script = args.slice(1).find((a) => !a.startsWith('-'));
+    if (script && HARNESS_SCRIPT_PATTERN.test(script.replace(/\\/g, '/'))) return true;
+  }
+  return false;
+}
 
 function isMcpInfrastructure(p: TrackedProcess): boolean {
   if (p.owner.label && /^MCP\b/i.test(p.owner.label)) return true;
@@ -399,9 +413,10 @@ export function classifySessionOngoingProcesses(list: readonly TrackedProcess[])
     const inspectChildren = (parent: TrackedProcess) => {
       for (const child of kids.get(parent.pid) ?? []) {
         if (isMcpInfrastructure(child)) continue;
-        if (isIdleShellWrapper(child)) {
-          // A persistent shell wrapper (e.g. Claude's shell launcher or an idle nested shell)
-          // is only interesting if it is currently hosting a real child command.
+        if (isIdleShellWrapper(child) || isHarnessRuntime(child)) {
+          // A persistent shell wrapper (e.g. Claude's shell launcher or an idle nested shell) or
+          // a harness CLI running under a Windows cmd.exe shim is only interesting if it is
+          // currently hosting a real child command.
           inspectChildren(child);
           continue;
         }
