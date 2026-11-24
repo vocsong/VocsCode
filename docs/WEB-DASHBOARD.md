@@ -51,11 +51,12 @@ Built on the desktop from `AnalyticsFile` and the computed reports by an allowli
 - `days`: `UsageDay` per UTC date with `by.harness`, `by.model`, `by.harnessModel`,
   `by.project`, `by.tool`, `by.modelTool`, `by.harnessTool`, `by.harnessModelTool`.
   `by.project` is re-keyed to the folder **basename**. `by.file` is dropped.
-- `sessions`: `id`, `title`, `harness`, `provider`, `model`, `project` (basename), `createdAt`,
-  `updatedAt`, `usage`, `toolCalls`, `speed`. `projectRoot` is dropped.
+- `sessions`: `id`, `title`, `harness`, `provider`, `model`, `projectRoot` (holding the folder
+  name only), `createdAt`, `updatedAt`, `usage`, `toolCalls`, `durationMs`, `speed`.
 - Tool maps: `tools`, `modelTools`, `harnessTools`, `harnessModelTools`.
-- `reports[range]` for 7, 30, 90 and 0: `reliability` (signature `examples` execution ids dropped;
-  signature text checked for paths, see PR 1) and `codeOutput`.
+- `reports[range]` for 7, 30, 90 and 0: `reliability` and `codeOutput`. Reliability project rows
+  are cut to folder names, executable rows and signature fields that contain a slash or backslash
+  to their last segment, and signature `examples` (execution ids) are dropped.
 
 **Never uploaded:** `files`, absolute project roots, delta baselines (`recorded`), replay receipts
 (`recordedTools`, `recordedUserInputs`), the execution log, transcripts, prompts.
@@ -171,7 +172,5 @@ they upload; until then their cards read "never synced". Run Appendix A of
   carefully, and do not remove relay pairing, mirror or control endpoints in this track.
 - **Dev profile:** a `Vocs Code (Dev)` build connected to the production relay appears as its own
   computer. Default: it shares like any other; the card shows "(Dev)".
-- **Reliability signatures** are normalized error text. PR 1 must confirm they carry no paths, or
-  redact them.
 - Docs to update as the steps land: [REMOTE-ACCESS.md](REMOTE-ACCESS.md),
   [REMOTE-ACCESS-ROADMAP.md](REMOTE-ACCESS-ROADMAP.md) (status snapshot, test map), [TESTING.md](TESTING.md).
