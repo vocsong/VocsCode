@@ -23,7 +23,7 @@ import {
 import { BarList, Meter, Segmented, Sparkline, StackedBar, type BarRow, type Segment } from './analytics/charts';
 import { fmtPct } from './analytics/model';
 import { totalTokens } from '../../../shared/usage-rollup';
-import { AntigravityQuotaCard } from './AntigravityQuotaCard';
+import { SubscriptionUsage } from './SubscriptionUsage';
 import { Icon } from './ui';
 
 /** Stable fallback so a zustand selector never returns a fresh array (React #185 infinite loop). */
@@ -62,7 +62,26 @@ const FILE_SEGMENTS = [
 
 const HINT_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)'];
 
-export function SessionUsage({ session, items }: { session: SessionMeta; items?: readonly TranscriptItem[] }) {
+type UsageScope = 'session' | 'subscriptions';
+const SCOPES: { value: UsageScope; label: string }[] = [
+  { value: 'session', label: 'Session' },
+  { value: 'subscriptions', label: 'Subscriptions' }
+];
+
+type SessionUsageProps = { session: SessionMeta; items?: readonly TranscriptItem[] };
+
+export function SessionUsage(props: SessionUsageProps) {
+  const [scope, setScope] = useState<UsageScope>('session');
+  return (
+    <div className="usage" data-testid="usage-panel">
+      <Segmented value={scope} options={SCOPES} onChange={setScope} ariaLabel="Usage scope" />
+      <div hidden={scope !== 'session'}><SessionUsageSummary {...props} /></div>
+      <div hidden={scope !== 'subscriptions'}><SubscriptionUsage /></div>
+    </div>
+  );
+}
+
+function SessionUsageSummary({ session, items }: SessionUsageProps) {
   const stats = useMemo(() => sessionUsageStats(session, items ?? EMPTY), [session, items]);
   const [view, setView] = useState<DetailView>('turns');
   const u = session.usage;
@@ -80,7 +99,7 @@ export function SessionUsage({ session, items }: { session: SessionMeta; items?:
   const costSpark = useMemo(() => stats.series.slice(-24).map((p) => p.costUsd), [stats.series]);
 
   return (
-    <div className="usage" data-testid="usage-panel">
+    <div className="usage-session">
       <div className="usage-hero">
         <div className="usage-hero-main">
           <div className="usage-hero-label">Session spend</div>
@@ -97,8 +116,6 @@ export function SessionUsage({ session, items }: { session: SessionMeta; items?:
         </div>
         {costSpark.length > 1 && <Sparkline values={costSpark} width={104} height={34} />}
       </div>
-
-      {session.config.harness === 'antigravity' && <AntigravityQuotaCard key={session.id} />}
 
       <div className="usage-kpis">
         <Kpi label="Tokens" value={fmtTokens(tokens)} sub={`${fmtTokens(u.inputTokens)} in · ${fmtTokens(u.outputTokens)} out`} title="Every token this session reported: input, output and cache traffic. Reasoning is counted inside output, the way the providers report it." />
