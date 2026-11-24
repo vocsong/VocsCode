@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { resolveIntelligenceSettings } from '../../../shared/intelligence';
-import { authorityOf, isPendingStatus, isServable, type KnowledgeGraph, type KnowledgeJobState, type KnowledgePageDetail, type KnowledgePageSummary, type KnowledgeView } from '../../../shared/knowledge';
+import { authorityOf, isPendingStatus, isServable, pageIdFromPath, pathForProposal, type KnowledgeGraph, type KnowledgeJobState, type KnowledgePageDetail, type KnowledgePageSummary, type KnowledgeView } from '../../../shared/knowledge';
 import type { SessionMeta } from '../../../shared/types';
 import { canInvoke, invoke } from '../api';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
@@ -9,7 +9,7 @@ import { HighlightedSnippet } from './HighlightedSnippet';
 import { Badge, Button, EmptyState, Icon, Spinner, Toggle } from './ui';
 import { CollectionsView } from './knowledge/CollectionsView';
 import { EvidenceView } from './knowledge/EvidenceView';
-import { MemoryView } from './knowledge/MemoryView';
+import { MemoryRefresh, MemoryView } from './knowledge/MemoryView';
 import { SourcesView } from './knowledge/SourcesView';
 import { InlineError, PromoteControl } from './knowledge/controls';
 import { errorMessage, useIntelligence, useScopeGuard, type IntelligenceController, type KnowledgeSection } from './knowledge/useIntelligence';
@@ -80,6 +80,7 @@ function KnowledgeSession({ session, active, id }: { session: SessionMeta; activ
       <div key={section} role="tabpanel" id={`${id}-${section}-panel`} aria-labelledby={`${id}-${section}-tab`} hidden={!selected} tabIndex={0}>
         {section === 'knowledge' ? <WikiView session={session} active={selected} intelligence={intelligence} /> : selected && View && (
           <div className="intelligence-panel" data-testid={view ? `${section}-view` : undefined}>
+            {section === 'memory' && <MemoryRefresh sessionId={session.id} busy={busy} run={run} />}
             <InlineError>{errors[section]}</InlineError>
             {errors.load && <div className="intelligence-inline">
               <InlineError>{errors.load}</InlineError>
@@ -108,6 +109,14 @@ function authorityLabel(page: KnowledgePageSummary): string {
   if (page.verifiedBy) return 'verified';
   if (page.status === 'current') return 'accepted';
   return page.status;
+}
+
+function isReviewDraft(page: Pick<KnowledgePageSummary, 'status' | 'updatedBy'>) {
+  return page.status === 'draft' && page.updatedBy === 'auto:evidence-draft';
+}
+
+function scopeLabel(page: Pick<KnowledgePageSummary, 'scope' | 'branch'>) {
+  return page.scope === 'branch' ? (page.branch ? `Branch: ${page.branch}` : 'Branch') : 'Repository';
 }
 
 /** Normalized tags, rendered the same way in a list row and a detail header. */
@@ -143,13 +152,19 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
   const toast = useStore((s) => s.toast);
   const settings = useStore((s) => s.settings);
   const [view, setView] = useState<KnowledgeView | null>(null);
-  const [detail, setDetail] = useState<KnowledgePageDetail | null>(null);
+  const [selection, setSelection] = useState<{ id: string; detail: KnowledgePageDetail; draft?: KnowledgePageSummary } | null>(null);
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<KnowledgePageSummary[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [reviewError, setReviewError] = useState<{ id: string; message: string } | null>(null);
+  const [reviewResult, setReviewResult] = useState<string | null>(null);
+  const drafts = view?.proposals.filter(isReviewDraft) ?? [];
+  const draft = selection?.draft;
+  // A refresh can remove a draft independently of this panel. Do not offer actions on that preview.
+  const detail = draft && !drafts.some((page) => page.id === draft.id) ? null : selection?.detail;
+  const detailId = detail ? selection?.id : null;
   const capture = useScopeGuard();
   const loadRequest = useRef(0);
   const readRequest = useRef(0);
@@ -185,11 +200,10 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
     return () => clearInterval(timer);
   }, [generating, load]);
 
-  // The graph is derived from the pages, so it is only worth fetching while a detail is open. A
-  // failure (or an older main process without the channel) leaves the page readable without it.
-  const detailId = detail?.page.meta.id ?? null;
+  // The graph covers wiki pages, not review-only drafts. A failure leaves the page readable.
+  const graphPageId = draft ? null : detail?.page.meta.id;
   useEffect(() => {
-    if (!detailId) {
+    if (!graphPageId) {
       setGraph(null);
       return undefined;
     }
@@ -205,7 +219,7 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
     return () => {
       alive = false;
     };
-  }, [detailId, session.id]);
+  }, [graphPageId, session.id]);
 
   const runWiki = async (work: (current: () => boolean) => Promise<void>, onError = (message: string) => toast(message, 'error')) => {
     if (busy) return;
@@ -227,21 +241,27 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
     if (current()) await load();
   });
 
-  const open = async (id: string) => {
+  const open = async (id: string, draft?: KnowledgePageSummary) => {
     const current = capture();
     const request = ++readRequest.current;
     setReviewError(null);
     try {
       const next = await invoke('knowledge:read', { sessionId: session.id, id });
-      if (current() && request === readRequest.current) setDetail(next && next.page ? next : null);
+      if (!current() || request !== readRequest.current) return;
+      if (draft && (!next?.page || next.page.meta.id !== id || !isReviewDraft(next.page.meta))) {
+        toast('This draft is no longer available for review.', 'error');
+        return;
+      }
+      setSelection(next?.page ? { id, detail: next, draft } : null);
     } catch (e) {
       if (current() && request === readRequest.current) toast(errorMessage(e), 'error');
     }
   };
   const closeDetail = () => {
     ++readRequest.current;
-    setDetail(null);
+    setSelection(null);
   };
+  const closeSelection = (id: string) => setSelection((previous) => previous?.id === id ? null : previous);
 
   const search = async () => {
     const current = capture();
@@ -302,7 +322,7 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
     if (!current()) return;
     await applyView(next);
     if (!current()) return;
-    setDetail((previous) => previous?.page.meta.id === id ? null : previous);
+    closeSelection(id);
     toast('Rejected — the claim is remembered so it will not be filed again', 'success');
   });
 
@@ -311,14 +331,27 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
     if (!current()) return;
     await applyView(next);
     if (!current()) return;
-    setDetail((previous) => previous?.page.meta.id === id ? null : previous);
-    toast('Page deleted', 'success');
+    closeSelection(id);
+    toast(draft?.id === id ? 'Draft deleted' : 'Page deleted', 'success');
   });
 
-  const markReviewed = (id: string) => runWiki(async (current) => {
+  const markReviewed = (id: string, draft?: KnowledgePageSummary) => runWiki(async (current) => {
     setReviewError(null);
+    setReviewResult(null);
     const next = await invoke('knowledge:review', { sessionId: session.id, id, action: 'accept' });
-    if (current()) await applyView(next);
+    if (!current()) return;
+    await applyView(next);
+    if (!current() || !draft || !next) return;
+    if (next.proposals.some((page) => page.id === id)) throw new Error('The draft is still awaiting review.');
+    // The proposal id is not the final wiki id. Return to the updated list and keep a receipt
+    // from this review rather than relabeling the draft preview as the accepted page.
+    closeSelection(id);
+    const targetId = pageIdFromPath(pathForProposal(draft.kind, draft.title));
+    const accepted = next.pages.find((page) => page.id === targetId && page.claim === draft.claim && page.status === 'current' && page.authority <= 2 &&
+      page.scope === draft.scope && page.branch === draft.branch);
+    setReviewResult(accepted
+      ? `Accepted “${accepted.title}” into the wiki (${scopeLabel(accepted)}).`
+      : `Draft “${draft.title}” is no longer pending. Its reviewed page is not in this view.`);
   }, (message) => setReviewError({ id, message }));
 
   const publish = () => runWiki(async (current) => {
@@ -334,9 +367,9 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
 
   const shown = useMemo(() => (results ?? view?.pages ?? []).slice(0, 200), [results, view?.pages]);
   const graphEdges = useMemo(() => {
-    if (!graph || !detailId) return [];
-    return graph.edges.filter((edge) => edge.from === detailId || edge.to === detailId);
-  }, [graph, detailId]);
+    if (!graph || !graphPageId) return [];
+    return graph.edges.filter((edge) => edge.from === graphPageId || edge.to === graphPageId);
+  }, [graph, graphPageId]);
 
   if (!view) {
     return (
@@ -350,10 +383,10 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
   // Background generation runs on the utility model; without one the button can only fail, so say so.
   const modelReady = !!settings?.utilityModel;
   const titleOf = (id: string) => view.pages.find((p) => p.id === id)?.title ?? id;
-  const summary = detail && view.pages.find((page) => page.id === detail.page.meta.id);
-  const humanReviewed = !!detail && (summary?.authority ?? authorityOf(detail.page.meta)) <= 2;
-  const verified = !humanReviewed && !!(summary ? summary.verifiedBy : detail?.page.meta.verification);
-  const pageStatus = summary?.status ?? detail?.page.meta.status;
+  const summary = !draft && detail ? view.pages.find((page) => page.id === detail.page.meta.id) : undefined;
+  const humanReviewed = !draft && !!detail && (summary?.authority ?? authorityOf(detail.page.meta)) <= 2;
+  const verified = !draft && !humanReviewed && !!(summary ? summary.verifiedBy : detail?.page.meta.verification);
+  const pageStatus = draft ? 'draft' : summary?.status ?? detail?.page.meta.status;
 
   return (
     <div className="knowledge-tab">
@@ -365,7 +398,7 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
       </div>
       <div className="muted small mono knowledge-path" title={view.wikiDir}>{view.wikiDir}{view.branch ? ` · branch ${view.branch}` : ''}</div>
       <div className="muted small" data-testid="knowledge-auto-note">
-        Knowledge is ingested automatically as you work — this panel is for browsing and correcting it.
+        Knowledge is ingested automatically as you work. Review-only drafts wait for your approval.
       </div>
 
       <div className="knowledge-actions">
@@ -405,7 +438,8 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
         <Button size="sm" variant="ghost" icon="search" onClick={() => void search()} title="Search page bodies" />
       </div>
 
-      {!status.hasWiki && !status.pages && (
+      {reviewResult && <p className="muted small" role="status">{reviewResult}</p>}
+      {!status.hasWiki && !status.pages && !drafts.length && (
         <EmptyState icon="book" title="No project wiki yet">
           <p>Knowledge is ingested automatically as you work. Generate a first set of pages from this project's README, docs and instructions, or start an empty wiki and let it fill in from there.</p>
           <Button size="sm" disabled={busy} data-testid="knowledge-create" onClick={() => void createWiki()}>
@@ -414,15 +448,35 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
         </EmptyState>
       )}
 
-      {detail && pageStatus ? (
+      {!detail && drafts.length > 0 && (
+        <section className="knowledge-pages" aria-label="Drafts awaiting review" data-testid="knowledge-proposals">
+          <h4>Drafts awaiting review</h4>
+          <p className="muted small">Drafts stay out of the knowledge digest and Publish until accepted.</p>
+          {drafts.map((item) => (
+            <button key={item.id} type="button" className="knowledge-row" disabled={busy}
+              aria-label={`Review draft: ${item.title} (${scopeLabel(item)})`} onClick={() => void open(item.id, item)}>
+              <Icon name="file" size={12} />
+              <span className="knowledge-row-main">
+                <span className="knowledge-title">{item.title}</span>
+                {item.claim && <span className="muted small knowledge-claim">{item.claim}</span>}
+              </span>
+              <span className="muted small">{scopeLabel(item)}</span>
+              <Badge tone="amber">Draft</Badge>
+            </button>
+          ))}
+        </section>
+      )}
+
+      {detail && detailId && pageStatus ? (
         <section className="knowledge-detail" data-testid="knowledge-detail">
           <div className="knowledge-card-head">
             <Button size="sm" variant="ghost" icon="chevron" onClick={closeDetail} title="Back to the list" />
             <span className="knowledge-title">{detail.page.meta.title}</span>
-            <Badge tone={statusTone(pageStatus)}>{pageStatus}</Badge>
+            <Badge tone={statusTone(pageStatus)}>{draft ? 'Review-only draft' : pageStatus}</Badge>
             {humanReviewed ? <Badge>human-reviewed</Badge> : verified && <Badge>verified</Badge>}
           </div>
           <div className="knowledge-detail-meta">
+            {draft && <span className="muted small">{scopeLabel(detail.page.meta)}</span>}
             <LabelChips labels={detail.page.meta.labels ?? []} testId="knowledge-labels" />
             {detail.page.meta.updatedBy && <span className="muted small knowledge-by" title={`Last written by ${detail.page.meta.updatedBy}`}>{detail.page.meta.updatedBy}</span>}
           </div>
@@ -431,21 +485,21 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
               size="sm"
               disabled={busy}
               data-testid="knowledge-page-reject"
-              title="Tombstone this claim so an agent will not file it again; the page is removed."
-              onClick={() => void rejectPage(detail.page.meta.id)}
+              title={`Tombstone this claim so an agent will not file it again; the ${draft ? 'draft' : 'page'} is removed.`}
+              onClick={() => void rejectPage(detailId)}
             >
               Reject (remember)
             </Button>
-            <Button size="sm" variant="danger" icon="trash" disabled={busy} data-testid="knowledge-page-delete" title="Delete this page. Its claim is not remembered and may be filed again." onClick={() => void deletePage(detail.page.meta.id)}>
+            <Button size="sm" variant="danger" icon="trash" disabled={busy} data-testid="knowledge-page-delete" title={`Delete this ${draft ? 'draft' : 'page'}. Its claim is not remembered and may be filed again.`} onClick={() => void deletePage(detailId)}>
               Delete
             </Button>
-            {!humanReviewed && <Button size="sm" disabled={busy} data-testid="knowledge-mark-reviewed" onClick={() => void markReviewed(detail.page.meta.id)}>Mark reviewed</Button>}
-            {intelligence && <PromoteControl key={detail.page.meta.id} prefix="knowledge" view={intelligence.view} busy={busy || intelligence.busy}
-              disabledReason={isServable({ status: pageStatus }) ? undefined : 'Mark this page reviewed first'}
+            {!humanReviewed && <Button size="sm" disabled={busy} data-testid="knowledge-mark-reviewed" onClick={() => void markReviewed(detailId, draft)}>{draft ? 'Accept draft' : 'Mark reviewed'}</Button>}
+            {intelligence && <PromoteControl key={detailId} prefix="knowledge" view={intelligence.view} busy={busy || intelligence.busy}
+              disabledReason={draft ? 'Accept this draft first' : isServable({ status: pageStatus }) ? undefined : 'Mark this page reviewed first'}
               loadError={intelligence.errors.load} onLoad={() => void intelligence.refresh()}
-              onPromote={(target) => intelligence.run('knowledge', () => invoke('intelligence:promote', { sessionId: session.id, pageId: detail.page.meta.id, ...target }))} />}
+              onPromote={(target) => intelligence.run('knowledge', () => invoke('intelligence:promote', { sessionId: session.id, pageId: detailId, ...target }))} />}
           </div>
-          <InlineError>{reviewError?.id === detail.page.meta.id ? reviewError.message : undefined}</InlineError>
+          <InlineError>{reviewError?.id === detailId ? reviewError.message : undefined}</InlineError>
           <InlineError>{intelligence?.errors.knowledge}</InlineError>
           {detail.page.meta.claim && <div className="knowledge-claim">{detail.page.meta.claim}</div>}
           {detail.stale && (
@@ -511,7 +565,7 @@ function WikiView({ session, active, intelligence }: { session: SessionMeta; act
         </section>
       ) : (
         <section className="knowledge-pages">
-          {shown.length === 0 && status.hasWiki && <div className="muted small">No pages match.</div>}
+          {shown.length === 0 && status.hasWiki && (results || !drafts.length) && <div className="muted small">No pages match.</div>}
           {shown.map((page) => (
             <div
               key={page.id}

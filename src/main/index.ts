@@ -24,7 +24,8 @@ import { GraphifyProvider, TESTED_GRAPHIFY_VERSION } from './intelligence/graphi
 import { GraphScheduler } from './intelligence/graph-scheduler';
 import { graphHead, graphHeadStamp, snapshotCommittedCode } from './intelligence/graph-snapshot';
 import { MemoryStore } from './intelligence/memory-store';
-import { ProjectRegistry } from './intelligence/registry';
+import { PassiveLearning } from './intelligence/passive-learning';
+import { normalizeRoot, ProjectRegistry } from './intelligence/registry';
 import { IntelligenceService } from './intelligence/service';
 import { resolveIntelligenceSettings } from '../shared/intelligence';
 import { GITNEXUS_SERVER_ID, gitnexusSharedRoots, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './mcp/gitnexus';
@@ -200,10 +201,19 @@ async function main(): Promise<void> {
   // Assigned further down; a deleted session takes its capability and its unverified memory with it.
   let intelligence: IntelligenceService | null = null;
   let intelligenceGateway: IntelligenceGateway | null = null;
+  let passiveLearning: PassiveLearning | undefined;
   store.hooks = {
+    prepareAppend: (id, item) => passiveLearning?.prepare(id, item),
     onAppend: (id, item) => search.indexItem(id, item),
-    onRewrite: (id) => search.resyncSession(id),
+    onRewrite: (id, replacement) => {
+      passiveLearning?.discard(id);
+      search.resyncSession(id);
+      if (replacement && intelligence?.onTranscriptRewritten(id, replacement)) {
+        pushToRenderer(mainWindow, PUSH_CHANNELS.projectMemoryChanged, { sessionId: id });
+      }
+    },
     onRemove: (id) => {
+      passiveLearning?.discard(id);
       search.dropSession(id);
       intelligenceGateway?.revoke(id);
       intelligence?.onSessionRemoved(id);
@@ -285,8 +295,8 @@ async function main(): Promise<void> {
   });
 
   // The intelligence core: stable project identity and collections, the memory ledger, the local
-  // Graphify cache, and the gateway. Reflection alone can call the configured utility model
-  // when explicitly requested or opted in.
+  // Graphify cache, and the gateway. Passive turn capture stays on-device; model-assisted
+  // wiki jobs and session reflection are separate paths.
   const intelligenceDir = path.join(userData, 'intelligence');
   const projectRegistry = new ProjectRegistry(intelligenceDir, { log, facts: (root) => gitIdentityFacts(root) });
   const memoryStore = new MemoryStore(intelligenceDir, { log });
@@ -325,16 +335,33 @@ async function main(): Promise<void> {
     gatewayState: () => intelligenceGateway?.state() ?? { listening: false, sessions: 0 }
   });
   const intelligenceCore = intelligence;
+  passiveLearning = new PassiveLearning({
+    enabled: () => memoryStore.available && settings.get().intelligence?.reflection === 'local',
+    session: (id) => store.get(id),
+    capture: async (ctx, observation, current) => {
+      if (await intelligenceCore.captureLocalTurn(ctx, observation, current)) {
+        pushToRenderer(mainWindow, PUSH_CHANNELS.projectMemoryChanged, { sessionId: ctx.sessionId });
+      }
+    },
+    failed: () => log('warn', 'intelligence: could not save a local learning note')
+  });
   const graphSettings = () => resolveIntelligenceSettings(settings.get().intelligence).graphify;
+  const graphSession = (id: string) => {
+    const meta = store.get(id);
+    return meta && !meta.archived && !meta.mission && !meta.controlCreation && meta.cwd && meta.config?.projectRoot ? meta : null;
+  };
   const graphScheduler = new GraphScheduler({
     enabled: () => graphSettings().enabled && graphCommand() !== null,
     refresh: async (id, signal) => {
-      const meta = store.get(id);
-      if (!meta || meta.archived || meta.mission) return;
-      await intelligenceCore.refreshGraph({ sessionId: id, projectRoot: meta.config.projectRoot, cwd: meta.cwd }, signal);
+      const meta = graphSession(id);
+      if (meta) await intelligenceCore.refreshGraph({ sessionId: id, projectRoot: meta.config.projectRoot, cwd: meta.cwd }, signal);
     },
     onError: (error) => log('debug', `Graphify refresh could not be scheduled: ${describeError(error)}`)
   });
+  const selectGraphSession = (id: string | null) => {
+    const meta = id ? graphSession(id) : null;
+    graphScheduler.select(meta?.id ?? null, meta ? JSON.stringify([normalizeRoot(meta.config.projectRoot), normalizeRoot(meta.cwd)]) : undefined);
+  };
   intelligenceGateway = new IntelligenceGateway({
     log,
     enabled: () => resolveIntelligenceSettings(settings.get().intelligence).gateway,
@@ -390,11 +417,7 @@ async function main(): Promise<void> {
     appInstructions: (harness) => appInstructions.effective(harness),
     withWorkspaceDispatch: (meta, dispatch) => missions ? missions.admission.dispatch(meta.cwd, dispatch) : dispatch(),
     ordinaryProcessOwnership,
-    knowledgeDigest: (scope) => {
-      // Opening a session on a project with no wiki is the passive trigger for the first scan.
-      void knowledge.ensureSeeded(scope);
-      return knowledge.digest(scope);
-    },
+    knowledgeDigest: (scope) => knowledge.digest(scope, { seedIfEmpty: true }),
     pushEvent: (env: SessionEventEnvelope) => {
       pushAll(PUSH_CHANNELS.sessionEvent, env);
       remoteMirror?.notify(env.sessionId);
@@ -467,12 +490,15 @@ async function main(): Promise<void> {
   const desktopFocus = new DesktopFocusTracker({
     hasSession: (id) => !!sessionsRef.get(id),
     push: (focus) => {
-      graphScheduler.select(focus.sessionId);
+      selectGraphSession(focus.sessionId);
       pushAll(PUSH_CHANNELS.desktopFocus, focus);
       remoteMirror?.notifyIndex();
     }
   });
-  sessionsChangedHooks.push(() => desktopFocus.reconcile());
+  sessionsChangedHooks.push(() => {
+    desktopFocus.reconcile();
+    selectGraphSession(desktopFocus.state().sessionId);
+  });
 
   // The Processes panel: every process the app starts, through any session, terminal or tool. It
   // observes spawns from here on, before a session, server or shell can start one, and saves what
@@ -640,7 +666,12 @@ async function main(): Promise<void> {
   }
 
   let lastGraphSettings = JSON.stringify(graphSettings());
+  let lastReflection = settings.get().intelligence?.reflection;
   settings.onChange((s) => {
+    if (s.intelligence?.reflection !== lastReflection) {
+      lastReflection = s.intelligence?.reflection;
+      passiveLearning?.reset();
+    }
     localControl.projectsChanged();
     const nextGraphSettings = JSON.stringify(graphSettings());
     if (nextGraphSettings !== lastGraphSettings) {
@@ -741,7 +772,7 @@ async function main(): Promise<void> {
       safe('search close', search?.close()),
       safe('intelligence gateway close', intelligenceGateway?.close()),
       safe('Graphify shutdown', Promise.all([graphScheduler.close(), graphify.cancel()])),
-      safe('memory ledger close', Promise.resolve().then(() => memoryStore.close())),
+      safe('memory ledger close', Promise.resolve(passiveLearning?.close()).finally(() => memoryStore.close())),
       safe('web server stop', webServer?.stop()),
       safe('vesta shutdown', registry.shutdown()),
       safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop())),

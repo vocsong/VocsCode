@@ -110,7 +110,7 @@ const TOOL_ARGS: Record<MemoryTool, Rule> = {
   intelligence_trace: object({ from: text, to: text }, ['from']),
   context_compile: object({ query: text, scope: searchScope, budget_tokens: positiveInteger }, ['query']),
   memory_recall: object({ query: string, types: arrayOf(oneOf(RECALL_TYPES), true), limit: positiveInteger, include_unverified: boolean }),
-  knowledge_record: object({ ...proposal, kind: text, memory_type: oneOf(RECORDED_TYPES), scope: oneOf(['project', 'branch']) }, ['title', 'claim']),
+  knowledge_record: object({ ...proposal, draft: boolean, kind: text, memory_type: oneOf(RECORDED_TYPES), scope: oneOf(['project', 'branch']) }, ['title', 'claim']),
   knowledge_promote: object({ page: pageId, record: recordId, to: oneOf(['collection', 'personal']), collection: text, reason: string }, ['to']),
   memory_forget: object({ id: recordId }, ['id'])
 };
@@ -201,6 +201,7 @@ function evidenceOut(item: IntelligenceEvidence): Record<string, unknown> {
     ...(item.kind ? { kind: item.kind } : {}),
     authority: item.authority,
     historical: item.historical,
+    ...(item.provider === 'memory' && item.historical && item.sources ? { sources: item.sources.filter((source) => source.type === 'transcript') } : {}),
     scope: item.scope,
     ...(item.branch ? { branch: item.branch } : {}),
     ...(item.revision ? { revision: item.revision } : {}),
@@ -250,7 +251,7 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
   signal?.throwIfAborted();
   const { intelligence, knowledge } = deps;
   const scope = { projectRoot: session.projectRoot, cwd: session.cwd, ...(session.branch ? { branch: session.branch } : {}) };
-  const context = { ...session, signal };
+  const context = { ...session, signal, modelFacing: true };
 
   switch (name) {
     case 'knowledge_search': {
@@ -440,6 +441,7 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
           scope: r.scope,
           state: r.state,
           servable: r.servable,
+          historical: r.type === 'episodic' || !r.servable,
           title: r.title,
           text: r.text.length > 1_200 ? `${r.text.slice(0, 1_199)}…` : r.text,
           ...(r.branch ? { branch: r.branch } : {}),
@@ -461,6 +463,7 @@ export async function callIntelligenceTool(deps: ToolServices, session: GatewayS
             claim: str(args.claim),
             ...(str(args.body) ? { body: str(args.body) } : {}),
             memoryType,
+            ...(args.draft === true ? { draft: true } : {}),
             ...(str(args.kind) ? { kind: str(args.kind) } : {}),
             scope: args.scope === 'branch' ? 'branch' : 'project',
             ...(str(args.page_id) ? { pageId: str(args.page_id) } : {}),

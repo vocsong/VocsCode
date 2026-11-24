@@ -239,9 +239,13 @@ describe('context packet', () => {
 });
 
 describe('settings', () => {
-  it('enables the bundled graph by default without enabling personal memory or automatic reflection', () => {
-    expect(DEFAULT_INTELLIGENCE_SETTINGS).toEqual({ gateway: true, reflection: 'manual', collections: true, personalMemory: false, graphify: { enabled: true, excludedProjects: [] } });
+  it('defaults to bundled indexing and on-device learning without enabling personal recall or model-assisted reflection', () => {
+    expect(DEFAULT_INTELLIGENCE_SETTINGS).toEqual({ gateway: true, reflection: 'local', collections: true, personalMemory: false, graphify: { enabled: true, excludedProjects: [] } });
     expect(resolveIntelligenceSettings(undefined)).toEqual(DEFAULT_INTELLIGENCE_SETTINGS);
+  });
+
+  it.each(['off', 'manual', 'auto'] as const)('honors a saved %s reflection mode', (reflection) => {
+    expect(resolveIntelligenceSettings({ reflection }).reflection).toBe(reflection);
   });
 
   it('accepts only values of the right type from a hand-edited file', () => {

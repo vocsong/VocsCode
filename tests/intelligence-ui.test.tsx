@@ -7,12 +7,18 @@ import {
   resolveIntelligenceSettings, type ContextPacket, type GraphIndexStatus, type IntelligenceSearchResponse, type IntelligenceSettings, type IntelligenceView,
   type MemoryRecord, type MemoryState, type ProjectCollection, type ProjectIdentity, type PromotionRequest
 } from '../src/shared/intelligence';
-import type { IpcChannel } from '../src/shared/ipc';
+import type { IpcChannel, PushPayloads } from '../src/shared/ipc';
 import type { KnowledgePageDetail, KnowledgePageSummary, KnowledgeView } from '../src/shared/knowledge';
 import type { SessionMeta } from '../src/shared/types';
 
-const { invoke, canInvoke } = vi.hoisted(() => ({ invoke: vi.fn(), canInvoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, canInvoke, isMac: false, modKey: 'Ctrl', isWeb: false }));
+const { invoke, canInvoke, on } = vi.hoisted(() => ({ invoke: vi.fn(), canInvoke: vi.fn(), on: vi.fn() }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, canInvoke, on, isMac: false, modKey: 'Ctrl', isWeb: false }));
+
+type MemoryListener = (event: PushPayloads['push:projectMemoryChanged']) => void;
+const memoryListeners = new Set<MemoryListener>();
+const pushMemoryChange = (...sessionIds: string[]) => act(async () => {
+  for (const sessionId of sessionIds) for (const listener of memoryListeners) listener({ sessionId });
+});
 
 const at = '2026-01-01T00:00:00.000Z';
 const revision = '1234567890ab11cd22ef33';
@@ -84,6 +90,11 @@ const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAs
 beforeEach(() => {
   invoke.mockReset();
   canInvoke.mockReset().mockReturnValue(true);
+  on.mockReset().mockImplementation((channel: string, listener: MemoryListener) => {
+    if (channel === 'push:projectMemoryChanged') memoryListeners.add(listener);
+    return () => { memoryListeners.delete(listener); };
+  });
+  vi.stubGlobal('harness', { on });
   useStore.setState({ settings: {} as never });
 });
 afterEach(() => {
@@ -336,7 +347,7 @@ describe('Memory ledger', () => {
     expect(screen.queryByTestId('memory-row')).toBeNull();
   });
 
-  it('warns about provider use before reflecting and refreshes newly captured history', async () => {
+  it('explains selective Local recall and distinguishes it from Reflect and its provider warning', async () => {
     let reflected = false;
     setup(ledger(), {
       'intelligence:view': () => ledger({ records: reflected ? [candidate] : [] }),
@@ -344,12 +355,83 @@ describe('Memory ledger', () => {
     });
     await openView('memory');
     const button = screen.getByTestId('memory-reflect');
-    expect(document.getElementById(button.getAttribute('aria-describedby')!)?.textContent).toContain('session transcript to your configured background model provider');
-    expect(invoke).not.toHaveBeenCalledWith('intelligence:reflect', expect.anything());
+    expect(screen.getByText(/after completed turns/i).textContent).toMatch(/capture makes no model calls/i);
+    const recall = screen.getByText(/up to 3 short, topic-matched notes/i);
+    expect(recall.textContent).toMatch(/with local selected.*in this project.*from source sessions it can access/i);
+    expect(recall.textContent).toMatch(/no list or broad fallback/i);
+    expect(recall.textContent).toMatch(/recalled notes are history, not guidance.*verification changes their authority in memory, not recall access/i);
+    expect(screen.getByText(/not automatically added to prompts/i).textContent).toMatch(/no extra provider request.*session’s model.*tool results.*cloud-backed/i);
+    expect(screen.getByRole('button', { name: 'Reflect on this session', description: /session transcript to your configured background model provider/ })).toBe(button);
+    expect(intelligenceCalls()).toEqual([['intelligence:view', { sessionId: 's1' }]]);
     await click(button);
     expect(invoke).toHaveBeenCalledWith('intelligence:reflect', { sessionId: 's1' });
     expect(screen.getByTestId('memory-reflect-result').textContent).toBe('Captured one episode');
     expect(record(candidate.id).getByTestId('memory-state').textContent).toBe('candidate');
+  });
+
+  it('keeps saved Local notes visible on the desktop and explains that agents cannot recall them when Off', async () => {
+    const saved = rowRecord('Saved Local outcome', 'captured', { origin: 'agent:local-learning' });
+    setup(ledger({ settings: resolveIntelligenceSettings({ reflection: 'off' }), records: [saved] }));
+    await openView('memory');
+    const button = screen.getByTestId('memory-reflect') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(record(saved.id).getByText(saved.text)).toBeTruthy();
+    expect(screen.getByText(/off keeps saved notes visible on the desktop but withholds them from agents/i)).toBeTruthy();
+    expect(screen.queryByText(/after completed turns/i)).toBeNull();
+    await click(button);
+    expect(intelligenceCalls()).toEqual([['intelligence:view', { sessionId: 's1' }]]);
+  });
+
+  it('refreshes open Memory after a matching desktop push, not for a hidden tab or another session', async () => {
+    let current = ledger();
+    setup(current, { 'intelligence:view': () => current });
+    await openView('memory');
+    current = ledger({ records: [candidate] });
+    await pushMemoryChange('s2');
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    await pushMemoryChange('s1');
+    expect(screen.queryByTestId('memory-row')).toBeNull();
+    expect(intelligenceCalls()).toHaveLength(1);
+
+    visibility.mockReturnValue('visible');
+    await pushMemoryChange('s1');
+    expect(record(candidate.id).getByTestId('memory-state').textContent).toBe('candidate');
+    expect((record(candidate.id).getByTestId('memory-promote') as HTMLButtonElement).disabled).toBe(true);
+    await openView('collections');
+    await pushMemoryChange('s1');
+    expect(intelligenceCalls()).toEqual(Array.from({ length: 2 }, () => ['intelligence:view', { sessionId: 's1' }]));
+    expect(memoryListeners.size).toBe(0);
+  });
+
+  it('coalesces pushes during a pending Memory action and preserves its result', async () => {
+    const reflection = deferred<{ ok: boolean; captured: number; candidates: number; error: string }>();
+    let current = ledger();
+    setup(current, { 'intelligence:view': () => current, 'intelligence:reflect': reflection.promise });
+    await openView('memory');
+    await click(screen.getByTestId('memory-reflect'));
+    current = ledger({ records: [candidate] });
+    await pushMemoryChange('s1', 's1');
+    const before = [['intelligence:view', { sessionId: 's1' }], ['intelligence:reflect', { sessionId: 's1' }]];
+    expect(intelligenceCalls()).toEqual(before);
+
+    await act(async () => { reflection.resolve({ ok: false, captured: 0, candidates: 0, error: 'Could not reflect' }); });
+    expect(intelligenceCalls()).toEqual([...before, ['intelligence:view', { sessionId: 's1' }]]);
+    expect(screen.getByTestId('memory-reflect-result').textContent).toBe('Could not reflect');
+    expect(record(candidate.id).getByTestId('memory-state').textContent).toBe('candidate');
+  });
+
+  it('discards a pending passive read after leaving and reopening the Memory tab', async () => {
+    const stale = deferred<IntelligenceView>();
+    let reads = 0;
+    setup(ledger(), { 'intelligence:view': () => ++reads === 1 ? ledger() : stale.promise });
+    await openView('memory');
+    await pushMemoryChange('s1');
+    expect(reads).toBe(2);
+    await openView('collections');
+    await openView('memory');
+    await act(async () => { stale.resolve(ledger({ records: [candidate] })); });
+    expect(reads).toBe(2);
+    expect(screen.queryByTestId('memory-row')).toBeNull();
   });
 
   it('does not send the old session a follow-up refresh after reflection settles', async () => {
@@ -426,6 +508,27 @@ describe('Collections, Sources and Evidence', () => {
     expect(index.disabled).toBe(false);
   });
 
+  it('defaults to Local and persists each reflection choice without starting reflection', async () => {
+    const defaults = resolveIntelligenceSettings(undefined);
+    let settings = defaults;
+    setup(ledger(), {
+      'intelligence:view': () => ledger({ settings }),
+      'settings:update': ({ intelligence }: { intelligence: IntelligenceSettings }) => { settings = intelligence; }
+    });
+    await openView('sources');
+    const select = screen.getByTestId('setting-reflection') as HTMLSelectElement;
+    expect(select.value).toBe('local');
+    expect(select.selectedOptions[0].textContent).toMatch(/local.*completed turns/i);
+    expect(screen.getByRole('combobox', { name: 'Session reflection', description: /capture makes no model calls.*up to 3 short, topic-matched notes.*cloud-backed.*off keeps saved notes.*when a session is archived or merged/i })).toBe(select);
+    expect(invoke).not.toHaveBeenCalledWith('settings:update', expect.anything());
+    for (const reflection of ['off', 'manual', 'auto', 'local'] as const) {
+      await act(async () => update(select, reflection));
+      expect(invoke).toHaveBeenCalledWith('settings:update', { intelligence: { ...defaults, reflection } });
+      expect(select.value).toBe(reflection);
+    }
+    expect(invoke).not.toHaveBeenCalledWith('intelligence:reflect', expect.anything());
+  });
+
   it('shows gateway status and honors saved Graphify global off and project exclusions independently', async () => {
     const settings = resolveIntelligenceSettings({ reflection: 'manual', graphify: { enabled: false, excludedProjects: [alpha.id, beta.id] } });
     let current = settings;
@@ -451,8 +554,7 @@ describe('Collections, Sources and Evidence', () => {
       intelligence: { ...settings, gateway: false, graphify: { enabled: true, excludedProjects: [beta.id] } }
     });
     expect(graphProject.checked).toBe(true);
-    const reflection = screen.getByTestId('setting-reflection');
-    expect(document.getElementById(reflection.getAttribute('aria-describedby')!)?.textContent).toContain('when a session is archived or merged');
+    expect((screen.getByTestId('setting-reflection') as HTMLSelectElement).value).toBe('manual');
   });
 
   it('explains the unavailable bundled worker without an install instruction or losing other sources', async () => {

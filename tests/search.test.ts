@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { ftsQuery, itemText, SearchIndex } from '../src/main/search';
 import { SessionStore } from '../src/main/store';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
@@ -79,6 +79,33 @@ async function waitFor<T>(fn: () => T | undefined, ms = 5000): Promise<T> {
   }
 }
 
+function gate() {
+  let release!: () => void;
+  const reached = new Promise<void>((resolve) => { release = resolve; });
+  return { reached, release };
+}
+
+/** Observe completion without making production init blocking or replacing any rebuild work. */
+function watchBackfill(index: SearchIndex) {
+  return vi.spyOn(index as unknown as { backfill(): Promise<void> }, 'backfill');
+}
+
+async function expectRestart(dir: string, hits: [q: string, id: string][], rebuilds: string[] = []): Promise<void> {
+  const store = new SessionStore(dir);
+  await store.load();
+  const index = new SearchIndex(dir, { store, log: () => undefined });
+  const reads = vi.spyOn(store, 'readTranscript');
+  const backfill = watchBackfill(index);
+  try {
+    await index.init();
+    await backfill.mock.results[0].value;
+    expect(reads.mock.calls).toEqual(rebuilds.map((id) => [id]));
+    for (const [q, id] of hits) expect(index.search({ q }).results.map((r) => r.itemId)).toEqual([id]);
+  } finally {
+    index.close();
+  }
+}
+
 describe('ftsQuery', () => {
   it('quotes every term so FTS syntax cannot inject operators', () => {
     expect(ftsQuery('permission gate')).toBe('"permission" "gate"');
@@ -120,6 +147,112 @@ describe('itemText', () => {
 });
 
 describe('SearchIndex', () => {
+  it('does not let a boot-racing append certify the unindexed history', async () => {
+    const { dir, store, index } = setup();
+    const id = 'boot-race';
+    const old = user('historic marmot');
+    const appended = assistant('new ocelot');
+    await store.upsert(meta(id));
+    await store.appendTranscript(id, old);
+
+    const statEntered = gate();
+    const resumeStat = gate();
+    const realStat = fs.stat.bind(fs);
+    const stat = vi.spyOn(fs, 'stat').mockImplementationOnce(async (...args) => {
+      statEntered.release();
+      await resumeStat.reached;
+      return realStat(...args);
+    });
+    const reads = vi.spyOn(store, 'readTranscript');
+    const backfill = watchBackfill(index);
+    try {
+      await index.init();
+      expect(index.available).toBe(true);
+      await statEntered.reached;
+      await store.appendTranscript(id, appended);
+      index.flushNow();
+      expect(index.search({ q: 'ocelot' }).results.map((r) => r.itemId)).toEqual([appended.id]);
+      expect(index.search({ q: 'marmot' }).results).toEqual([]);
+      // Let any append-triggered stat and its SQLite write finish before boot can sample the file.
+      await Promise.all(stat.mock.results.slice(1).map((r) => r.value));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      resumeStat.release();
+      await backfill.mock.results[0]?.value;
+      stat.mockRestore();
+    }
+
+    expect(index.search({ q: 'marmot' }).results.map((r) => r.itemId)).toEqual([old.id]);
+    expect(index.search({ q: 'ocelot' }).results.map((r) => r.itemId)).toEqual([appended.id]);
+    expect(reads.mock.calls).toEqual([[id]]);
+    index.close();
+    await expectRestart(dir, [['marmot', old.id], ['ocelot', appended.id]]);
+  });
+
+  it('preserves a newer flushed upsert when an older rebuild snapshot lands', async () => {
+    const { dir, store, index } = setup();
+    const id = 'snapshot-race';
+    const old = user('historic marmot');
+    const original = assistant('stale ocelot');
+    const updated = { ...assistant('updated capybara'), id: original.id };
+    await store.upsert(meta(id));
+    await store.appendTranscript(id, old);
+    await store.appendTranscript(id, original);
+
+    const snapshotCaptured = gate();
+    const resumeSnapshot = gate();
+    const readTranscript = store.readTranscript.bind(store);
+    const reads = vi.spyOn(store, 'readTranscript').mockImplementationOnce(async (id) => {
+      const snapshot = await readTranscript(id);
+      snapshotCaptured.release();
+      await resumeSnapshot.reached;
+      return snapshot;
+    });
+    const backfill = watchBackfill(index);
+    try {
+      await index.init();
+      expect(index.available).toBe(true);
+      await snapshotCaptured.reached;
+      await store.appendTranscript(id, updated);
+      index.flushNow();
+    } finally {
+      resumeSnapshot.release();
+      await backfill.mock.results[0]?.value;
+    }
+
+    expect(index.search({ q: 'ocelot' }).results).toEqual([]);
+    expect(index.search({ q: 'capybara' }).results.map((r) => r.itemId)).toEqual([updated.id]);
+    expect(reads.mock.calls).toEqual([[id]]);
+    index.close();
+    const hits: [string, string][] = [['marmot', old.id], ['capybara', updated.id]];
+    // The changed file gets one conservative revalidation; truly unchanged boots skip it.
+    await expectRestart(dir, hits, [id]);
+    await expectRestart(dir, hits);
+  });
+
+  it('reuses the complete index for a new session on its first warm boot', async () => {
+    const { dir, store, index } = setup();
+    await index.init();
+    const id = 'new-session';
+    const item = user('new session woodpecker');
+    await store.upsert(meta(id));
+    await store.appendTranscript(id, item);
+    const persisted = gate();
+    const stat = fs.stat.bind(fs);
+    const spy = vi.spyOn(fs, 'stat').mockImplementationOnce(async (...args) => {
+      const result = await stat(...args);
+      setImmediate(persisted.release);
+      return result;
+    });
+    try {
+      index.flushNow();
+      expect(spy).toHaveBeenCalledTimes(1);
+      await persisted.reached;
+    } finally { spy.mockRestore(); }
+    index.close();
+    await expectRestart(dir, [['woodpecker', item.id]]);
+  });
+
   it('indexes appends and finds matches with snippets and item ids', async () => {
     const { store, index } = setup();
     await index.init();

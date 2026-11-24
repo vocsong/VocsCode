@@ -150,10 +150,7 @@ describe('AGENTS.md memory snippet', () => {
     expect(MEMORY_GUIDE_MARKDOWN).toContain('Never pass `repo`');
   });
 
-  it('promises no accept gate for knowledge_propose, and names the rung the write actually lands on', async () => {
-    // `knowledge_propose` serializes `status: current` with `updated_by: agent:mcp` and answers
-    // "writes immediately: nothing is queued for human review" (resources/mcp/vocs-memory.mjs), so
-    // the pasted snippet must not teach an agent to wait for a human to accept or reject the page.
+  it('distinguishes a review-only wiki draft from legacy accepted ingestion', async () => {
     invoke.mockResolvedValue(info());
     await act(async () => { render(<McpTab session={session()} />); });
     await act(async () => { fireEvent.click(screen.getByTestId('memory-guide-toggle')); });
@@ -162,8 +159,8 @@ describe('AGENTS.md memory snippet', () => {
     // The rung comes from the code, not a restatement: the snippet has to name what search returns.
     const rung = authorityLabel({ status: 'current', updatedBy: 'agent:mcp' });
     expect(rung).toBe('accepted');
-    expect(shown).toContain('rung `' + rung + '`');
-    expect(shown).toContain('nothing waiting on a human');
-    expect(shown).not.toMatch(/accepts or rejects/i);
+    expect(shown).toContain('as ' + rung + ' (not reviewed)');
+    expect(shown).toContain('`knowledge_record` with `draft: true` and cite the evidence');
+    expect(shown).toContain('A draft stays separate from guidance until reviewed');
   });
 });
