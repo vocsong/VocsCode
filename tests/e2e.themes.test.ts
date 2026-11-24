@@ -8,18 +8,17 @@
  * On failure, a pre-shutdown screenshot lands in tests/artifacts/ for diagnosis. Set
  * VOCS_CODE_E2E_CAPTURE_THEMES=1 for optional per-variant screenshots to eyeball palettes.
  *
- * The renderer's CSP forbids eval, so nothing here uses page.evaluate: themes are switched by
- * clicking the picker and verified through the data-theme / data-palette / data-scheme attributes
- * and rendered pixels.
+ * Themes are switched through the picker and verified through the data-theme / data-palette /
+ * data-scheme attributes and rendered pixels. On Windows the native title bar is checked too.
  */
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { decodePng, type Frame, isolatedEnv, openNewSession, pixelDelta, seedSettings } from './e2e-ui';
-import { GROUP_ORDER, PALETTES, findPalette, type ColorScheme, type PaletteId } from '../src/shared/themes';
+import { GROUP_ORDER, PALETTES, findPalette, variantFor, type ColorScheme, type PaletteId } from '../src/shared/themes';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -30,14 +29,14 @@ let app: ElectronApplication | null = null;
 let failedPage: Page | null = null;
 
 afterEach(async ({ task }) => {
-  // Capture the live renderer before afterAll shuts it down; successful runs leave no images.
-  if (task.result?.state !== 'fail' || !failedPage) return;
-  await fs.mkdir(shots, { recursive: true });
-  await failedPage.screenshot({ path: path.join(shots, 'e2e-fail-themes.png') }).catch(() => undefined);
-});
-
-afterAll(async () => {
+  // Capture the live renderer before shutting it down; successful runs leave no images.
+  if (task.result?.state === 'fail' && failedPage) {
+    await fs.mkdir(shots, { recursive: true });
+    await failedPage.screenshot({ path: path.join(shots, 'e2e-fail-themes.png') }).catch(() => undefined);
+  }
   await app?.close().catch(() => undefined);
+  app = null;
+  failedPage = null;
 });
 
 /**
@@ -57,6 +56,66 @@ const SAME = 0.005;
 const nameOf = (id: PaletteId): string => findPalette(id)!.name;
 
 describe.runIf(enabled)('color themes (e2e)', () => {
+  if (process.platform === 'win32') it('blends the native caption buttons into Zen at launch and after an appearance change', async () => {
+    const userData = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-caption-theme-'));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(userData, {
+      theme: 'light', palette: 'midnight', uiMode: 'zen', windowBounds: { width: 1100, height: 700 }
+    }));
+    const electronApp = app = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env: isolatedEnv(userData), timeout: 60_000 });
+    const win = failedPage = await electronApp.firstWindow();
+
+    const assertCaption = async (scheme: ColorScheme): Promise<void> => {
+      await win.locator(`html[data-ui='zen'][data-scheme='${scheme}'] .titlebar`).waitFor();
+      const overlay = () => win.locator('.titlebar').evaluate((bar) => {
+        const { windowControlsOverlay } = navigator as Navigator & { windowControlsOverlay: { getTitlebarAreaRect(): DOMRect } };
+        const area = windowControlsOverlay.getTitlebarAreaRect();
+        return { width: bar.clientWidth, height: bar.clientHeight, right: area.right, heightDelta: Math.abs(bar.clientHeight - area.bottom) };
+      });
+      await expect.poll(async () => (await overlay()).heightDelta).toBeLessThanOrEqual(1);
+      const { width, height, right } = await overlay();
+      expect(width - right).toBeGreaterThan(0);
+      const bg = Buffer.from(variantFor('midnight', scheme).bg.slice(1), 'hex');
+      // Playwright's page screenshot excludes the non-client area. Capture only this window's
+      // native thumbnail, which includes the caption buttons even when the test runs off-screen.
+      await expect.poll(async () => {
+        const png = await electronApp.evaluate(async ({ BrowserWindow, desktopCapturer }) => {
+          const win = BrowserWindow.getAllWindows()[0]!;
+          const { width, height } = win.getBounds();
+          const sources = await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width, height } });
+          const thumbnail = sources.find((source) => source.id === win.getMediaSourceId())?.thumbnail;
+          return thumbnail && !thumbnail.isEmpty() ? thumbnail.toPNG().toString('base64') : null;
+        });
+        if (!png) return 'window thumbnail unavailable';
+        const frame = decodePng(Buffer.from(png, 'base64'));
+        const scale = frame.width / width;
+        const pixel = (x: number, y: number) => {
+          const i = (Math.round(y * scale) * frame.width + Math.round(x * scale)) * frame.channels;
+          return frame.pixels.subarray(i, i + 3);
+        };
+        const matchesBg = (rgb: Buffer) => rgb.every((value, i) => Math.abs(value - bg[i]!) <= 2);
+        // Sample above the glyphs, on either side of the overlay seam and inside the Close button.
+        for (const x of [right - 14, right + 14, width - (width - right) / 6]) {
+          const rgb = pixel(x, 6);
+          if (!matchesBg(rgb)) return `title bar pixel ${rgb.toString('hex')} != ${bg.toString('hex')}`;
+        }
+        const close = width - (width - right) / 6;
+        const glyphVisible = [-6, -4, -2, 0, 2, 4, 6].some((dx) => {
+          const difference = pixel(close + dx, height / 2).reduce((sum, value, i) => sum + value - bg[i]!, 0);
+          return scheme === 'dark' ? difference > 100 : difference < -100;
+        });
+        return glyphVisible ? 'matched' : 'no contrasting Close glyph';
+      }, { timeout: 10_000 }).toBe('matched');
+    };
+
+    await assertCaption('light');
+    await win.locator('.main-empty').getByRole('button', { name: 'Settings', exact: true }).click();
+    await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Appearance', exact: true }).click();
+    await win.getByRole('group', { name: 'Light or dark mode' }).getByRole('button', { name: 'Dark', exact: true }).click();
+    await win.getByRole('group', { name: 'Interface size' }).getByRole('button', { name: '125%', exact: true }).click();
+    await expect.poll(() => electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.getZoomFactor())).toBeCloseTo(1.25);
+    await assertCaption('dark');
+  });
+
   it('keeps the mode across palettes, paints a distinct window for every variant, and animates only Nebula', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-themes-${Date.now()}`);
     const userData = path.join(tmp, 'userData');
