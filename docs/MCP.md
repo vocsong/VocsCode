@@ -711,3 +711,17 @@ disconnect the same way. A temporary sign-in expiring, an ended kept sign-in, of
 catalog errors do not: the Hub grant is separate and stays usable.
 Tests: `tests/vocs-hub.test.ts` (fake Hub on a local HTTP server, real SDK OAuth and MCP
 client), `tests/mcp-oauth.test.ts`, `e2e.vocs-account` (keychain restore and Disconnect).
+
+### Mission mode tools (app-owned `vocs-mission`)
+
+Mission sessions only ([Mission mode](MISSION-MODE.md)). `resolveMission` in `src/main/mcp/index.ts`
+adds the reserved built-in `vocs-mission` when the session's Mission gateway attachment exists and its
+harness can take a Mission role; it is not part of `builtinDefs`, so it has no MCP-tab switch and a
+per-repo switch cannot remove it. The definition (`src/main/mcp/mission.ts`) launches
+`resources/mcp/vocs-mission.mjs` with `VOCS_MISSION_GATEWAY_URL` and the secret
+`VOCS_MISSION_GATEWAY_TOKEN` (in `secretEnvKeys`): Claude receives it through an in-process SDK
+bridge, Pi on the ephemeral channel next to vocs-memory, Codex inline, native and ACP over stdio.
+Its tools are trusted in every tier by app-set provenance (`BUILTIN_MISSION_TOOLS`), and the gateway
+lists and accepts only the caller's role. Codex sets `default_tools_approval_mode = "approve"` for it;
+for a Builder every other server is forced to `prompt`.
+
