@@ -62,6 +62,7 @@ import { windowsLocalPipe } from './control/windows-pipe';
 import type { ControlResourceGuard } from './control/workspace';
 import { RemoteAudit } from './remote/audit';
 import { RemoteMirror } from './remote/mirror';
+import { AnalyticsSync } from './remote/analytics-sync';
 import { relayUrl } from './remote/relay-url';
 import { WebServer } from './web-server';
 
@@ -399,6 +400,7 @@ async function main(): Promise<void> {
   // Declared before the manager so the push callbacks can mirror transcripts; assigned once the
   // remote host exists (the callbacks only fire on real activity, long after boot).
   let remoteMirror: RemoteMirror | null = null;
+  let analyticsSync: AnalyticsSync | null = null;
   let processesRef: ProcessTracker | null = null;
   sessions = new SessionManager({
     store,
@@ -456,6 +458,7 @@ async function main(): Promise<void> {
       for (const id of reflectedStates.keys()) if (!liveIds.has(id)) reflectedStates.delete(id);
       for (const hook of sessionsChangedHooks) hook();
       remoteMirror?.notifyIndex();
+      analyticsSync?.notify();
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
     },
     notify: (sessionId, title, body) => {
@@ -601,6 +604,7 @@ async function main(): Promise<void> {
     viewOnly: () => settings.get().remote?.viewOnly === true,
     // A re-keyed mirror must be re-sealed: the relay copy under the old key was just dropped.
     onMirrorRotated: () => remoteMirror?.sync(),
+    onOnline: () => analyticsSync?.connected(),
     // P3.5: a paired browser streams a terminal it watches; it never attaches the desktop's view.
     terminals: () => terminals
   });
@@ -615,6 +619,16 @@ async function main(): Promise<void> {
     enabled: () => settings.get().remote?.mirror === true,
     log
   });
+
+  // The code.vocs.io dashboard (docs/WEB-DASHBOARD.md): a connected computer uploads its analytics
+  // snapshot unless sharing is off. Nothing is sent while remote access is off or unregistered.
+  analyticsSync = new AnalyticsSync({
+    snapshot: () => analytics.snapshot({ appVersion: app.getVersion(), platform: `${process.platform} ${process.arch}` }),
+    request: (requestPath, init) => remoteHost!.analyticsRequest(requestPath, init),
+    sharing: () => settings.get().remote?.shareAnalytics !== false,
+    log
+  });
+  analyticsSync.start();
 
   // Built here, not in the registry, because it needs the OS vault; restored after the window opens.
   const vocsAccount = createVocsAccount({ realm: vocsAccountRealm(), openExternal: (url) => shell.openExternal(url), vault: secrets, isOnline: () => net.isOnline(), hub: vocsHub });
@@ -641,6 +655,7 @@ async function main(): Promise<void> {
     localControlDocument,
     desktopFocus,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
+    analyticsSync,
     updater: updater ?? undefined,
     processes,
     broadcast: (channel, payload) => {

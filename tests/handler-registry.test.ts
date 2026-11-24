@@ -1240,6 +1240,20 @@ describe('remote handlers', () => {
     return { enabled, saved, ...stubDeps({ remote, secrets }) };
   }
 
+  it('persists analytics sharing and tells the uploader, keeping the rest of the remote config', async () => {
+    const changed: Array<boolean | undefined> = [];
+    const { registry, deps, pushes } = remoteRig();
+    deps.analyticsSync = { sharingChanged: async () => void changed.push(deps.settings.get().remote?.shareAnalytics) };
+    await deps.settings.update({ remote: { enabled: true, viewOnly: true } });
+    await registry.invoke('remote:setShareAnalytics', { share: false });
+    expect(deps.settings.get().remote).toEqual({ enabled: true, viewOnly: true, shareAnalytics: false });
+    await registry.invoke('remote:setShareAnalytics', { share: true });
+    expect(deps.settings.get().remote?.shareAnalytics).toBe(true);
+    // The uploader runs after the setting is saved, so it reads the new value.
+    expect(changed).toEqual([false, true]);
+    expect(pushes.filter(([channel]) => channel === 'push:settingsChanged')).toHaveLength(2);
+  });
+
   it('refuses an insecure relay override before settings, secret writes, or host dispatch', async () => {
     vi.stubEnv('VOCS_CODE_RELAY_URL', 'http://user:password@192.168.1.2/?token=hidden');
     const { registry, deps, enabled, saved, pushes } = remoteRig();
