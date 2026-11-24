@@ -217,13 +217,11 @@
 .run-controls .pill-model > .icon:first-child {
   color: var(--accent);
 }
-/* The current stays on the composer even when its controls are hidden. */
+/* The current stays on the composer even when its controls are hidden. FastModeElectric sizes
+   it past the box edge so strikes ride the border itself; nothing may clip that overhang. */
 .fast-mode-electric {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
+  overflow: visible;
   pointer-events: none;
   fill: none;
   stroke: color-mix(in srgb, var(--blue) 68%, var(--fg));
