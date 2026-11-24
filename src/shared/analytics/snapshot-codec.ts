@@ -3,10 +3,10 @@
  * unchanged part is never re-uploaded. Uses only web platform APIs (CompressionStream, SubtleCrypto),
  * which Electron's main process, browsers and Cloudflare Workers all provide.
  */
-import { partitionSnapshot, type AnalyticsSnapshot, type AnalyticsSnapshotManifest, type SnapshotPartRef } from './snapshot';
+import { partitionSnapshot, type AnalyticsSnapshot } from './snapshot';
+import { ANALYTICS_PART_MAX_BYTES, type AnalyticsSnapshotManifest, type SnapshotPartRef } from './snapshot-wire';
 
-/** Stays under the Durable Object value limit (about 2 MB) with room for the record around it. */
-export const ANALYTICS_PART_MAX_BYTES = 1_900_000;
+export { ANALYTICS_PART_MAX_BYTES };
 
 export class SnapshotPartTooLargeError extends Error {
   constructor(

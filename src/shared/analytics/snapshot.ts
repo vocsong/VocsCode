@@ -13,8 +13,9 @@ import type { ToolUsage, UsageCounters, UsageDay, UsageDayDimensions, UsageSessi
 import type { CodeOutputReport } from './code-output';
 import type { ReliabilityReport, ReliabilityRow } from './reliability';
 import { addCounters, addToolUsage, COUNTER_FIELDS, emptyCounters, emptySlice, emptyToolUsage } from '../usage-rollup';
+import { ANALYTICS_SNAPSHOT_SCHEMA, type AnalyticsSnapshotManifest, type AnalyticsSnapshotMeta } from './snapshot-wire';
 
-export const ANALYTICS_SNAPSHOT_SCHEMA = 1;
+export { ANALYTICS_SNAPSHOT_SCHEMA, SNAPSHOT_PART_ID, type AnalyticsSnapshotManifest, type AnalyticsSnapshotMeta, type SnapshotPartRef } from './snapshot-wire';
 
 /** The dashboard's ranges in days (0 = all time); reports are precomputed for each. */
 export const SNAPSHOT_RANGES = [7, 30, 90, 0] as const;
@@ -23,12 +24,6 @@ export type SnapshotRange = (typeof SNAPSHOT_RANGES)[number];
 export interface SnapshotReports {
   reliability: ReliabilityReport;
   codeOutput: CodeOutputReport;
-}
-
-export interface AnalyticsSnapshotMeta {
-  generatedAt: number;
-  appVersion: string;
-  platform: string;
 }
 
 export interface SnapshotToolMaps {
@@ -196,22 +191,6 @@ export function buildAnalyticsSnapshot(source: AnalyticsSnapshotSource, meta: An
 
 // ---------------------------------------------------------------------------------------------
 // Parts
-
-/** `days.2026-11`, `sessions.2026-11`, `tools` or `reports`. */
-export const SNAPSHOT_PART_ID = /^(?:(?:days|sessions)\.\d{4}-\d{2}|tools|reports)$/;
-
-export interface SnapshotPartRef {
-  id: string;
-  /** SHA-256 of the part's JSON text, hex. */
-  hash: string;
-  /** Stored (compressed) size in bytes. */
-  bytes: number;
-}
-
-export interface AnalyticsSnapshotManifest extends AnalyticsSnapshotMeta {
-  schemaVersion: number;
-  parts: SnapshotPartRef[];
-}
 
 export interface SnapshotPart {
   id: string;
