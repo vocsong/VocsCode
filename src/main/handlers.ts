@@ -143,6 +143,8 @@ export interface HandlerDeps {
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
   remoteMirror?: { sync(): void; disable(): void };
+  /** The code.vocs.io dashboard's analytics uploader (src/main/remote/analytics-sync.ts). */
+  analyticsSync?: { sharingChanged(): Promise<unknown> };
   /** Base-pi global config (Settings → Pi); a default store is created when absent. */
   piConfig?: PiConfigStore;
   /** The app's own instruction layer (Settings → Instructions); created from userData when absent. */
@@ -1593,6 +1595,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
         if (mirror === true) deps.remoteMirror?.sync();
         else await deps.remoteMirror?.disable();
       })();
+      return remote.state();
+    });
+    handle('remote:setShareAnalytics', async ({ share }) => {
+      await settings.update({ remote: { ...remoteConfig(), shareAnalytics: share === true } });
+      deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
+      // Off deletes the relay copy now; a clear that cannot reach the relay is retried.
+      void deps.analyticsSync?.sharingChanged();
       return remote.state();
     });
     handle('remote:clearAudit', () => {

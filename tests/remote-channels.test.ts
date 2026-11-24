@@ -89,6 +89,12 @@ describe('remote channel manifest', () => {
     }
   });
 
+  it('never lets a paired browser change remote access itself, analytics sharing included', () => {
+    const remote = [...REMOTE_CHANNELS].filter((channel) => channel.startsWith('remote:'));
+    expect(remote).toEqual([]);
+    expect(REMOTE_CHANNELS.has('remote:setShareAnalytics')).toBe(false);
+  });
+
   it('keeps the frame budget equal to the largest frame the relay forwards', () => {
     // The relay drops anything larger without telling either side, so the desktop refuses an
     // oversized response itself instead of leaving the client to time out.

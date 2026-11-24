@@ -403,6 +403,8 @@ export interface IpcContract {
   'remote:setViewOnly': [{ viewOnly: boolean }, RemoteState];
   /** P4: the offline mirror is opt-in; enabling it syncs the existing sessions, disabling clears it. */
   'remote:setMirror': [{ mirror: boolean }, RemoteState];
+  /** Analytics sharing for the code.vocs.io dashboard: on by default; off deletes the relay copy. */
+  'remote:setShareAnalytics': [{ share: boolean }, RemoteState];
   'remote:clearAudit': [void, void];
   /** Local desktop owner only: never in the remote browser manifest or agent invocation origin. */
   'control:get': [void, ControlOwnerState];

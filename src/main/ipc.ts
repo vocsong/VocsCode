@@ -53,6 +53,7 @@ export interface IpcDeps {
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
   remoteMirror?: { sync(): void; disable(): void };
+  analyticsSync?: { sharingChanged(): Promise<unknown> };
   /** In-app auto-update (issue #198); present only in packaged builds. */
   updater?: UpdateService;
   /** Every process the app started (the Processes panel), wired in index.ts. */
@@ -153,6 +154,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     localControl: deps.localControl,
     desktopFocus: deps.desktopFocus,
     remoteMirror: deps.remoteMirror,
+    analyticsSync: deps.analyticsSync,
     updater: deps.updater,
     processes: deps.processes,
     log: deps.log,
