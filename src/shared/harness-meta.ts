@@ -352,6 +352,7 @@ export const SLASH_COMMANDS: { name: string; description: string; args?: string 
   },
   { name: 'diff', description: 'Open the Changes panel' },
   { name: 'mcp', description: 'Open the MCP panel for this repo' },
+  { name: 'usage', description: 'Open the Usage panel for this session' },
   { name: 'cost', description: 'Show token usage and cost for this session' },
   { name: 'compact', description: 'Ask the harness to compact its context (where supported)' },
   { name: 'clear', description: 'Clear the visible transcript (keeps harness state)' },

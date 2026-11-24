@@ -63,7 +63,7 @@ interface AntigravitySetupFixture {
   state: 'missing' | 'signed-out' | 'signed-in';
   openedUrls: string[];
   signIns: unknown[];
-  quotaChecks: number;
+  usageOpens: unknown[];
   modelLists: number;
   sends: number;
 }
@@ -403,7 +403,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const requested = fast.getByText('Requested', { exact: true });
     const confirm = win.getByRole('button', { name: 'Enable Fast mode', exact: true });
     const bolt = modelPill.locator('[data-icon="bolt"]');
-    const chargeAnimation = () => modelPill.evaluate((el) => getComputedStyle(el, '::after').animationName);
+    const electric = modelPill.locator('svg.fast-mode-electric');
+    const activeAnimations = () => electric.evaluate((el) => el.getAnimations({ subtree: true }).length);
     const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
 
     await modelPill.click({ timeout: 60_000 });
@@ -426,9 +427,10 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await modelPill.getAttribute('aria-label')).toContain('Model: openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('high');
     expect(await bolt.isVisible()).toBe(true);
-    expect(await chargeAnimation()).not.toBe('none');
+    await win.emulateMedia({ reducedMotion: 'no-preference' });
+    await expect.poll(activeAnimations).toBeGreaterThan(0);
     await win.emulateMedia({ reducedMotion: 'reduce' });
-    expect(await chargeAnimation()).toBe('none');
+    await expect.poll(activeAnimations).toBe(0);
     expect(await bolt.isVisible()).toBe(true);
     await win.emulateMedia({ reducedMotion: 'no-preference' });
 
@@ -446,7 +448,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await on.getAttribute('aria-checked')).toBe('false');
     expect(await requested.isVisible()).toBe(false);
     expect(await confirm.count()).toBe(0);
-    expect(await chargeAnimation()).toBe('none');
+    expect(await electric.count()).toBe(0);
     expect(await bolt.count()).toBe(0);
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(false);
     expect(await high.getAttribute('aria-checked')).toBe('true');
@@ -471,7 +473,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await modelPill.click();
     await expect.poll(() => on.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
     expect(await off.getAttribute('aria-checked')).toBe('false');
-    expect(await chargeAnimation()).not.toBe('none');
+    await expect.poll(activeAnimations).toBeGreaterThan(0);
     await requested.waitFor();
     expect(await low.getAttribute('aria-checked')).toBe('true');
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
@@ -822,7 +824,7 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
     await apps[apps.length - 1]!.close();
   }, 180_000);
 
-  it('opens Google Antigravity sign-in and quota from Settings and saves an idle Antigravity session', async () => {
+  it('opens Google Antigravity sign-in and interactive usage from Settings and saves an idle Antigravity session', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-onboarding-antigravity-'));
     const userData = path.join(tmp, 'userData'), project = path.join(tmp, 'project');
     await fs.mkdir(userData, { recursive: true });
@@ -831,12 +833,12 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
     const win = await launch(userData);
     const app = apps[apps.length - 1]!;
     try {
-      // Keep the production preload, setup UI, model picker and session persistence. Script the
-      // vendor boundaries so neither installation, OAuth nor quota traffic leaves the machine.
+      // Keep the production preload, setup UI, model picker and session persistence. Stub the
+      // vendor boundaries so the suite never opens an external sign-in or usage terminal.
       await app.evaluate(({ ipcMain }, installUrl) => {
-        const fixture: AntigravitySetupFixture = { state: 'missing', openedUrls: [], signIns: [], quotaChecks: 0, modelLists: 0, sends: 0 };
+        const fixture: AntigravitySetupFixture = { state: 'missing', openedUrls: [], signIns: [], usageOpens: [], modelLists: 0, sends: 0 };
         (globalThis as AntigravityFixtureGlobal).__vocsAntigravitySetupFixture = fixture;
-        for (const channel of ['harness:setup', 'harness:login', 'harness:antigravityQuota', 'harness:models', 'app:openExternal', 'sessions:send']) ipcMain.removeHandler(channel);
+        for (const channel of ['harness:setup', 'harness:login', 'subscriptions:openUsage', 'harness:models', 'app:openExternal', 'sessions:send']) ipcMain.removeHandler(channel);
         // The account's catalog as the CLI's session config options report it (see harness-readiness.test.ts).
         ipcMain.handle('harness:models', (_event, request: { harness: string }) => {
           if (request.harness !== 'antigravity') return { models: [], error: 'Only Antigravity is configured in this fixture' };
@@ -865,10 +867,10 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
         });
         ipcMain.handle('app:openExternal', (_event, request: { url: string }) => { fixture.openedUrls.push(request.url); });
         ipcMain.handle('harness:login', (_event, request: unknown) => { fixture.signIns.push(request); return { ok: true }; });
-        ipcMain.handle('harness:antigravityQuota', () => {
-          fixture.quotaChecks++;
-          if (fixture.state !== 'signed-in') throw new Error('Quota requires sign-in');
-          return { groups: [{ name: 'Gemini models', buckets: [{ name: 'Gemini 3 Pro', remainingFraction: 0.726 }] }] };
+        ipcMain.handle('subscriptions:openUsage', (_event, request: { provider: string }) => {
+          fixture.usageOpens.push(request);
+          if (request.provider !== 'antigravity' || fixture.state !== 'signed-in') throw new Error('Expected a signed-in Antigravity account');
+          return { kind: 'terminal' };
         });
         ipcMain.handle('sessions:send', () => { fixture.sends++; throw new Error('No prompts may be sent in this fixture'); });
       }, ANTIGRAVITY_INSTALL_URL);
@@ -887,19 +889,20 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
       const recheck = guide.getByRole('button', { name: 'Recheck setup', exact: true });
       await recheck.click();
       const signIn = guide.getByRole('button', { name: 'Sign in with Google', exact: true });
-      const checkQuota = guide.getByRole('button', { name: 'Check Antigravity quota', exact: true });
+      const openUsage = guide.getByRole('button', { name: 'Open Antigravity usage', exact: true });
+      await signIn.waitFor();
+      expect(await openUsage.isVisible()).toBe(false);
       await signIn.click();
       await guide.getByText('Recheck sign-in', { exact: true }).waitFor();
-      expect(await checkQuota.isVisible() && await checkQuota.isEnabled()).toBe(false);
+      expect(await openUsage.isVisible()).toBe(false);
 
       await setVendorState('signed-in');
       await recheck.click();
       await guide.getByText('Google sign-in detected.', { exact: true }).waitFor();
       expect(await guide.locator('input[type="password"]').count()).toBe(0);
-      await checkQuota.click();
-      const quota = guide.locator('[aria-label="Antigravity account quota"]');
-      await quota.getByText('Gemini models', { exact: true }).waitFor();
-      await quota.getByRole('listitem').filter({ hasText: 'Gemini 3 Pro' }).getByText('73% remaining', { exact: true }).waitFor();
+      await guide.getByText('In the Antigravity terminal, type /usage and press Enter to see your account limits.', { exact: true }).waitFor();
+      await openUsage.click();
+      await guide.getByRole('status').filter({ hasText: 'Antigravity terminal launcher started.' }).waitFor();
       const next = guide.getByRole('button', { name: 'Next', exact: true });
       await next.click();
       await guide.getByText(/default Gemini model/).waitFor();
@@ -923,7 +926,8 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
       expect(sessions[0].harnessRef).toEqual({});
       expect(sessions[0].config.model).toEqual({ provider: 'antigravity', model: 'gemini-4-argon' });
       const calls = await app.evaluate(() => (globalThis as AntigravityFixtureGlobal).__vocsAntigravitySetupFixture);
-      expect(calls).toMatchObject({ state: 'signed-in', openedUrls: [ANTIGRAVITY_INSTALL_URL], signIns: [{ harness: 'antigravity' }], quotaChecks: 1, sends: 0 });
+      expect(calls).toMatchObject({ state: 'signed-in', openedUrls: [ANTIGRAVITY_INSTALL_URL], signIns: [{ harness: 'antigravity' }], sends: 0 });
+      expect(calls.usageOpens).toEqual([{ provider: 'antigravity' }]);
       expect(calls.modelLists).toBeGreaterThan(0);
     } finally {
       await app.close();

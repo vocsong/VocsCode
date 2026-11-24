@@ -1,8 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
-import { z } from 'zod';
-import type { AntigravityQuota } from '../../shared/harness-setup';
 import type { ModelInfo } from '../../shared/types';
 import { withTimeout } from '../util/async';
 import { acpModelCatalog, type ConfigOptionLike } from './acp-config';
@@ -12,15 +10,17 @@ import { shutdownChild, spawnTool } from './spawn';
 // make Vocs Code's permission mode silently less restrictive: the app's mode alone decides.
 const antigravitySettings = JSON.stringify({ modelProvider: '', toolPermission: 'strict', allowNonWorkspaceAccess: false });
 export const ANTIGRAVITY_ACP_ARGS = ['--settings', antigravitySettings, 'acp'] as const;
-export const ANTIGRAVITY_QUOTA_ARGS = ['--settings', antigravitySettings, '-p', '/usage', '--output-format', 'json'] as const;
 export const ANTIGRAVITY_SIGN_IN_MESSAGE = 'Sign in with Google in Settings → Providers & keys → Harness logins, then retry.';
+
+// Use the CLI's saved sign-in even if Gemini API keys or Cloud ADC are set for other integrations.
+export const ANTIGRAVITY_AUTH_ENV_OVERRIDES: readonly string[] = [
+  'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AGY_ADC_AUTH', 'GOOGLE_APPLICATION_CREDENTIALS'
+];
 
 export function antigravityAccountEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  // The Antigravity account route uses the CLI's saved sign-in even when this app or the
-  // launching shell has a Gemini API key or Cloud ADC configured for another integration.
   for (const key of Object.keys(env)) {
-    if (/^(GEMINI_API_KEY|GOOGLE_API_KEY|AGY_ADC_AUTH|GOOGLE_APPLICATION_CREDENTIALS)$/i.test(key)) delete env[key];
+    if (ANTIGRAVITY_AUTH_ENV_OVERRIDES.includes(key.toUpperCase())) delete env[key];
   }
   return env;
 }
@@ -88,47 +88,5 @@ export async function listAntigravityModels(binary: string, cwd: string): Promis
     throw error;
   } finally {
     await shutdownChild(child);
-  }
-}
-
-const quotaBucket = z.object({
-  name: z.string().trim().min(1).max(120),
-  disabled: z.literal(false).optional(),
-  remaining_fraction: z.number().min(0).max(1),
-  reset_time: z.iso.datetime({ offset: true }).nullish().catch(undefined)
-});
-
-const quotaEnvelope = z.object({
-  status: z.literal('SUCCESS'),
-  num_turns: z.literal(0),
-  command: z.object({
-    name: z.literal('usage'),
-    data: z.object({
-      groups: z.array(z.object({
-        name: z.string().trim().min(1).max(120),
-        buckets: z.array(z.unknown()).max(20)
-      })).max(30)
-    })
-  })
-});
-
-export function parseAntigravityQuota(stdout: string): AntigravityQuota | undefined {
-  try {
-    const parsed = quotaEnvelope.safeParse(JSON.parse(stdout));
-    if (!parsed.success) return undefined;
-    const groups: AntigravityQuota['groups'] = [];
-    for (const group of parsed.data.command.data.groups) {
-      const buckets: AntigravityQuota['groups'][number]['buckets'] = [];
-      for (const row of group.buckets) {
-        const bucket = quotaBucket.safeParse(row);
-        if (bucket.success) {
-          buckets.push({ name: bucket.data.name, remainingFraction: bucket.data.remaining_fraction, resetAt: bucket.data.reset_time ?? undefined });
-        }
-      }
-      if (buckets.length) groups.push({ name: group.name, buckets });
-    }
-    return groups.length ? { groups } : undefined;
-  } catch {
-    return undefined;
   }
 }

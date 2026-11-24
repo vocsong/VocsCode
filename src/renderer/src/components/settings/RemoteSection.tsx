@@ -191,6 +191,17 @@ export function RemoteSection({ settings }: { settings: AppSettings; update?: (p
         </Field>
       )}
 
+      {config.enabled && (
+        <Field label="Analytics dashboard" hint="Upload this computer's usage analytics so code.vocs.io shows every computer in one dashboard. Sent: spend, tokens, models, tools, reliability, session titles and project folder names. Never sent: file paths, full project paths, prompts or transcripts. Turning this off deletes the uploaded copy.">
+          <Toggle
+            checked={config.shareAnalytics !== false}
+            disabled={busy}
+            onChange={(v) => void act(() => invoke('remote:setShareAnalytics', { share: v }))}
+            label="Share analytics with code.vocs.io"
+          />
+        </Field>
+      )}
+
       {config.enabled && (state?.status === 'online' || state?.status === 'connecting') && (
         <>
           <h3>Pair a browser</h3>

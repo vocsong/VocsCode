@@ -17,7 +17,7 @@ import {
   type SettingSource,
   type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
-import type { AppSettings, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { AppSettings, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, OngoingItem, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { fastModeSupport } from '../../shared/fast-mode';
 import { assertEndpointUrl } from '../../shared/endpoint-policy';
 import { hasClaudeAgentPins } from '../claude-agents';
@@ -45,6 +45,31 @@ import type { HarnessAdapter, HarnessContext } from './types';
 import { reportHarnessCommands } from './commands';
 import type { HarnessCommand } from '../../shared/harness-commands';
 
+/** Delay before surfacing a Claude hook as ongoing work, so fast hooks never flicker in the UI. */
+const HOOK_VISIBILITY_DELAY_MS = 250;
+
+/** Records a live Claude background task (from `background_tasks_changed` or edge fallback). */
+interface LiveBackgroundTask {
+  taskId: string;
+  taskType: string;
+  description: string;
+  startedAt: number;
+}
+
+/** Records a live user/project Claude hook between `hook_started` and `hook_response`. */
+interface LiveHookRun {
+  hookId: string;
+  hookName: string;
+  hookEvent: string;
+  startedAt: number;
+  visible: boolean;
+  timer?: NodeJS.Timeout;
+}
+
+function isInternalHookName(hookName: string | undefined): boolean {
+  if (!hookName) return true;
+  return hookName === 'callback' || hookName.endsWith(':callback');
+}
 const APP_ID = 'vocs-code/0.1.0';
 /**
  * How many subagents one session may run at once. Claude Code's own default is 20, a number tuned
@@ -239,6 +264,14 @@ export class ClaudeAdapter implements HarnessAdapter {
   private autoCompactionWindow: number | null | undefined;
   /** Records the delegated runs Claude Code spawns, so the Subagents panel can show them. */
   private readonly subagents: ClaudeSubagentRuns;
+  /** Live non-ambient background tasks from `background_tasks_changed` (or edge fallback on older CLIs). */
+  private readonly backgroundTasks = new Map<string, LiveBackgroundTask>();
+  /** True once this CLI process has emitted the authoritative `background_tasks_changed` level signal. */
+  private seenBackgroundTasksSnapshot = false;
+  /** Live user/project hooks between `hook_started` and `hook_response`. */
+  private readonly activeHooks = new Map<string, LiveHookRun>();
+  /** Depth of Vocs Code's own SDK hook callbacks (`preToolUse` / `postToolUse`), never surfaced as user hooks. */
+  private internalHookDepth = 0;
   /** One closer per in-process gateway bridge (memory, Mission) this launch opened. */
   private gatewayClosers: (() => Promise<void>)[] = [];
 
@@ -292,6 +325,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       permissionMode: toSdkMode(mode),
       canUseTool: this.canUseTool,
       includePartialMessages: true,
+      includeHookEvents: true,
       // Without this the SDK forwards only a subagent's tool_use/tool_result blocks, so a delegated
       // run reaches the Subagents panel with no transcript of its own.
       forwardSubagentText: true,
@@ -578,6 +612,15 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   private preToolUse: HookCallback = async (input) => {
+    this.internalHookDepth++;
+    try {
+      return await this.runPreToolUse(input);
+    } finally {
+      this.internalHookDepth = Math.max(0, this.internalHookDepth - 1);
+    }
+  };
+
+  private async runPreToolUse(input: Parameters<HookCallback>[0]): Promise<Awaited<ReturnType<HookCallback>>> {
     let tierDecision: 'allow' | 'ask' | undefined;
     if (input.hook_event_name === 'PreToolUse' && !SESSION_CONTROL_TOOLS.has(input.tool_name)) {
       // The tier overrides Claude settings: an allow rule there would skip canUseTool, so every call
@@ -602,9 +645,18 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
     if (tierDecision) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: tierDecision, ...(tierDecision === 'ask' ? { permissionDecisionReason: 'Vocs Code permission tier requires approval.' } : {}) } };
     return { continue: true };
-  };
+  }
 
   private postToolUse: HookCallback = async (input) => {
+    this.internalHookDepth++;
+    try {
+      return await this.runPostToolUse(input);
+    } finally {
+      this.internalHookDepth = Math.max(0, this.internalHookDepth - 1);
+    }
+  };
+
+  private async runPostToolUse(input: Parameters<HookCallback>[0]): Promise<Awaited<ReturnType<HookCallback>>> {
     if (input.hook_event_name === 'PostToolUse' && EDIT_TOOLS.has(input.tool_name)) {
       const ti = input.tool_input as Record<string, unknown>;
       const file = String(ti?.file_path ?? ti?.notebook_path ?? '');
@@ -627,7 +679,116 @@ export class ClaudeAdapter implements HarnessAdapter {
       }
     }
     return { continue: true };
-  };
+  }
+
+  private emitBackgroundTasks(): void {
+    const items: OngoingItem[] = [];
+    for (const task of this.backgroundTasks.values()) {
+      const run = this.subagents.lookupByTaskId(task.taskId);
+      if (run || task.taskType === 'local_agent') {
+        items.push({
+          id: run ? `subagent:${run.runId}` : `task:${task.taskId}`,
+          kind: 'subagent',
+          label: run?.description || task.description || 'Subagent',
+          ...(run?.agent ? { agent: run.agent } : {}),
+          ...(run?.runId ? { runId: run.runId } : {}),
+          ...(run?.turns !== undefined ? { turns: run.turns } : {}),
+          ...(run?.toolUses !== undefined ? { toolUses: run.toolUses } : {}),
+          startedAt: run?.startedAt ?? task.startedAt,
+          canStop: false
+        });
+      } else {
+        items.push({
+          id: `task:${task.taskId}`,
+          kind: 'task',
+          label: task.description || task.taskType || 'Background task',
+          ...(task.taskType ? { detail: task.taskType } : {}),
+          startedAt: task.startedAt,
+          canStop: false
+        });
+      }
+    }
+    this.ctx.emit({ type: 'ongoing', source: 'tasks', items });
+  }
+
+  private emitHooks(): void {
+    const items: OngoingItem[] = [];
+    for (const hook of this.activeHooks.values()) {
+      if (!hook.visible) continue;
+      items.push({
+        id: `hook:${hook.hookId}`,
+        kind: 'hook',
+        label: hook.hookName || hook.hookEvent || 'Hook',
+        ...(hook.hookEvent ? { detail: hook.hookEvent } : {}),
+        startedAt: hook.startedAt,
+        canStop: false
+      });
+    }
+    this.ctx.emit({ type: 'ongoing', source: 'hooks', items });
+  }
+
+  private onBackgroundTasksChanged(tasks: readonly { task_id: string; task_type?: string; description?: string; ambient?: boolean }[]): void {
+    this.seenBackgroundTasksSnapshot = true;
+    const prev = new Map(this.backgroundTasks);
+    this.backgroundTasks.clear();
+    const now = Date.now();
+    for (const t of tasks) {
+      if (!t || typeof t.task_id !== 'string' || !t.task_id || t.ambient === true) continue;
+      const existing = prev.get(t.task_id);
+      this.backgroundTasks.set(t.task_id, {
+        taskId: t.task_id,
+        taskType: typeof t.task_type === 'string' ? t.task_type : '',
+        description: typeof t.description === 'string' ? t.description : '',
+        startedAt: existing?.startedAt ?? now
+      });
+    }
+    this.emitBackgroundTasks();
+  }
+
+  private onHookStarted(msg: { hook_id?: string; hook_name?: string; hook_event?: string }): void {
+    const hookId = typeof msg.hook_id === 'string' ? msg.hook_id : '';
+    const hookName = typeof msg.hook_name === 'string' ? msg.hook_name : '';
+    const hookEvent = typeof msg.hook_event === 'string' ? msg.hook_event : '';
+    if (!hookId) return;
+    // Skip Vocs Code's own internal SDK callbacks (permission gating / file snapshots).
+    if (isInternalHookName(hookName)) return;
+    if (this.internalHookDepth > 0 && (hookEvent === 'PreToolUse' || hookEvent === 'PostToolUse') && !hookName) return;
+    const existing = this.activeHooks.get(hookId);
+    if (existing?.timer) clearTimeout(existing.timer);
+    const entry: LiveHookRun = { hookId, hookName, hookEvent, startedAt: Date.now(), visible: false };
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined;
+      if (this.activeHooks.get(hookId) !== entry) return;
+      entry.visible = true;
+      this.emitHooks();
+    }, HOOK_VISIBILITY_DELAY_MS);
+    entry.timer.unref?.();
+    this.activeHooks.set(hookId, entry);
+  }
+
+  private onHookResponse(msg: { hook_id?: string }): void {
+    const hookId = typeof msg.hook_id === 'string' ? msg.hook_id : '';
+    if (!hookId) return;
+    const entry = this.activeHooks.get(hookId);
+    if (!entry) return;
+    if (entry.timer) clearTimeout(entry.timer);
+    this.activeHooks.delete(hookId);
+    if (entry.visible) this.emitHooks();
+  }
+
+  private clearOngoing(): void {
+    const hadTasks = this.backgroundTasks.size > 0;
+    this.backgroundTasks.clear();
+    this.seenBackgroundTasksSnapshot = false;
+    let hadVisibleHooks = false;
+    for (const entry of this.activeHooks.values()) {
+      if (entry.timer) clearTimeout(entry.timer);
+      if (entry.visible) hadVisibleHooks = true;
+    }
+    this.activeHooks.clear();
+    if (hadTasks) this.ctx.emit({ type: 'ongoing', source: 'tasks', items: [] });
+    if (hadVisibleHooks) this.ctx.emit({ type: 'ongoing', source: 'hooks', items: [] });
+  }
 
   private reportStreamUsage(ev: {
     type: string;
@@ -741,6 +902,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   private async consume(q: Query): Promise<void> {
     for await (const msg of q) this.handle(msg, q);
     this.closeOpenTurn();
+    this.clearOngoing();
     this.compactionWaiter?.reject(new Error('Claude Code stopped during context compaction.'));
     this._busy = false;
     this.ctx.emit({ type: 'status', status: 'stopped', detail: 'Claude Code process ended' });
@@ -795,14 +957,40 @@ export class ClaudeAdapter implements HarnessAdapter {
         } else if (subtype === 'permission_denied') {
           const m = msg as { tool_name: string };
           this.info(`Tool ${m.tool_name} was auto-denied by the harness.`, 'warn');
+        } else if (subtype === 'background_tasks_changed') {
+          const m = msg as { tasks?: { task_id: string; task_type?: string; description?: string; ambient?: boolean }[] };
+          this.onBackgroundTasksChanged(Array.isArray(m.tasks) ? m.tasks : []);
+        } else if (subtype === 'hook_started') {
+          this.onHookStarted(msg as unknown as { hook_id?: string; hook_name?: string; hook_event?: string });
+        } else if (subtype === 'hook_response') {
+          this.onHookResponse(msg as unknown as { hook_id?: string });
         } else if (subtype === 'task_started') {
-          this.subagents.onTaskStarted(msg as unknown as TaskStartedLike);
+          const t = msg as unknown as TaskStartedLike & { task_type?: string };
+          this.subagents.onTaskStarted(t);
+          // Re-enrich if `background_tasks_changed` arrived before this `task_started` bookend.
+          if (this.seenBackgroundTasksSnapshot && t.task_id && this.backgroundTasks.has(t.task_id)) {
+            this.emitBackgroundTasks();
+          } else if (!this.seenBackgroundTasksSnapshot && t.is_backgrounded && !t.ambient && !t.skip_transcript && t.task_type !== 'local_agent' && typeof t.task_id === 'string' && t.task_id) {
+            this.backgroundTasks.set(t.task_id, { taskId: t.task_id, taskType: t.task_type ?? '', description: t.description ?? '', startedAt: Date.now() });
+            this.emitBackgroundTasks();
+          }
         } else if (subtype === 'task_progress') {
           this.subagents.onTaskProgress(msg as unknown as TaskProgressLike);
         } else if (subtype === 'task_updated') {
-          this.subagents.onTaskUpdated(msg as unknown as TaskUpdatedLike);
+          const t = msg as unknown as TaskUpdatedLike;
+          this.subagents.onTaskUpdated(t);
+          if (!this.seenBackgroundTasksSnapshot && t.task_id) {
+            const st = t.patch?.status;
+            if ((st === 'completed' || st === 'failed' || st === 'killed') && this.backgroundTasks.delete(t.task_id)) {
+              this.emitBackgroundTasks();
+            }
+          }
         } else if (subtype === 'task_notification') {
-          this.subagents.onTaskNotification(msg as unknown as TaskNotificationLike);
+          const t = msg as unknown as TaskNotificationLike;
+          this.subagents.onTaskNotification(t);
+          if (!this.seenBackgroundTasksSnapshot && t.task_id && this.backgroundTasks.delete(t.task_id)) {
+            this.emitBackgroundTasks();
+          }
         }
         return;
       }
@@ -1173,6 +1361,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   async dispose(): Promise<void> {
     // Before the reporter closes: the turn being abandoned is reported through it.
     this.closeOpenTurn();
+    this.clearOngoing();
     this.usageReporter.close();
     this.compactionWaiter?.reject(new Error('Claude context compaction was cancelled.'));
     this.input.close();

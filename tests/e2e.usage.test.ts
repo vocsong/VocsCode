@@ -1,8 +1,9 @@
 /**
  * Electron end-to-end for the right panel's Usage dashboard. A session, its totals and a transcript
  * carrying turns, tool calls, file changes and failures are seeded on disk, so the whole page is
- * driven through the real UI with no harness and no provider key. Requires `npm run build` first;
- * gated by VOCS_CODE_E2E_UI=1.
+ * driven through the real UI with no harness and no provider key. Subscription reads and vendor
+ * launches are stubbed at IPC; `/usage` must neither send a prompt nor check the account.
+ * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -45,13 +46,17 @@ function transcript(): TranscriptItem[] {
 }
 
 describe.runIf(enabled)('electron e2e: usage dashboard', () => {
-  it('shows spend, counters, meters and all three detail views for a seeded session', async () => {
+  it('opens with /usage and shows session metrics separately from subscription limits and vendor actions', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-usage-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { uiMode: 'standard', sidebarWidth: 280, panelWidth: 420 }));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      uiMode: 'standard', sidebarWidth: 280, panelWidth: 420,
+      // Startup probes must not reach a developer's signed-in CLI.
+      binaries: Object.fromEntries(['agy', 'claude', 'codex', 'pi'].map((name) => [name, path.join(tmp, `missing-${name}`)]))
+    }));
 
     const session: SessionMeta = {
       id: SID,
@@ -78,6 +83,24 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const win: Page = await app.firstWindow();
     await win.waitForSelector('.brand', { timeout: 60_000 });
     await expectQuietWindow(app);
+    await app.evaluate(({ ipcMain }) => {
+      const calls = { checks: [] as string[], launches: [] as string[], prompts: 0 };
+      Reflect.set(globalThis, '__vocsUsageCalls', calls);
+      for (const channel of ['sessions:send', 'subscriptions:read', 'subscriptions:openUsage']) ipcMain.removeHandler(channel);
+      ipcMain.handle('sessions:send', () => { calls.prompts++; throw new Error('Usage must not send a prompt'); });
+      ipcMain.handle('subscriptions:read', (_event, { provider }: { provider: string }) => {
+        calls.checks.push(provider);
+        return { groups: [{ name: 'Codex', buckets: [
+          { name: '5-hour limit', remainingFraction: 0.726, resetAt: '2030-01-01T12:00:00Z' },
+          { name: 'Weekly limit', remainingFraction: 0.16 }
+        ] }] };
+      });
+      ipcMain.handle('subscriptions:openUsage', (_event, { provider }: { provider: string }) => {
+        calls.launches.push(provider);
+        return { kind: provider === 'antigravity' ? 'terminal' : 'browser' };
+      });
+    });
+    const vendorCalls = () => app!.evaluate(() => Reflect.get(globalThis, '__vocsUsageCalls'));
     const wideViewport = { width: 1440, height: 900 };
     await win.setViewportSize(wideViewport);
 
@@ -124,10 +147,34 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     expect(await meter.getAttribute('aria-expanded')).toBe('false');
 
     await win.setViewportSize(wideViewport);
-    await meter.click();
+    const prompt = composer.locator('textarea');
+    await prompt.fill('/USAGE');
+    await prompt.press('Enter');
     await panel.waitFor({ timeout: 10_000 });
+    expect(await vendorCalls()).toEqual({ checks: [], launches: [], prompts: 0 });
+    expect(await prompt.inputValue()).toBe('');
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'usage-00-summary.png') });
+
+    const subscriptions = panel.getByRole('radio', { name: 'Subscriptions', exact: true });
+    await subscriptions.click();
+    const accounts = panel.getByRole('region', { name: 'Subscription limits', exact: true });
+    const codex = accounts.getByRole('region', { name: 'Codex · ChatGPT', exact: true });
+    expect(await vendorCalls()).toEqual({ checks: [], launches: [], prompts: 0 });
+    await codex.getByRole('button', { name: 'Check limits', exact: true }).click();
+    const shortWindow = codex.getByRole('meter', { name: '5-hour limit', exact: true });
+    expect(await shortWindow.getAttribute('aria-valuenow')).toBe('73');
+    expect(await codex.getByRole('meter', { name: 'Weekly limit' }).getAttribute('aria-valuenow')).toBe('16');
+    expect(await codex.getByText(/^Resets /).innerText()).toBeTruthy();
+    const google = accounts.getByRole('region', { name: 'Google Antigravity', exact: true });
+    await google.getByRole('button', { name: 'Open CLI', exact: true }).click();
+    await google.getByText('In the terminal, type /usage and press Enter.').waitFor();
+    await accounts.getByRole('region', { name: 'Claude', exact: true }).getByRole('button', { name: 'Open usage page' }).click();
+    await accounts.getByText('Usage page opened in your browser.').waitFor();
+    const explicitCalls = { checks: ['codex'], launches: ['antigravity', 'claude'], prompts: 0 };
+    expect(await vendorCalls()).toEqual(explicitCalls);
+    await win.screenshot({ path: path.join(shots, 'usage-00-subscriptions.png') });
+    await panel.getByRole('radio', { name: 'Session', exact: true }).click();
 
     // Summary block: spend, and counters the page derives from the transcript rather than the totals.
     expect(await win.locator('.usage-hero-value').innerText()).toBe('$0.75');
@@ -177,6 +224,18 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const body = await win.locator('.panel-section.panel-top .panel-body').boundingBox();
     const content = await panel.boundingBox();
     expect(content!.height).toBeGreaterThan(body!.height * 0.9);
+
+    // The same shortcut peeks open the Zen drawer and the quota result survives the layout switch.
+    await win.locator('.menubar').getByRole('button', { name: 'View', exact: true }).click();
+    await win.locator('.menubar-panel').getByRole('button', { name: 'Zen interface', exact: true }).click();
+    await win.locator('html[data-ui="zen"]').waitFor();
+    await prompt.fill('/usage');
+    await prompt.press('Enter');
+    await subscriptions.click();
+    await codex.getByRole('button', { name: 'Refresh limits', exact: true }).hover();
+    expect(await shortWindow.getAttribute('aria-valuenow')).toBe('73');
+    expect(await vendorCalls()).toEqual(explicitCalls);
+    await win.screenshot({ path: path.join(shots, 'usage-00-subscriptions-zen.png'), animations: 'disabled' });
   }, 180_000);
 });
 

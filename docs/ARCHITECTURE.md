@@ -271,6 +271,18 @@ as the last list seen (it only offers names), and a session that has not started
 latest list from a same-harness session in the same project. Harnesses that cannot list commands say
 so in the popover instead of looking empty; the list is kept off remote frames.
 
+The app-owned `/usage` opens the right-hand Usage tab without sending a prompt. An advertised
+harness command of the same name still runs via `//usage`. The separate **Subscriptions** view
+shows account limits independent of the active session. Neither opening it nor switching sessions
+queries a provider. `subscriptions:read` and `subscriptions:openUsage` are desktop-owner-only:
+Codex uses the documented app-server account read over a short-lived process without a thread or a
+turn, shared by both Codex adapters. It keeps the CLI's saved login but not ambient auth or endpoint
+variables, uses isolated app-server state, and disables Codex remote-control startup. The renderer
+holds only the bounded snapshot during the open
+panel, separate from tokens, spend and context. Other actions open fixed vendor pages (Claude,
+Cursor or ChatGPT) or the interactive Antigravity CLI, where the user types `/usage`. Nothing
+submits a session prompt, runs Antigravity headlessly for quota, or forwards account data remotely.
+
 `/goal` has a per-session driver (`src/shared/goal-driver.ts`): the harness reports the slash
 commands it accepts (above), and when
 that list — or, before the harness has started, a `goal` skill on disk — names `goal`, the composer

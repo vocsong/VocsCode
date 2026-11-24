@@ -724,4 +724,3 @@ bridge, Pi on the ephemeral channel next to vocs-memory, Codex inline, native an
 Its tools are trusted in every tier by app-set provenance (`BUILTIN_MISSION_TOOLS`), and the gateway
 lists and accepts only the caller's role. Codex sets `default_tools_approval_mode = "approve"` for it;
 for a Builder every other server is forced to `prompt`.
-

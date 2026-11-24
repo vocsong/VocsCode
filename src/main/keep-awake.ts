@@ -1,4 +1,5 @@
 import type { SessionMeta } from '../shared/types';
+import { hasOngoingWork } from '../shared/ongoing';
 import type { Logger } from './log';
 import { errorMessage } from './util/async';
 
@@ -38,12 +39,11 @@ export class KeepAwake {
     let wanted = false;
     if (!this.quitting) {
       const eligible = new Set<string>();
-      for (const { id, status, archived, mission } of sessions) {
+      for (const { id, status, ongoing, archived, mission } of sessions) {
         if (archived) continue;
-        const working = status === 'starting' || status === 'running' || status === 'awaiting';
         if (this.optedIn.has(id)) eligible.add(id);
         else if (!mission) continue;
-        wanted ||= working;
+        wanted ||= status === 'starting' || status === 'running' || status === 'awaiting' || hasOngoingWork({ ongoing });
       }
       // Deleting or archiving a session revokes the choice rather than leaving stale opt-ins.
       if (this.optedIn.size) this.optedIn = eligible;

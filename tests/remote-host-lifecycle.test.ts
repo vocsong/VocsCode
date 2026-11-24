@@ -65,7 +65,7 @@ afterEach(async () => {
   for (const rig of rigs.splice(0)) await rig.cleanup();
 });
 
-async function rig(opts: { onMirrorRotated?: () => void; mirrorRetryMs?: number; mirrorLateWriteMs?: number } = {}): Promise<Rig> {
+async function rig(opts: { onMirrorRotated?: () => void; onOnline?: () => void; mirrorRetryMs?: number; mirrorLateWriteMs?: number } = {}): Promise<Rig> {
   const relay = new FakeRelay();
   const port = await relay.start();
   const base = `http://127.0.0.1:${port}`;
@@ -86,6 +86,7 @@ async function rig(opts: { onMirrorRotated?: () => void; mirrorRetryMs?: number;
       rotated++;
       opts.onMirrorRotated?.();
     },
+    onOnline: opts.onOnline,
     mirrorRetryMs: opts.mirrorRetryMs,
     mirrorLateWriteMs: opts.mirrorLateWriteMs
   });
@@ -292,7 +293,7 @@ describe('Connect with Vocs: adding and pairing through a signed-in owner', () =
       // check code the page will show.
       expect(opened).toHaveLength(1);
       const link = new URL(opened[0]);
-      expect(link.origin + link.pathname).toBe(`${r.base}/app`);
+      expect(link.origin + link.pathname).toBe(`${r.base}/dashboard`);
       const nonceHash = link.searchParams.get('connect')!;
       expect(nonceHash).toMatch(/^[0-9a-f]{64}$/);
       expect(desktop.state()).toMatchObject({ status: 'connecting', signIn: { link: opened[0], checkCode: connectCheckCode(nonceHash) } });
@@ -479,6 +480,20 @@ describe('offline mirror writes around key rotation and clearing', () => {
       mirror?.stop();
       relay.restore();
     }
+  });
+
+  it('makes analytics calls as the registered computer only while remote access is on', async () => {
+    let online = 0;
+    const r = await rig({ onOnline: () => void online++ });
+    // Enrolling, not yet registered: nothing to send as.
+    expect(await r.host.analyticsRequest('/v1/analytics')).toBeNull();
+    await r.pair(r.browser().client, 'Browser');
+    await until(() => online > 0, 'the online hook');
+    const res = await r.host.analyticsRequest('/v1/analytics');
+    expect(res?.status).toBe(200);
+    expect(await res!.json()).toEqual({ manifest: null, receivedAt: null });
+    await r.host.disable();
+    expect(await r.host.analyticsRequest('/v1/analytics')).toBeNull();
   });
 
   it('does not send a mirror upload whose publication was superseded', async () => {

@@ -12,7 +12,13 @@ import type { AppSettings, CreateSessionRequest, SessionMeta } from '../../share
 import { confinedWorktreeRoot } from '../git';
 import type { SessionManager } from '../session-manager';
 import { ControlJournal, type ControlJournalState } from './journal';
-import { checkControlWorkspace, controlPathKey as key, controlSessionIdentity as sessionIdentity, freshControlSession, insideControlWorkspace, type ControlResourceGuard } from './workspace';
+import {
+  checkControlWorkspace, controlPathKey as key, controlSessionIdentity as sessionIdentity,
+  freshControlSession, insideControlWorkspace, localWorkspaceIdentity, type ControlResourceGuard,
+} from './workspace';
+
+type EnrolledProject = ControlJournalState['projects'][number];
+type DiscoveryMethod = 'projects.list' | 'sessions.list' | 'sessions.get';
 
 const terminal = new Set(['succeeded', 'failed', 'interrupted', 'unknown']);
 const WINDOW_MS = 60 * 60 * 1000;
@@ -29,6 +35,7 @@ export const CONTROL_OPERATIONS_PER_CONTROLLER = 1000;
 export class ControlService {
   private storageFault = false;
   private jobs = new Set<Promise<void>>();
+  private discoveryDisableRevision = 0;
   constructor(private readonly deps: {
     journal: ControlJournal;
     sessions: SessionManager;
@@ -56,7 +63,7 @@ export class ControlService {
         const stat = await fs.stat(canonicalRoot);
         if (!stat.isDirectory()) continue;
         projects.push({ id: `p_${randomUUID().replaceAll('-', '')}`, root, canonicalRoot, name: path.basename(root), identity: `${stat.dev}:${stat.ino}` });
-      } catch { /* Missing or managed roots are not enrollable. Never infer new access from them. */ }
+      } catch { /* Never infer new access from a root that failed enrollment. */ }
     }
     if (projects.length !== current.projects.length) await this.deps.journal.transaction((s) => {
       for (const project of projects) if (!s.projects.some((p) => key(p.root) === key(project.root) || key(p.canonicalRoot) === key(project.canonicalRoot))) s.projects.push(project);
@@ -81,6 +88,8 @@ export class ControlService {
       s.enabled = enabled;
       if (!enabled) this.failPending(s);
     });
+    // A committed disable retires in-flight reads even if the same grants are re-enabled.
+    if (!enabled) this.discoveryDisableRevision++;
     return this.ownerState();
   }
 
@@ -121,15 +130,39 @@ export class ControlService {
     return grant;
   }
 
-  private async project(projectId: string): Promise<ControlProject> {
-    const project = this.snapshot().projects.find((p) => p.id === projectId);
-    if (!project) throw new ControlError('denied');
+  private discoveryFence(principal: ControllerPrincipal, method: DiscoveryMethod, grant: ControlGrant, instanceId: string, projectId?: string) {
+    const disabled = this.discoveryDisableRevision;
+    // Recheck the same desktop grant synchronously with the final response projection.
+    return () => {
+      const state = this.snapshot();
+      const current = this.authorize(principal, method, projectId, state);
+      if (current.id !== grant.id || current.revokedAt !== undefined || state.instanceId !== instanceId ||
+        disabled !== this.discoveryDisableRevision) throw new ControlError('denied');
+      return { state, grant: current };
+    };
+  }
+
+  private currentDiscoveryProject(project: EnrolledProject, state: ControlJournalState, grant: ControlGrant): EnrolledProject | undefined {
+    const current = state.projects.find(({ id }) => id === project.id);
+    if (current && grant.projectIds.includes(current.id) && current.root === project.root &&
+      current.canonicalRoot === project.canonicalRoot && current.identity === project.identity) return current;
+  }
+
+  private async projectDirectory(project: EnrolledProject): Promise<string> {
     try {
       const real = await fs.realpath(project.root);
       const stat = await fs.stat(real);
       if (key(real) !== key(project.canonicalRoot) || !stat.isDirectory() || `${stat.dev}:${stat.ino}` !== project.identity) throw new Error('changed');
-      await this.deps.guard({ projectRoot: real });
+      return real;
     } catch { throw new ControlError('unavailable'); }
+  }
+
+  private async project(projectId: string): Promise<EnrolledProject> {
+    const project = this.snapshot().projects.find((p) => p.id === projectId);
+    if (!project) throw new ControlError('denied');
+    const real = await this.projectDirectory(project);
+    try { await this.deps.guard({ projectRoot: real }); }
+    catch { throw new ControlError('unavailable'); }
     return project;
   }
 
@@ -164,8 +197,8 @@ export class ControlService {
     const request = controlRequestSchema.parse(input);
     const params = controlParams[request.method].parse(request.params) as Record<string, unknown>;
     const projectId = typeof params.projectId === 'string' ? params.projectId : undefined;
-    this.authorize(principal, request.method, projectId);
     const state = this.snapshot();
+    const grant = this.authorize(principal, request.method, projectId, state);
     if (request.method !== 'capabilities' && params.instanceId !== state.instanceId) throw new ControlError('denied');
     const offset = Number(params.offset ?? 0), limit = Number(params.limit ?? 50);
     switch (request.method) {
@@ -175,21 +208,67 @@ export class ControlService {
             try { this.authorize(principal, method as ControlMethod); return true; } catch { return false; }
           }), questions: 'owner-only', busyPolicy: 'rejectIfBusy' };
       case 'projects.list': {
-        const visible: unknown[] = [];
+        const checkPublication = this.discoveryFence(principal, request.method, grant, state.instanceId);
+        const checked: EnrolledProject[] = [];
         for (const project of state.projects) {
-          try { this.authorize(principal, 'projects.list', project.id); await this.project(project.id); visible.push({ id: project.id, name: project.name }); } catch { /* No existence leak. */ }
+          if (!grant.projectIds.includes(project.id)) continue;
+          try {
+            await this.deps.guard({ projectRoot: await this.projectDirectory(project) });
+            checked.push(project);
+          } catch { /* No existence leak. */ }
+        }
+        const verified: EnrolledProject[] = [];
+        for (const project of checked) {
+          try { await this.projectDirectory(project); verified.push(project); } catch { /* Directory changed. */ }
+        }
+        const live = checkPublication();
+        const visible = verified.flatMap((project) => {
+          const current = this.currentDiscoveryProject(project, live.state, live.grant);
+          return current ? [{ id: current.id, name: current.name }] : [];
+        });
+        return { items: visible.slice(offset, offset + limit), nextOffset: offset + limit < visible.length ? offset + limit : null };
+      }
+      case 'sessions.list':
+      case 'sessions.get': {
+        const checkPublication = this.discoveryFence(principal, request.method, grant, state.instanceId, projectId);
+        const project = await this.project(projectId!);
+        checkPublication();
+        const single = request.method === 'sessions.get';
+        const candidates = single ? [this.deps.sessions.get(String(params.sessionId))] : this.deps.sessions.list({ refreshGit: false }).slice();
+        const checked: Array<{ session: SessionMeta; identity: string; workspace: string | undefined }> = [];
+        for (const session of candidates) {
+          try {
+            if (!session || session.archived || !grant.permissionModes.includes(session.config.permissionMode) ||
+              !grant.harnesses.includes(session.config.harness)) continue;
+            const identity = sessionIdentity(session);
+            const workspace = await checkControlWorkspace(session, project.canonicalRoot, this.deps.guard, true);
+            checked.push({ session, identity, workspace });
+          } catch { /* Not an ordinary session in the granted workspace. */ }
+        }
+        // Re-sample directories after all the resource guards, then check live session identities
+        // and authority together. Keep offset/limit over the filtered rows, as before.
+        const verified: typeof checked = [];
+        for (const entry of checked) {
+          try {
+            if (await localWorkspaceIdentity(entry.session, project.canonicalRoot) === entry.workspace) verified.push(entry);
+          } catch { /* Workspace changed or disappeared. */ }
+        }
+        await this.projectDirectory(project);
+        const live = checkPublication();
+        if (!this.currentDiscoveryProject(project, live.state, live.grant)) throw new ControlError('denied');
+        const visible = verified.flatMap((entry) => {
+          try {
+            const current = this.fresh(entry);
+            return live.grant.permissionModes.includes(current.config.permissionMode) && live.grant.harnesses.includes(current.config.harness)
+              ? [this.summary(current)] : [];
+          } catch { return []; }
+        });
+        if (single) {
+          if (!visible.length) throw new ControlError('denied');
+          return visible[0];
         }
         return { items: visible.slice(offset, offset + limit), nextOffset: offset + limit < visible.length ? offset + limit : null };
       }
-      case 'sessions.list': {
-        await this.project(projectId!);
-        const visible: unknown[] = [];
-        for (const session of this.deps.sessions.list()) {
-          try { visible.push(this.summary(this.fresh(await this.session(principal, 'sessions.list', projectId!, session.id)))); } catch { /* Filter unapproved sessions. */ }
-        }
-        return { items: visible.slice(offset, offset + limit), nextOffset: offset + limit < visible.length ? offset + limit : null };
-      }
-      case 'sessions.get': return this.summary(this.fresh(await this.session(principal, request.method, projectId!, String(params.sessionId))));
       case 'sessions.transcript': {
         const checked = await this.session(principal, request.method, projectId!, String(params.sessionId));
         const transcript = await this.deps.sessions.transcript(checked.session.id);

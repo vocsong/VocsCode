@@ -796,6 +796,10 @@
 .slist-gone {
   color: var(--amber);
 }
+.slist-computer {
+  color: var(--fg);
+  font-weight: 500;
+}
 .slist .num {
   font-family: var(--mono);
   font-size: 12px;
@@ -2237,6 +2241,10 @@
 .panel-tab-count.warn {
   background: var(--amber-soft);
   color: var(--amber);
+}
+.panel-tab-count.live {
+  background: var(--blue-soft);
+  color: var(--blue);
 }
 .processes {
   display: flex;

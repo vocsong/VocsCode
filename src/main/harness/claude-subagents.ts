@@ -68,7 +68,7 @@ export interface TaskProgressLike {
 export interface TaskUpdatedLike {
   task_id: string;
   tool_use_id?: string;
-  patch?: { status?: 'pending' | 'running' | 'completed' | 'failed' | 'killed' | 'paused'; error?: string };
+  patch?: { status?: 'pending' | 'running' | 'completed' | 'failed' | 'killed' | 'paused'; error?: string; is_backgrounded?: boolean };
 }
 
 /** `system`/`task_notification` — the terminal record. */
@@ -190,6 +190,21 @@ export class ClaudeSubagentRuns {
     return this.runs.size > 0;
   }
 
+  /** Live run metadata for a task id, so `background_tasks_changed` can enrich subagent entries. */
+  lookupByTaskId(taskId: string): { runId: string; agent: string; description: string; startedAt: number; turns: number; toolUses: number } | undefined {
+    const id = this.tasks.get(taskId);
+    const state = id ? this.runs.get(id) : undefined;
+    if (!state || state.ended) return undefined;
+    return {
+      runId: state.runId,
+      agent: state.agent,
+      description: state.description,
+      startedAt: state.startedAt,
+      turns: state.totals.turns,
+      toolUses: state.toolUses
+    };
+  }
+
   /**
    * A main-thread `Agent`/`Task` tool call opens a run. Returns the run id so the transcript card
    * can link to it, or null when this session is not recording runs.
@@ -276,6 +291,10 @@ export class ClaudeSubagentRuns {
   onTaskUpdated(msg: TaskUpdatedLike): void {
     const state = this.find(msg.task_id, msg.tool_use_id);
     if (!state || state.ended) return;
+    if (msg.patch?.is_backgrounded === true && state.mode !== 'background') {
+      state.mode = 'background';
+      this.announce(state, 'running');
+    }
     const status = msg.patch?.status;
     if (status === 'completed') void this.finish(state, 'completed');
     else if (status === 'failed') void this.finish(state, 'error', msg.patch?.error);

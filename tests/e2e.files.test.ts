@@ -262,12 +262,14 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     } as SessionMeta;
     const checkoutUrlPath = checkout.replace(/\\/g, '/');
     const absoluteLink = `${/^[A-Za-z]:/.test(checkoutUrlPath) ? '/' : ''}${checkoutUrlPath}/src/hello.ts:12`;
+    const searchNeedle = 'PerformanceNeedle';
     const history: TranscriptItem[] = Array.from({ length: 400 }, (_, i) => ({
       id: `history${i}`, kind: 'assistant', ts: Date.now() - 1000 + i,
-      text: i === 200 ? 'PerformanceNeedle: inspect `src/hello.ts:300`.' : `Historical reply ${i}`
+      text: i === 200 ? `${searchNeedle}: inspect \`src/hello.ts:300\`.` : `Historical reply ${i}`
     }));
     const items: TranscriptItem[] = [
       ...history,
+      { id: 't1', kind: 'tool', ts: Date.now(), name: 'diagnostics', status: 'done', output: `${searchNeedle}: tool-only diagnostic.` },
       { id: 'u1', kind: 'user', ts: Date.now(), text: 'Where is the greeting?' },
       { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'It lives in `src/hello.ts:300`, right at the top.' },
       // The missing name starts out in config.projectRoot only, not in the session checkout.
@@ -482,12 +484,36 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     await expectFile(candidates[1], duplicateBody);
     await closePreview();
 
-    // Deep search temporarily reveals history, then returns to a bounded list at the match.
+    // The same query matches both items in All content, but the scopes separate them.
     await win.getByRole('button', { name: 'Search sessions', exact: true }).click();
-    await win.getByPlaceholder('Search titles, goals and full transcripts…').fill('PerformanceNeedle');
-    const result = win.getByRole('button', { name: /PerformanceNeedle/ });
+    const search = win.locator('.search-palette');
+    const searchInput = search.getByLabel('Search sessions', { exact: true });
+    const category = (name: string) => search.getByRole('button', { name, exact: true });
+    const allPlaceholder = 'Search titles, goals and full transcripts…';
+    expect(await category('All content').getAttribute('aria-pressed')).toBe('true');
+    for (const label of ['Session names', 'Goals', 'Transcript', 'Tool output']) {
+      expect(await category(label).getAttribute('aria-pressed')).toBe('false');
+    }
+    expect(await searchInput.getAttribute('placeholder')).toBe(allPlaceholder);
+    await searchInput.fill(searchNeedle);
+    const result = search.getByRole('button', { name: /inspect.*src\/hello\.ts:300/ });
+    const toolResult = search.getByRole('button', { name: /tool-only diagnostic/ });
+    await result.waitFor({ timeout: 10_000 });
+    await toolResult.waitFor({ timeout: 10_000 });
+
+    await category('Tool output').click();
+    expect(await category('Tool output').getAttribute('aria-pressed')).toBe('true');
+    expect(await searchInput.getAttribute('placeholder')).not.toBe(allPlaceholder);
+    await result.waitFor({ state: 'hidden', timeout: 10_000 });
+    await toolResult.waitFor({ timeout: 10_000 });
+    expect(await result.count()).toBe(0);
+
+    // Jump via Transcript: reveal history, then return to a bounded list at the match.
+    await category('Transcript').click();
+    expect(await category('Transcript').getAttribute('aria-pressed')).toBe('true');
     const resultLabel = result.locator('.session-label');
-    await resultLabel.waitFor();
+    await resultLabel.waitFor({ timeout: 10_000 });
+    expect(await toolResult.count()).toBe(0);
     expect(await resultLabel.locator(':scope > span').allTextContents()).toEqual(sessionLabel);
     expect(await pillColors(resultLabel)).toEqual(conversationColors);
     await result.click();

@@ -5,6 +5,7 @@ import { modelName } from '../../../../shared/model-names';
 import { speedTps } from '../../../../shared/usage-rollup';
 import { fmtCost, fmtTokens, harnessShort, relTime } from '../../format';
 import { useStore } from '../../store';
+import { useAnalyticsEnv } from './env';
 import { SessionTitle } from '../SessionTitle';
 import { Segmented } from './charts';
 import { fmtCompact, fmtMs, fmtTps, plural, SESSION_SORTS, sessionMatches, sessionTokens, sortSessions, type Scope, type SessionSort } from './model';
@@ -56,10 +57,12 @@ export function SessionsTab({ scope, summary }: { scope: Scope; summary: Analyti
 
 /** Session rows; live sessions open on click, deleted ones stay as history. */
 export function SessionList({ sessions, compact }: { sessions: UsageSessionRecord[]; compact?: boolean }) {
+  const env = useAnalyticsEnv();
   const live = useStore((s) => s.sessions);
   const setActive = useStore((s) => s.setActive);
   if (sessions.length === 0) return <div className="chart-empty">No sessions in this range.</div>;
-  const liveById = new Map(live.map((s) => [s.id, s]));
+  // Uploaded snapshots know nothing of which sessions still exist: no links, no "deleted" marks.
+  const liveById = new Map(env.liveSessions ? live.map((s) => [s.id, s]) : []);
   return (
     <div className={`slist ${compact ? 'compact' : ''}`} role="table">
       {!compact && (
@@ -76,14 +79,16 @@ export function SessionList({ sessions, compact }: { sessions: UsageSessionRecor
       {sessions.map((s) => {
         const open = liveById.get(s.id);
         const isLive = !!open;
+        const computer = env.computerOf?.(s);
         return (
-          <div key={s.id} className={`slist-row ${isLive ? 'live' : 'gone'}`} role="row" tabIndex={isLive ? 0 : -1} onClick={() => isLive && void setActive(s.id)} onKeyDown={(e) => e.key === 'Enter' && isLive && void setActive(s.id)} title={isLive ? 'Open session' : 'Session was deleted; its usage is kept'}>
+          <div key={s.id} className={`slist-row ${isLive ? 'live' : env.liveSessions ? 'gone' : ''}`} role="row" tabIndex={isLive ? 0 : -1} onClick={() => isLive && void setActive(s.id)} onKeyDown={(e) => e.key === 'Enter' && isLive && void setActive(s.id)} title={isLive ? 'Open session' : env.liveSessions ? 'Session was deleted; its usage is kept' : undefined}>
             <span className="slist-main">
               <SessionTitle session={open ?? { title: s.title, config: s }} className="slist-title" />
               <span className="slist-meta">
                 {s.model && <span className="mono">{s.provider ? modelName(s.provider, s.model) : s.model}</span>}
+                {computer && <span className="slist-computer">{computer}</span>}
                 <span>{relTime(s.updatedAt)}</span>
-                {!isLive && <span className="slist-gone">deleted</span>}
+                {!isLive && env.liveSessions && <span className="slist-gone">deleted</span>}
               </span>
             </span>
             <span className="num slist-cost">{fmtCost(s.usage.costUsd)}</span>

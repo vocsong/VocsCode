@@ -3,10 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { ftsQuery, itemText, SearchIndex } from '../src/main/search';
 import { SessionStore } from '../src/main/store';
-import type { SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { SearchCategory, SessionMeta, TranscriptItem } from '../src/shared/types';
 
 const dirs: string[] = [];
 
@@ -290,6 +291,89 @@ describe('SearchIndex', () => {
     expect(r.results.some((x) => x.sessionId === 's3' && x.itemId)).toBe(true);
     // Unbalanced syntax must not throw.
     expect(() => index.search({ q: '")(AND* ' })).not.toThrow();
+  });
+
+  it('isolates session names, goals, messages and tool output before applying limits', async () => {
+    const { store, index } = setup2();
+    const goal = { objective: 'needle milestone', status: 'active', createdAt: 1, updatedAt: 1, iterations: 0, maxIterations: 1, autoContinue: false } as const;
+    await store.upsert(meta('name', { title: 'needle cleanup' }));
+    await store.upsert(meta('goal', { title: 'Follow-up', goal }));
+    await store.upsert(meta('context', { statusLabel: 'needle' }));
+    await store.upsert(meta('body'));
+    for (let i = 0; i < 45; i++) await store.upsert(meta(`archived-${i}`, { title: 'needle', archived: true }));
+    index.syncMeta(store.list());
+
+    // Enough highly ranked tool matches to displace all messages in an unfiltered body query.
+    for (let i = 0; i < 410; i++) index.indexItem('body', tool('Read', 'needle needle needle', 'code.ts', i));
+    const prompt = user('I need to look up the needle in this transcript.');
+    const reply = assistant('I found the needle in the conversation.');
+    index.indexItem('body', prompt);
+    index.indexItem('body', reply);
+    index.indexItem('body', { id: 'info', kind: 'info', ts: 1, level: 'info', text: 'needle' });
+    index.flushNow();
+
+    const q = 'needl*';
+    const find = (category: SearchCategory, limit?: number) =>
+      index.search({ q, filters: { category }, limit }).results;
+    expect(find('title', 1)).toEqual([expect.objectContaining({ sessionId: 'name', snippet: '\u0001needle\u0002 cleanup' })]);
+    expect(find('goal')).toEqual([expect.objectContaining({ sessionId: 'goal', snippet: '\u0001needle\u0002 milestone' })]);
+    expect(find('transcript').map((r) => r.itemId).sort()).toEqual([prompt.id, reply.id].sort());
+    expect(find('tool', 1)).toEqual([expect.objectContaining({ kind: 'tool', sessionId: 'body' })]);
+    expect(find('all', 1)).toHaveLength(1);
+    expect(find('all').some((r) => r.sessionId === 'context')).toBe(true);
+    expect(index.search({ q, filters: { category: 'title', archived: true }, limit: 50 }).results).toHaveLength(46);
+  });
+
+  it('upgrades a legacy metadata index without rebuilding a covered transcript', async () => {
+    const { dir, store, index } = setup();
+    const session = meta('legacy', { title: 'Actual session name' });
+    const prompt = user('Preserved transcript');
+    await store.upsert(session);
+    await store.appendTranscript(session.id, prompt);
+    const backfill = watchBackfill(index);
+    await index.init();
+    await backfill.mock.results[0].value;
+    index.close();
+
+    // Put back the pre-category schema, without touching transcript rows or coverage.
+    const db = new DatabaseSync(path.join(dir, 'search.db'));
+    try {
+      db.exec(`
+        DROP TABLE session_meta;
+        DROP TABLE meta_fts;
+        CREATE TABLE session_meta (id INTEGER PRIMARY KEY, sessionId TEXT UNIQUE NOT NULL, text TEXT NOT NULL);
+        CREATE VIRTUAL TABLE meta_fts USING fts5(text, content='session_meta', content_rowid='id', tokenize='porter unicode61');
+        CREATE TRIGGER meta_ai AFTER INSERT ON session_meta BEGIN
+          INSERT INTO meta_fts(rowid, text) VALUES (new.id, new.text);
+        END;
+        INSERT INTO session_meta(sessionId, text) VALUES ('legacy', 'obsolete title /repo');
+      `);
+    } finally { db.close(); }
+
+    const failed = new SearchIndex(dir, { store, log: () => undefined });
+    vi.spyOn(failed, 'syncMeta').mockImplementationOnce(() => { throw new Error('simulated metadata rebuild failure'); });
+    await failed.init();
+    expect(failed.available).toBe(false);
+    const legacyDb = new DatabaseSync(path.join(dir, 'search.db'), { readOnly: true });
+    try {
+      expect(legacyDb.prepare('SELECT text FROM session_meta WHERE sessionId = ?').get(session.id)).toMatchObject({ text: 'obsolete title /repo' });
+    } finally { legacyDb.close(); }
+
+    const upgraded = new SearchIndex(dir, { store, log: () => undefined });
+    const reads = vi.spyOn(store, 'readTranscript');
+    const restartBackfill = watchBackfill(upgraded);
+    try {
+      await upgraded.init();
+      await restartBackfill.mock.results[0].value;
+      expect(reads).not.toHaveBeenCalled();
+      expect(upgraded.search({ q: 'actual', filters: { category: 'title' } }).results).toEqual([
+        expect.objectContaining({ sessionId: session.id, kind: 'meta' })
+      ]);
+      expect(upgraded.search({ q: 'obsolete' }).results).toEqual([]);
+      expect(upgraded.search({ q: 'preserved', filters: { category: 'transcript' } }).results).toEqual([
+        expect.objectContaining({ sessionId: session.id, itemId: prompt.id })
+      ]);
+    } finally { upgraded.close(); }
   });
 
   it('caps hits per session so one session cannot drown out the rest', async () => {

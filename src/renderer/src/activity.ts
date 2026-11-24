@@ -2,6 +2,7 @@
  *  every unarchived session that needs you, is running, finished since you last looked,
  *  or was viewed recently — each session in one section only, the most urgent one. */
 import type { SessionMeta } from '../../shared/types';
+import { hasOngoingWork } from '../../shared/ongoing';
 
 /** How many recently viewed sessions the tray offers. */
 export const RECENT_LIMIT = 5;
@@ -21,7 +22,7 @@ const newest = (key: (s: SessionMeta) => number) => (a: SessionMeta, b: SessionM
 export function activitySections(sessions: SessionMeta[], activeId: string | null): ActivitySections {
   const live = sessions.filter((s) => !s.archived);
   const needs = live.filter((s) => s.status === 'awaiting').sort(newest((s) => s.updatedAt));
-  const running = live.filter((s) => s.status === 'running' || s.status === 'starting').sort(newest((s) => s.lastUserMessageAt ?? s.updatedAt));
+  const running = live.filter((s) => s.status === 'running' || s.status === 'starting' || (s.status !== 'awaiting' && hasOngoingWork(s))).sort(newest((s) => s.lastUserMessageAt ?? s.updatedAt));
   const listed = new Set([...needs, ...running].map((s) => s.id));
   const done = live.filter((s) => s.unseenAt !== undefined && !listed.has(s.id)).sort(newest((s) => s.unseenAt!));
   for (const s of done) listed.add(s.id);
