@@ -227,7 +227,7 @@ describe('title bar separator', () => {
 
   it('keeps --titlebar in step with TITLEBAR_HEIGHT', () => {
     const css = /--titlebar:\s*(\d+)px/.exec(styles)?.[1];
-    const main = /TITLEBAR_HEIGHT = (\d+)/.exec(read('src/main/index.ts'))?.[1];
+    const main = /TITLEBAR_HEIGHT = (\d+)/.exec(read('src/main/window.ts'))?.[1];
     expect(css, '--titlebar not found in styles.css').toBeDefined();
     expect(main, 'the caption overlay and the CSS bar must be the same height').toBe(css);
   });
