@@ -94,12 +94,15 @@ describe('staging Vocs account settings', () => {
     expect(screen.queryByRole('button', { name: 'Retry status' })).toBeNull();
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Sign in to staging' }).disabled).toBe(false);
   });
-  it('renders descriptive catalog only and an account switch wins a pending refresh', async () => {
+  it('renders the catalog with an explicit Connect only, and an account switch wins a pending refresh', async () => {
     const refresh = deferred<VocsAccountState>();
     api.invoke.mockImplementation((c) => c === 'vocsAccount:refresh' ? refresh.promise : Promise.resolve(c === 'vocsAccount:signOut' ? out(5) : c === 'vocsAccount:signIn' ? { ...connected(6), accountId: 'opaque-account-b', connections: [] } : connected()));
     render(<VocsAccountSettings />); await screen.findByText('OpenRouter');
     expect(screen.getByText('Separate authorization required')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^(connect|install|run)$/i })).toBeNull();
+    // Viewing connects nothing: the only action is an explicit Connect; nothing installs or runs.
+    expect(screen.getByRole('button', { name: 'Connect OpenRouter' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^(install|run)/i })).toBeNull();
+    expect(api.invoke.mock.calls.some(([c]) => String(c).startsWith('vocsAccount:hub'))).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await screen.findByText('Signed out');
@@ -222,6 +225,55 @@ describe('staging Vocs account settings', () => {
     expect(screen.getByTestId('vocs-account-session').textContent).toBe('Signed in until Vocs Code closes');
     expect(screen.getByText('This computer has no secure keychain, so you’ll be signed out when Vocs Code closes.')).toBeTruthy();
     expect(screen.getByRole('alert').textContent).toMatch(/could not save your sign-in/);
+  });
+  it('connects once per click, waits on the browser with Cancel beside a disabled Connect, then shows the granted scopes', async () => {
+    const connect = deferred<VocsAccountState>();
+    const hub = (status: 'connected' | 'connecting' | 'disconnected', extra = {}) => [{ id: 'openrouter' as const, serverId: 'vocs-openrouter', status, ...extra }];
+    api.invoke.mockImplementation((c) => c === 'vocsAccount:hubConnect' ? connect.promise : Promise.resolve({ ...connected(), hub: hub('disconnected') }));
+    render(<VocsAccountSettings />);
+    const button = await screen.findByRole<HTMLButtonElement>('button', { name: 'Connect OpenRouter' });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:hubConnect')).toEqual([['vocsAccount:hubConnect', { connectionId: 'openrouter' }]]);
+    expect(screen.getByText('Waiting for approval in your browser…')).toBeTruthy();
+    expect(button.isConnected).toBe(true); expect(button.disabled).toBe(true);
+    expect(button.nextElementSibling?.textContent).toBe('Cancel');
+    await act(async () => connect.resolve({ ...connected(4), hub: hub('connected', { scopes: ['models:read', 'speech:write'], saved: true }) }));
+    expect(screen.getByText('Connected · models:read, speech:write')).toBeTruthy();
+    expect(screen.getByText(/Speech requests wait for your approval on mcp.vocs.io/)).toBeTruthy();
+    expect(screen.getByText('vocs-openrouter')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Connect OpenRouter' })).toBeNull();
+    // Disconnect.
+    api.invoke.mockImplementation((c) => Promise.resolve({ ...connected(5), hub: hub('disconnected') }));
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect OpenRouter' }));
+    await screen.findByRole('button', { name: 'Connect OpenRouter' });
+    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:hubDisconnect')).toEqual([['vocsAccount:hubDisconnect', { connectionId: 'openrouter' }]]);
+  });
+  it('cancels a pending Connect', async () => {
+    const hub = (status: 'connecting' | 'disconnected') => [{ id: 'openrouter' as const, serverId: 'vocs-openrouter', status }];
+    api.invoke.mockImplementation((c) => c === 'vocsAccount:hubConnect' ? new Promise(() => undefined) : c === 'vocsAccount:hubCancel' ? Promise.resolve({ ...connected(5), hub: hub('disconnected') }) : Promise.resolve({ ...connected(), hub: hub('disconnected') }));
+    render(<VocsAccountSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect OpenRouter' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await vi.waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Connect OpenRouter' }).disabled).toBe(false));
+    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:hubCancel')).toEqual([['vocsAccount:hubCancel', { connectionId: 'openrouter' }]]);
+    expect(screen.queryByText('Waiting for approval in your browser…')).toBeNull();
+  });
+  it('signed out, shows a connection this computer still holds with Disconnect, and why one ended', async () => {
+    api.invoke.mockResolvedValue({ ...out(), hub: [{ id: 'openrouter', serverId: 'vocs-openrouter', status: 'connected', scopes: ['models:read'], saved: false }] });
+    await ready();
+    expect(screen.getByText('Connected · models:read')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Disconnect OpenRouter' })).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toMatch(/ends when Vocs Code closes/);
+    expect(screen.queryByRole('button', { name: 'Connect OpenRouter' })).toBeNull();
+    cleanup();
+    api.invoke.mockResolvedValue({ ...out(), hub: [{ id: 'openrouter', serverId: 'vocs-openrouter', status: 'disconnected', error: 'Disconnected on mcp.vocs.io — connect again' }] });
+    await ready();
+    expect(screen.getByRole('alert').textContent).toBe('Disconnected on mcp.vocs.io — connect again');
+    expect(screen.getByText('Sign in to connect OpenRouter again.')).toBeTruthy();
+    cleanup();
+    api.invoke.mockResolvedValue({ ...out(), hub: [{ id: 'openrouter', serverId: 'vocs-openrouter', status: 'disconnected' }] });
+    await ready();
+    expect(screen.queryByText('OpenRouter')).toBeNull();
   });
   it('keeps account management out of remote browser sessions', () => {
     api.isWeb = true;

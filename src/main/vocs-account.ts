@@ -1,11 +1,14 @@
 /**
  * Vocs account broker. A temporary sign-in lives in memory; "Keep me signed in" enrolls a device
- * grant whose refresh token is kept in the OS vault (`SecretStore`). No resource grants or harness
- * configuration writes. Tokens never leave the main process and are never logged.
+ * grant whose refresh token is kept in the OS vault (`SecretStore`). The account itself grants no
+ * resources; a Hub connection is a separate, explicit grant (`vocs-hub.ts`) that this broker only
+ * starts from its verified catalog and ends on sign-out or an account switch. Tokens never leave the
+ * main process and are never logged.
  */
 import { z } from 'zod';
-import type { VocsAccountRealm, VocsAccountSignInRequest, VocsAccountState } from '../shared/vocs-account';
+import { VOCS_HUB_SCOPES, type VocsAccountRealm, type VocsAccountSignInRequest, type VocsAccountState, type VocsHubConnectionId } from '../shared/vocs-account';
 import { createNativeMcpOAuth, DEVICE_ID, DEVICE_MAX_LIFETIME_MS, DEVICE_REFRESH_TOKEN, NativeOAuthError, parseDeviceGrant, type NativeDeviceGrant, type NativeMcpOAuth, type NativeMcpOAuthOptions } from './mcp/oauth';
+import type { VocsHubBroker } from './vocs-hub';
 /** The public client that enrolls a kept ("Keep me signed in") device. */
 export const VOCS_DEVICE_CLIENT_ID = 'vocs-code-device';
 interface RealmConfig {
@@ -68,7 +71,9 @@ function catalogSchema(target: RealmConfig) {
     connections: z.array(z.strictObject({
       id: z.literal('openrouter'), name: z.literal('OpenRouter'), transport: z.literal('streamable-http'),
       resource: z.literal(`${target.hub}/openrouter`), authorizationServer: z.union([z.literal(target.hub), z.null()]),
-      accountScopes: z.array(z.literal('models:read')).min(1).max(1), authorization: z.enum(['oauth_required', 'unavailable']), executionReadiness: z.literal('not_checked')
+      // Any duplicate-free subset of the Hub's scopes, always including models:read.
+      accountScopes: z.array(z.enum(VOCS_HUB_SCOPES)).min(1).max(VOCS_HUB_SCOPES.length).refine(scopes => scopes.includes('models:read') && new Set(scopes).size === scopes.length),
+      authorization: z.enum(['oauth_required', 'unavailable']), executionReadiness: z.literal('not_checked')
     }).refine(c => (c.authorization === 'oauth_required') === (c.authorizationServer !== null))).max(1),
     policy: z.strictObject({ authorizationRequiredPerResource: z.literal(true), localServersSynced: z.literal(false), offlineCloudAccess: z.literal(false) })
   });
@@ -118,6 +123,9 @@ interface Options {
   isOnline?: () => boolean;
   /** Device label source; defaults to this process's platform. */
   platform?: NodeJS.Platform;
+  /** Hub connections (`vocs-hub.ts`). Connect takes its connection from the catalog this broker
+   *  verified; sign-out, an account switch or a connection leaving the catalog disconnects. */
+  hub?: Pick<VocsHubBroker, 'states' | 'connect' | 'cancel' | 'disconnect' | 'accountSeen' | 'accountSignedOut' | 'refuse' | 'dispose'>;
 }
 async function bounded<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   let abort!: () => void;
@@ -245,7 +253,9 @@ export function createVocsAccount(options: Options) {
   function get(): VocsAccountState {
     if (state.expiresAt && state.expiresAt <= Date.now()) clear('Session expired. Sign in again.');
     if (session?.record && session.record.deviceExpiresAt <= Date.now()) end(ENDED);
-    return structuredClone(state);
+    const out = structuredClone(state);
+    if (options.hub) out.hub = options.hub.states();
+    return out;
   }
   function online(): boolean {
     try { return options.isOnline?.() ?? true; } catch { return true; }
@@ -326,6 +336,9 @@ export function createVocsAccount(options: Options) {
     if (response.status !== 200 || response.redirected) { void response.body?.cancel().catch(() => undefined); if (response.status === 403) throw new CatalogAccessDenied(); if (response.status === 401 && !response.redirected) throw new CatalogUnauthorized(); throw new Error('Account catalog denied'); }
     const value = schema.parse(await json(response, controller.signal));
     if (epoch !== generation || controller.signal.aborted) throw new Error('Account operation interrupted');
+    // A verified catalog names the account and what it may connect: Hub connections made under
+    // another account, or no longer listed, end here (best-effort revocation runs in the background).
+    void options.hub?.accountSeen(value.account.id, structuredClone(value.connections)).catch(() => undefined);
     if (state.accountId && state.accountId !== value.account.id) throw new AccountChanged();
     update({ accountId: value.account.id, connections: value.connections });
   }
@@ -510,6 +523,8 @@ export function createVocsAccount(options: Options) {
     if (s) s.ended = true;
     const temporary = s && !s.persistent ? s.accessToken : undefined;
     clear(); const epoch = generation;
+    // Signing out ends every Hub connection on this computer too (in parallel; revocation is best effort).
+    const hubSignedOut = options.hub?.accountSignedOut().catch(() => undefined);
     // The vault is cleared first, so signing out works offline; revocation follows.
     let record = s?.record;
     if (!record) record = (await readVault()).record;
@@ -530,12 +545,13 @@ export function createVocsAccount(options: Options) {
       } catch { error ??= 'Signed out locally. Remote revocation was not confirmed; the token expires within five minutes.'; }
       finally { clearTimeout(timer); }
     }
+    await hubSignedOut;
     if (error && epoch === generation) update({ error });
     return get();
   }
   /** App quit: memory goes, the vault stays. A device whose token never reached a lasting vault
    *  (failed write, or no OS keychain) cannot come back, so it is revoked (bounded). */
-  async function dispose(timeoutMs = 2000): Promise<void> {
+  async function disposeAccount(timeoutMs: number): Promise<void> {
     const s = session;
     clear();
     if (!s?.record || !s.unsaved || s.ended) return;
@@ -546,6 +562,30 @@ export function createVocsAccount(options: Options) {
       new Promise<void>(resolve => { const timer = setTimeout(resolve, timeoutMs); timer.unref?.(); })
     ]);
   }
-  return { get, restore, signIn, refresh, signOut, cancel: () => { clear(); return get(); }, dispose };
+  async function dispose(timeoutMs = 2000): Promise<void> {
+    await Promise.all([disposeAccount(timeoutMs), options.hub?.dispose(timeoutMs).catch(() => undefined)]);
+  }
+  /** Connect one catalog connection. The renderer names it; main takes resource, issuer, scopes and
+   *  the account from the catalog it verified. Resolves when the browser flow ends. */
+  async function hubConnect(id: VocsHubConnectionId): Promise<VocsAccountState> {
+    const hub = options.hub;
+    get();
+    if (!hub || state.refreshing) return get();
+    const accountId = state.status === 'signed_in' ? state.accountId : undefined;
+    const connection = accountId ? state.connections.find(c => c.id === id) : undefined;
+    if (!accountId) hub.refuse(id, 'signed_out');
+    else if (!connection) hub.refuse(id, 'not_listed');
+    else await hub.connect(structuredClone(connection), accountId);
+    return get();
+  }
+  function hubCancel(id: VocsHubConnectionId): VocsAccountState {
+    options.hub?.cancel(id);
+    return get();
+  }
+  async function hubDisconnect(id: VocsHubConnectionId): Promise<VocsAccountState> {
+    await options.hub?.disconnect(id);
+    return get();
+  }
+  return { get, restore, signIn, refresh, signOut, cancel: () => { clear(); return get(); }, dispose, hubConnect, hubCancel, hubDisconnect };
 }
 export type VocsAccountBroker = ReturnType<typeof createVocsAccount>;

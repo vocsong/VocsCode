@@ -26,7 +26,24 @@ export interface NativeMcpOAuthOptions {
   /** A device grant that arrived but will not be handed over (cancelled or failed sign-in):
    *  the caller revokes it, so it is never left live on the account. */
   onAbandonedDeviceGrant?: (grant: NativeDeviceGrant) => void;
+  /** Opt-in for the Hub connection broker only (`main/vocs-hub.ts`): register for the refresh grant
+   *  and hold the code exchange's `refresh_token` for `takeRefreshGrant()`. It is still stripped from
+   *  what the SDK parses, so the SDK can never refresh on its own. Off (the default) discards it. */
+  keepRefreshToken?: boolean;
+  /** A refresh grant that arrived but will not be handed over (cancelled or failed sign-in, or a
+   *  clear before `takeRefreshGrant()`): the caller revokes it. */
+  onAbandonedRefreshGrant?: (grant: NativeRefreshGrant) => void;
 }
+
+/** A refresh grant from the code exchange (`keepRefreshToken` only), with the public client it
+ *  belongs to. Main-process only; the SDK never sees the refresh token. */
+export interface NativeRefreshGrant {
+  refreshToken: string;
+  clientId: string;
+}
+
+/** Printable, space-free and bounded: the only refresh token shape a keeping caller accepts. */
+export const REFRESH_TOKEN = /^[\x21-\x7e]{16,4096}$/;
 
 /** A device grant from the code exchange. Main-process only; the SDK never sees the refresh token. */
 export interface NativeDeviceGrant {
@@ -66,6 +83,8 @@ export interface NativeMcpOAuth {
   authorize(signal?: AbortSignal): Promise<void>;
   /** The device grant of the last completed `authorize()`, handed over once (then forgotten here). */
   takeDeviceGrant(): NativeDeviceGrant | undefined;
+  /** `keepRefreshToken` only: the refresh grant of the last completed `authorize()`, handed over once. */
+  takeRefreshGrant(): NativeRefreshGrant | undefined;
   /** Local logout/cancel. Remote revocation is a separate issuer operation. */
   clear(): void;
 }
@@ -134,7 +153,9 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
   let expiresAt = 0;
   let lifetime = new AbortController();
   let device: NativeDeviceGrant | undefined;
+  let refresh: NativeRefreshGrant | undefined;
   let endpointError: NativeOAuthError | undefined;
+  const keepRefresh = options.keepRefreshToken === true;
 
   /** `detached`: a device code exchange. Once sent, it is allowed to finish (bounded) even if the
    *  sign-in is cancelled, so a grant it returns can be revoked instead of left live. */
@@ -156,7 +177,7 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
   const provider: OAuthClientProvider = {
     get redirectUrl() { return redirect; },
     get clientMetadata() {
-      return { client_name: 'Vocs Code', redirect_uris: redirect ? [redirect] : [], grant_types: ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none', scope: scopes.join(' ') };
+      return { client_name: 'Vocs Code', redirect_uris: redirect ? [redirect] : [], grant_types: keepRefresh ? ['authorization_code', 'refresh_token'] : ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none', scope: scopes.join(' ') };
     },
     state() { if (!state) throw new Error('Start an explicit MCP sign-in first'); return state; },
     clientInformation() { return options.clientId ? { client_id: options.clientId, token_endpoint_auth_method: 'none' } : client; },
@@ -172,7 +193,7 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
       if (!value.access_token || value.token_type.toLowerCase() !== 'bearer' || !value.expires_in || value.expires_in <= 0 || !Number.isSafeInteger(deadline)) throw new Error('MCP OAuth requires a bounded bearer token');
       if (options.maxTokenAgeSeconds && value.expires_in > options.maxTokenAgeSeconds) throw new Error('Token exceeds approved lifetime');
       if (value.scope?.split(' ').some((scope) => !scopes.includes(scope))) throw new Error('MCP OAuth returned an unapproved scope');
-      // Renewal needs account/device revocation first. Do not retain refresh tokens yet.
+      // The SDK never retains a refresh token: a keeping caller gets its own copy (inspectTokenResponse).
       tokens = { access_token: value.access_token, token_type: value.token_type, expires_in: value.expires_in, ...(value.scope ? { scope: value.scope } : {}) };
       expiresAt = deadline;
     },
@@ -225,6 +246,8 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     // A device grant that arrived but was never handed over is revoked, not just forgotten.
     if (device) abandon(device);
     device = undefined;
+    if (refresh) abandonRefresh(refresh);
+    refresh = undefined;
     endpointError = undefined;
   }
 
@@ -243,6 +266,8 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     if (attempt.aborted) {
       const late = response.ok && options.deviceName && value && typeof value === 'object' && !Array.isArray(value) ? parseDeviceGrant(value as Record<string, unknown>) : undefined;
       if (late) abandon(late);
+      const lateRefresh = response.ok && keepRefresh && value && typeof value === 'object' && !Array.isArray(value) ? refreshGrantFrom(value as Record<string, unknown>) : undefined;
+      if (lateRefresh) abandonRefresh(lateRefresh);
       attempt.throwIfAborted();
     }
     if (!value || typeof value !== 'object' || Array.isArray(value)) return new Response(JSON.stringify(value), init);
@@ -254,11 +279,29 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     }
     const { refresh_token: _refresh, device_id: _id, device_expires_at: _expires, ...rest } = record;
     if (options.deviceName) device = parseDeviceGrant(record);
+    if (keepRefresh) {
+      // One code exchange per attempt; should a second grant ever arrive, the first is not left live.
+      const next = refreshGrantFrom(record);
+      if (refresh && refresh.refreshToken !== next?.refreshToken) abandonRefresh(refresh);
+      refresh = next;
+    }
     return new Response(JSON.stringify(rest), init);
+  }
+
+  /** The refresh token of a token response with the public client it was issued to. */
+  function refreshGrantFrom(value: Record<string, unknown>): NativeRefreshGrant | undefined {
+    const refreshToken = value.refresh_token;
+    const clientId = options.clientId ?? client?.client_id;
+    if (typeof refreshToken !== 'string' || !REFRESH_TOKEN.test(refreshToken) || typeof clientId !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(clientId)) return undefined;
+    return { refreshToken, clientId };
   }
 
   function abandon(grant: NativeDeviceGrant) {
     try { options.onAbandonedDeviceGrant?.(grant); } catch { /* best effort */ }
+  }
+
+  function abandonRefresh(grant: NativeRefreshGrant) {
+    try { options.onAbandonedRefreshGrant?.(grant); } catch { /* best effort */ }
   }
 
   function transport(): { authProvider: OAuthClientProvider; fetch: FetchLike } {
@@ -297,6 +340,7 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     resource, provider, fetch: guardedFetch, clear, transport,
     credentialSnapshot: () => tokens && Date.now() < expiresAt ? { token: { ...tokens }, expiresAt } : undefined,
     takeDeviceGrant() { const grant = device; device = undefined; return grant; },
+    takeRefreshGrant() { const grant = refresh; refresh = undefined; return grant; },
     async authorize(signal) {
       if (active) throw new Error('MCP sign-in is already in progress');
       clear();
@@ -396,6 +440,8 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
         expiresAt = 0;
         if (device) abandon(device);
         device = undefined;
+        if (refresh) abandonRefresh(refresh);
+        refresh = undefined;
         // The SDK retries an invalid_client/invalid_grant exchange and then fails on something
         // else; the endpoint's own answer is the one worth reporting.
         throw endpointError ?? error;

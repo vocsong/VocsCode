@@ -1,4 +1,4 @@
-import type { VocsAccountSignInRequest, VocsAccountState } from './vocs-account';
+import type { VocsAccountSignInRequest, VocsAccountState, VocsHubConnectionRequest } from './vocs-account';
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
 import type { LocalControlOwnerState } from './local-control';
@@ -165,6 +165,11 @@ export interface IpcContract {
   'vocsAccount:cancel': [void, VocsAccountState];
   'vocsAccount:signOut': [void, VocsAccountState];
   'vocsAccount:refresh': [void, VocsAccountState];
+  /** Hub connections: the connection id only; main takes resource, issuer and scopes from its own
+   *  verified catalog. Connect resolves when the browser flow ends. */
+  'vocsAccount:hubConnect': [VocsHubConnectionRequest, VocsAccountState];
+  'vocsAccount:hubCancel': [VocsHubConnectionRequest, VocsAccountState];
+  'vocsAccount:hubDisconnect': [VocsHubConnectionRequest, VocsAccountState];
 
   'settings:get': [void, AppSettings];
   'settings:update': [Partial<AppSettings>, AppSettings];

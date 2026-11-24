@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { createNativeMcpOAuth } from '../src/main/mcp/oauth';
+import { createNativeMcpOAuth, type NativeMcpOAuthOptions } from '../src/main/mcp/oauth';
 import { inspectServer } from '../src/main/mcp/client';
 
 const resource = 'https://hub.example/openrouter';
@@ -10,9 +10,10 @@ const metadata = {
   registration_endpoint: `${issuer}register`, response_types_supported: ['code'], grant_types_supported: ['authorization_code'],
   token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], authorization_response_iss_parameter_supported: true
 };
-function fixture(overrides: Partial<typeof metadata> = {}, timeoutMs = 5000) {
+function fixture(overrides: Partial<typeof metadata> = {}, timeoutMs = 5000, extra: Partial<NativeMcpOAuthOptions> = {}, refreshToken = 'must-not-retain') {
   let authorization: URL;
   let issued = 0;
+  const registrations: Record<string, unknown>[] = [];
   const requests: { url: string; init?: RequestInit }[] = [];
   const network = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -21,8 +22,9 @@ function fixture(overrides: Partial<typeof metadata> = {}, timeoutMs = 5000) {
     if (url.includes('.well-known/')) return Response.json({ ...metadata, ...overrides });
     if (url === `${issuer}register`) {
       const body = JSON.parse(String(init?.body));
+      registrations.push(body);
       expect(body.token_endpoint_auth_method).toBe('none');
-      expect(body.grant_types).toEqual(['authorization_code']);
+      expect(body.grant_types).toEqual(extra.keepRefreshToken ? ['authorization_code', 'refresh_token'] : ['authorization_code']);
       return Response.json({ ...body, client_id: 'fixture-client' }, { status: 201 });
     }
     if (url === `${issuer}token`) {
@@ -32,7 +34,7 @@ function fixture(overrides: Partial<typeof metadata> = {}, timeoutMs = 5000) {
       expect(params.get('client_secret')).toBeNull();
       expect(createHash('sha256').update(params.get('code_verifier')!).digest('base64url')).toBe(authorization.searchParams.get('code_challenge'));
       issued++;
-      return Response.json({ access_token: 'secret-token', refresh_token: 'must-not-retain', token_type: 'Bearer', expires_in: 300, scope: 'models:read' });
+      return Response.json({ access_token: 'secret-token', refresh_token: refreshToken, token_type: 'Bearer', expires_in: 300, scope: 'models:read' });
     }
     if (url === resource) {
       expect(new Headers(init?.headers).get('authorization')).toBe('Bearer secret-token');
@@ -52,8 +54,8 @@ function fixture(overrides: Partial<typeof metadata> = {}, timeoutMs = 5000) {
     const response = await fetch(callback);
     expect(response.status).toBe(200);
   });
-  const oauth = createNativeMcpOAuth({ resource, issuer, scopes: ['models:read'], fetch: network, openExternal: browser, timeoutMs });
-  return { oauth, browser, network, requests, get issued() { return issued; } };
+  const oauth = createNativeMcpOAuth({ resource, issuer, scopes: ['models:read'], fetch: network, openExternal: browser, timeoutMs, ...extra });
+  return { oauth, browser, network, requests, registrations, get issued() { return issued; } };
 }
 
 describe('native MCP OAuth main-process boundary', () => {
@@ -67,8 +69,33 @@ describe('native MCP OAuth main-process boundary', () => {
     expect(result.tools.map(t => t.name)).toEqual(['list_models']);
     expect(f.browser).toHaveBeenCalledTimes(1);
     expect(f.requests.every(r => r.init?.redirect === 'manual')).toBe(true);
+    // By default a refresh token is discarded, not held for anyone.
+    expect(f.oauth.takeRefreshGrant()).toBeUndefined();
     f.oauth.clear();
     expect(f.oauth.provider.tokens()).toBeUndefined();
+  });
+
+  it('keeps the refresh token only for an opted-in caller, never in the SDK provider', async () => {
+    const abandoned = vi.fn();
+    const f = fixture({}, 5000, { keepRefreshToken: true, onAbandonedRefreshGrant: abandoned }, 'kept-refresh-token-0001');
+    await f.oauth.authorize();
+    expect(f.registrations).toEqual([expect.objectContaining({ client_name: 'Vocs Code', grant_types: ['authorization_code', 'refresh_token'], token_endpoint_auth_method: 'none' })]);
+    // The SDK's own refresh logic still never sees it.
+    expect(f.oauth.provider.tokens()).toEqual({ access_token: 'secret-token', token_type: 'Bearer', expires_in: 300, scope: 'models:read' });
+    expect(f.oauth.credentialSnapshot()?.token).not.toHaveProperty('refresh_token');
+    expect(f.oauth.takeRefreshGrant()).toEqual({ refreshToken: 'kept-refresh-token-0001', clientId: 'fixture-client' });
+    expect(f.oauth.takeRefreshGrant()).toBeUndefined();
+    f.oauth.clear();
+    expect(abandoned).not.toHaveBeenCalled();
+  });
+
+  it('hands a kept refresh grant that is never taken to the caller for revocation', async () => {
+    const abandoned = vi.fn();
+    const f = fixture({}, 5000, { keepRefreshToken: true, onAbandonedRefreshGrant: abandoned }, 'kept-refresh-token-0002');
+    await f.oauth.authorize();
+    f.oauth.clear();
+    expect(abandoned).toHaveBeenCalledExactlyOnceWith({ refreshToken: 'kept-refresh-token-0002', clientId: 'fixture-client' });
+    expect(f.oauth.takeRefreshGrant()).toBeUndefined();
   });
 
   it('preserves fixed authorization endpoint query parameters through real SDK sign-in', async () => {

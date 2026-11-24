@@ -188,7 +188,7 @@ const MEMORY_GATEWAY_TOKEN_ENV = 'VOCS_MEMORY_GATEWAY_TOKEN';
  * The app's built-in server ids, mirroring `MCP_BUILTIN_IDS` in src/shared/types.ts. Their names are
  * reserved in every spelling that folds to the same tool names (see `reservedKey`).
  */
-export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', MISSION_SERVER_ID];
+export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', MISSION_SERVER_ID, 'vocs-openrouter'];
 
 /**
  * Tools the app's own built-in servers expose read-only, mirroring `BUILTIN_READ_ONLY_TOOLS` in

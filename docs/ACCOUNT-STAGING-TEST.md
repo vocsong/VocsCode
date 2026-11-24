@@ -1,6 +1,6 @@
 # Vocs account + Hub catalog: staging desktop acceptance
 
-This is an opt-in staging experiment, not a mandatory login gate. Local work remains available signed out. It does not install MCP servers, authorize tools, send coding prompts, run paid providers or change production.
+This is an opt-in staging experiment, not a mandatory login gate. Local work remains available signed out. Signing in does not install MCP servers, authorize tools, send coding prompts, run paid providers or change production; only an explicit **Connect** under Hub connections offers a connection's tools to new sessions.
 
 ## Targets and boundaries
 
@@ -10,6 +10,7 @@ This is an opt-in staging experiment, not a mandatory login gate. Local work rem
 - Access tokens are memory-only and last at most five minutes. A temporary (`vocs-code`) sign-in ends with them; closing the app clears it.
 - A kept (`vocs-code-device`) sign-in stores only its rotating refresh token, in the OS keychain (the `vocs-account:staging` entry of `secrets.json`, `enc:`), and renews at startup. Without a real keychain the device is still enrolled, its token stays in memory for this run, and the device is revoked when the app quits ("This computer has no secure keychain, so you'll be signed out when Vocs Code closes."). Production offers no kept sign-in until device grants are enabled there. No desktop client secret or provider key is involved.
 - Catalog visibility is not a tool grant. Even a visible connection must not be installed, connected or invoked automatically.
+- **Connect** is a separate grant from the staging Hub (`https://vocs-mcp-staging.vocs.workers.dev`, resource `/openrouter`, dynamic public client "Vocs Code", the account's scopes). Its rotating refresh token is kept only in the keychain (`vocs-hub:staging:openrouter`, `enc:`); access tokens (15 minutes) stay in memory. Sessions reach it as `vocs-openrouter` through a loopback proxy and never see the Hub token.
 - No token, authorization code, verifier, cookie, credential or authorization URL should be copied into a screenshot, issue, log attachment or chat. Report safe status and timestamps only.
 
 ## Before testing on your PC
@@ -41,6 +42,11 @@ This is an opt-in staging experiment, not a mandatory login gate. Local work rem
 | Sign out of a kept sign-in (also offline) | Signed out at once and the saved entry removed; the device leaves the account page once revocation reaches Vocs. |
 | Sign in as another already-authorized account | Old account data is cleared first. Only the new account's catalog appears. Do not create a second live account solely for this check. |
 | Light/dark and narrow window | Labels/buttons remain readable, focusable and non-overlapping; cancellation/status is visible. |
+| **Connect OpenRouter**, approve on the Hub's consent page | Consent names Vocs Code and the account's scopes. Afterwards "Connected · <scopes>" with **Disconnect OpenRouter**; `secrets.json` holds an `enc:` `vocs-hub:staging:openrouter` entry; no token in the page. Cancel while waiting leaves it not connected. |
+| Start a new session after connecting, ask for the OpenRouter model list | The session has `vocs-openrouter` tools and `openrouter_models` answers. Do not run speech: it needs separate approval on the Hub. |
+| Restart the app, then use the tool again | Still connected (no request at launch); the first call renews once. |
+| Revoke the connection on the Hub dashboard, then use the tool | "Disconnected on mcp.vocs.io — connect again"; the `vocs-hub:staging:openrouter` entry is gone. |
+| **Disconnect**, or **Sign out** | Removed at once and revoked on the Hub; new sessions no longer list `vocs-openrouter`. |
 
 An empty catalog may be correct: shared identity and current Hub membership are separate gates. Do not insert live permission rows or bypass admission just to make the screen show a connection.
 
