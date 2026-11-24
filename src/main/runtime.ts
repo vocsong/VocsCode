@@ -3,8 +3,8 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import type { AppSettings, HarnessAvailability, HarnessBinarySource, HarnessId, HarnessUpdate } from '../shared/types';
-import { ANTIGRAVITY_MIN_VERSION, type AntigravityQuota } from '../shared/harness-setup';
-import { antigravityAccountEnv, ANTIGRAVITY_QUOTA_ARGS, ANTIGRAVITY_SIGN_IN_MESSAGE, checkAntigravityAccount, parseAntigravityQuota } from './harness/antigravity';
+import { ANTIGRAVITY_MIN_VERSION } from '../shared/harness-setup';
+import { ANTIGRAVITY_SIGN_IN_MESSAGE, checkAntigravityAccount } from './harness/antigravity';
 import { killTree, spawnTool } from './harness/spawn';
 import { exists } from './util/fs';
 
@@ -533,19 +533,6 @@ export class RuntimeResolver {
       case 'native':
         return { available: true, detail: 'Built in. Add an API key under Settings → Providers.', authenticated: 'unknown' };
     }
-  }
-
-  /** Reads the vendor's account quota on demand. The fixed slash command never runs inference. */
-  async antigravityQuota(): Promise<AntigravityQuota> {
-    const status = await this.availability('antigravity');
-    if (!status.available || !status.binaryPath) throw new Error(status.detail);
-    if (status.authenticated === false) throw new Error(ANTIGRAVITY_SIGN_IN_MESSAGE);
-    const result = await runCapture(status.binaryPath, [...ANTIGRAVITY_QUOTA_ARGS], {
-      cwd: this.paths.appRuntimeDir, env: antigravityAccountEnv(), timeoutMs: 15_000
-    });
-    const quota = result.code === 0 && !result.truncated ? parseAntigravityQuota(result.stdout) : undefined;
-    if (!quota) throw new Error('Antigravity did not return account quota. Check your Google sign-in and retry.');
-    return quota;
   }
 
   /** Installs a harness CLI into the app runtime dir with npm. */

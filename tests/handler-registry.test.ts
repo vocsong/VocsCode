@@ -23,7 +23,9 @@ import { signInProbe } from '../src/main/remote/relay-url';
 import { SettingsStore } from '../src/main/settings';
 import { PiConfigStore } from '../src/main/pi-config';
 import { AppInstructions } from '../src/main/app-instructions';
-import { openHarnessLogin, readHarnessSetup } from '../src/main/harness-setup';
+import { openAntigravityUsage, openHarnessLogin, readHarnessSetup } from '../src/main/harness-setup';
+import { readCodexSubscriptionQuota } from '../src/main/harness/codex-quota';
+import type { SubscriptionLimits } from '../src/shared/subscription-usage';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 import { discoverChatImports } from '../src/main/chat-import';
@@ -32,7 +34,8 @@ import type { ChatImportPreview } from '../src/shared/chat-import';
 
 vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
 vi.mock('../src/main/harness/registry', async (original) => ({ ...await original<typeof import('../src/main/harness/registry')>(), listHarnessModels: vi.fn() }));
-vi.mock('../src/main/harness-setup', async (original) => ({ ...await original<typeof import('../src/main/harness-setup')>(), openHarnessLogin: vi.fn(), readHarnessSetup: vi.fn() }));
+vi.mock('../src/main/harness-setup', async (original) => ({ ...await original<typeof import('../src/main/harness-setup')>(), openAntigravityUsage: vi.fn(), openHarnessLogin: vi.fn(), readHarnessSetup: vi.fn() }));
+vi.mock('../src/main/harness/codex-quota', () => ({ readCodexSubscriptionQuota: vi.fn() }));
 
 const dirs: string[] = [];
 let ws: string;
@@ -267,6 +270,61 @@ describe('handler registry', () => {
     expect(login.mock.calls[0]!.slice(1)).toEqual(['codex', true]);
     expect(isRemoteChannel('harness:login')).toBe(false);
     expect(agentChannels().includes('harness:login' as never)).toBe(false);
+  });
+
+  it('keeps subscription actions desktop-only and rejects config and non-listed providers before dispatch', async () => {
+    const { registry, calls } = stubDeps();
+    const read = vi.mocked(readCodexSubscriptionQuota).mockReset();
+    const launch = vi.mocked(openAntigravityUsage).mockReset();
+    for (const channel of ['subscriptions:read', 'subscriptions:openUsage'] as const) {
+      expect(registry.channels()).toContain(channel);
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels().includes(channel as never)).toBe(false);
+      for (const actor of ['user', 'agent'] as const) {
+        await expect(registry.invoke(channel, { provider: 'codex' }, actor)).rejects.toThrow(/desktop owner/);
+      }
+      for (const input of [undefined, { provider: 'pi' }, { provider: '__proto__' }, { provider: 'antigravity', args: ['-p', '/usage'] }, { provider: 'claude', url: 'https://example.test' }, { provider: 'codex', cwd: 'G:/repo' }]) {
+        await expect(registry.invoke(channel, input, 'desktop')).rejects.toThrow(/Unsupported subscription/);
+      }
+    }
+    await expect(registry.invoke('subscriptions:read', { provider: 'antigravity' }, 'desktop')).rejects.toThrow(/Unsupported/);
+    expect(read).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+  });
+
+  it('opens only fixed vendor sites or the interactive Antigravity CLI', async () => {
+    const { registry, deps, calls } = stubDeps();
+    const launch = vi.mocked(openAntigravityUsage).mockReset().mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: false, error: 'No terminal' });
+    await expect(registry.invoke('subscriptions:openUsage', { provider: 'antigravity' }, 'desktop')).resolves.toEqual({ kind: 'terminal' });
+    expect(launch).toHaveBeenCalledExactlyOnceWith(deps.runtime);
+    await expect(registry.invoke('subscriptions:openUsage', { provider: 'antigravity' }, 'desktop')).rejects.toThrow('No terminal');
+    for (const provider of ['claude', 'codex', 'cursor']) {
+      await expect(registry.invoke('subscriptions:openUsage', { provider }, 'desktop')).resolves.toEqual({ kind: 'browser' });
+    }
+    expect(calls).toEqual([
+      'openExternal:https://claude.ai/settings/usage',
+      'openExternal:https://chatgpt.com/codex/settings/usage',
+      'openExternal:https://cursor.com/dashboard/usage'
+    ]);
+  });
+
+  it('shares an in-flight Codex limit read but never caches the completed account snapshot', async () => {
+    const { registry, deps, pushes } = stubDeps();
+    const output: SubscriptionLimits = { groups: [{ name: 'Codex', buckets: [{ name: '5-hour limit', remainingFraction: 0.42 }] }] };
+    let finish!: (result: SubscriptionLimits) => void;
+    const read = vi.mocked(readCodexSubscriptionQuota).mockReset()
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+      .mockResolvedValueOnce(output);
+    const check = () => registry.invoke('subscriptions:read', { provider: 'codex' }, 'desktop');
+    const a = check();
+    const b = check();
+    expect(read).toHaveBeenCalledExactlyOnceWith(deps.runtime);
+    finish(output);
+    await expect(Promise.all([a, b])).resolves.toEqual([output, output]);
+    await expect(check()).resolves.toEqual(output);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(pushes).toEqual([]);
   });
 
   it('rejects invalid setup and install ids before their privileged dependencies', async () => {

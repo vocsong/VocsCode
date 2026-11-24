@@ -1,19 +1,20 @@
 /**
  * @vitest-environment jsdom
  *
- * The right panel's Usage dashboard: the always-on summary block, and the three detail views the
- * segmented control switches between. Rendered as real component code over a plain props feed, so
- * these assert what the user reads rather than what the stats model returns.
+ * The right panel's Usage dashboard: the session summary and the separate, on-demand account
+ * limits view. Exercise what the user can read and click over a stubbed desktop bridge.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { SessionUsage } from '../src/renderer/src/components/SessionUsage';
-import type { AntigravityQuota } from '../src/shared/harness-setup';
+import { useStore } from '../src/renderer/src/store';
+import type { SubscriptionLimits } from '../src/shared/subscription-usage';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  useStore.setState({ availability: {} });
 });
 
 const T = Date.now() - 60_000;
@@ -43,62 +44,92 @@ const items: TranscriptItem[] = [
 ];
 
 const detail = (name: 'Turns' | 'Tools' | 'Errors') => screen.getByRole('radio', { name });
-const antigravity = session({ config: { projectRoot: 'G:/repo', harness: 'antigravity', permissionMode: 'ask' } });
-const quota = (): ReturnType<typeof within> => within(screen.getByRole('region', { name: 'Antigravity account quota' }));
-const quotaReply: AntigravityQuota = { groups: [{ name: 'Gemini models', buckets: [
-  { name: 'Gemini Pro', remainingFraction: 0.726, resetAt: '2030-01-01T12:00:00Z' },
-  { name: 'Gemini Flash', remainingFraction: 0 }
+const show = (name: 'Session' | 'Subscriptions') => fireEvent.click(screen.getByRole('radio', { name }));
+const account = (name: string) => within(screen.getByRole('region', { name }));
+const quotaReply: SubscriptionLimits = { groups: [{ name: 'Codex', buckets: [
+  { name: '5-hour limit', remainingFraction: 0.726, resetAt: '2030-01-01T12:00:00Z' },
+  { name: 'Weekly limit', remainingFraction: 0 }
 ] }] };
 
 describe('Usage panel', () => {
-  it('checks Antigravity account quota only on click and meters it separately from session context', async () => {
-    let finish!: (value: AntigravityQuota) => void;
-    const invoke = vi.fn(() => new Promise<AntigravityQuota>((resolve) => { finish = resolve; }));
+  it('lists subscription accounts from any session and checks Codex only on click', async () => {
+    let finish!: (value: SubscriptionLimits) => void;
+    const invoke = vi.fn(() => new Promise<SubscriptionLimits>((resolve) => { finish = resolve; }));
     vi.stubGlobal('harness', { invoke });
-    render(<SessionUsage session={antigravity} />);
+    useStore.setState({ availability: { codex: { available: true, authenticated: true, authMethod: 'subscription' }, claude: { available: true, authenticated: true, authMethod: 'api-key' } } });
+    const { rerender } = render(<SessionUsage session={session()} />);
+    expect(screen.getByRole('meter', { name: 'Context window' }).getAttribute('aria-valuenow')).toBe('90');
+    show('Subscriptions');
 
-    const card = quota();
+    const codex = account('Codex · ChatGPT');
+    expect(codex.getByText('Subscription sign-in detected')).toBeTruthy();
+    expect(account('Claude').getByText('API key configured')).toBeTruthy();
+    expect(account('Google Antigravity').getByRole('button', { name: 'Open CLI' })).toBeTruthy();
+    expect(account('Cursor').getByRole('button', { name: 'Open usage page' })).toBeTruthy();
     expect(invoke).not.toHaveBeenCalled();
-    expect(card.queryByRole('meter')).toBeNull();
-    const check = card.getByRole('button', { name: 'Check quota' });
+    expect(screen.queryByRole('meter')).toBeNull();
+    const check = codex.getByRole('button', { name: 'Check limits' });
     fireEvent.click(check);
     fireEvent.click(check);
-    expect(invoke).toHaveBeenCalledExactlyOnceWith('harness:antigravityQuota', undefined);
-    expect(card.getByRole('status').textContent).toContain('Checking Antigravity quota');
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('subscriptions:read', { provider: 'codex' });
+    expect(codex.getByRole('status').textContent).toContain('Checking account limits');
 
     finish(quotaReply);
-    expect((await card.findByRole('meter', { name: 'Gemini Pro' })).getAttribute('aria-valuenow')).toBe('73');
-    expect(card.getByRole('meter', { name: 'Gemini Flash' }).getAttribute('aria-valuenow')).toBe('0');
-    expect(card.getByText(/^Resets /)).toBeTruthy();
-    expect(card.getByText('Gemini models')).toBeTruthy();
+    expect((await codex.findByRole('meter', { name: '5-hour limit' })).getAttribute('aria-valuenow')).toBe('73');
+    expect(codex.getByRole('meter', { name: 'Weekly limit' }).getAttribute('aria-valuenow')).toBe('0');
+    expect(codex.getByText(/^Resets /)).toBeTruthy();
+    show('Session');
     expect(screen.getByRole('meter', { name: 'Context window' }).getAttribute('aria-valuenow')).toBe('90');
+    rerender(<SessionUsage session={session({ id: 'another' })} />);
+    show('Subscriptions');
+    expect(codex.getByRole('meter', { name: '5-hour limit' })).toBeTruthy();
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 
-  it('shows a quota check error without inventing percentages and allows a retry', async () => {
-    const invoke = vi.fn().mockRejectedValueOnce(new Error("Error invoking remote method 'harness:antigravityQuota': Error: Sign in with Google first."))
+  it('shows quota errors without inventing percentages and allows a retry', async () => {
+    const invoke = vi.fn().mockRejectedValueOnce(new Error("Error invoking remote method 'subscriptions:read': Error: Sign in with ChatGPT first."))
       .mockResolvedValueOnce(quotaReply);
     vi.stubGlobal('harness', { invoke });
-    render(<SessionUsage session={antigravity} />);
+    render(<SessionUsage session={session()} />);
+    show('Subscriptions');
 
-    const card = quota();
-    fireEvent.click(card.getByRole('button', { name: 'Check quota' }));
-    expect((await card.findByRole('alert')).textContent).toBe('Sign in with Google first.');
-    expect(card.queryByRole('meter')).toBeNull();
-    fireEvent.click(card.getByRole('button', { name: 'Check quota' }));
-    await card.findByRole('meter', { name: 'Gemini Pro' });
-    expect(card.queryByRole('alert')).toBeNull();
-    expect(card.getByRole('button', { name: 'Refresh quota' })).toBeTruthy();
+    const codex = account('Codex · ChatGPT');
+    fireEvent.click(codex.getByRole('button', { name: 'Check limits' }));
+    expect((await codex.findByRole('alert')).textContent).toBe('Sign in with ChatGPT first.');
+    expect(codex.queryByRole('meter')).toBeNull();
+    fireEvent.click(codex.getByRole('button', { name: 'Check limits' }));
+    await codex.findByRole('meter', { name: '5-hour limit' });
+    expect(codex.queryByRole('alert')).toBeNull();
+    expect(codex.getByRole('button', { name: 'Refresh limits' })).toBeTruthy();
     expect(invoke).toHaveBeenCalledTimes(2);
   });
 
-  it('leaves other harnesses unchanged and does not offer a quota check to a remote transport', () => {
+  it('opens official usage views without sending a chat message or reading Antigravity headlessly', async () => {
+    const invoke = vi.fn().mockResolvedValueOnce({ kind: 'terminal' }).mockResolvedValueOnce({ kind: 'browser' });
+    vi.stubGlobal('harness', { invoke });
+    render(<SessionUsage session={session()} />);
+    show('Subscriptions');
+
+    const antigravity = account('Google Antigravity');
+    fireEvent.click(antigravity.getByRole('button', { name: 'Open CLI' }));
+    expect((await antigravity.findByText('In the terminal, type /usage and press Enter.')).getAttribute('role')).toBe('status');
+    expect(antigravity.queryByRole('meter')).toBeNull();
+    const claude = account('Claude');
+    fireEvent.click(claude.getByRole('button', { name: 'Open usage page' }));
+    await claude.findByText('Usage page opened in your browser.');
+    expect(invoke.mock.calls).toEqual([
+      ['subscriptions:openUsage', { provider: 'antigravity' }],
+      ['subscriptions:openUsage', { provider: 'claude' }]
+    ]);
+  });
+
+  it('does not offer account reads or launch actions to a remote transport', () => {
     const invoke = vi.fn();
     vi.stubGlobal('harness', { invoke, can: () => false });
-    const { rerender } = render(<SessionUsage session={session()} />);
-    expect(screen.queryByRole('region', { name: 'Antigravity account quota' })).toBeNull();
-    rerender(<SessionUsage session={antigravity} />);
-    expect(quota().getByText(/available in the desktop app/)).toBeTruthy();
-    expect(quota().queryByRole('button')).toBeNull();
+    render(<SessionUsage session={session()} />);
+    show('Subscriptions');
+    expect(screen.getByText(/available in the desktop app/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Open CLI|Check limits|Open usage page/ })).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
   });
 
