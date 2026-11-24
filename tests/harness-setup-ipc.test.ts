@@ -6,6 +6,7 @@ const { listeners, invoke, mainFrame, contents, ownerChannels, ownerDocument } =
   const ownerChannels = [
     'harness:login', 'harness:antigravityQuota', 'control:grant', 'control:local:get', 'control:local:enable', 'control:local:disable',
     'vocsAccount:get', 'vocsAccount:signIn', 'vocsAccount:cancel', 'vocsAccount:refresh', 'vocsAccount:signOut',
+    'vocsAccount:hubConnect', 'vocsAccount:hubCancel', 'vocsAccount:hubDisconnect',
     'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText', 'intelligence:view', 'intelligence:promote', 'desktop:setFocus'
   ];
   return { listeners: new Map<string, (event: { sender: unknown; senderFrame: unknown }, req: unknown) => unknown>(), invoke: vi.fn(), mainFrame, ownerChannels, ownerDocument,

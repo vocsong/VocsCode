@@ -9,6 +9,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { controlGrantInputSchema } from '../shared/control';
+import { VOCS_HUB_CONNECTION_IDS, type VocsHubConnectionId } from '../shared/vocs-account';
 import type { CreateMissionRequest, MissionCodeRevision, MissionControlRequest, MissionRecord, MissionUserControl } from '../shared/mission';
 import { MISSION_NOT_LINKED_MESSAGE, parseMissionCommand } from '../shared/mission-command';
 import { missionRevisionConflictMessage } from '../shared/mission-errors';
@@ -317,6 +318,18 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const parsed = signInRequest.safeParse(input);
     if (!parsed.success) throw new Error('Account commands do not accept configuration.');
     return vocsAccount.signIn(parsed.data);
+  });
+  // A Hub connection is named by its catalog id only; resource, issuer and scopes come from the
+  // catalog main verified, never from the renderer.
+  const hubRequest = z.strictObject({ connectionId: z.enum(VOCS_HUB_CONNECTION_IDS) });
+  for (const [channel, action] of [
+    ['vocsAccount:hubConnect', (id: VocsHubConnectionId) => vocsAccount.hubConnect(id)],
+    ['vocsAccount:hubCancel', (id: VocsHubConnectionId) => vocsAccount.hubCancel(id)],
+    ['vocsAccount:hubDisconnect', (id: VocsHubConnectionId) => vocsAccount.hubDisconnect(id)]
+  ] as const) handle(channel, input => {
+    const parsed = hubRequest.safeParse(input);
+    if (!parsed.success) throw new Error('Account commands do not accept configuration.');
+    return action(parsed.data.connectionId);
   });
 
   if (deps.control) {
