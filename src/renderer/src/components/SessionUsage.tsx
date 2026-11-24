@@ -23,6 +23,7 @@ import {
 import { BarList, Meter, Segmented, Sparkline, StackedBar, type BarRow, type Segment } from './analytics/charts';
 import { fmtPct } from './analytics/model';
 import { totalTokens } from '../../../shared/usage-rollup';
+import { AntigravityQuotaCard } from './AntigravityQuotaCard';
 import { Icon } from './ui';
 
 /** Stable fallback so a zustand selector never returns a fresh array (React #185 infinite loop). */
@@ -96,6 +97,8 @@ export function SessionUsage({ session, items }: { session: SessionMeta; items?:
         </div>
         {costSpark.length > 1 && <Sparkline values={costSpark} width={104} height={34} />}
       </div>
+
+      {session.config.harness === 'antigravity' && <AntigravityQuotaCard key={session.id} />}
 
       <div className="usage-kpis">
         <Kpi label="Tokens" value={fmtTokens(tokens)} sub={`${fmtTokens(u.inputTokens)} in · ${fmtTokens(u.outputTokens)} out`} title="Every token this session reported: input, output and cache traffic. Reasoning is counted inside output, the way the providers report it." />

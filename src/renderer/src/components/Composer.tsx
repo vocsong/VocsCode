@@ -425,6 +425,9 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
       case 'mcp':
         store.setPanelTab('mcp');
         return true;
+      case 'usage':
+        store.setPanelTab('usage');
+        return true;
       case 'cost':
         toast(`${fmtCost(session.usage.costUsd)} · ${fmtTokens(session.usage.inputTokens)} in / ${fmtTokens(session.usage.outputTokens)} out · ${session.usage.turns} turns`, 'info');
         store.setPanelTab('usage');
