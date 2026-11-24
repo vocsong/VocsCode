@@ -220,7 +220,7 @@ describe.runIf(enabled)('remote access settings', () => {
       await expect.poll(async () => (await opened()).length, { timeout: 20_000 }).toBe(1);
       const link = (await opened())[0];
       const nonceHash = new URL(link).searchParams.get('connect')!;
-      expect(link).toBe(`${gate.origin}/app?connect=${nonceHash}`);
+      expect(link).toBe(`${gate.origin}/dashboard?connect=${nonceHash}`);
       await expect.poll(() => win.getByTestId('remote-sign-in-code').textContent(), { timeout: 20_000 }).toBe(connectCheckCode(nonceHash));
 
       // The signed-in browser adds this computer: it comes online, registered, with nothing typed.
