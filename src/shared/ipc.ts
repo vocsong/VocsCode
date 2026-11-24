@@ -69,6 +69,7 @@ import type { ChatImportPreview, ChatImportSource } from './chat-import';
 import type { ExecutionRecord } from './analytics/records';
 import type { KnowledgeGraph, KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
 import type { CollectionMember, ContextPacket, IntelligenceSearchResponse, IntelligenceView, MemoryExportBundle, MemoryState, MemoryType } from './intelligence';
+import type { KnowledgeUsageDays, KnowledgeUsageReport, KnowledgeUsageVote } from './knowledge-usage';
 import type { AgentTypeInfo, SubagentRun, SubagentRunSummary } from './subagents';
 import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
@@ -485,9 +486,14 @@ export interface IpcContract {
   /** Memory records, collections, the graph provider and the gateway for one session's project. */
   'intelligence:view': [{ sessionId: string }, IntelligenceView];
   /** Federated, permission-scoped evidence search: the planner the agents' tools use, for the panel. */
-  'intelligence:search': [{ sessionId: string; query: string; scope?: 'project' | 'collection'; limit?: number; includeHistorical?: boolean }, IntelligenceSearchResponse];
+  'intelligence:search': [{ sessionId: string; query: string; scope?: 'project' | 'collection'; limit?: number; includeHistorical?: boolean }, IntelligenceSearchResponse & { usageReceipt?: string }];
   /** A bounded, cited context packet for one question. */
-  'intelligence:compile': [{ sessionId: string; query: string; budgetTokens?: number; scope?: 'project' | 'collection' }, ContextPacket];
+  'intelligence:compile': [{ sessionId: string; query: string; budgetTokens?: number; scope?: 'project' | 'collection' }, ContextPacket & { usageReceipt?: string }];
+  /** Local-only counters and opt-in for the held session's project. */
+  'intelligence:usage:view': [{ sessionId: string; days: KnowledgeUsageDays }, KnowledgeUsageReport];
+  'intelligence:usage:configure': [{ sessionId: string; days: KnowledgeUsageDays; enabled: boolean }, KnowledgeUsageReport];
+  'intelligence:usage:clear': [{ sessionId: string; days: KnowledgeUsageDays }, KnowledgeUsageReport];
+  'intelligence:usage:vote': [{ sessionId: string; receipt: string; vote: KnowledgeUsageVote }, boolean];
   /** Adds a record by hand: a lesson for the project, or a preference the user declares. */
   'intelligence:memory:add': [{ sessionId: string; type: MemoryType; title: string; text: string; scope: 'project' | 'personal' }, IntelligenceView];
   /** A person's decision about one record: verify, activate, mark uncertain, reject, expire or revoke. */

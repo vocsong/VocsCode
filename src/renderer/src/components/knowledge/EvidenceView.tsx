@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import type { ContextPacket, IntelligenceEvidence, IntelligenceSearchResponse } from '../../../../shared/intelligence';
+import type { IntelligenceEvidence } from '../../../../shared/intelligence';
+import type { IpcResponse } from '../../../../shared/ipc';
 import { invoke } from '../../api';
 import { Badge, Button } from '../ui';
+import { LookupFeedback } from './LookupFeedback';
 import type { IntelligenceSectionProps } from './useIntelligence';
 
 /** Provenance and freshness stay visible even when the match is just a short excerpt. */
@@ -28,8 +30,8 @@ function EvidenceRow({ evidence }: { evidence: IntelligenceEvidence }) {
 export function EvidenceView({ sessionId, busy, run }: IntelligenceSectionProps) {
   const [query, setQuery] = useState('');
   const [scope, setScope] = useState<'project' | 'collection'>('project');
-  const [search, setSearch] = useState<IntelligenceSearchResponse | null>(null);
-  const [packet, setPacket] = useState<ContextPacket | null>(null);
+  const [search, setSearch] = useState<IpcResponse<'intelligence:search'> | null>(null);
+  const [packet, setPacket] = useState<IpcResponse<'intelligence:compile'> | null>(null);
   const [copied, setCopied] = useState(false);
   const response = packet ?? search;
   const canQuery = !busy && !!query.trim();
@@ -75,10 +77,12 @@ export function EvidenceView({ sessionId, busy, run }: IntelligenceSectionProps)
       </form>
       {!response && <p className="muted small">Ask a question to see evidence, or compile a context packet.</p>}
       {response && <p className="muted small">Detected intent: {response.intent}</p>}
-      {search && (
-        search.results.length ? search.results.map((item) => <EvidenceRow key={`${item.provider}:${item.projectId}:${item.ref}`} evidence={item} />)
-          : <p className="muted small">No evidence matched — try a narrower question or another scope.</p>
-      )}
+      {search && <>
+        {search.results.length ? search.results.map((item) => <EvidenceRow key={`${item.provider}:${item.projectId}:${item.ref}`} evidence={item} />)
+          : <p className="muted small">No evidence matched — try a narrower question or another scope.</p>}
+        {search.usageReceipt && <LookupFeedback key={search.usageReceipt} label="Did this search help?" disabled={busy}
+          sessionId={sessionId} receipt={search.usageReceipt} />}
+      </>}
       {!!response?.conflicts.length && <section className="intelligence-card" data-testid="evidence-conflicts">
         <h4>Conflicts</h4>
         <ul>{response.conflicts.map(({ a, b, reason }, i) => <li key={i}>{a} vs {b}: {reason}</li>)}</ul>
@@ -99,6 +103,8 @@ export function EvidenceView({ sessionId, busy, run }: IntelligenceSectionProps)
           })}>Copy</Button>
           {copied && <span className="muted small" role="status">Copied</span>}
         </div>
+        {packet.usageReceipt && <LookupFeedback key={packet.usageReceipt} label="Did this context packet help?" disabled={busy}
+          sessionId={sessionId} receipt={packet.usageReceipt} />}
       </section>}
     </div>
   );

@@ -22,7 +22,10 @@ import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitH
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
 import type { IntelligenceContext, IntelligenceService } from './intelligence/service';
+import type { FinishKnowledgeLookup, KnowledgeUsage, KnowledgeUsageSample } from './intelligence/usage';
+import { usageForEvidence, usageForPacket } from './intelligence/usage-observation';
 import { isIntelligenceOwnerRequest, isMemoryState, isMemoryType } from '../shared/intelligence';
+import { KNOWLEDGE_USAGE_WINDOWS, type KnowledgeUsageLookup } from '../shared/knowledge-usage';
 import type { UpdateState } from '../shared/types';
 import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
@@ -110,6 +113,7 @@ export interface HandlerDeps {
   knowledge?: KnowledgeService;
   /** Memory lifecycle, collections and scoped retrieval; present when wired up in index.ts. */
   intelligence?: IntelligenceService;
+  knowledgeUsage?: KnowledgeUsage;
   revokeMemoryGrants?: () => void;
   /** Best-effort GitNexus freshness queue; absent in tests/hosts that do not run the built-in. */
   gitnexusIndexer?: Pick<GitnexusIndexer, 'schedule' | 'index'>;
@@ -1467,19 +1471,68 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (typeof id !== 'string' || !/^mem_[0-9a-z]{6,40}$/.test(id)) throw new Error('A memory record id is required');
     return id;
   };
+  const usageOf = () => {
+    if (!deps.knowledgeUsage) throw new Error('Local Knowledge usage is unavailable in this run.');
+    return deps.knowledgeUsage;
+  };
+  const usageRequest = z.strictObject({ sessionId: sessionIdSchema, days: z.literal(KNOWLEDGE_USAGE_WINDOWS) });
+  const usageConfig = usageRequest.extend({ enabled: z.boolean() });
+  const usageVote = z.strictObject({ sessionId: sessionIdSchema, receipt: z.uuid(), vote: z.enum(['helped', 'not-helpful']) });
+  const trackEvidence = async <T extends object>(ctx: IntelligenceContext, tool: KnowledgeUsageLookup, work: () => Promise<T>, describe: (result: T) => KnowledgeUsageSample): Promise<T & { usageReceipt?: string }> => {
+    let finish: FinishKnowledgeLookup | undefined;
+    try { finish = deps.knowledgeUsage?.begin(ctx, 'desktop', tool); }
+    catch { deps.log('warn', 'knowledge usage: could not start counting a lookup'); }
+    if (!finish) return work();
+    const record = (sample: () => KnowledgeUsageSample) => {
+      try { return finish(sample()); }
+      catch { deps.log('warn', 'knowledge usage: could not count a lookup'); }
+    };
+    const result = await work().catch((error: unknown) => {
+      record(() => ({ outcome: 'failed' }));
+      throw error;
+    });
+    const usageReceipt = record(() => describe(result));
+    return usageReceipt ? { ...result, usageReceipt } : result;
+  };
   handle('intelligence:view', ({ sessionId }) => intelligenceOf().view(intelligenceContextOf(sessionId)));
   handle('intelligence:search', ({ sessionId, query, scope, limit, includeHistorical }) => {
     if (typeof query !== 'string' || !query.trim()) throw new Error('A question is required');
-    return intelligenceOf().search(intelligenceContextOf(sessionId), {
+    const ctx = intelligenceContextOf(sessionId);
+    const i = intelligenceOf();
+    return trackEvidence(ctx, 'intelligence_search', () => i.search(ctx, {
       query: query.slice(0, 500),
       scope: scope === 'collection' ? 'collection' : 'project',
       ...(typeof limit === 'number' ? { limit } : {}),
       includeHistorical: includeHistorical === true
-    });
+    }), (result) => usageForEvidence(result.results));
   });
   handle('intelligence:compile', ({ sessionId, query, budgetTokens, scope }) => {
     if (typeof query !== 'string' || !query.trim()) throw new Error('A question is required');
-    return intelligenceOf().compile(intelligenceContextOf(sessionId), { query: query.slice(0, 500), ...(typeof budgetTokens === 'number' ? { budgetTokens } : {}), scope: scope === 'collection' ? 'collection' : 'project' });
+    const ctx = intelligenceContextOf(sessionId);
+    const i = intelligenceOf();
+    return trackEvidence(ctx, 'context_compile', () => i.compile(ctx, { query: query.slice(0, 500), ...(typeof budgetTokens === 'number' ? { budgetTokens } : {}), scope: scope === 'collection' ? 'collection' : 'project' }), usageForPacket);
+  });
+  handle('intelligence:usage:view', (input) => {
+    const { sessionId, days } = usageRequest.parse(input);
+    return usageOf().report(intelligenceContextOf(sessionId), days);
+  });
+  handle('intelligence:usage:configure', async (input) => {
+    const { sessionId, days, enabled } = usageConfig.parse(input);
+    const ctx = intelligenceContextOf(sessionId);
+    const usage = usageOf();
+    await usage.configure(ctx, enabled);
+    return usage.report(ctx, days);
+  });
+  handle('intelligence:usage:clear', async (input) => {
+    const { sessionId, days } = usageRequest.parse(input);
+    const ctx = intelligenceContextOf(sessionId);
+    const usage = usageOf();
+    await usage.clear(ctx);
+    return usage.report(ctx, days);
+  });
+  handle('intelligence:usage:vote', (input) => {
+    const { sessionId, receipt, vote } = usageVote.parse(input);
+    return usageOf().vote(intelligenceContextOf(sessionId), receipt, vote);
   });
   handle('intelligence:memory:add', async ({ sessionId, type, title, text, scope }) => {
     if (!isMemoryType(type) || type === 'working') throw new Error('Unknown memory type');
