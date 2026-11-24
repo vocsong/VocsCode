@@ -47,7 +47,7 @@ visits to Import within the guide; dismissing the guide does not persist those d
   Google** to run `agy acp --login` in the vendor's terminal flow, then select **Recheck setup**.
   A saved CLI login is detected automatically. Select **Open Antigravity usage**, then type `/usage`
   in the interactive CLI to see Google's remaining quota and reset times. The same action is
-  available under **Usage → Subscriptions** from any desktop session. Choose **Google Antigravity**
+  available under **Subscription limits** in the right-hand **Usage** panel. Choose **Google Antigravity**
   in New Session, send your first prompt on the default Gemini model, then pick from the account's
   advertised models.
   If the app cannot find an installed CLI, set its executable under **Settings → Harnesses →
@@ -98,11 +98,21 @@ an ACP session-list request. ACP does not report Google account quota. The **Ope
 button opens Google's interactive CLI; Vocs Code does not type `/usage`, scrape the result, or
 check quota in headless mode. Setup and usage actions do not submit model prompts.
 
-From any desktop session, `/usage` opens the right-hand **Usage** panel. Choose **Subscriptions**
-for account limits, separate from the **Session** view. **Check limits** reads the Codex CLI's
-ChatGPT account, not the API-key usage of the current session. Claude and Cursor link to their own
-usage pages; check the account shown in your browser. Pi and custom ACP agents can use other
-accounts or API keys, and Vocs Code cannot infer those limits from the session's model.
+From any desktop session, `/usage` opens the right-hand **Usage** panel. **Subscription limits**
+appear on the same page as session spend and tokens, but are different measurements:
+
+- **Codex:** If a ChatGPT sign-in is detected, limits load once when you open the view. Both Codex
+  modes use the same CLI account. The values do not describe API-key billing. You can retry or
+  refresh manually; the panel does not poll.
+- **Claude:** In a Claude session, the panel shows recent plan windows the running SDK reported
+  during normal work. It never starts Claude just to check usage. If no recent values were
+  reported, or you want every window, open [Claude’s usage page](https://claude.ai/settings/usage).
+- **Antigravity:** Use **Open CLI**, then type `/usage`. The ACP connection does not carry account
+  limits, and [Google does not support headless wrappers on consumer plans](https://antigravity.google/docs/faq/#can-i-use-antigravity-cli-headless-mode-in-third-party-coding-agents-or-automate-account-switching).
+- **Cursor:** Use the official usage dashboard. Check which account your browser is signed into.
+
+Pi and custom ACP agents can use other accounts or API keys. Vocs Code cannot infer those limits
+from the session’s model or token count.
 
 Rechecks invalidate PATH/probe caches. Runtime, main availability, renderer availability and
 catalog request ordering prevent discarded in-flight results from reviving stale setup failures.

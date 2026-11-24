@@ -71,8 +71,12 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
   // the panel), or stays out while pinned.
   const focus = useStore((s) => (s.panelFocus === 'bottom' && s.panelBottomOpened.includes(s.panelBottomTab) ? 'bottom' : 'top'));
   const peek = useStore((s) => s.panelPeek);
+  const panelOpen = useStore((s) => s.panelOpen);
   const previewOpen = !!preview;
   const pinned = useStore((s) => s.pins.right);
+  // The Zen rail keeps Usage mounted even when the drawer is folded. A hover or a file
+  // preview alone shouldn't start a provider check; opening Usage or pinning it can.
+  const readLimitsOnOpen = panelOpen && (!minimal || (focus === 'top' && (peek || pinned)));
   const togglePin = useStore((s) => s.togglePin);
   const changesVersion = useStore((s) => s.changesVersion);
   const { data: summary } = useGitSummary(session.id, changesVersion);
@@ -166,7 +170,7 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
           {tab === 'files' && <FilesTab key={`${session.id}:${session.cwd}`} session={session} />}
           {tab === 'branches' && <BranchesTab session={session} cache={cache} />}
           {tab === 'goal' && <GoalTab session={session} />}
-          {tab === 'usage' && <UsageTabPanel session={session} />}
+          {tab === 'usage' && <UsageTabPanel session={session} readLimitsOnOpen={readLimitsOnOpen} />}
           {tab === 'terminal' && <TerminalPanel session={session} />}
         </div>
       </div>
@@ -526,7 +530,7 @@ function NativeGoalTab({ session }: { session: SessionMeta }) {
 }
 
 /** Subscribes the Usage dashboard to the live transcript; the dashboard itself stays a pure view. */
-function UsageTabPanel({ session }: { session: SessionMeta }) {
+function UsageTabPanel({ session, readLimitsOnOpen }: { session: SessionMeta; readLimitsOnOpen: boolean }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
-  return <SessionUsage session={session} items={items} />;
+  return <SessionUsage session={session} items={items} readLimitsOnOpen={readLimitsOnOpen} />;
 }

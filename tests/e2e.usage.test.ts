@@ -1,8 +1,9 @@
 /**
  * Electron end-to-end for the right panel's Usage dashboard. A session, its totals and a transcript
  * carrying turns, tool calls, file changes and failures are seeded on disk, so the whole page is
- * driven through the real UI with no harness and no provider key. Subscription reads and vendor
- * launches are stubbed at IPC; `/usage` must neither send a prompt nor check the account.
+ * driven through the real UI with no harness and no provider key. Availability, subscription reads
+ * and vendor launches are stubbed at IPC; opening Usage reads verified limits without sending a
+ * prompt or launching a vendor view.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
@@ -11,7 +12,8 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import type { SessionMeta, TranscriptItem } from '../src/shared/types';
+import { PUSH_CHANNELS } from '../src/shared/ipc';
+import type { SessionEventEnvelope, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { expectQuietWindow, isolatedEnv, openAnalytics, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -46,7 +48,7 @@ function transcript(): TranscriptItem[] {
 }
 
 describe.runIf(enabled)('electron e2e: usage dashboard', () => {
-  it('opens with /usage and shows session metrics separately from subscription limits and vendor actions', async () => {
+  it('shows session metrics and reads subscription limits once per Usage visit in Standard and Zen', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-usage-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -55,7 +57,7 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
       uiMode: 'standard', sidebarWidth: 280, panelWidth: 420,
       // Startup probes must not reach a developer's signed-in CLI.
-      binaries: Object.fromEntries(['agy', 'claude', 'codex', 'pi'].map((name) => [name, path.join(tmp, `missing-${name}`)]))
+      binaries: Object.fromEntries(['agy', 'claude', 'codex', 'dsh', 'pi'].map((name) => [name, path.join(tmp, `missing-${name}`)]))
     }));
 
     const session: SessionMeta = {
@@ -69,67 +71,123 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
       harnessRef: {},
       usage: { inputTokens: 1200, outputTokens: 480, cacheReadTokens: 3600, cacheWriteTokens: 240, reasoningTokens: 0, costUsd: 0.75, turns: 3, contextWindow: 200_000, contextTokens: 120_000 }
     };
-    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+    const claudeSession: SessionMeta = {
+      ...session, id: `${SID}_claude`, title: 'Claude usage sample', updatedAt: T - 1,
+      config: { harness: 'claude', projectRoot: project, permissionMode: 'ask' },
+      usage: { ...session.usage, costUsd: 0, turns: 1 }
+    };
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session, claudeSession]));
     await fs.mkdir(path.join(userData, 'sessions', SID), { recursive: true });
     await fs.writeFile(path.join(userData, 'sessions', SID, 'transcript.jsonl'), transcript().map((i) => JSON.stringify(i)).join('\n') + '\n');
 
+    const appData = path.join(tmp, 'AppData', 'Roaming');
+    const localAppData = path.join(tmp, 'AppData', 'Local');
+    // Electron resolves these before it opens the custom user-data directory on Windows.
+    await Promise.all([appData, localAppData].map((dir) => fs.mkdir(dir, { recursive: true })));
     const packaged = process.env.HARNESS_E2E_EXE;
     app = await electron.launch({
       executablePath: packaged || (require('electron') as string),
       args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
-      env: isolatedEnv(userData),
+      env: isolatedEnv(userData, {
+        HOME: tmp, USERPROFILE: tmp, APPDATA: appData, LOCALAPPDATA: localAppData,
+        PI_CODING_AGENT_DIR: path.join(tmp, 'pi'), CURSOR_API_KEY: ''
+      }),
       timeout: 60_000
     });
     const win: Page = await app.firstWindow();
     await win.waitForSelector('.brand', { timeout: 60_000 });
     await expectQuietWindow(app);
-    await app.evaluate(({ ipcMain }) => {
-      const calls = { checks: [] as string[], launches: [] as string[], prompts: 0 };
+    const resetAt = '2030-01-01T12:00:00Z';
+    await app.evaluate(({ ipcMain }, { resetAt, claudeId }) => {
+      const calls = { checks: [] as string[], claudeObserved: [] as string[], launches: [] as string[], prompts: 0 };
       Reflect.set(globalThis, '__vocsUsageCalls', calls);
-      for (const channel of ['sessions:send', 'subscriptions:read', 'subscriptions:openUsage']) ipcMain.removeHandler(channel);
+      for (const channel of ['harness:availability', 'sessions:send', 'subscriptions:read', 'subscriptions:claudeObserved', 'subscriptions:openUsage']) {
+        ipcMain.removeHandler(channel);
+      }
+      ipcMain.handle('harness:availability', async (_event, request?: { id?: string }) => {
+        await Reflect.get(globalThis, '__vocsUsageAvailabilityGate')?.pending;
+        return request?.id && request.id !== 'codex' ? {} : {
+          codex: { available: true, authenticated: true, authMethod: 'subscription' }
+        };
+      });
       ipcMain.handle('sessions:send', () => { calls.prompts++; throw new Error('Usage must not send a prompt'); });
+      // Catch every provider on the read IPC, including unexpected ones. Never fall through to a CLI.
       ipcMain.handle('subscriptions:read', (_event, { provider }: { provider: string }) => {
         calls.checks.push(provider);
+        if (provider !== 'codex') throw new Error(`Unexpected subscription read: ${provider}`);
         return { groups: [{ name: 'Codex', buckets: [
-          { name: '5-hour limit', remainingFraction: 0.726, resetAt: '2030-01-01T12:00:00Z' },
+          { name: '5-hour limit', remainingFraction: 0.726, resetAt },
           { name: 'Weekly limit', remainingFraction: 0.16 }
         ] }] };
+      });
+      ipcMain.handle('subscriptions:claudeObserved', (_event, { sessionId }: { sessionId: string }) => {
+        calls.claudeObserved.push(sessionId);
+        const observedAt = Date.now();
+        return sessionId === claudeId ? [{ name: 'Weekly limit', remainingFraction: 0.63, observedAt, expiresAt: observedAt + 1_800_000, resetAt }] : [];
       });
       ipcMain.handle('subscriptions:openUsage', (_event, { provider }: { provider: string }) => {
         calls.launches.push(provider);
         return { kind: provider === 'antigravity' ? 'terminal' : 'browser' };
       });
-    });
+    }, { resetAt, claudeId: claudeSession.id });
+    // Discard any availability the first renderer fetched before the handlers were replaced.
+    await win.clock.install();
+    await win.reload();
     const vendorCalls = () => app!.evaluate(() => Reflect.get(globalThis, '__vocsUsageCalls'));
+    const expectCalls = async (visits: number, launches: string[] = [], claudeObserved: string[] = []) => {
+      expect(await vendorCalls()).toEqual({ checks: Array<string>(visits).fill('codex'), claudeObserved, launches, prompts: 0 });
+    };
     const wideViewport = { width: 1440, height: 900 };
     await win.setViewportSize(wideViewport);
 
     const rightPanel = win.locator('aside.panel');
     const panel = rightPanel.getByTestId('usage-panel');
+    const accounts = panel.getByRole('region', { name: 'Subscription limits', exact: true, includeHidden: true });
+    const codex = accounts.getByRole('region', { name: 'Codex · ChatGPT', exact: true, includeHidden: true });
+    const shortWindow = codex.getByRole('meter', { name: '5-hour limit', exact: true });
+    const contextWindow = panel.getByRole('meter', { name: 'Context window' });
+    const usageTab = rightPanel.getByRole('button', { name: 'Usage', exact: true });
     const composer = win.locator('.composer');
+    const prompt = composer.locator('textarea');
     const meter = composer.getByRole('button', { name: 'Session usage', exact: true });
-    expect(await meter.innerText()).toBe('60%');
+    const openUsage = async (command: string) => {
+      await prompt.fill(command);
+      await prompt.press('Enter');
+      expect(await prompt.inputValue()).toBe('');
+    };
+    const expectVisit = async (visits: number, launches: string[] = []) => {
+      await shortWindow.waitFor({ timeout: 10_000 });
+      await expectCalls(visits, launches);
+    };
+    const expectLimits = async () => {
+      expect(await shortWindow.getAttribute('aria-valuenow')).toBe('73');
+      expect(await codex.getByRole('meter', { name: 'Weekly limit', exact: true }).getAttribute('aria-valuenow')).toBe('16');
+      const reset = await win.evaluate((iso) => new Date(iso).toLocaleString(), resetAt);
+      expect(await codex.getByText(/^Resets /).innerText()).toBe(`Resets ${reset}`);
+    };
+    expect(await meter.innerText({ timeout: 30_000 })).toBe('60%');
+    await expectCalls(0);
 
     // Start closed, then use the context ring to open, close, and reopen Usage.
     await rightPanel.getByRole('button', { name: 'Close panel', exact: true }).click();
     await rightPanel.waitFor({ state: 'detached', timeout: 10_000 });
     await meter.click();
-    await panel.waitFor({ timeout: 30_000 });
+    await expectVisit(1);
     await meter.click();
     await rightPanel.waitFor({ state: 'detached', timeout: 10_000 });
     await meter.click();
-    await panel.waitFor({ timeout: 10_000 });
+    await expectVisit(2);
 
     // With another tab open, the ring switches to Usage without closing the panel.
     const goalTab = rightPanel.getByRole('button', { name: 'Goal', exact: true });
     await goalTab.click();
     await goalTab.and(rightPanel.locator('.panel-tab.active')).waitFor({ timeout: 10_000 });
     await meter.click();
-    await panel.waitFor({ timeout: 10_000 });
+    await expectVisit(3);
 
-    // The Usage tab itself is still open-only.
-    await rightPanel.getByRole('button', { name: 'Usage', exact: true }).click();
-    await panel.waitFor({ timeout: 10_000 });
+    // Clicking the selected Usage tab neither toggles the panel nor starts another read.
+    await usageTab.click();
+    await expectVisit(3);
 
     // Opening Usage can squeeze the composer below the cutoff that normally hides the ring.
     // The expanded ring must still be visible and clickable so it can close the panel.
@@ -137,7 +195,7 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     await rightPanel.waitFor({ state: 'detached', timeout: 10_000 });
     await win.setViewportSize({ width: 1080, height: 760 });
     await meter.click();
-    await panel.waitFor({ timeout: 10_000 });
+    await expectVisit(4);
     expect(await composer.locator('.composer-box').evaluate((el) => el.clientWidth)).toBeLessThanOrEqual(440);
     await meter.waitFor({ timeout: 10_000 });
     expect(await meter.innerText()).toBe('60%');
@@ -147,34 +205,24 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     expect(await meter.getAttribute('aria-expanded')).toBe('false');
 
     await win.setViewportSize(wideViewport);
-    const prompt = composer.locator('textarea');
-    await prompt.fill('/USAGE');
-    await prompt.press('Enter');
-    await panel.waitFor({ timeout: 10_000 });
-    expect(await vendorCalls()).toEqual({ checks: [], launches: [], prompts: 0 });
-    expect(await prompt.inputValue()).toBe('');
+    await openUsage('/USAGE');
+    await expectVisit(5);
+    await expectLimits();
+    expect(await panel.getByRole('radio', { name: /^(Session|Subscriptions)$/ }).count()).toBe(0);
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'usage-00-summary.png') });
 
-    const subscriptions = panel.getByRole('radio', { name: 'Subscriptions', exact: true });
-    await subscriptions.click();
-    const accounts = panel.getByRole('region', { name: 'Subscription limits', exact: true });
-    const codex = accounts.getByRole('region', { name: 'Codex · ChatGPT', exact: true });
-    expect(await vendorCalls()).toEqual({ checks: [], launches: [], prompts: 0 });
-    await codex.getByRole('button', { name: 'Check limits', exact: true }).click();
-    const shortWindow = codex.getByRole('meter', { name: '5-hour limit', exact: true });
-    expect(await shortWindow.getAttribute('aria-valuenow')).toBe('73');
-    expect(await codex.getByRole('meter', { name: 'Weekly limit' }).getAttribute('aria-valuenow')).toBe('16');
-    expect(await codex.getByText(/^Resets /).innerText()).toBeTruthy();
+    // Only the user's fallback clicks launch the Antigravity CLI and the official Claude page.
     const google = accounts.getByRole('region', { name: 'Google Antigravity', exact: true });
     await google.getByRole('button', { name: 'Open CLI', exact: true }).click();
     await google.getByText('In the terminal, type /usage and press Enter.').waitFor();
-    await accounts.getByRole('region', { name: 'Claude', exact: true }).getByRole('button', { name: 'Open usage page' }).click();
-    await accounts.getByText('Usage page opened in your browser.').waitFor();
-    const explicitCalls = { checks: ['codex'], launches: ['antigravity', 'claude'], prompts: 0 };
-    expect(await vendorCalls()).toEqual(explicitCalls);
+    await expectCalls(5, ['antigravity']);
+    const claude = accounts.getByRole('region', { name: 'Claude', exact: true });
+    await claude.getByRole('button', { name: 'Open usage page', exact: true }).click();
+    await claude.getByText('Usage page opened in your browser.').waitFor();
+    const explicitLaunches = ['antigravity', 'claude'];
+    await expectCalls(5, explicitLaunches);
     await win.screenshot({ path: path.join(shots, 'usage-00-subscriptions.png') });
-    await panel.getByRole('radio', { name: 'Session', exact: true }).click();
 
     // Summary block: spend, and counters the page derives from the transcript rather than the totals.
     expect(await win.locator('.usage-hero-value').innerText()).toBe('$0.75');
@@ -183,8 +231,8 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     expect(await panel.getByTitle(/Failed tool calls/).innerText()).toContain('3'); // 2 failed tools + 1 failed turn
     expect(await panel.getByTitle(/Distinct paths reported as changed/).innerText()).toContain('2');
 
-    // Both meters are present and read the seeded numbers, not a placeholder.
-    expect(await win.getByRole('meter', { name: 'Context window' }).getAttribute('aria-valuenow')).toBe('60');
+    // Session meters are still on the same page and use the seeded totals.
+    expect(await contextWindow.getAttribute('aria-valuenow')).toBe('60');
     expect(await win.getByRole('meter', { name: 'Budget' }).getAttribute('aria-valuenow')).toBe('50');
     expect(await win.getByRole('meter', { name: 'Tool success' }).getAttribute('aria-valuenow')).toBe('50');
 
@@ -225,17 +273,64 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const content = await panel.boundingBox();
     expect(content!.height).toBeGreaterThan(body!.height * 0.9);
 
-    // The same shortcut peeks open the Zen drawer and the quota result survives the layout switch.
-    await win.locator('.menubar').getByRole('button', { name: 'View', exact: true }).click();
-    await win.locator('.menubar-panel').getByRole('button', { name: 'Zen interface', exact: true }).click();
+    // Drive a real preload push and wait for a changed session metric, not just a repaint.
+    const usageUpdate: SessionEventEnvelope = {
+      sessionId: SID, ts: T + 12, event: { type: 'usage', totals: { ...session.usage, contextTokens: 140_000 } }
+    };
+    await app.evaluate(({ BrowserWindow }, { channel, update }) => {
+      BrowserWindow.getAllWindows()[0]!.webContents.send(channel, update);
+    }, { channel: PUSH_CHANNELS.sessionEvent, update: usageUpdate });
+    await expect.poll(() => contextWindow.getAttribute('aria-valuenow')).toBe('70');
+    await expectCalls(5, explicitLaunches);
+    await win.clock.fastForward('10:00');
+    await expectCalls(5, explicitLaunches);
+
+    // Reflow the same open visit without a pointer click outside the panel ending its peek.
+    const panelWidth = () => rightPanel.evaluate((el) => el.clientWidth);
+    await win.evaluate(() => window.harness.invoke('settings:update', { uiMode: 'zen' }));
     await win.locator('html[data-ui="zen"]').waitFor();
-    await prompt.fill('/usage');
-    await prompt.press('Enter');
-    await subscriptions.click();
-    await codex.getByRole('button', { name: 'Refresh limits', exact: true }).hover();
-    expect(await shortWindow.getAttribute('aria-valuenow')).toBe('73');
-    expect(await vendorCalls()).toEqual(explicitCalls);
+    await expect.poll(panelWidth).toBeGreaterThan(52);
+    expect(await panel.getByRole('radio', { name: 'Errors', checked: true }).count()).toBe(1);
+    expect(await contextWindow.getAttribute('aria-valuenow')).toBe('70');
+    await expectLimits();
+    await expectCalls(5, explicitLaunches);
+
+    // Fresh Zen visit: let the boot-time sign-in result arrive only once the selected Usage
+    // drawer folds. It must not start a read until the user explicitly opens the drawer again.
+    await app.evaluate(() => {
+      let release!: () => void;
+      const pending = new Promise<void>((resolve) => { release = resolve; });
+      Reflect.set(globalThis, '__vocsUsageAvailabilityGate', { pending, release });
+    });
+    await win.reload();
+    await win.locator('html[data-ui="zen"]').waitFor();
+    await openUsage('/usage');
+    await expect.poll(panelWidth).toBeGreaterThan(52);
+    await expectCalls(5, explicitLaunches);
+    await win.mouse.click(wideViewport.width / 2, 300);
+    await expect.poll(panelWidth).toBe(52);
+    expect(await usageTab.getAttribute('aria-current')).toBe('true');
+    await app.evaluate(() => { Reflect.get(globalThis, '__vocsUsageAvailabilityGate').release(); });
+    await codex.getByText('Subscription sign-in detected', { exact: true }).waitFor({ state: 'attached', timeout: 10_000 });
+    await expectCalls(5, explicitLaunches);
+
+    await usageTab.click();
+    await expect.poll(panelWidth).toBeGreaterThan(52);
+    await expectVisit(6, explicitLaunches);
+    await expectLimits();
+    expect(await contextWindow.getAttribute('aria-valuenow')).toBe('60');
+    await shortWindow.scrollIntoViewIfNeeded();
     await win.screenshot({ path: path.join(shots, 'usage-00-subscriptions-zen.png'), animations: 'disabled' });
+    await expectCalls(6, explicitLaunches);
+
+    // A Claude window comes from the selected live session only, without another Codex check.
+    await win.keyboard.press('ControlOrMeta+2');
+    await expect.poll(() => panel.locator('.usage-hero-value').innerText()).toBe('$0.00');
+    await openUsage('/usage');
+    const observed = claude.getByRole('meter', { name: 'Weekly limit' });
+    await expect.poll(() => observed.getAttribute('aria-valuenow', { timeout: 2_000 })).toBe('63');
+    expect(await claude.getByText(/Last reported by Claude/).count()).toBe(1);
+    await expectCalls(6, explicitLaunches, [claudeSession.id]);
   }, 180_000);
 });
 

@@ -1,7 +1,6 @@
 /**
- * The right panel's Usage page: a session-scoped dashboard over the live transcript. The top block
- * is always on (spend, headline counters, context and budget meters, token mix); the lower half
- * switches between turn activity, the tool mix and the failure log, which is what fills the panel.
+ * The right panel's Usage page. Account limits are separate from the session's spend and
+ * transcript metrics. The detail view switches between turns, tools and errors.
  *
  * Charts reuse the analytics primitives so the colour system is the one already validated there:
  * categorical `--chart-N` in a fixed order for mixes, and the reserved status hues only for status.
@@ -62,26 +61,11 @@ const FILE_SEGMENTS = [
 
 const HINT_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)'];
 
-type UsageScope = 'session' | 'subscriptions';
-const SCOPES: { value: UsageScope; label: string }[] = [
-  { value: 'session', label: 'Session' },
-  { value: 'subscriptions', label: 'Subscriptions' }
-];
-
-type SessionUsageProps = { session: SessionMeta; items?: readonly TranscriptItem[] };
-
-export function SessionUsage(props: SessionUsageProps) {
-  const [scope, setScope] = useState<UsageScope>('session');
-  return (
-    <div className="usage" data-testid="usage-panel">
-      <Segmented value={scope} options={SCOPES} onChange={setScope} ariaLabel="Usage scope" />
-      <div hidden={scope !== 'session'}><SessionUsageSummary {...props} /></div>
-      <div hidden={scope !== 'subscriptions'}><SubscriptionUsage /></div>
-    </div>
-  );
-}
-
-function SessionUsageSummary({ session, items }: SessionUsageProps) {
+export function SessionUsage({ session, items, readLimitsOnOpen = false }: {
+  session: SessionMeta;
+  items?: readonly TranscriptItem[];
+  readLimitsOnOpen?: boolean;
+}) {
   const stats = useMemo(() => sessionUsageStats(session, items ?? EMPTY), [session, items]);
   const [view, setView] = useState<DetailView>('turns');
   const u = session.usage;
@@ -99,7 +83,7 @@ function SessionUsageSummary({ session, items }: SessionUsageProps) {
   const costSpark = useMemo(() => stats.series.slice(-24).map((p) => p.costUsd), [stats.series]);
 
   return (
-    <div className="usage-session">
+    <div className="usage" data-testid="usage-panel">
       <div className="usage-hero">
         <div className="usage-hero-main">
           <div className="usage-hero-label">Session spend</div>
@@ -165,6 +149,8 @@ function SessionUsageSummary({ session, items }: SessionUsageProps) {
           )}
         </div>
       )}
+
+      <SubscriptionUsage session={session} readLimitsOnOpen={readLimitsOnOpen} />
 
       {tokens > 0 && (
         <section className="usage-block">

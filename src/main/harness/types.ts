@@ -14,6 +14,7 @@ import type {
   UserInput
 } from '../../shared/types';
 import type { AgentTypeInfo } from '../../shared/subagents';
+import type { ObservedSubscriptionWindow } from '../../shared/subscription-usage';
 import type { RuntimeResolver } from '../runtime';
 import type { ResolvedServer } from '../mcp/effective';
 
@@ -74,6 +75,8 @@ export interface HarnessAdapter {
    * `undefined` means the runtime does not track its writers; it is treated like an adapter without
    * this method. */
   workspaceWriterState?(): 'active' | 'unknown' | 'quiescent' | undefined;
+  /** Fresh subscription windows already observed on this runtime; reading never starts or queries it. */
+  observedSubscriptionWindows?(): ObservedSubscriptionWindow[];
   start(): Promise<void>;
   /** Submit user input. Resolves once accepted by the harness (not when the turn finishes). */
   send(input: UserInput): Promise<void>;

@@ -1016,6 +1016,12 @@ export class SessionManager {
     return adapter.listAgents().catch(() => []);
   }
 
+  /** Read only what the live Claude adapter has observed; never start a session to ask. */
+  claudeSubscriptionWindows(id: string) {
+    const adapter = this.active.get(id)?.adapter;
+    return adapter?.id === 'claude' ? adapter.observedSubscriptionWindows?.() ?? [] : [];
+  }
+
   /**
    * Stops or steers one subagent run by sending the extension command straight to the harness.
    * The command is not a user message: it must not appear in the transcript or start a turn, so it
