@@ -24,3 +24,29 @@ export function recencyAt(s: SessionMeta): number {
 export function sortSessionRows(list: SessionMeta[]): SessionMeta[] {
   return [...list].sort((a, b) => pinRank(a) - pinRank(b) || recencyAt(b) - recencyAt(a) || a.id.localeCompare(b.id));
 }
+
+/**
+ * Mission mode: each Builder moves directly under its Lead, in Builder number order, wherever the
+ * sorted list put the Lead. A Builder whose Lead is not in the list (archived, filtered out) keeps
+ * its own place. Applied after `sortSessionRows`, so the vertical list and keyboard order agree.
+ */
+export function nestMissionRows(sorted: SessionMeta[]): SessionMeta[] {
+  const leads = new Set(sorted.filter((s) => s.mission?.role === 'lead').map((s) => s.id));
+  if (!leads.size) return sorted;
+  const builders = new Map<string, SessionMeta[]>();
+  for (const s of sorted) {
+    const lead = s.mission?.role === 'builder' ? s.mission.leadId : undefined;
+    if (lead && lead !== s.id && leads.has(lead)) builders.set(lead, [...(builders.get(lead) ?? []), s]);
+  }
+  if (!builders.size) return sorted;
+  const nested = new Set([...builders.values()].flat().map((s) => s.id));
+  const index = (s: SessionMeta) => s.mission?.builderIndex ?? Number.MAX_SAFE_INTEGER;
+  const out: SessionMeta[] = [];
+  for (const s of sorted) {
+    if (nested.has(s.id)) continue;
+    out.push(s);
+    const under = builders.get(s.id);
+    if (under) out.push(...[...under].sort((a, b) => index(a) - index(b) || a.id.localeCompare(b.id)));
+  }
+  return out;
+}

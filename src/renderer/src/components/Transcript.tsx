@@ -2,7 +2,19 @@ import React, { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, u
 import type { ApprovalDecision, ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { parseGitHubPullRequestUrl } from '../../../shared/github-pull-request';
 import { imageMimeType } from '../../../shared/image-files';
+import { missionToolOf, type MissionMessageKind, type MissionTool } from '../../../shared/mission-mode';
 import { invoke, isWeb, platform } from '../api';
+import {
+  builderIndexOf,
+  finishReportSections,
+  isHandoffTool,
+  missionMessageLabel,
+  missionToolLabel,
+  missionToolSummary,
+  startedBuilderIndex,
+  toolArg
+} from '../mission';
+import { renderMarkdown } from '../markdown';
 import { fileManagerName } from '../file-open';
 import { workspaceRelativePath } from '../file-refs';
 import { useCanInvoke, useTranscriptCapabilities } from '../capabilities';
@@ -304,7 +316,8 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
 
   // Your message for the stretch being read floats at the top once it scrolls away. Row offsets
   // cover unmounted rows too, so this works the same with windowing on.
-  const userChunks = useMemo(() => chunks.flatMap((c, i) => (c.kind === 'single' && c.item.kind === 'user' ? [i] : [])), [chunks]);
+  // Mission rows are written by the app, not by you, so they never become the pinned prompt.
+  const userChunks = useMemo(() => chunks.flatMap((c, i) => (c.kind === 'single' && c.item.kind === 'user' && c.item.origin !== 'mission' ? [i] : [])), [chunks]);
   const [pinned, setPinned] = useState(-1);
   const rowBase = useRef(0);
   useLayoutEffect(() => {
@@ -378,7 +391,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   const onContextMenu = (e: React.MouseEvent) => {
     if (isEditableTarget(e.target) || isTerminalEventTarget(e.target)) return;
     const selection = window.getSelection()?.toString() ?? '';
-    const block = e.target instanceof Element ? e.target.closest<HTMLElement>('.msg, .tool-card, .info-line') : null;
+    const block = e.target instanceof Element ? e.target.closest<HTMLElement>('.msg, .tool-card, .info-line, .mission-card') : null;
     // A message's own body, not its meta row: the timestamp and the action buttons are chrome.
     const body = block?.querySelector<HTMLElement>('.msg-text, .md, .info-text') ?? block;
     const blockText = body ? (body.innerText ?? body.textContent ?? '').trim() : '';
@@ -553,11 +566,15 @@ function sameEntries(a: TranscriptItem[], b: TranscriptItem[]): boolean {
 function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, showThinking: boolean, onImageExpand: OnImageExpand) {
   switch (item.kind) {
     case 'user':
-      return <UserMessage item={item} sessionId={sessionId} canEdit={canEdit} onImageExpand={onImageExpand} />;
+      return item.origin === 'mission'
+        ? <MissionMessageCard item={item} sessionId={sessionId} onImageExpand={onImageExpand} />
+        : <UserMessage item={item} sessionId={sessionId} canEdit={canEdit} onImageExpand={onImageExpand} />;
     case 'assistant':
       return <AssistantMessage item={item} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} />;
-    case 'tool':
-      return <ToolCard item={item} sessionId={sessionId} />;
+    case 'tool': {
+      const tool = missionToolOf(item.name);
+      return tool ? <MissionToolCard item={item} tool={tool} sessionId={sessionId} /> : <ToolCard item={item} sessionId={sessionId} />;
+    }
     case 'approval':
       return <ApprovalCard item={item} sessionId={sessionId} />;
     case 'info':
@@ -709,6 +726,114 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
   );
 }
 
+const MISSION_KIND_ICON: Record<MissionMessageKind, string> = {
+  kickoff: 'flag', from_lead: 'arrowRight', from_builder: 'arrowLeft', report: 'check', question: 'info',
+  approval: 'shield', failed: 'alert', stopped: 'stop', resume: 'play', note: 'info'
+};
+
+/** Past either, a mission message folds to its first lines until it is opened. */
+const MISSION_FOLD_CHARS = 600;
+const MISSION_FOLD_LINES = 8;
+
+/**
+ * A row Mission mode wrote into this transcript (a kickoff, a Lead↔Builder message, a report): a
+ * compact labelled card rather than a bubble that reads as if you had typed it.
+ */
+function MissionMessageCard({ item, sessionId, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; sessionId: string; onImageExpand?: OnImageExpand }) {
+  const meta = item.mission;
+  const kind = meta?.kind ?? 'note';
+  const builderIndex = useStore((s) => builderIndexOf(meta?.builderId, s.missionViews, s.sessions));
+  const jumpHere = useStore((s) => !!s.searchJump && s.searchJump.sessionId === sessionId && s.searchJump.itemId === item.id);
+  const [open, setOpen] = useState(false);
+  const long = item.text.length > MISSION_FOLD_CHARS || item.text.split('\n').length > MISSION_FOLD_LINES;
+  const expanded = !long || open || jumpHere;
+  const markup = useMemo(() => ({ __html: renderMarkdown(item.text) }), [item.text]);
+  const images = item.images ?? [];
+  return (
+    <div className={`mission-card mission-msg${expanded ? '' : ' folded'}`} data-kind={kind}>
+      <div className="mission-card-head">
+        <span className="mission-card-glyph"><Icon name={MISSION_KIND_ICON[kind] ?? 'info'} size={13} /></span>
+        <span className="mission-card-label">{missionMessageLabel(meta, builderIndex)}</span>
+        {builderIndex && kind !== 'from_builder' ? <span className="mission-card-who">Builder {builderIndex}</span> : null}
+        <span className="spacer" />
+        {long && (
+          <button type="button" className="link-btn mission-card-toggle" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
+            {expanded ? 'Show less' : 'Show more'}
+          </button>
+        )}
+        <Stamp ts={item.ts} className="mission-card-time" />
+      </div>
+      {item.text && <div className="md mission-card-body" dangerouslySetInnerHTML={markup} />}
+      {images.length > 0 && (
+        <div className="msg-images">
+          {images.map((im, i) => (
+            <button key={i} type="button" className="msg-image-btn" aria-label={`Preview ${im.name ?? 'image'}`} onClick={() => onImageExpand?.(images.map((att) => ({ src: imageSrc(att), name: att.name })), i)}>
+              <img src={imageSrc(im)} alt={im.name ?? 'attachment'} draggable={false} />
+            </button>
+          ))}
+        </div>
+      )}
+      {item.files?.length ? <div className="msg-files" aria-label="Attached files">{item.files.map((file) => <Badge key={file.path} tone="neutral">{file.name}</Badge>)}</div> : null}
+    </div>
+  );
+}
+
+const MISSION_TOOL_ICON: Record<MissionTool, string> = {
+  start_builder: 'play', message_builder: 'send', answer_request: 'shield', list_builders: 'list', wait_for_builders: 'clock',
+  builder_diff: 'diff', builder_log: 'branch', record_check: 'check', accept_builder: 'check', stop_builder: 'stop',
+  finish_mission: 'flag', ask_lead: 'info', report_done: 'check', report_blocked: 'alert', land_on_lead: 'branch'
+};
+
+/**
+ * A Mission tool call as the handoff it is ("Started Builder 2: …", "Asked the Lead"). The raw
+ * arguments and result stay one click away; `finish_mission` shows its report as the PR body reads.
+ */
+function MissionToolCard({ item, tool, sessionId, dataItemId }: { item: ToolItem; tool: MissionTool; sessionId: string; dataItemId?: string }) {
+  const [open, setOpen] = useState(false);
+  const builderId = toolArg(item.input, 'builderId');
+  const builderIndex = useStore((s) =>
+    builderId ? builderIndexOf(builderId, s.missionViews, s.sessions)
+      : tool === 'start_builder' ? startedBuilderIndex(item.output, toolArg(item.input, 'title'), s.missionViews)
+      : undefined);
+  const jumpHere = useStore((s) => !!s.searchJump && s.searchJump.sessionId === sessionId && s.searchJump.itemId === item.id);
+  const expanded = open || jumpHere;
+  const running = item.status === 'running';
+  const failed = item.status === 'error' || item.status === 'declined';
+  const label = missionToolLabel(tool, item.input, builderIndex ? `Builder ${builderIndex}` : undefined);
+  const summary = missionToolSummary(tool, item.input);
+  const report = tool === 'finish_mission' ? finishReportSections(item.input) : [];
+  return (
+    <div data-item-id={dataItemId} className={`mission-card mission-tool tool-${item.status}`} data-tool={tool}>
+      <button type="button" className="mission-card-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)} title={expanded ? 'Hide the call details' : 'Show the call details'}>
+        <span className="mission-card-glyph"><Icon name={MISSION_TOOL_ICON[tool]} size={13} /></span>
+        <span className="mission-card-label">{label}</span>
+        {summary && tool !== 'finish_mission' && <span className="mission-card-summary" title={summary}>{summary}</span>}
+        <span className="spacer" />
+        {running ? <Spinner size={12} /> : failed ? <Badge tone={item.status === 'error' ? 'red' : 'amber'}>{toolStatus(item)}</Badge> : null}
+        <Stamp ts={item.ts} className="mission-card-time" detail={item.durationMs ? `took ${fmtDuration(item.durationMs)}` : undefined} />
+        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
+      </button>
+      {report.length > 0 && (
+        <div className="mission-report" aria-label="Mission report">
+          {report.map((section) => (
+            <div key={section.title} className="mission-report-section">
+              <div className="mission-report-title">{section.title}</div>
+              {section.title === 'Task' ? <p>{section.lines[0]}</p> : <ul>{section.lines.map((line, i) => <li key={i}>{line}</li>)}</ul>}
+            </div>
+          ))}
+        </div>
+      )}
+      {expanded && (
+        <div className="tool-body mission-tool-body">
+          <div className="mission-tool-name muted small mono">{item.name}</div>
+          {item.input !== undefined && <pre className="tool-input mono">{typeof item.input === 'string' ? item.input : JSON.stringify(item.input, null, 2).slice(0, 4000)}</pre>}
+          {item.output && <pre className="tool-output mono">{item.output.length > 12_000 ? item.output.slice(-12_000) : item.output}</pre>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AssistantMessage({ item, sessionId, showThinking, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
   // open === null means the user has not toggled; then reasoning shows only while it is being written.
   const [open, setOpen] = useState<boolean | null>(null);
@@ -801,6 +926,9 @@ const isStep = (item: TranscriptItem): boolean => item.kind === 'tool' || item.k
  * its header, so a plan update does not split a stretch of work in two.
  */
 export function isWorkItem(item: TranscriptItem): boolean {
+  // A Mission handoff (a Builder started, a report filed, a branch landed) is the story of the
+  // mission, so it stays on screen; the Lead's read-only checks fold away like any other step.
+  if (item.kind === 'tool' && isHandoffTool(missionToolOf(item.name))) return false;
   if (isStep(item)) return true;
   // Warnings and errors are signals, not work: they stay on screen when the group is collapsed.
   if (item.kind === 'info') return item.level === 'info';
@@ -1101,6 +1229,12 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
   const emptyQuestion = questionComment && !Object.values(answers).some((answer) => answer.trim()) && !note.trim();
   const noteLabel = req.kind === 'question' ? 'Additional context (optional)' : 'Note for the agent (sent with Deny only)';
   const decisionKind = req.options.find((o) => o.id === item.decision?.optionId)?.kind ?? item.decision?.optionId ?? '';
+  // Mission mode: a Builder's request goes to its Lead first. The Lead's copy of the card answers the
+  // Builder's own request, so the response names the session that asked, not the one being viewed.
+  const route = req.mission;
+  const target = route && req.sessionId ? req.sessionId : sessionId;
+  const askingBuilder = useStore((s) => (route && req.sessionId && req.sessionId !== sessionId ? builderIndexOf(req.sessionId, s.missionViews, s.sessions) : undefined));
+  const recommendation = route?.recommendation;
   const respond = (optionId: string) => {
     if (locked || responding.current) return;
     const option = req.options.find((o) => o.id === optionId);
@@ -1116,7 +1250,7 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
     }
     responding.current = true;
     setResponseState('sending');
-    void invoke('approvals:respond', { sessionId, requestId: req.id, decision }).then(() => {
+    void invoke('approvals:respond', { sessionId: target, requestId: req.id, decision }).then(() => {
       // Keep the draft locked until the persisted decision arrives, not just until IPC resolves.
       setResponseState('sent');
     }).catch((e: unknown) => {
@@ -1137,6 +1271,25 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
         <HarnessPill harness={req.harness} />
         {decided && <Badge tone={/deny|reject|cancel/.test(decisionKind) ? 'red' : 'green'}>{labelFor(req, item.decision!.optionId)}</Badge>}
       </div>
+      {(route || item.decidedBy === 'lead') && (
+        <div className="approval-mission" data-status={route?.status}>
+          <Icon name="flag" size={12} />
+          {askingBuilder ? <span className="approval-mission-who">Builder {askingBuilder}</span> : null}
+          {decided ? (
+            <span>{item.decidedBy === 'lead' ? 'Answered by the Lead' : 'Answered by you'}</span>
+          ) : route?.status === 'with_lead' ? (
+            <span>With the Lead — it answers first; you can still decide here.</span>
+          ) : (
+            <span>Needs you{route?.reason ? `: ${route.reason}` : ''}</span>
+          )}
+        </div>
+      )}
+      {route && recommendation && (
+        <div className="approval-recommendation" data-verdict={recommendation.verdict}>
+          <span className="approval-note-label">The Lead recommends: {recommendation.verdict === 'allow' ? 'Allow' : 'Deny'}</span>
+          {recommendation.note && <div>{recommendation.note}</div>}
+        </div>
+      )}
       {req.command !== undefined && (
         decided ? (
           <pre className="approval-cmd mono">{req.command}</pre>

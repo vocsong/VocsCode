@@ -7,7 +7,8 @@ import { invoke, isMac, modKey } from '../api';
 import { basename, relTime } from '../format';
 import { archiveSession, removeFolder } from '../sessionActions';
 import { activitySections } from '../activity';
-import { sortSessionRows } from '../sessionOrder';
+import { nestMissionRows, sortSessionRows } from '../sessionOrder';
+import { BUILDER_STATE_LABELS, MISSION_STATE_LABELS } from '../mission';
 import { useStore, toastError } from '../store';
 import { useMinimalUi } from '../ui-mode';
 import { canSplit, paneShowing, SESSION_DRAG_TYPE } from '../panes';
@@ -63,7 +64,7 @@ export const sidebarViewOf = (settings: AppSettings | null): SidebarView => (set
  */
 function recentNavModel(visible: SessionMeta[]): SidebarNavFolder[] {
   const runs: SidebarNavFolder[] = [];
-  for (const s of sortSessionRows(visible)) {
+  for (const s of nestMissionRows(sortSessionRows(visible))) {
     const last = runs[runs.length - 1];
     if (last?.root === s.config.projectRoot) last.sessionIds.push(s.id);
     else runs.push({ root: s.config.projectRoot, sessionIds: [s.id] });
@@ -83,7 +84,7 @@ export function sidebarNavModel(sessions: SessionMeta[], settings: AppSettings |
   for (const s of visible) byProject.set(s.config.projectRoot, [...(byProject.get(s.config.projectRoot) ?? []), s]);
   const model = [...byProject.entries()].map(([root, list]) => ({
     root,
-    sessionIds: sortSessionRows(list).map((s) => s.id)
+    sessionIds: nestMissionRows(sortSessionRows(list)).map((s) => s.id)
   }));
   for (const root of settings?.folders ?? []) {
     if (!byProject.has(root)) model.push({ root, sessionIds: [] });
@@ -149,7 +150,7 @@ export function Sidebar() {
     [sessions, showArchived]
   );
   // Recent view: one list across every folder, by the same comparator a folder's rows use.
-  const recentRows = useMemo(() => (sidebarView === 'recent' ? sortSessionRows(visible) : []), [visible, sidebarView]);
+  const recentRows = useMemo(() => (sidebarView === 'recent' ? nestMissionRows(sortSessionRows(visible)) : []), [visible, sidebarView]);
 
   const groups = useMemo(() => {
     const byProject = new Map<string, SessionMeta[]>();
@@ -159,7 +160,7 @@ export function Sidebar() {
     }
     const groups = [...byProject.entries()].map(([root, list]) => ({
       root,
-      list: sortSessionRows(list)
+      list: nestMissionRows(sortSessionRows(list))
     }));
     if (!showArchived) {
       // A folder whose last active session was archived or deleted stays listed so a new
@@ -655,15 +656,20 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
   const canDrag = !s.archived && !renaming;
   const dragClass = dnd.dragId === s.id ? ' dragging' : '';
   const indicator = dnd.overId === s.id && dnd.dragId && dnd.dragId !== s.id ? (dnd.pos === 'before' ? ' drag-above' : ' drag-below') : '';
+  // Mission mode: a Builder sits indented under its Lead with a status dot; the Lead carries a marker.
+  const mission = s.mission;
+  const builderState = mission?.role === 'builder' ? mission.builderState ?? 'working' : undefined;
+  const builderName = mission?.builderIndex ? `Builder ${mission.builderIndex}` : 'Builder';
   return (
     <div
       ref={rowRef}
-      className={`session-row ${active ? 'active' : ''}${inPane ? ' in-pane' : ''}${s.unseenAt !== undefined ? ' unseen' : ''}${dragClass}${indicator}`}
+      className={`session-row ${active ? 'active' : ''}${inPane ? ' in-pane' : ''}${s.unseenAt !== undefined ? ' unseen' : ''}${builderState ? ' mission-builder' : ''}${dragClass}${indicator}`}
       data-testid="session-row"
       data-session-id={s.id}
       data-status={archiving ? 'archiving' : s.status}
       data-harness={s.config.harness}
       data-pinned={s.pinned ? '' : undefined}
+      data-mission-role={mission?.role}
       title={minimal && !renaming ? sessionTitleText(s) : undefined}
       draggable={canDrag}
       onDragStart={(e) => {
@@ -727,6 +733,9 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
             />
           ) : (
             <div className="session-title">
+              {builderState && (
+                <span className="mission-dot" data-state={builderState} role="img" aria-label={`${builderName}: ${BUILDER_STATE_LABELS[builderState]}`} title={`${builderName} · ${BUILDER_STATE_LABELS[builderState]}`} />
+              )}
               {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
               <SessionTitle session={s} showProject={!!folder} projectLabel={folder && (
                 <span className="session-folder" data-testid="session-folder" title={folder.root} style={folder.style?.color ? { color: folder.style.color } : undefined}>
@@ -757,6 +766,12 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
           </div>
         </div>
         <div className="session-meta">
+          {mission?.role === 'lead' && (
+            <span className="session-mission" data-state={mission.state} title={`Mission Lead${mission.state ? ` · ${MISSION_STATE_LABELS[mission.state]}` : ''}`}>
+              <Icon name="flag" size={11} />
+              <span>Mission</span>
+            </span>
+          )}
           {s.activeModel && (
             <span className="session-model" title={modelRefName(s.activeModel)}>
               {modelRefName(s.activeModel)}

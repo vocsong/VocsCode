@@ -8,8 +8,10 @@ import type { KeepAwakeBridge } from '../../../shared/keep-awake';
 import type { ModelInfo, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { modelName, modelRefName, parseTypedModel } from '../../../shared/model-names';
-import { invoke, invokeErrorMessage } from '../api';
+import { canInvoke, invoke, invokeErrorMessage } from '../api';
 import { fmtCost, fmtTokens } from '../format';
+import { canStartMission, missionDefaultsOf, missionPermissionLabel } from '../mission';
+import { openSettings } from '../settings-nav';
 import { setSessionEffort } from '../sessionActions';
 import { effortOptions, permissionOptions } from '../session-controls';
 import { useSessionModels } from '../models';
@@ -37,6 +39,19 @@ export function SessionControls({ session }: { session: SessionMeta }) {
   const fastSelected = session.config.fastMode;
   const fastLabel = fastSelected ? `Fast ${session.fastModeStatus?.state ?? 'requested'}` : undefined;
   const modelDetail = [modelRefName(current) ?? 'default model', effortLabel && `Effort: ${effortLabel}`, fastLabel].filter(Boolean).join(' · ');
+
+  // Mission mode: armed is renderer-local until the next send; a Lead keeps it on, a Builder never shows it.
+  const role = session.mission?.role;
+  const isLead = role === 'lead';
+  const armed = useStore((s) => !!s.missionArmed[session.id]) && !role;
+  const setMissionArmed = useStore((s) => s.setMissionArmed);
+  const settings = useStore((s) => s.settings);
+  const missionOn = isLead || armed;
+  const missionLabel = missionPermissionLabel(settings);
+  const missionBuilderTier = PERMISSION_MODE_LABELS[missionDefaultsOf(settings).builder.permissionMode]?.label ?? 'Auto';
+  const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
+  // While a turn runs the switch steps aside (a mission starts from the next message); once armed it stays reachable.
+  const showMissionSwitch = isLead || (canStartMission(session) && canInvoke('mission:start') && (armed || !busy));
 
   const setModel = async (m: ModelInfo) => {
     try {
@@ -84,8 +99,27 @@ export function SessionControls({ session }: { session: SessionMeta }) {
         )}
       </Dropdown>
 
-      {/* A restored session can lack a mode; don't offer a selector until one exists. */}
-      {modeLabel && (
+      {/* Mission mode replaces the session's own tier: the Lead always plans, Builders take the Settings tier. */}
+      {missionOn ? (
+        <Dropdown
+          align="left"
+          width={280}
+          trigger={(open) => (
+            <button type="button" className={`pill run-permission mode-plan is-mission ${open ? 'open' : ''}`} title="Mission mode permissions" aria-label={`Permission mode: ${missionLabel}`}>
+              <Icon name="shield" size={13} /> <span className="pill-text">{missionLabel}</span> <Icon name="chevron" size={12} />
+            </button>
+          )}
+        >
+          {(close) => (
+            <>
+              <div className="run-more-label">Mission mode</div>
+              <div className="run-more-note">The Lead runs in Plan mode: it plans, coordinates and checks, and never edits. Builders run in {missionBuilderTier}; they ask the Lead first.</div>
+              <MenuItem hint="Settings → Session defaults" onClick={() => { close(); openSettings('sessions'); }}>Builder settings</MenuItem>
+            </>
+          )}
+        </Dropdown>
+      ) : modeLabel && (
+        /* A restored session can lack a mode; don't offer a selector until one exists. */
         <Dropdown
           align="left"
           trigger={(open) => (
@@ -105,6 +139,24 @@ export function SessionControls({ session }: { session: SessionMeta }) {
             </>
           )}
         </Dropdown>
+      )}
+      {showMissionSwitch && (
+        <button
+          type="button"
+          className="pill run-mission"
+          role="switch"
+          aria-label="Mission mode"
+          aria-checked={missionOn}
+          aria-readonly={isLead || undefined}
+          title={isLead
+            ? 'Mission Lead: Mission mode stays on for this session. Messages here go to the Lead.'
+            : armed
+              ? 'Mission mode is on: your next message starts a mission. A Lead plans and Builders implement.'
+              : 'Mission mode: send your next message as a mission. A Lead plans and Builders implement.'}
+          onClick={isLead ? undefined : () => setMissionArmed(session.id, !armed)}
+        >
+          <Icon name="flag" size={13} /> <span className="pill-text">Mission</span>
+        </button>
       )}
       {!session.archived && window.keepAwake && (
         <KeepAwakeSwitch key={session.id} id={session.id} bridge={window.keepAwake} />

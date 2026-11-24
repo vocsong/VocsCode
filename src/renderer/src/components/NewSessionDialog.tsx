@@ -6,7 +6,9 @@ import { HARNESSES, PERMISSION_MODE_LABELS, closestPermissionMode, effortOptions
 import { harnessNeedsSetup, harnessStatus } from '../../../shared/harness-setup';
 import { FAST_MODE_COST_WARNING, fastModeSupport } from '../../../shared/fast-mode';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
+import { missionSupport } from '../../../shared/mission-mode';
 import { canInvoke, invoke } from '../api';
+import { MISSION_BRANCH_PREFIX, missionDefaultsOf } from '../mission';
 import { FileAttachmentChips, readAttachments } from '../attachments';
 import { rememberEffort, rememberWithoutEffort } from '../sessionActions';
 import { useStore } from '../store';
@@ -79,8 +81,11 @@ export function NewSessionDialog() {
   const [appendSystemPrompt, setAppendSystemPrompt] = useState('');
   const [maxBudget, setMaxBudget] = useState('');
   const [creating, setCreating] = useState(false);
+  // Mission mode: the new session starts as a Lead. It plans in Plan mode on its own worktree branch.
+  const [missionWanted, setMissionWanted] = useState(false);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const promptId = useId();
+  const permissionsId = useId();
   const permissionsHintId = useId();
   const fastModeLabelId = useId();
 
@@ -211,11 +216,15 @@ export function NewSessionDialog() {
     selectedEffort = selectedModel?.defaultEffort && effortOptions.includes(selectedModel.defaultEffort) ? selectedModel.defaultEffort : '';
   }
 
+  // Only a harness that can lead offers the switch; switching to one that cannot turns it off.
+  const canLead = missionSupport(harness).lead && canInvoke('mission:start');
+  const mission = missionWanted && canLead;
   // The toggle state stays the user's preference (it is what gets remembered); a folder without a
   // repository simply cannot act on it. Starting waits for the probe, so a fast click cannot submit
-  // the preference before it is known to be usable.
-  const isolate = useWorktree && folderIsRepo === true;
-  const branchPrefix = prefixChoice === CUSTOM_PREFIX ? normalizeBranchPrefix(customPrefix) : prefixChoice;
+  // the preference before it is known to be usable. A mission always works on its own branch.
+  const isolate = (useWorktree || mission) && folderIsRepo === true;
+  const branchPrefix = mission ? MISSION_BRANCH_PREFIX : prefixChoice === CUSTOM_PREFIX ? normalizeBranchPrefix(customPrefix) : prefixChoice;
+  const permissionMode: PermissionMode = mission ? 'plan' : mode;
   // An unedited name follows the request's intent: a title word for word, as the user wrote it,
   // else the model's reading of the first prompt, with the prompt's own words (filler dropped)
   // standing in until that arrives.
@@ -244,7 +253,8 @@ export function NewSessionDialog() {
     };
   }, [wantsSuggestion, promptText]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const ready = !!projectRoot && !modelsLoading && folderIsRepo !== undefined && (!isolate || !!branchPrefix);
+  // A mission starts from its task, so the first prompt is required with the switch on.
+  const ready = !!projectRoot && !modelsLoading && folderIsRepo !== undefined && (!isolate || !!branchPrefix) && (!mission || !!promptText);
 
   const create = async () => {
     if (modelsLoading) return;
@@ -261,7 +271,7 @@ export function NewSessionDialog() {
         // undefined inherits the app preference in the main process; null explicitly omits it.
         effort: noEffort ? null : selectedEffort || undefined,
         fastMode: fastSupport.supported && fastMode,
-        permissionMode: mode,
+        permissionMode,
         useWorktree: isolate,
         branchPrefix: isolate ? branchPrefix : undefined,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
@@ -274,7 +284,8 @@ export function NewSessionDialog() {
       // they were (effort is shared with live session switches, model with cross-harness forks).
       // A model that takes no effort leaves both remembered efforts as they were.
       // A typed prefix joins the saved list (newest first, so a full list drops its oldest entry).
-      const newPrefix = isolate && branchPrefix && !prefixOptions.includes(branchPrefix) ? branchPrefix : undefined;
+      // Mission mode's own choices (Plan, the mission/ prefix, the forced worktree) are never remembered.
+      const newPrefix = !mission && isolate && branchPrefix && !prefixOptions.includes(branchPrefix) ? branchPrefix : undefined;
       const remembered: Partial<AppSettings> = {
         ...(newPrefix ? { customBranchPrefixes: [newPrefix, ...(settings.customBranchPrefixes ?? [])] } : {}),
         defaultHarness: harness,
@@ -287,7 +298,7 @@ export function NewSessionDialog() {
           permissionMode: mode,
           useWorktree,
           // The picker is only shown while isolating; a session without a worktree keeps the folder's prefix.
-          ...(isolate && branchPrefix ? { branchPrefix } : {}),
+          ...(isolate && branchPrefix && !mission ? { branchPrefix } : {}),
           // Only an ACP session records an agent; another harness must not erase the folder's pick.
           ...(harness === 'acp' ? { acpAgent } : {})
         })
@@ -299,7 +310,9 @@ export function NewSessionDialog() {
         initialPrompt: prompt.trim() || undefined,
         initialImages: images.length ? images : undefined,
         initialFiles: files.length ? files : undefined,
-        goal: harness === 'antigravity' ? undefined : goal.trim() || undefined,
+        // A mission has no goal loop: the Lead runs until it finishes the mission.
+        goal: harness === 'antigravity' || mission ? undefined : goal.trim() || undefined,
+        ...(mission ? { mission: true as const } : {}),
         // The name is sent as previewed, so the branch is the one the dialog showed; the
         // checked-out branch is where an unspecified worktree starts anyway.
         ...(isolate && (branchName.trim() || autoSlug) ? { worktreeName: branchName.trim() || autoSlug } : {}),
@@ -354,14 +367,15 @@ export function NewSessionDialog() {
         <>
           <span className="muted small ns-summary">
             {descriptor.name} · {selectedModel?.displayName ?? model?.model ?? (modelsAfterStart ? 'Agent default' : 'Harness default')}
+            {mission && <> · Mission Lead</>}
             {isolate && branchPreview && <> · <code>{branchPreview}</code></>}
           </span>
           <span className="spacer" />
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={create} disabled={creating || !ready} title="Start from the prompt area with Enter">
-            {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>↵</Kbd>
+          <Button variant="primary" onClick={create} disabled={creating || !ready} title={mission && !promptText ? 'Describe the mission task first' : 'Start from the prompt area with Enter'}>
+            {creating ? <Spinner /> : <Icon name={mission ? 'flag' : 'play'} />} {mission ? 'Start mission' : 'Start session'} <Kbd>↵</Kbd>
           </Button>
         </>
       }
@@ -448,17 +462,33 @@ export function NewSessionDialog() {
               </select>
             </Field>
             <div className="field">
-              <label className="field">
-                <span className="field-label">Permissions</span>
-                <select aria-describedby={permissionsHintId} value={mode} onChange={(e) => setMode(e.target.value as PermissionMode)}>
+              <label className="field-label" htmlFor={permissionsId}>Permissions</label>
+              <div className="ns-permission-row">
+                <select
+                  id={permissionsId}
+                  aria-describedby={permissionsHintId}
+                  value={permissionMode}
+                  disabled={mission}
+                  title={mission ? 'A Mission Lead always runs in Plan mode' : undefined}
+                  onChange={(e) => setMode(e.target.value as PermissionMode)}
+                >
                   {modes.map((m) => (
                     <option key={m} value={m}>
                       {PERMISSION_MODE_LABELS[m].label}
                     </option>
                   ))}
                 </select>
-              </label>
-              <span id={permissionsHintId} className="field-hint">{permissionModeHint(harness, mode)}</span>
+                {canLead && (
+                  <span className="ns-mission" title="Mission mode: a Lead plans and coordinates; Builder sessions implement">
+                    <Toggle checked={mission} onChange={setMissionWanted} disabled={creating} label="Mission" ariaLabel="Mission mode" />
+                  </span>
+                )}
+              </div>
+              <span id={permissionsHintId} className="field-hint">
+                {mission
+                  ? `Mission mode: the Lead plans in Plan mode and never edits; Builders run in ${PERMISSION_MODE_LABELS[missionDefaultsOf(settings).builder.permissionMode].label} (Settings → Session defaults).`
+                  : permissionModeHint(harness, mode)}
+              </span>
             </div>
             <div className="field ns-fast-mode" role="group" aria-labelledby={fastModeLabelId}>
               <span id={fastModeLabelId} className="field-label">Fast mode</span>
@@ -468,13 +498,13 @@ export function NewSessionDialog() {
               <span className="field-hint">{FAST_MODE_COST_WARNING}</span>
               {!fastSupport.supported && <span className="field-hint">{fastSupport.reason ?? 'Fast mode is not supported on this route.'}</span>}
             </div>
-            {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="ns-span2 callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
+            {!descriptor.capabilities.approvals && permissionMode !== 'plan' && <div className="ns-span2 callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
           </section>
         </div>
 
         <section className="ns-span2">
           <div className="field">
-            <label className="field-label" htmlFor={promptId}>First prompt (optional)</label>
+            <label className="field-label" htmlFor={promptId}>{mission ? 'Mission task (required)' : 'First prompt (optional)'}</label>
             {images.length > 0 && (
               <div className="attachments ns-attachments">
                 {images.map((im, i) => (
@@ -489,7 +519,7 @@ export function NewSessionDialog() {
             )}
             <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
             <div className="ns-prompt-box">
-              <textarea id={promptId} ref={promptRef} autoFocus rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <textarea id={promptId} ref={promptRef} autoFocus rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder={mission ? 'What should the mission deliver? The Lead plans it and Builders implement it.' : 'What should the agent do?'} />
               <label className="icon-btn ns-attach" title="Attach files">
                 <Icon name="file" size={14} />
                 <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
@@ -497,7 +527,7 @@ export function NewSessionDialog() {
             </div>
             <span className="field-hint">Paste or attach files and images — they are sent with the first message.</span>
           </div>
-          {harness !== 'antigravity' && <Field
+          {harness !== 'antigravity' && !mission && <Field
             label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>}
             hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips. On a harness that has its own /goal command, the objective is handed to that harness instead and the guard does not apply."
           >
@@ -509,16 +539,18 @@ export function NewSessionDialog() {
           <Toggle
             checked={isolate}
             onChange={setUseWorktree}
-            disabled={folderIsRepo !== true}
+            disabled={folderIsRepo !== true || mission}
             label={
               <span className="ns-toggle-text">
                 <span className="ns-toggle-title">Isolate in a git worktree</span>
                 <span className="muted small">
                   {folderIsRepo === false
-                    ? 'Unavailable — this folder is not a git repository.'
+                    ? mission ? 'This folder is not a git repository, so the mission works in the folder itself.' : 'Unavailable — this folder is not a git repository.'
                     : folderIsRepo === undefined
                       ? 'Checking the folder…'
-                      : 'Work on a new branch in .vocs-code/worktrees. Your current checkout stays untouched.'}
+                      : mission
+                        ? 'A mission always works on its own branch in .vocs-code/worktrees. Your current checkout stays untouched.'
+                        : 'Work on a new branch in .vocs-code/worktrees. Your current checkout stays untouched.'}
                 </span>
               </span>
             }
@@ -529,15 +561,21 @@ export function NewSessionDialog() {
                 <div className="field">
                   <span className="field-label">New branch</span>
                   <div className="ns-branch-input">
-                    <select className="ns-branch-prefix" aria-label="Branch prefix" value={prefixChoice} onChange={(e) => choosePrefix(e.target.value)}>
-                      {prefixOptions.map((p) => (
-                        <option key={p} value={p}>
-                          {p}/
-                        </option>
-                      ))}
-                      <option value={CUSTOM_PREFIX}>Custom…</option>
-                    </select>
-                    {prefixChoice === CUSTOM_PREFIX && (
+                    {mission ? (
+                      <select className="ns-branch-prefix" aria-label="Branch prefix" value={MISSION_BRANCH_PREFIX} disabled title="Mission branches always start with mission/">
+                        <option value={MISSION_BRANCH_PREFIX}>{MISSION_BRANCH_PREFIX}/</option>
+                      </select>
+                    ) : (
+                      <select className="ns-branch-prefix" aria-label="Branch prefix" value={prefixChoice} onChange={(e) => choosePrefix(e.target.value)}>
+                        {prefixOptions.map((p) => (
+                          <option key={p} value={p}>
+                            {p}/
+                          </option>
+                        ))}
+                        <option value={CUSTOM_PREFIX}>Custom…</option>
+                      </select>
+                    )}
+                    {!mission && prefixChoice === CUSTOM_PREFIX && (
                       <>
                         <input
                           className="ns-branch-custom"
@@ -573,7 +611,7 @@ export function NewSessionDialog() {
                       <Icon name="branch" size={12} /> Creates <code>{branchPreview}</code> in <code>.vocs-code/worktrees/{nameSlug ?? '<session-name>'}</code>
                       {suggesting && <span className="row gap6" title="Naming the branch from what the first prompt asks for"><Spinner size={10} /> naming from your prompt…</span>}
                     </span>
-                    {prefixChoice === CUSTOM_PREFIX && <span>The new prefix is saved to your prefixes when the session starts.</span>}
+                    {!mission && prefixChoice === CUSTOM_PREFIX && <span>The new prefix is saved to your prefixes when the session starts.</span>}
                   </>
                 ) : customPrefix.trim() ? (
                   'Not a valid branch prefix: use letters, digits, ".", "_" or "-", with "/" between parts.'

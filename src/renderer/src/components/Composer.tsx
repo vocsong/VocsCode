@@ -7,10 +7,13 @@ import { harnessRoutedText, slashEntries, type HarnessCommand, type SlashEntry }
 import { harnessCommandNote, useHarnessCommandList } from '../harness-commands';
 import { MAX_HOUSEKEEP_RECENT_DAYS } from '../../../shared/housekeep';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
-import { canInvoke, invoke } from '../api';
+import { missionSupport } from '../../../shared/mission-mode';
+import { canInvoke, invoke, invokeErrorMessage } from '../api';
 import { FileAttachmentChips, readAttachments } from '../attachments';
 import { fmtCost, fmtTokens } from '../format';
 import { canHousekeepHere, openHousekeep } from '../housekeep';
+import { LEAD_HARNESS_NAMES, MISSION_ENDED_TEXT, missionEnded } from '../mission';
+import { ForkIntoDropdown } from './ForkInto';
 import { openSettings } from './SettingsView';
 import { useSessionModels } from '../models';
 import { setSessionEffort } from '../sessionActions';
@@ -66,6 +69,10 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
   const shellDraft = text.trimStart().startsWith('!');
   const harness = HARNESS_BY_ID[session.config.harness];
   const caps = harness.capabilities;
+  // Mission mode: the switch arms this session's next send; a Lead is always on; an ended mission is read-only.
+  const missionRole = session.mission?.role;
+  const armed = useStore((s) => !!s.missionArmed[session.id]) && !missionRole;
+  const ended = missionEnded(session);
   const uiMode = useUiMode();
   const { models } = useSessionModels(session);
   const currentModel = session.activeModel ?? session.config.model;
@@ -214,7 +221,55 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
       setSlash(null);
       setHistIdx(-1);
     };
+    if (ended) return;
     const typedCommand = t.startsWith('/') ? t.slice(1).split(/\s+/)[0] : '';
+    // Mission mode: `/mission <task>`, or any prompt while the switch is armed, starts a mission. On a
+    // Lead the mission is already on, so `/mission <text>` is just a follow-up for it.
+    const missionCommand = typedCommand === 'mission';
+    const missionTask = missionCommand ? t.slice('/mission'.length).trim() : t;
+    if (missionCommand && missionRole === 'builder') {
+      toast('This is a Mission Builder. Message its Lead to change the mission.', 'info');
+      return;
+    }
+    const appCommand = !!typedCommand && !missionCommand && SLASH_COMMANDS.some((c) => c.name === typedCommand);
+    if (!missionRole && (missionCommand || (armed && !appCommand && !t.startsWith('!')))) {
+      if (!missionSupport(session.config.harness).lead) {
+        toast(`${harness.name} cannot lead a mission. Mission mode runs on ${LEAD_HARNESS_NAMES.join(', ')}.`, 'error');
+        return;
+      }
+      if (!canInvoke('mission:start')) {
+        toast('Mission mode starts from the desktop app.', 'info');
+        return;
+      }
+      if (!missionTask) {
+        toast('Describe the task for the mission, for example /mission add rate limiting to the API.', 'info');
+        return;
+      }
+      const sentImages = images;
+      const sentFiles = files;
+      pushHistory(session.id, t);
+      clearDraft();
+      setImages((current) => current.filter((image) => !sentImages.includes(image)));
+      setFiles((current) => current.filter((file) => !sentFiles.includes(file)));
+      try {
+        const { leadId } = await invoke('mission:start', {
+          sessionId: session.id,
+          input: { text: missionTask, images: sentImages.length ? sentImages : undefined, files: sentFiles.length ? sentFiles : undefined, mode: 'now' }
+        });
+        useStore.getState().setMissionArmed(session.id, false);
+        await useStore.getState().setActive(leadId);
+      } catch (e) {
+        toast(invokeErrorMessage(e), 'error');
+        setText((current) => current ? `${t}\n\n${current}` : t);
+        setImages((current) => [...sentImages, ...current]);
+        setFiles((current) => [...sentFiles, ...current]);
+      }
+      return;
+    }
+    if (missionCommand && !missionTask && !images.length && !files.length) {
+      toast('Usage: /mission <task>', 'info');
+      return;
+    }
     if (typedCommand === 'housekeep') {
       if (images.length || files.length) { toast('Housekeep cannot include attachments.', 'error'); return; }
       const arg = t.slice('/housekeep'.length).trim().toLowerCase();
@@ -232,14 +287,14 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
     }
     // `//name` is the explicit route to a harness command an app command shadows: one slash comes
     // off and the rest goes to the harness as an ordinary message (shared/harness-commands.ts).
-    const routed = harnessRoutedText(t, SLASH_COMMANDS.map((c) => c.name));
+    const routed = missionCommand ? missionTask : harnessRoutedText(t, SLASH_COMMANDS.map((c) => c.name));
     // A command the harness owns itself is prompt text, not an app command: `/goal` on a session whose
     // harness has its own goal goes to the harness verbatim (see shared/goal-driver.ts). The rest of
     // the send path is unchanged, so history and draft handling stay correct for free.
     if (typedCommand && typedCommand === session.nativeGoal?.toLowerCase()) {
       toast(`${harness.name} answers /${typedCommand} itself — sent to the harness.`, 'info');
       useStore.getState().setPanelTab('goal');
-    } else if (typedCommand && SLASH_COMMANDS.some((c) => c.name === typedCommand)) {
+    } else if (appCommand) {
       if (files.length) { toast('App commands cannot include file attachments. Remove them or send a regular message.', 'error'); return; }
       // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
       // composer looking frozen; their progress and outcome appear as info lines in the transcript.
@@ -653,19 +708,26 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
         </>
       )}
       <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
-      <div className="composer-box">
+      <div className={`composer-box${armed ? ' is-mission' : ''}${ended ? ' is-ended' : ''}`}>
         <textarea
           ref={ref}
           value={text}
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={busy ? (caps.steer ? 'Steer the agent… (Enter sends now; send menu to queue)' : 'Queue a follow-up… (sent after this turn)') : IDLE_PLACEHOLDER[uiMode]}
+          placeholder={ended
+            ? MISSION_ENDED_TEXT
+            : armed
+              ? 'Describe the mission… a Lead plans it and Builders implement it'
+              : busy ? (caps.steer ? 'Steer the agent… (Enter sends now; send menu to queue)' : 'Queue a follow-up… (sent after this turn)')
+              : missionRole === 'lead' ? 'Message the Lead…' : IDLE_PLACEHOLDER[uiMode]}
+          aria-label={ended ? MISSION_ENDED_TEXT : undefined}
+          disabled={ended}
           rows={1}
           spellCheck
         />
         <div className="composer-actions">
-          <button type="button" className="icon-btn composer-attach" title="Attach files" aria-label="Attach files" onClick={() => fileInput.current?.click()}>
+          <button type="button" className="icon-btn composer-attach" title="Attach files" aria-label="Attach files" disabled={ended} onClick={() => fileInput.current?.click()}>
             <Icon name="plus" size={16} />
           </button>
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
@@ -678,7 +740,13 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
               {secondaryItems}
             </Dropdown>
           )}
-          {shellDraft ? (
+          {ended ? (
+            <ForkIntoDropdown
+              session={session}
+              onForked={(fork) => void useStore.getState().setActive(fork.id)}
+              trigger={() => <Button size="sm" variant="primary" icon="fork" title="Fork this session to keep working on it">Fork to continue</Button>}
+            />
+          ) : shellDraft ? (
             <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
               Run
             </Button>

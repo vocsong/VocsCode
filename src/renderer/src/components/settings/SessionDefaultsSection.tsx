@@ -2,10 +2,13 @@
 import React, { useEffect, useState } from 'react';
 import { BUILTIN_BRANCH_PREFIXES, branchPrefixOptions, normalizeBranchPrefix } from '../../../../shared/branch-prefix';
 import { AUTO_COMPACTION_PRESETS } from '../../../../shared/compaction';
-import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../../shared/harness-meta';
-import type { AppSettings, HarnessId, ModelInfo, ProviderConfig } from '../../../../shared/types';
+import { EFFORT_LEVELS, HARNESS_BY_ID, HARNESSES, PERMISSION_MODE_LABELS, PERMISSION_TIER_ORDER, closestPermissionMode, effortOptionsFor } from '../../../../shared/harness-meta';
+import { missionSupport, type MissionDefaults } from '../../../../shared/mission-mode';
+import type { AppSettings, EffortLevel, HarnessId, ModelInfo, PermissionMode, ProviderConfig } from '../../../../shared/types';
 import { invoke } from '../../api';
+import { missionDefaultsOf } from '../../mission';
 import { rememberEffort } from '../../sessionActions';
+import { useStore } from '../../store';
 import { ModelPicker } from '../ModelPicker';
 import { SettingsGroup, SettingsNote } from '../SettingsPrimitives';
 import { Button, Field, Icon, Toggle } from '../ui';
@@ -76,10 +79,116 @@ export function SessionDefaultsSection({ settings, update }: { settings: AppSett
           label="Prefer a harness's own /goal when it has one — the command goes to the harness instead of the app's goal engine"
         />
       </SettingsGroup>
+      <SettingsGroup
+        id="sessions-mission"
+        title="Mission mode"
+        icon="flag"
+        description="With Mission mode on, a Lead plans and coordinates in Plan mode while Builder sessions implement. Builders run on these choices."
+      >
+        <MissionBuilderFields settings={settings} update={update} />
+      </SettingsGroup>
       <SettingsGroup id="sessions-branches" title="Worktree branches" icon="branch">
         <BranchPrefixFields settings={settings} update={update} />
       </SettingsGroup>
     </div>
+  );
+}
+
+/** Harnesses a Builder can run on; Codex exec, Cursor and Antigravity cannot take part. */
+const BUILDER_HARNESSES = HARNESSES.filter((h) => missionSupport(h.id).builder);
+
+/** Session defaults → Mission mode: the harness, model, effort and permission mode every Builder starts with. */
+function MissionBuilderFields({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const builder = missionDefaultsOf(settings).builder;
+  const harness: HarnessId | undefined = builder.harness === 'same' ? undefined : builder.harness;
+  const same = !harness;
+  const catalog = useStore((s) => (harness ? s.modelCatalog[harness] : undefined));
+  const ensureModelCatalog = useStore((s) => s.ensureModelCatalog);
+  useEffect(() => {
+    if (harness && !catalog) void ensureModelCatalog(harness);
+  }, [harness, catalog, ensureModelCatalog]);
+  const save = (next: MissionDefaults['builder']) => update({ missionDefaults: { builder: next } });
+  const descriptor = harness ? HARNESS_BY_ID[harness] : undefined;
+  const models = catalog?.models ?? [];
+  const selectedModel = builder.model ? models.find((m) => m.provider === builder.model!.provider && m.id === builder.model!.model) : undefined;
+  const efforts = descriptor ? effortOptionsFor(descriptor, selectedModel) : EFFORT_LEVELS;
+  const tiers = descriptor ? descriptor.capabilities.permissionModes : PERMISSION_TIER_ORDER;
+
+  const chooseHarness = (value: HarnessId | 'same') => {
+    // A model belongs to its harness, and a tier the new harness does not offer becomes its closest stricter one.
+    const { model: _model, effort, ...rest } = builder;
+    const permissionMode = value === 'same' ? builder.permissionMode : closestPermissionMode(value, builder.permissionMode);
+    save({ ...rest, harness: value, permissionMode, ...(value !== 'same' && effort !== undefined ? { effort } : {}) });
+  };
+
+  return (
+    <>
+      <Field
+        label="Builder harness"
+        hint={same ? 'Same as Lead runs every Builder on the Lead’s harness, model and reasoning effort.' : 'The Lead keeps its own session’s harness and model; only Builders use this one.'}
+      >
+        <select value={builder.harness} onChange={(e) => chooseHarness(e.target.value as HarnessId | 'same')}>
+          <option value="same">Same as Lead</option>
+          {BUILDER_HARNESSES.map((h) => (
+            <option key={h.id} value={h.id}>
+              {h.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {!same && (
+        <>
+          <div className="field">
+            <span className="field-label">Builder model</span>
+            <div className="onboarding-model-picker">
+              <ModelPicker
+                models={models}
+                loading={catalog?.loading ?? true}
+                error={catalog?.error}
+                selected={builder.model}
+                autoFocus={false}
+                clearOption={{ label: 'Harness default' }}
+                onSelect={(m) => {
+                  const { model: _model, ...rest } = builder;
+                  save(m ? { ...rest, model: { provider: m.provider, model: m.id } } : rest);
+                }}
+              />
+            </div>
+          </div>
+          <Field label="Builder reasoning effort">
+            <select
+              value={builder.effort === null ? 'none' : builder.effort ?? ''}
+              disabled={!descriptor?.capabilities.effort}
+              onChange={(e) => {
+                const { effort: _effort, ...rest } = builder;
+                const value = e.target.value;
+                save(value === '' ? rest : { ...rest, effort: value === 'none' ? null : value as EffortLevel });
+              }}
+            >
+              <option value="">App default</option>
+              <option value="none">Harness default</option>
+              {efforts.map((level) => (
+                <option key={level} value={level}>
+                  {level}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </>
+      )}
+      <Field
+        label="Builder permission mode"
+        hint="Builders ask their Lead first. Publishing, elevation, downloads piped to a shell and anything outside the mission's folders still ask you, with the Lead's advice."
+      >
+        <select value={builder.permissionMode} onChange={(e) => save({ ...builder, permissionMode: e.target.value as PermissionMode })}>
+          {tiers.map((mode) => (
+            <option key={mode} value={mode}>
+              {PERMISSION_MODE_LABELS[mode].label}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </>
   );
 }
 
