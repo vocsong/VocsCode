@@ -15,6 +15,15 @@ export interface SubscriptionLimits {
   groups: SubscriptionLimitGroup[];
 }
 
+/** A window reported during a normal turn. Times are epoch milliseconds except the reset ISO string. */
+export interface ObservedSubscriptionWindow {
+  name: string;
+  remainingFraction: number;
+  resetAt?: string;
+  observedAt: number;
+  expiresAt: number;
+}
+
 export interface OpenSubscriptionUsageResult {
   kind: 'browser' | 'terminal';
 }

@@ -4,7 +4,7 @@ import type { ControlGrantInput, ControlOwnerState } from './control';
 import type { LocalControlOwnerState } from './local-control';
 import type { HousekeepInventory, HousekeepOutcome, HousekeepPreview } from './housekeep';
 import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
-import type { InlineSubscriptionProvider, OpenSubscriptionUsageResult, SubscriptionLimits, SubscriptionProvider } from './subscription-usage';
+import type { InlineSubscriptionProvider, ObservedSubscriptionWindow, OpenSubscriptionUsageResult, SubscriptionLimits, SubscriptionProvider } from './subscription-usage';
 import type {
   AnalyticsSummary,
   AppInstructionFile,
@@ -210,6 +210,8 @@ export interface IpcContract {
   'harness:login': [{ harness: LoginHarnessId; device?: boolean }, { ok: boolean; error?: string }];
   /** Desktop-owner action only. Reads provider account windows, never credentials or raw output. */
   'subscriptions:read': [{ provider: InlineSubscriptionProvider }, SubscriptionLimits];
+  /** Desktop owner only. Reads observations already received from this live Claude session. */
+  'subscriptions:claudeObserved': [{ sessionId: string }, ObservedSubscriptionWindow[]];
   /** Desktop-owner action only. Opens a fixed vendor usage page or its interactive CLI. */
   'subscriptions:openUsage': [{ provider: SubscriptionProvider }, OpenSubscriptionUsageResult];
   /** Served from a 7-day disk cache of the last clean discovery; `refresh` rediscovers now. */

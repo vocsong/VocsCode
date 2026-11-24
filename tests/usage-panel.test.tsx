@@ -1,11 +1,11 @@
 /**
  * @vitest-environment jsdom
  *
- * The right panel's Usage dashboard: the session summary and the separate, on-demand account
- * limits view. Exercise what the user can read and click over a stubbed desktop bridge.
+ * The right panel's Usage dashboard: session metrics and separate account limits on one page.
+ * Exercise visible results and calls over a stubbed desktop bridge.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { SessionUsage } from '../src/renderer/src/components/SessionUsage';
 import { useStore } from '../src/renderer/src/store';
 import type { SubscriptionLimits } from '../src/shared/subscription-usage';
@@ -44,33 +44,30 @@ const items: TranscriptItem[] = [
 ];
 
 const detail = (name: 'Turns' | 'Tools' | 'Errors') => screen.getByRole('radio', { name });
-const show = (name: 'Session' | 'Subscriptions') => fireEvent.click(screen.getByRole('radio', { name }));
 const account = (name: string) => within(screen.getByRole('region', { name }));
 const quotaReply: SubscriptionLimits = { groups: [{ name: 'Codex', buckets: [
   { name: '5-hour limit', remainingFraction: 0.726, resetAt: '2030-01-01T12:00:00Z' },
   { name: 'Weekly limit', remainingFraction: 0 }
 ] }] };
 
+const connected = { available: true, authenticated: true, authMethod: 'subscription' } as const;
+
 describe('Usage panel', () => {
-  it('lists subscription accounts from any session and checks Codex only on click', async () => {
+  it('shows Codex limits on open without hiding the session metrics', async () => {
     let finish!: (value: SubscriptionLimits) => void;
     const invoke = vi.fn(() => new Promise<SubscriptionLimits>((resolve) => { finish = resolve; }));
     vi.stubGlobal('harness', { invoke });
-    useStore.setState({ availability: { codex: { available: true, authenticated: true, authMethod: 'subscription' }, claude: { available: true, authenticated: true, authMethod: 'api-key' } } });
-    const { rerender } = render(<SessionUsage session={session()} />);
+    useStore.setState({ availability: { codex: connected, claude: { ...connected, authMethod: 'api-key' } } });
+    const { rerender } = render(<SessionUsage session={session()} readLimitsOnOpen />);
     expect(screen.getByRole('meter', { name: 'Context window' }).getAttribute('aria-valuenow')).toBe('90');
-    show('Subscriptions');
+    expect(screen.queryByRole('radio', { name: 'Subscriptions' })).toBeNull();
 
     const codex = account('Codex · ChatGPT');
     expect(codex.getByText('Subscription sign-in detected')).toBeTruthy();
     expect(account('Claude').getByText('API key configured')).toBeTruthy();
     expect(account('Google Antigravity').getByRole('button', { name: 'Open CLI' })).toBeTruthy();
     expect(account('Cursor').getByRole('button', { name: 'Open usage page' })).toBeTruthy();
-    expect(invoke).not.toHaveBeenCalled();
-    expect(screen.queryByRole('meter')).toBeNull();
-    const check = codex.getByRole('button', { name: 'Check limits' });
-    fireEvent.click(check);
-    fireEvent.click(check);
+    expect(codex.queryByRole('meter')).toBeNull();
     expect(invoke).toHaveBeenCalledExactlyOnceWith('subscriptions:read', { provider: 'codex' });
     expect(codex.getByRole('status').textContent).toContain('Checking account limits');
 
@@ -78,25 +75,40 @@ describe('Usage panel', () => {
     expect((await codex.findByRole('meter', { name: '5-hour limit' })).getAttribute('aria-valuenow')).toBe('73');
     expect(codex.getByRole('meter', { name: 'Weekly limit' }).getAttribute('aria-valuenow')).toBe('0');
     expect(codex.getByText(/^Resets /)).toBeTruthy();
-    show('Session');
     expect(screen.getByRole('meter', { name: 'Context window' }).getAttribute('aria-valuenow')).toBe('90');
-    rerender(<SessionUsage session={session({ id: 'another' })} />);
-    show('Subscriptions');
+    rerender(<SessionUsage session={session({ id: 'another' })} items={items} readLimitsOnOpen />);
     expect(codex.getByRole('meter', { name: '5-hour limit' })).toBeTruthy();
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
-  it('shows quota errors without inventing percentages and allows a retry', async () => {
+  it('waits for a visible visit and a detected subscription, including Codex exec', async () => {
+    const invoke = vi.fn().mockResolvedValue(quotaReply);
+    vi.stubGlobal('harness', { invoke });
+    const current = session({ config: { ...session().config, harness: 'codex-exec' } });
+    const { rerender } = render(<SessionUsage session={current} />);
+    act(() => useStore.setState({ availability: { 'codex-exec': { ...connected, authMethod: 'api-key' } } }));
+    expect(invoke).not.toHaveBeenCalled();
+    rerender(<SessionUsage session={current} readLimitsOnOpen />);
+    expect(invoke).not.toHaveBeenCalled();
+    rerender(<SessionUsage session={current} />);
+    act(() => useStore.setState({ availability: { 'codex-exec': connected } }));
+    expect(invoke).not.toHaveBeenCalled();
+    rerender(<SessionUsage session={current} readLimitsOnOpen />);
+    await account('Codex · ChatGPT').findByRole('meter', { name: '5-hour limit' });
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('subscriptions:read', { provider: 'codex' });
+  });
+
+  it('shows an automatic read failure without inventing percentages or retrying in the background', async () => {
     const invoke = vi.fn().mockRejectedValueOnce(new Error("Error invoking remote method 'subscriptions:read': Error: Sign in with ChatGPT first."))
       .mockResolvedValueOnce(quotaReply);
     vi.stubGlobal('harness', { invoke });
-    render(<SessionUsage session={session()} />);
-    show('Subscriptions');
+    useStore.setState({ availability: { codex: connected } });
+    render(<SessionUsage session={session()} readLimitsOnOpen />);
 
     const codex = account('Codex · ChatGPT');
-    fireEvent.click(codex.getByRole('button', { name: 'Check limits' }));
     expect((await codex.findByRole('alert')).textContent).toBe('Sign in with ChatGPT first.');
     expect(codex.queryByRole('meter')).toBeNull();
+    expect(invoke).toHaveBeenCalledTimes(1);
     fireEvent.click(codex.getByRole('button', { name: 'Check limits' }));
     await codex.findByRole('meter', { name: '5-hour limit' });
     expect(codex.queryByRole('alert')).toBeNull();
@@ -107,8 +119,7 @@ describe('Usage panel', () => {
   it('opens official usage views without sending a chat message or reading Antigravity headlessly', async () => {
     const invoke = vi.fn().mockResolvedValueOnce({ kind: 'terminal' }).mockResolvedValueOnce({ kind: 'browser' });
     vi.stubGlobal('harness', { invoke });
-    render(<SessionUsage session={session()} />);
-    show('Subscriptions');
+    render(<SessionUsage session={session()} readLimitsOnOpen />);
 
     const antigravity = account('Google Antigravity');
     fireEvent.click(antigravity.getByRole('button', { name: 'Open CLI' }));
@@ -123,12 +134,57 @@ describe('Usage panel', () => {
     ]);
   });
 
+  it('shows recent Claude limits after a normal turn, then expires them without rechecking', async () => {
+    const current = session({ config: { ...session().config, harness: 'claude' } });
+    const invoke = vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([{
+      name: 'Weekly limit', remainingFraction: 0.63, observedAt: Date.now(), expiresAt: Date.now() + 60_000, resetAt: '2030-01-01T12:00:00Z'
+    }]);
+    vi.stubGlobal('harness', { invoke });
+    vi.useFakeTimers();
+    try {
+      const { rerender } = render(<SessionUsage session={current} readLimitsOnOpen />);
+      await act(async () => {});
+      const claude = account('Claude');
+      expect(claude.getByText(/No recent Claude limits/)).toBeTruthy();
+      expect(claude.queryByRole('meter')).toBeNull();
+      rerender(<SessionUsage session={{ ...current, usage: { ...current.usage, turns: current.usage.turns + 1 } }} readLimitsOnOpen />);
+      await act(async () => {});
+      expect(claude.getByRole('meter', { name: 'Weekly limit' }).getAttribute('aria-valuenow')).toBe('63');
+      expect(claude.getByText(/Last reported by Claude/)).toBeTruthy();
+      expect(claude.getByText(/Resets /)).toBeTruthy();
+      expect(claude.getByRole('button', { name: 'Open usage page' })).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(claude.queryByRole('meter')).toBeNull();
+      expect(invoke.mock.calls).toEqual([
+        ['subscriptions:claudeObserved', { sessionId: current.id }],
+        ['subscriptions:claudeObserved', { sessionId: current.id }]
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not show a late Claude observation in a different session', async () => {
+    const current = session({ config: { ...session().config, harness: 'claude' } });
+    let finish!: (value: unknown) => void;
+    const invoke = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValueOnce([]);
+    vi.stubGlobal('harness', { invoke });
+    const { rerender } = render(<SessionUsage session={current} readLimitsOnOpen />);
+    rerender(<SessionUsage session={{ ...current, id: 'another' }} readLimitsOnOpen />);
+    await act(async () => { finish([{ name: 'Weekly limit', remainingFraction: 0.6, observedAt: Date.now(), expiresAt: Date.now() + 60_000 }]); });
+    expect(account('Claude').queryByRole('meter')).toBeNull();
+    expect(invoke.mock.calls).toEqual([
+      ['subscriptions:claudeObserved', { sessionId: 's1' }],
+      ['subscriptions:claudeObserved', { sessionId: 'another' }]
+    ]);
+  });
+
   it('does not offer account reads or launch actions to a remote transport', () => {
     const invoke = vi.fn();
     vi.stubGlobal('harness', { invoke, can: () => false });
-    render(<SessionUsage session={session()} />);
-    show('Subscriptions');
-    expect(screen.getByText(/available in the desktop app/)).toBeTruthy();
+    useStore.setState({ availability: { codex: connected, antigravity: connected, claude: connected } });
+    render(<SessionUsage session={session()} readLimitsOnOpen />);
+    expect(screen.queryByRole('region', { name: 'Subscription limits' })).toBeNull();
     expect(screen.queryByRole('button', { name: /Open CLI|Check limits|Open usage page/ })).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
   });
