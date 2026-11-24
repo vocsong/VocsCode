@@ -38,7 +38,7 @@ src/main
   runtime.ts      binary discovery (PATH, app runtime dir, bundled), the npm update check, doctor, installer
   secrets.ts      API keys encrypted at rest via Electron safeStorage
   terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
-  handlers.ts     transport-agnostic IPC handler registry (Electron-free, unit-tested in Node)
+  handlers.ts + handlers/   transport-agnostic IPC handler registry (Electron-free, unit-tested in Node), split by domain (app, settings-providers, harnesses, mcp-cua, sessions, account-remote, git-fs, knowledge-terminal)
   web-server.ts   localhost web client (VOCS_CODE_WEB=1): serves the built renderer, bridges the registry over WebSocket
   analytics.ts + analytics-migrations.ts + analytics-executions.ts   usage ledger, stat-gated startup replay, one-time repairs, execution log
   git.ts / settings.ts / store.ts / ipc.ts / index.ts / window.ts / shutdown.ts / windows-shell-identity.ts   (ipc.ts binds handlers.ts to ipcMain; window.ts, shutdown.ts, windows-shell-identity.ts hold Electron shell/lifecycle mechanics)
