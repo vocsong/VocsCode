@@ -85,6 +85,8 @@ const EDGE_ROUTES: EdgeRoute[] = [
   { method: 'GET', path: '/v1/owner/enroll-grant', binding: 'POLL_LIMIT', credential: 'none' },
   { method: 'GET', path: '/v1/owner/hosts', binding: 'POLL_LIMIT', credential: 'none' },
   { method: 'POST', path: '/v1/owner/pair-request', binding: 'PAIR_LIMIT', credential: 'none' },
+  { method: 'GET', path: '/v1/owner/analytics', binding: 'POLL_LIMIT', credential: 'none' },
+  { method: 'GET', path: '/v1/owner/analytics/part', binding: 'POLL_LIMIT', credential: 'none' },
   // Device routes: one total per address across all of them (whatever route or device id a request
   // names), then each device's own budget per route. A desktop's first mirror sync uploads up to ~50
   // sessions at once, and a busy one re-uploads each active session every few seconds; every
@@ -102,6 +104,10 @@ const EDGE_ROUTES: EdgeRoute[] = [
   { method: 'GET', path: '/v1/mirror/', prefix: true, ...DEVICE, credential: 'device' },
   { method: 'PUT', path: '/v1/mirror/', prefix: true, ...DEVICE, credential: 'device', bulk: true },
   { method: 'DELETE', path: '/v1/mirror/', prefix: true, ...DEVICE, credential: 'device' },
+  { method: 'GET', path: '/v1/analytics', ...DEVICE, credential: 'device' },
+  { method: 'PUT', path: '/v1/analytics/part', ...DEVICE, credential: 'device', bulk: true },
+  { method: 'PUT', path: '/v1/analytics/manifest', ...DEVICE, credential: 'device' },
+  { method: 'DELETE', path: '/v1/analytics', ...DEVICE, credential: 'device' },
   // The controller endpoint reads and bounds its own body (control-auth.ts); limited here only.
   { method: 'POST', path: CONTROL_PATH, binding: 'POLL_LIMIT', credential: 'none' }
 ];
