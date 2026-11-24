@@ -15,8 +15,6 @@ import { Composer } from '../src/renderer/src/components/Composer';
 import { Header } from '../src/renderer/src/components/Header';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { Sidebar } from '../src/renderer/src/components/Sidebar';
-import { StatusChip } from '../src/web/components/StatusChip';
-import { WebComposer } from '../src/web/components/WebComposer';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta } from '../src/shared/types';
 
@@ -159,18 +157,5 @@ describe('Sidebar, Header, Composer, RightPanel, and Web shell ongoing indicator
     // RightPanel badges both Subagents (live running count) and Processes (active session process count).
     expect(screen.getByTestId('subagents-running-count').textContent).toBe('1');
     expect(screen.getByTestId('processes-session-count').textContent).toBe('1');
-  });
-
-  it('surfaces ongoing state in the web shell StatusChip and WebComposer', () => {
-    const ongoing = [{ id: 'subagent:r1', kind: 'subagent' as const, label: 'Check CI', startedAt: NOW }];
-    const session = makeSession({ status: 'idle', ongoing });
-    render(
-      <>
-        <StatusChip status="idle" ongoing={ongoing} />
-        <WebComposer session={session} offline={false} />
-      </>
-    );
-    expect(screen.getByText('1 subagent')).toBeTruthy();
-    expect(screen.getByPlaceholderText(/Background work running/)).toBeTruthy();
   });
 });

@@ -18,7 +18,7 @@ export class SnapshotPartTooLargeError extends Error {
 }
 
 async function pipe(bytes: Uint8Array, transform: CompressionStream | DecompressionStream): Promise<Uint8Array<ArrayBuffer>> {
-  const stream = new Blob([new Uint8Array(bytes)]).stream().pipeThrough(transform);
+  const stream = new Response(new Uint8Array(bytes)).body!.pipeThrough(transform);
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 

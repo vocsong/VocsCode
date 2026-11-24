@@ -10,6 +10,7 @@ import { CONTROL_DISCOVERY_INTERNAL_PATH, CONTROL_INTERNAL_PATH, CONTROL_PATH, C
 import { ControlHostBridge } from './control-host';
 import { ControlMcpGateway } from './control-mcp';
 import { FixedWindowLimiter } from './rate';
+import { legacyAppRedirect } from './legacy-app';
 import { authorizeSocket, BROADCAST_TAG, handleHttp, json, type RouteContext } from './routes';
 
 const ACCOUNT_STORAGE_KEY = '__vocs_account_id__';
@@ -342,6 +343,8 @@ async function routeAccount(request: Request, env: Env): Promise<{ accountId: st
 export default {
   fetch: async (request: Request, env: Env): Promise<Response> => {
     const url = new URL(request.url);
+    const legacy = legacyAppRedirect(url);
+    if (legacy) return legacy;
     if (!url.pathname.startsWith('/v1/')) return json({ error: 'not found' }, 404);
     // This RPC is reachable only through the directory's DO binding, never through public /v1.
     if (url.pathname.startsWith('/v1/__internal')) return controlJson({ error: 'not found' }, 404);
