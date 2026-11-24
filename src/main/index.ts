@@ -686,12 +686,11 @@ async function main(): Promise<void> {
       graphScheduler.settingsChanged();
     }
     currentPalette = s.palette ?? DEFAULT_PALETTE;
-    nativeTheme.themeSource = themeSourceFor(s.theme);
-    // A palette switch leaves themeSource as it was, so nativeTheme stays silent — repaint the
-    // caption from the palette directly.
-    applyChrome();
     currentUiScale = s.typography?.uiScale ?? 1;
+    nativeTheme.themeSource = themeSourceFor(s.theme);
     applyZoom();
+    // Palette and interface size changes don't emit nativeTheme's updated event.
+    applyChrome();
     terminals?.updateSettings(s.terminal);
     ordinaryProcessOwnership(); // Configuring Missions starts the Job helper probe.
   });
@@ -951,10 +950,18 @@ async function reconcileForkInheritance(analytics: AnalyticsStore, store: Sessio
   );
 }
 
-/** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
-function chrome(): { color: string; symbolColor: string; height: number } {
-  // themeSource carries the mode, so shouldUseDarkColors is the scheme the renderer resolved too.
-  return { ...chromeFor(currentPalette, nativeTheme.shouldUseDarkColors ? 'dark' : 'light'), height: TITLEBAR_HEIGHT };
+/** Theme colors for the loading surface and the native caption glyphs. */
+function chrome() {
+  return chromeFor(currentPalette, nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
+}
+
+function titleBarOverlay({ color, symbolColor }: ReturnType<typeof chrome>): Electron.TitleBarOverlay {
+  if (process.platform === 'win32') {
+    // Let the renderer paint the whole bar, including Zen, animated themes and modal scrims.
+    // Electron measures the native hit area in DIPs, while the CSS bar also scales with page zoom.
+    return { color: '#00000000', symbolColor, height: Math.round(TITLEBAR_HEIGHT * currentUiScale) };
+  }
+  return { color, symbolColor, height: TITLEBAR_HEIGHT };
 }
 
 /** Settings → Appearance → Interface size, applied as the window's zoom factor. */
@@ -973,10 +980,11 @@ function applyZoom(): void {
 /** Repaints the window background and the OS-drawn caption buttons for the active theme. */
 function applyChrome(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.setBackgroundColor(chrome().color);
+  const colors = chrome();
+  mainWindow.setBackgroundColor(colors.color);
   if (process.platform === 'darwin') return;
   try {
-    mainWindow.setTitleBarOverlay(chrome());
+    mainWindow.setTitleBarOverlay(titleBarOverlay(colors));
   } catch {
     // Older/unsupported platforms simply keep the colors they were created with.
   }
@@ -986,19 +994,20 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
   const icon = appIconPath(appRoot);
+  const colors = chrome();
   const win = new BrowserWindow({
     ...bounds,
     minWidth: 960,
     minHeight: 600,
     title: APP_NAME,
     icon,
-    backgroundColor: chrome().color,
+    backgroundColor: colors.color,
     // Frameless with an in-app title bar (sidebar toggle, history, menu bar). On Windows/Linux the
     // overlay keeps the native caption buttons — and with them snap layouts and double-click maximize.
     titleBarStyle: 'hidden',
     ...(process.platform === 'darwin'
       ? { trafficLightPosition: { x: 12, y: (TITLEBAR_HEIGHT - 14) / 2 } }
-      : { titleBarOverlay: chrome() }),
+      : { titleBarOverlay: titleBarOverlay(colors) }),
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
