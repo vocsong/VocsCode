@@ -11,12 +11,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AppSettings, McpServerDef } from '../src/shared/types';
 import { effectiveEntries } from '../src/main/mcp/effective';
 import { parseMcpJson } from '../src/main/mcp/file';
-import { cuaBaseDef, gitnexusBaseDef, memoryServerDef, projectInfo, resolveForSession, vocsMemoryBaseDef } from '../src/main/mcp';
+import { cuaBaseDef, gitnexusBaseDef, memoryServerDef, missionServerDef, projectInfo, resolveForSession, vocsMemoryBaseDef } from '../src/main/mcp';
 import { SettingsStore, defaultSettings, mcpServersSaveError, normalizeMcpServers } from '../src/main/settings';
 
 const MEMORY_ALIASES = ['vocs_memory', 'vocs.memory', 'Vocs-Memory'];
 const CODE_GRAPH_ALIASES = ['GitNexus', 'GITNEXUS', 'gitnexus_'];
-const ALIASES = [...MEMORY_ALIASES, ...CODE_GRAPH_ALIASES, 'cua_driver'];
+const MISSION_ALIASES = ['vocs_mission', 'Vocs.Mission'];
+const ALIASES = [...MEMORY_ALIASES, ...CODE_GRAPH_ALIASES, 'cua_driver', ...MISSION_ALIASES];
 
 const dirs: string[] = [];
 const savedHome = process.env.GITNEXUS_HOME;
@@ -146,6 +147,17 @@ describe('built-in provenance', () => {
     expect(gitnexusBaseDef().builtin).toBe('gitnexus');
     expect(gitnexusBaseDef('/bin/gitnexus').builtin).toBe('gitnexus');
     expect(cuaBaseDef(defaultSettings()).builtin).toBe('cua-driver');
+    expect(missionServerDef({ missionServerPath: '/m.mjs', attachment: { url: 'http://127.0.0.1:1', token: 't'.repeat(43) } })?.builtin).toBe('vocs-mission');
+    expect(missionServerDef({ missionServerPath: '/m.mjs', attachment: null })).toBeNull();
+  });
+
+  it('never hands an ordinary session the Mission server, whatever the switches say', async () => {
+    const scope = await session(settingsWith({ mcpProjectState: {} }));
+    scope.settings = settingsWith({ mcpProjectState: { [scope.projectRoot]: { enabledRepo: ['vocs-mission'] } } });
+    const servers = await resolveForSession({ ...scope, sessionId: 's1' }, { getSecret: async () => undefined });
+    expect(servers.map((s) => s.def.id)).not.toContain('vocs-mission');
+    // Not an MCP-tab built-in: there is no switch for it to show or turn off.
+    expect((await projectInfo(scope)).builtin.map((b) => b.def.id)).not.toContain('vocs-mission');
   });
 
   it('is never taken from a user or repository definition', async () => {

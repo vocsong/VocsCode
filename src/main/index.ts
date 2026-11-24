@@ -43,6 +43,8 @@ import { createVocsAccount, VOCS_ACCOUNT_VAULT_IDS, vocsAccountRealm } from './v
 import { createVocsHub, VOCS_HUB_VAULT_IDS } from './vocs-hub';
 import { SessionManager } from './session-manager';
 import { retireLegacyMissionData } from './legacy-mission';
+import { MissionGateway } from './mission-mode/gateway';
+import { MissionService } from './mission-mode/service';
 import { createProcessSource } from './process-snapshot';
 import { ProcessTracker } from './process-tracker';
 import { SettingsStore } from './settings';
@@ -400,7 +402,11 @@ async function main(): Promise<void> {
   let remoteMirror: RemoteMirror | null = null;
   let analyticsSync: AnalyticsSync | null = null;
   let processesRef: ProcessTracker | null = null;
+  // Mission mode needs the manager and the manager reaches it through hooks; assigned right below.
+  let missionService: MissionService | undefined;
   sessions = new SessionManager({
+    mission: () => missionService,
+    missionServerPath: runtime.resource('mcp', 'vocs-mission.mjs'),
     store,
     settings,
     runtime,
@@ -481,12 +487,33 @@ async function main(): Promise<void> {
   });
 
   const sessionsRef = sessions;
-  // One push fan-out for the window and web clients alike.
+
+  // One push fan-out for the window and web clients alike. Declared before Mission recovery, whose
+  // session updates already push the session list through it.
   const pushAll = (channel: string, payload: unknown) => {
     pushToRenderer(mainWindow, channel, payload);
     webServer?.broadcast(channel, payload);
     void remoteHost?.broadcastPush(channel, payload);
   };
+
+  // Mission mode: the loopback gateway carries the Mission tools; it opens on the first mission
+  // session. A mission that was running when the app closed comes back interrupted, never resumed.
+  const missionGateway = new MissionGateway({
+    identity: (sessionId) => missionService?.identity(sessionId) ?? null,
+    handler: { call: (call) => missionService ? missionService.call(call) : Promise.resolve({ text: 'Mission mode is not available.', isError: true }) },
+    log
+  });
+  missionService = new MissionService({
+    sessions: sessionsRef,
+    sessionDir: (id) => store.sessionDir(id),
+    settings: () => settings.get(),
+    appInstructions,
+    gateway: () => missionGateway,
+    log
+  });
+  const missionRef = missionService;
+  await missionRef.recover().catch((e) => log('warn', `mission: recovery failed: ${errorMessage(e)}`));
+  void missionRef.sweep().catch((e) => log('warn', `mission: startup sweep failed: ${errorMessage(e)}`));
 
   // Which session the desktop window is on, pushed to paired browsers so they can open the same
   // one. The window's focus/blur is wired in `createWindow`; the list reconcile forgets a target
@@ -637,6 +664,7 @@ async function main(): Promise<void> {
     analyticsSync,
     updater: updater ?? undefined,
     processes,
+    mission: missionRef,
     broadcast: (channel, payload) => {
       webServer?.broadcast(channel, payload);
     },
@@ -745,6 +773,9 @@ async function main(): Promise<void> {
     e.preventDefault();
     localControl.shutdown();
     keepAwake.quit();
+    // Before the sessions stop: quitting is not a Builder ending its turn, and the next launch
+    // finds running missions interrupted from their records as they are now.
+    missionRef.dispose();
     updater?.stopChecking();
     const t0 = Date.now();
     log('info', `quitting: ${sessions?.list().filter((s) => s.status === 'running' || s.status === 'awaiting' || s.status === 'starting').length ?? 0} live session(s), ${terminals?.list().length ?? 0} terminal tab(s)`);
@@ -770,6 +801,7 @@ async function main(): Promise<void> {
       safe('terminal shutdown', terminals?.shutdown(deadline)),
       safe('search close', search?.close()),
       safe('intelligence gateway close', intelligenceGateway?.close()),
+      safe('mission gateway close', missionGateway.close()),
       safe('Graphify shutdown', Promise.all([graphScheduler.close(), graphify.cancel()])),
       safe('memory ledger close', Promise.resolve(passiveLearning?.close()).finally(() => memoryStore.close())),
       safe('knowledge usage flush', knowledgeUsage.close()),

@@ -74,5 +74,11 @@
   "tests/relay-routes.test.ts",
   "tests/qr.test.ts",
   "tests/web-router.test.ts",
-  "tests/web-dashboard.test.tsx"
+  "tests/web-dashboard.test.tsx",
+  "tests/mission-mode-approvals.test.ts",
+  "tests/mission-mode-git.test.ts",
+  "tests/mission-mode-text.test.ts",
+  "tests/mission-mode-service.test.ts",
+  "tests/mission-mode-gateway.test.ts",
+  "tests/mission-mode-ui.test.tsx"
 ]

@@ -7,6 +7,7 @@ import type { SessionMeta } from '../../shared/types';
 import * as panes from './panes';
 import { createHostSlice } from './store/host-slice';
 import { createLayoutSlice } from './store/layout-slice';
+import { createMissionSlice } from './store/mission-slice';
 import { configureStore, createStoreRuntime } from './store/runtime';
 import { createSessionsSlice } from './store/sessions-slice';
 import { COMPOSER_HISTORY_LIMIT, NO_COMPOSER_HISTORY, type State } from './store/types';
@@ -36,7 +37,8 @@ export function toastError(error: unknown): void {
 export const useStore = create<State>((set, get) => ({
   ...createHostSlice(runtime, toastError)(set, get),
   ...createLayoutSlice(runtime, toastError)(set, get),
-  ...createSessionsSlice(runtime, toastError)(set, get)
+  ...createSessionsSlice(runtime, toastError)(set, get),
+  ...createMissionSlice()(set, get)
 }));
 
 useStore.subscribe((s, prev) => {

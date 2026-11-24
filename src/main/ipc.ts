@@ -58,6 +58,8 @@ export interface IpcDeps {
   updater?: UpdateService;
   /** Every process the app started (the Processes panel), wired in index.ts. */
   processes?: HandlerDeps['processes'];
+  /** Mission mode, wired in index.ts (desktop owner only). */
+  mission?: HandlerDeps['mission'];
   /** Extra push sink for non-window clients (the localhost web server today, the relay later). */
   broadcast?: (channel: string, payload: unknown) => void;
   getWindow: () => BrowserWindow | null;
@@ -156,6 +158,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     analyticsSync: deps.analyticsSync,
     updater: deps.updater,
     processes: deps.processes,
+    mission: deps.mission,
     log: deps.log,
     push: (channel, payload) => {
       pushToRenderer(deps.getWindow(), channel, payload);
@@ -165,11 +168,13 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
     const intelligenceOwner = isIntelligenceOwnerRequest(channel, req);
+    const missionOwner = channel.startsWith('mission:') || (channel === 'sessions:create' && !!req && typeof req === 'object' && (req as { mission?: unknown }).mission !== undefined && (req as { mission?: unknown }).mission !== false);
     const subscriptionOwner = channel.startsWith('subscriptions:');
-    if (intelligenceOwner || subscriptionOwner || channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'fs:writeText' || channel === 'desktop:setFocus') {
+    if (intelligenceOwner || missionOwner || subscriptionOwner || channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'fs:writeText' || channel === 'desktop:setFocus') {
       const contents = deps.getWindow()?.webContents;
       if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame || subscriptionOwner && (!event.senderFrame || event.senderFrame.detached)) {
         if (intelligenceOwner) throw new Error('Intelligence settings and memory management require the local desktop owner.');
+        if (missionOwner) throw new Error('Mission mode requires the local desktop owner.');
         if (channel.startsWith('vocsAccount:')) throw new Error('Vocs account sign-in requires the local desktop owner.');
         if (channel.startsWith('housekeep:')) throw new Error('Housekeep requires the local desktop owner.');
         if (channel === 'harness:login') throw new Error('Harness sign-in requires the local desktop owner.');

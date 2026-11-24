@@ -5,7 +5,7 @@
  * through its engine, and this layer is added after the engine's own prompt.
  */
 import React, { useEffect, useState } from 'react';
-import { APP_INSTRUCTION_HINTS, APP_INSTRUCTION_LABELS, APP_INSTRUCTION_MAX_CHARS, APP_INSTRUCTION_SCOPES } from '../../../shared/app-instructions';
+import { APP_INSTRUCTION_HINTS, APP_INSTRUCTION_LABELS, APP_INSTRUCTION_MAX_CHARS, APP_INSTRUCTION_SCOPES, MISSION_INSTRUCTION_SCOPES } from '../../../shared/app-instructions';
 import type { AppInstructionFile, AppInstructionScope } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
@@ -61,7 +61,7 @@ export function InstructionsSection() {
   return (
     <div className="settings-section">
       <h2>Instructions</h2>
-      <p className="muted">Set shared guidance for every harness, then add any harness-specific instructions.</p>
+      <p className="muted">Set shared guidance for every harness, then add any harness-specific instructions and Mission mode add-ons.</p>
       <SettingsNote>Most harnesses load instructions when starting. The native loop reloads them before each model step.</SettingsNote>
       <details className="settings-details">
         <summary>How instructions are applied</summary>
@@ -70,6 +70,9 @@ export function InstructionsSection() {
         </p>
         <p className="muted small">
           Pi and Claude Agent SDK take this in their system prompt at session start; Codex, Cursor and ACP agents get it on the first message instead, because their engines own the prompt. Start a new session for those harnesses to pick up edits. The native loop reloads this text before every model step, including in a running session.
+        </p>
+        <p className="muted small">
+          The Mission Lead and Mission Builder tabs apply only to Mission mode sessions: each is added to that role&rsquo;s built-in prompt, and the Mission rules still win over anything written here.
         </p>
       </details>
 
@@ -107,7 +110,7 @@ export function InstructionsSection() {
                 disabled={!files}
                 value={draft}
                 onChange={(e) => setDrafts((d) => ({ ...d, [scope]: e.target.value }))}
-                placeholder={`${scope} instructions are not set`}
+                placeholder={MISSION_INSTRUCTION_SCOPES.includes(scope) ? `The ${APP_INSTRUCTION_LABELS[scope]} add-on is not set` : `${scope} instructions are not set`}
               />
             </Field>
             <div className="row gap8">

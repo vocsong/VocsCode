@@ -2,7 +2,7 @@
 import type { SessionMeta } from '../../../shared/types';
 import * as panes from '../panes';
 import type { PaneLayout } from '../panes';
-import { recencyAt, sortSessionRows } from '../sessionOrder';
+import { nestMissionRows, recencyAt, sortSessionRows } from '../sessionOrder';
 import type { Getter, NavEntry, PanelBottomTab, Setter, State, StoreRuntime } from './types';
 
 const USAGE_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'contextWindow', 'contextTokens'] as const;
@@ -36,7 +36,7 @@ export function bootErrorMessage(error: unknown): string {
 export function replacementFor(previous: SessionMeta[], next: SessionMeta[], activeId: string): SessionMeta | undefined {
   const visible = next.filter((x) => !x.archived);
   const root = previous.find((x) => x.id === activeId)?.config.projectRoot;
-  const rows = sortSessionRows(previous.filter((x) => !x.archived && x.config.projectRoot === root));
+  const rows = nestMissionRows(sortSessionRows(previous.filter((x) => !x.archived && x.config.projectRoot === root)));
   const at = rows.findIndex((x) => x.id === activeId);
   const neighbour = at === -1 ? undefined : rows[at + 1] ?? rows[at - 1];
   const picked = neighbour && visible.find((x) => x.id === neighbour.id);

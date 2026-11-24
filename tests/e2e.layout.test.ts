@@ -294,7 +294,7 @@ describe.runIf(enabled)('shell layout', () => {
         anchoredTopics++;
       }
     }
-    expect(anchoredTopics).toBe(30);
+    expect(anchoredTopics).toBe(31);
 
     // Reproducible light/dark review frames for each major surface, using the real theme controls.
     for (const [theme, label] of [['light', 'Light'], ['dark', 'Dark']] as const) {

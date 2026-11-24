@@ -98,6 +98,7 @@ PRs are squash-merged, and titles follow [Conventional Commits](https://www.conv
 | [Architecture & harness reference](docs/ARCHITECTURE.md) | Source layout, harness engines, permission modes, security model |
 | [Terminal reference](docs/TERMINAL.md) | PTY handling, shells, tabs, shortcuts, packaging notes |
 | [Themes](docs/THEMES.md) | Light/dark mode, the twenty palettes and how they're built |
+| [Mission mode](docs/MISSION-MODE.md) | A Lead session plans and checks, Builder sessions implement, and you review the PR |
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Tool reliability](docs/TOOL-RELIABILITY.md) | Harness/tool analytics, Pi compatibility, native file safeguards and verification |
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |

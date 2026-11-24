@@ -21,6 +21,7 @@ import type {
   PermissionMode,
   SessionEvent,
   SessionEventEnvelope,
+  SessionConfig,
   SessionMeta,
   SessionStatus,
   TranscriptItem,
@@ -41,6 +42,8 @@ import { renderForkContext } from './fork-context';
 import { promptWithFiles, retainMessageFiles } from './message-files';
 import { builtinServerIds, resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
+import type { MissionHooks } from './mission-mode/hooks';
+import type { ApprovalMissionRoute, MissionMessageMeta, SessionMission } from '../shared/mission-mode';
 import { branchGitState, createForkWorktree, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
 import { isValidRunId, listSubagentRuns, readSubagentRun } from './subagents';
@@ -82,6 +85,10 @@ export interface SessionManagerDeps {
   memoryUserData?: string;
   /** Mints a session's intelligence-gateway endpoint and token; null when the gateway is off. */
   memoryGateway?: (sessionId: string) => { url: string; token: string } | null;
+  /** Mission mode (Lead/Builder sessions); absent in hosts and tests that do not run it. */
+  mission?: () => MissionHooks | undefined;
+  /** Path to resources/mcp/vocs-mission.mjs, the Mission tools' stdio client. */
+  missionServerPath?: string;
   /** Connected Vocs MCP Hub connections, as loopback proxy servers (`vocs-hub.ts`); absent: none. */
   hubServers?: () => Promise<ResolvedServer[]>;
   /** A stopping runtime loses its memory capability before disposal settles. */
@@ -398,6 +405,8 @@ export class SessionManager {
       };
       const state: BranchGitState = await branchGitState(cwd, worktreeBranch, q);
       if (!current() || state.unknown) return;
+      // A mission Lead's PR merged or closed ends the mission and frees its worktrees.
+      if (meta.mission) this.deps.mission?.()?.gitState(meta, state);
       const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
       // Git evidence can upgrade a stopped harness, but never downgrade it to idle.
       if (meta.status === next || (meta.status === 'stopped' && next === 'idle')) return;
@@ -795,6 +804,7 @@ export class SessionManager {
   private async deleteUncontrolled(id: string, removeWt: boolean): Promise<boolean> {
     const meta = this.get(id);
     if (!meta) return false;
+    if (meta.mission) await this.deps.mission?.()?.sessionRemoved(meta);
     const t0 = Date.now();
     await this.stop(id);
     await this.preserveUserInputs(meta, await this.deps.store.readTranscript(id));
@@ -824,6 +834,7 @@ export class SessionManager {
 
   private async patchUncontrolled(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {
     if ('controlCreation' in patch) throw new Error('Control creation identity is host-owned');
+    if ('mission' in patch) throw new Error('Mission identity is host-owned');
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     // A rename is the user naming the session: no title model may overwrite it afterwards.
@@ -904,7 +915,7 @@ export class SessionManager {
   private housekeepIdle(id: string): boolean {
     const meta = this.get(id);
     if (!meta || meta.archived || meta.pinned || this.configDispatches.has(id) || this.persistTimers.has(id) ||
-        this.fastModeUpdates.has(id) || this.antigravityModeUpdates.has(id)) return false;
+        this.fastModeUpdates.has(id) || this.antigravityModeUpdates.has(id) || missionLive(meta)) return false;
     const activity = this.activity(id);
     return !activity.active && activity.quiescent;
   }
@@ -952,6 +963,7 @@ export class SessionManager {
   private async archiveUncontrolled(id: string, archived: boolean, removeWt: boolean, forceWt: boolean): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    if (archived && meta.mission) await this.deps.mission?.()?.sessionRemoved(meta);
     if (archived) {
       // An archived session leaves the sidebar, so nothing of it may keep running: stop the harness
       // (and everything it spawned) whether or not the worktree is being removed. Unarchiving starts
@@ -1085,6 +1097,10 @@ export class SessionManager {
       // the adapter runs the closest stricter tier, never a looser one.
       permissionMode: () => closestPermissionMode(session().config.harness, session().config.permissionMode),
       ...(this.deps.appInstructions ? { appInstructions: () => this.deps.appInstructions!(session().config.harness) } : {}),
+      missionInstructions: async () => {
+        const m = session();
+        return m.mission ? this.deps.mission?.()?.instructions(m) : undefined;
+      },
       effort: () => {
         const m = session();
         // An explicit omission must not borrow the preference retained for effort-capable models.
@@ -1107,6 +1123,7 @@ export class SessionManager {
             memoryServerPath: this.deps.memoryServerPath,
             memoryUserData: this.deps.memoryUserData,
             memoryGateway: (sessionId) => available() ? this.deps.memoryGateway?.(sessionId) ?? null : null,
+            ...(m.mission ? { missionGateway: available() ? this.deps.mission?.()?.gateway() : undefined, missionServerPath: this.deps.missionServerPath } : {}),
             ...(this.deps.hubServers ? { hubServers: this.deps.hubServers } : {}),
             log: (level, message) => this.deps.log(level, `[${id}] ${message}`)
           }
@@ -1504,11 +1521,121 @@ export class SessionManager {
    * `source` is host provenance, never supplied by a renderer or model. Goal dispatch is not a user
    * action: it confers no new authority and must not affect user recency.
    */
-  private async sendAs(id: string, input: UserInput, source: 'user' | 'goal', originalText = input.text): Promise<void> {
-    return this.withoutControlled(id, () => this.sendUncontrolled(id, input, source, originalText));
+  private async sendAs(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', originalText = input.text, mission?: MissionMessageMeta): Promise<void> {
+    return this.withoutControlled(id, () => this.sendUncontrolled(id, input, source, originalText, mission));
   }
 
-  private async sendUncontrolled(id: string, input: UserInput, source: 'user' | 'goal', originalText = input.text): Promise<void> {
+  /**
+   * A host-authored message to a mission session (a kickoff, a Lead↔Builder message, a report).
+   * It is not the user's: no input receipt, no recency stamp, no title naming. Antigravity refuses it.
+   */
+  async sendHost(id: string, text: string, mission: MissionMessageMeta): Promise<void> {
+    if (!this.get(id)?.mission) throw new Error('Host messages go to mission sessions only');
+    return this.sendAs(id, { text }, 'mission', text, mission);
+  }
+
+  /** Writes a host item (a note or a mirrored approval card) into a session's transcript. */
+  emitHostItem(id: string, item: TranscriptItem): void {
+    if (!this.get(id)) return;
+    this.emit(id, { type: 'item.upsert', item });
+  }
+
+  /** Host-only update of a session's Mission identity (state, Builder state, PR link). */
+  setMission(id: string, patch: Partial<SessionMission>): SessionMeta | undefined {
+    const meta = this.get(id);
+    if (!meta?.mission) return undefined;
+    meta.mission = { ...meta.mission, ...patch };
+    this.schedulePersist(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  /**
+   * A mission session created by Mission mode itself: the worktree is already resolved (a Builder
+   * that shares the Lead's folder passes no `worktreeBranch`, so it never owns or removes it).
+   * `forkContextFrom` hands that session's conversation to the new one, as a cross-harness fork does.
+   */
+  async createMissionSession(spec: { config: SessionConfig; title: string; cwd: string; worktreeBranch?: string; mission: SessionMission; forkContextFrom?: string }): Promise<SessionMeta> {
+    const cfg = { ...spec.config, fastMode: false };
+    if (!HARNESS_BY_ID[cfg.harness]) throw new Error('Unknown harness');
+    assertPermissionModeOffered(cfg.harness, cfg.permissionMode);
+    const s = this.settings();
+    const id = shortId('s_');
+    const model = cfg.model ?? s.defaultModelByHarness[cfg.harness];
+    const meta: SessionMeta = {
+      id,
+      title: spec.title,
+      titleIsAutomatic: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      config: { ...cfg, model },
+      mission: spec.mission,
+      cwd: spec.cwd,
+      worktreeBranch: spec.worktreeBranch,
+      status: 'idle',
+      harnessRef: {},
+      usage: emptyUsage(),
+      activeModel: model,
+      activeEffort: cfg.effort ?? undefined,
+      fastModeStatus: { state: 'off' },
+      queued: 0
+    };
+    if (!HARNESS_BY_ID[cfg.harness].capabilities.systemPrompt) meta.pendingAppInstructions = true;
+    if (this.deps.knowledgeDigest && s.knowledge?.prime !== false) {
+      try {
+        const digest = (await this.deps.knowledgeDigest({ projectRoot: cfg.projectRoot, cwd: spec.cwd, branch: spec.worktreeBranch }))?.trim();
+        if (digest) {
+          meta.knowledgeDigest = digest;
+          if (!HARNESS_BY_ID[cfg.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
+        }
+      } catch (e) {
+        this.deps.log('debug', `[${id}] knowledge digest unavailable: ${errorMessage(e)}`);
+      }
+    }
+    let carried: TranscriptItem[] = [];
+    if (spec.forkContextFrom) {
+      const src = this.get(spec.forkContextFrom);
+      if (!src) throw new Error('Session not found');
+      carried = (await this.transcript(src.id)).filter((i) => !(i.kind === 'approval' && !i.decision)).map(carriedItem);
+      if (carried.length) {
+        await this.deps.store.writeBlob(id, FORK_CONTEXT_FILE, renderForkContext(carried, src.config.harness, cfg.harness));
+        meta.pendingForkContext = true;
+        meta.forkedFrom = src.id;
+        carried.push({ id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Mission Lead started from “${src.title}”; that conversation is carried over as context.` });
+      }
+    }
+    await this.deps.store.upsert(meta);
+    if (carried.length) await this.deps.store.rewriteTranscript(id, carried);
+    this.deps.log('info', `[${id}] mission ${spec.mission.role} created: harness=${cfg.harness} model=${describeModel(meta.activeModel)} permissions=${cfg.permissionMode} cwd=${spec.cwd}${spec.worktreeBranch ? ` worktree=${spec.worktreeBranch}` : ''}`);
+    this.deps.analytics.touchSession(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  /** Turns an existing, still-empty session into a mission session (the empty-session toggle). */
+  async adoptMissionSession(id: string, patch: { mission: SessionMission; permissionMode: PermissionMode }): Promise<SessionMeta> {
+    return this.withoutControlled(id, async () => {
+      const meta = this.get(id);
+      if (!meta) throw new Error('Session not found');
+      if (meta.mission) throw new Error('This session is already part of a mission');
+      if (this.active.get(id)?.adapter.busy) throw new Error('Wait for the current turn to finish');
+      assertPermissionModeOffered(meta.config.harness, patch.permissionMode);
+      // A running runtime started without the Mission tools and prompt; the next send starts fresh.
+      const active = this.active.get(id);
+      if (active) await this.disposeRuntime(id, active, 'idle');
+      meta.mission = patch.mission;
+      meta.config = { ...meta.config, permissionMode: patch.permissionMode, fastMode: false };
+      meta.goal = undefined;
+      meta.nativeGoal = undefined;
+      meta.updatedAt = Date.now();
+      await this.deps.store.upsert(meta);
+      this.pushSessions();
+      return meta;
+    });
+  }
+
+
+  private async sendUncontrolled(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', originalText = input.text, mission?: MissionMessageMeta): Promise<void> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (meta.config.harness === 'antigravity' && source !== 'user') throw new Error('Antigravity sessions are driven by direct user prompts.');
@@ -1521,7 +1648,8 @@ export class SessionManager {
     const userItem: TranscriptItem = {
       id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text,
       images: input.images, files: files.length ? files : undefined, queuedAs: input.mode,
-      userInput: source === 'user' ? measureUserInput(id, originalText) : undefined
+      userInput: source === 'user' ? measureUserInput(id, originalText) : undefined,
+      ...(source === 'mission' ? { origin: 'mission' as const, ...(mission ? { mission } : {}) } : {})
     };
     this.emit(id, { type: 'item.upsert', item: userItem });
     // The sidebar orders rows by the user's own last message: stamp it before the harness even
@@ -1535,7 +1663,7 @@ export class SessionManager {
     // A session named from a dialog prompt or a goal is already carrying a placeholder, and that
     // placeholder is the better one: it was cut from what the user wrote, not from a `/goal …`
     // command the app composed. Keep it on screen and let the model replace it.
-    if (isPlaceholderTitle(meta) && input.text.trim()) {
+    if (source !== 'mission' && isPlaceholderTitle(meta) && input.text.trim()) {
       const placeholder = meta.title === 'New session' ? titleFromPrompt(input.text) : meta.title;
       // A goal kickoff is the app's own prompt; the objective behind it is what names the session.
       const seed = (source === 'goal' && meta.goal?.objective?.trim()) || input.text;
@@ -1648,7 +1776,13 @@ export class SessionManager {
       if (text) parts.push(text);
       const sessionInstructions = meta.config.appendSystemPrompt?.trim();
       if (sessionInstructions) parts.push(sessionInstructions);
+      // Mission rules come last so they win; Codex app-server takes them as developer instructions.
+      if (meta.mission && meta.config.harness !== 'codex') {
+        const missionText = await this.deps.mission?.()?.instructions(meta);
+        if (missionText) parts.push(missionText);
+      }
     }
+
     if (meta.pendingKnowledgeDigest && meta.knowledgeDigest) parts.push(meta.knowledgeDigest);
     if (meta.pendingForkContext) {
       try {
@@ -1727,7 +1861,10 @@ export class SessionManager {
 
   private disposeRuntime(id: string, active: ActiveSession, status: 'idle' | 'stopped' | 'error' = 'stopped'): Promise<void> {
     // A late dispose from a retired runtime must never revoke its replacement's capability.
-    if (this.active.get(id) === active) this.deps.revokeMemoryGateway?.(id);
+    if (this.active.get(id) === active) {
+      this.deps.revokeMemoryGateway?.(id);
+      this.deps.mission?.()?.gateway()?.revoke(id);
+    }
     return this.retireOrdinary(id, active, status === 'idle');
   }
 
@@ -1945,6 +2082,8 @@ export class SessionManager {
   private async setPermissionUncontrolled(id: string, mode: PermissionMode): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    // The Lead coordinates and never edits: Plan is what makes that true on every harness.
+    if (meta.mission?.role === 'lead' && mode !== 'plan') throw new Error('A Mission Lead always runs in Plan.');
     assertPermissionModeOffered(meta.config.harness, mode);
     const antigravity = meta.config.harness === 'antigravity';
     const active = this.active.get(id);
@@ -2165,6 +2304,11 @@ export class SessionManager {
   }
 
   async respondApproval(sessionId: string, requestId: string, decision: ApprovalDecision): Promise<void> {
+    return this.resolveApproval(sessionId, requestId, decision, 'user');
+  }
+
+  /** The user's answer, or a mission Builder's Lead answering through `answer_request`. */
+  async resolveApproval(sessionId: string, requestId: string, decision: ApprovalDecision, by: 'user' | 'lead'): Promise<void> {
     const active = this.active.get(sessionId);
     const d = active?.approvals.get(requestId);
     if (!active || !d) {
@@ -2182,6 +2326,7 @@ export class SessionManager {
     if (item && item.kind === 'approval') {
       item.decision = decision;
       item.decidedAt = Date.now();
+      if (item.request.mission) item.decidedBy = by;
       this.emit(sessionId, { type: 'item.upsert', item: { ...item } });
     }
     const meta = this.get(sessionId);
@@ -2190,6 +2335,23 @@ export class SessionManager {
       this.emit(sessionId, { type: 'status', status });
     }
     this.emit(sessionId, { type: 'approval.resolved', requestId, decision });
+  }
+
+  /**
+   * A mission Builder's request changed hands: the Lead recommended a verdict on one only the user
+   * may answer, so it now waits for the user (who is notified), or the Lead's view is attached.
+   */
+  updateApprovalRoute(sessionId: string, requestId: string, route: ApprovalMissionRoute): void {
+    const active = this.active.get(sessionId);
+    const item = active?.liveItems.get(requestId);
+    if (!active?.approvals.has(requestId) || item?.kind !== 'approval') return;
+    const wasWithUser = item.request.mission?.status === 'with_user';
+    item.request = { ...item.request, mission: route };
+    this.emit(sessionId, { type: 'item.upsert', item: { ...item } });
+    if (route.status === 'with_user' && !wasWithUser) {
+      const meta = this.get(sessionId);
+      if (meta) this.deps.notify(sessionId, `${meta.title}: approval needed`, item.request.command ?? item.request.title);
+    }
   }
 
   private requestApproval(sessionId: string, draft: ApprovalDraft): Promise<ApprovalDecision> {
@@ -2202,10 +2364,25 @@ export class SessionManager {
     this.deps.log('info', `[${sessionId}] approval ${request.id} requested (${meta.config.permissionMode}): ${request.title.slice(0, 120)}`);
     meta.status = 'awaiting';
     meta.statusDetail = request.title;
-    this.emit(sessionId, { type: 'item.upsert', item: { id: request.id, kind: 'approval', ts: Date.now(), request } });
-    this.emit(sessionId, { type: 'approval.request', request });
-    this.pushSessions();
-    this.deps.notify(sessionId, `${meta.title}: approval needed`, request.command ?? request.title);
+    const hooks = meta.mission?.role === 'builder' && draft.kind !== 'question' ? this.deps.mission?.() : undefined;
+    const publish = (route?: ApprovalMissionRoute) => {
+      // The runtime may have moved on (or the card was answered) while the request was classified.
+      if (!active.approvals.has(request.id)) return;
+      if (route) request.mission = route;
+      this.emit(sessionId, { type: 'item.upsert', item: { id: request.id, kind: 'approval', ts: Date.now(), request } });
+      this.emit(sessionId, { type: 'approval.request', request });
+      this.pushSessions();
+      // A request with the Lead does not need the user yet; the Lead may still hand it on.
+      if (route?.status !== 'with_lead') this.deps.notify(sessionId, `${meta.title}: approval needed`, request.command ?? request.title);
+    };
+    if (!hooks) publish();
+    else {
+      // A Builder's request goes to its Lead first; an unclassifiable one reaches the user.
+      hooks.routeApproval(meta, request).then(publish, (e) => {
+        this.deps.log('warn', `[${sessionId}] mission approval routing failed: ${errorMessage(e)}`);
+        publish({ route: 'user', reason: 'could not be classified', status: 'with_user' });
+      });
+    }
     return d.promise;
   }
 
@@ -2223,6 +2400,11 @@ export class SessionManager {
     const meta = this.get(sessionId);
     const active = this.active.get(sessionId);
     // Ownership/configuration are host-owned even if an adapter emits the broad normalized meta shape.
+    // Mission identity is host-owned: an adapter's broad meta patch can never set it.
+    if (event.type === 'meta' && 'mission' in event.patch) {
+      const { mission: _ignored, ...rest } = event.patch;
+      event = { ...event, patch: rest };
+    }
     if (this.controlled.has(sessionId) && event.type === 'meta') {
       const patch = event.patch;
       const { activeModel, activeEffort, title, queued, statusDetail, harnessCommands, harnessCommandList } = patch;
@@ -2738,6 +2920,8 @@ export class SessionManager {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (meta.config.harness === 'antigravity') throw new Error('Antigravity sessions are driven by direct user prompts.');
+    // Mission mode drives its own continuation: a goal loop beside the Lead would bypass it.
+    if (meta.mission && action !== 'clear') throw new Error('Mission sessions cannot run a goal; the Lead drives the work.');
     const s = this.settings();
     const active = this.active.get(id);
     if (action !== 'update' && active) {
@@ -2864,6 +3048,7 @@ export class SessionManager {
   private async moveUncontrolled(id: string, cwd: string): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    if (meta.mission) throw new Error('A mission session stays in the mission’s worktree.');
     if (!path.isAbsolute(cwd)) throw new Error('Worktree path must be absolute');
     if (path.resolve(meta.cwd) === path.resolve(cwd)) return meta;
     const wasRunning = !!this.active.get(id);
@@ -2939,6 +3124,8 @@ export class SessionManager {
       forkedFrom: src.id,
       controlCreation: undefined,
       importedFrom: undefined,
+      // A fork of a mission session is an ordinary session: it carries the conversation, not the role.
+      mission: undefined,
       harnessRef: {},
       pendingForkContext: undefined,
       pendingKnowledgeDigest: undefined,
@@ -3085,7 +3272,16 @@ function forkNote(src: SessionMeta, target: HarnessId, own: { path: string; bran
  * counters. Text, tool calls and tokens stay — they are what the new harness can see — but a turn's
  * dollars do not, because the session that spent them already reports them.
  */
+/** A mission session still doing or owning work: Housekeep must leave it alone. */
+function missionLive(meta: SessionMeta): boolean {
+  const m = meta.mission;
+  if (!m) return false;
+  if (m.role === 'lead') return !['ended', 'stopped', 'done_local'].includes(m.state ?? 'running');
+  return !['done', 'failed', 'stopped'].includes(m.builderState ?? 'working');
+}
+
 function carriedItem(item: TranscriptItem): TranscriptItem {
+
   return item.kind === 'turn' ? { ...item, costUsd: 0, carried: true } : item;
 }
 

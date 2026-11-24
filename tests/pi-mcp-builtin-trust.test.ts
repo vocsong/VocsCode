@@ -10,9 +10,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import vocsCodeApprovals from '../resources/pi/vocs-code-approvals';
 import { DECLINED_REASON, PLAN_REASON } from '../resources/pi/subagent-gate';
-import { BUILTIN_READ_ONLY_TOOLS, BUILTIN_SERVERS, loadMcpBridge, mcpReadOnlyToolNames, mcpToolNames, reservedBuiltinName, reservedKey } from '../resources/pi/vocs-code-mcp';
+import { BUILTIN_READ_ONLY_TOOLS, BUILTIN_SERVERS, MISSION_TOOLS, loadMcpBridge, mcpReadOnlyToolNames, mcpToolNames, reservedBuiltinName, reservedKey } from '../resources/pi/vocs-code-mcp';
 import { MCP_BUILTIN_IDS } from '../src/shared/types';
-import { BUILTIN_READ_ONLY_TOOLS as HOST_READ_ONLY_TOOLS } from '../src/shared/builtin-tools';
+import { BUILTIN_MISSION_TOOLS as HOST_MISSION_TOOLS, BUILTIN_READ_ONLY_TOOLS as HOST_READ_ONLY_TOOLS } from '../src/shared/builtin-tools';
+import { missionServerDef } from '../src/main/mcp/mission';
 import { gitnexusBaseDef } from '../src/main/mcp/gitnexus';
 import type { PiMcpTool } from '../resources/pi/mcp-client';
 import { mcpIdKey, reservedBuiltinFor } from '../src/shared/mcp-ids';
@@ -174,8 +175,40 @@ describe('the app-built gitnexus and cua-driver servers', () => {
   });
 });
 
+describe('the app-built Mission server', () => {
+  /** The definition the app hands pi for a mission session (the host sets `builtin`). */
+  const appMissionDef = () => {
+    const def = missionServerDef({ missionServerPath: '/app/resources/mcp/vocs-mission.mjs', attachment: { url: 'http://127.0.0.1:9', token: 'M'.repeat(43) } });
+    if (!def) throw new Error('Mission definition was not built');
+    // The stub hands definitions over in the config file, which may never carry a capability.
+    return { ...def, env: {} };
+  };
+  const missionTools = (): PiMcpTool[] => ['start_builder', 'ask_lead', 'delete_repo'].map((name) => ({ name, inputSchema: { type: 'object', properties: {} } }));
+
+  it.each(['plan', 'ask', 'accept-edits', 'auto'])('runs its coordination tools without asking in %s mode, and gates anything else it lists', async (mode) => {
+    bridge = await stubPiMcpBridge([appMissionDef()], missionTools);
+    expect([...(await mcpReadOnlyToolNames())].sort()).toEqual(['mcp__vocs_mission__ask_lead', 'mcp__vocs_mission__start_builder']);
+    const select = vi.fn(async () => 'Deny');
+    const gate = parentGate(mode);
+    for (const toolName of ['mcp__vocs_mission__start_builder', 'mcp__vocs_mission__ask_lead']) {
+      await expect(gate({ toolName, toolCallId: toolName, input: {} }, { cwd: process.cwd(), ui: { select, notify: vi.fn() } })).resolves.toBeUndefined();
+    }
+    const other = await gate({ toolName: 'mcp__vocs_mission__delete_repo', toolCallId: 'd', input: {} }, { cwd: process.cwd(), ui: { select, notify: vi.fn() } });
+    expect(other?.block).toBe(mode === 'auto' ? undefined : true);
+    expect(select).toHaveBeenCalledTimes(mode === 'ask' || mode === 'accept-edits' ? 1 : 0);
+  });
+
+  it('gives no trust to a lookalike: a reserved alias is refused, provenance on another id grants nothing', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    bridge = await stubPiMcpBridge([third('vocs-mission'), third('Vocs_Mission'), { ...third('notes'), builtin: 'vocs-mission' }], missionTools);
+    expect((await mcpReadOnlyToolNames()).size).toBe(0);
+    expect(bridge.connected).toEqual(['notes']);
+    await expect(parentGate('plan')({ toolName: 'mcp__notes__start_builder', toolCallId: 's', input: {} }, { cwd: process.cwd(), ui: { select: vi.fn(), notify: vi.fn() } })).resolves.toEqual({ block: true, reason: PLAN_REASON });
+  });
+});
+
 describe('reserved and duplicate names in the bridge', () => {
-  it.each(['vocs_memory', 'Vocs-Memory', 'GitNexus', 'gitnexus', 'cua_driver'])('does not load a third-party server named %s', async (id) => {
+  it.each(['vocs_memory', 'Vocs-Memory', 'GitNexus', 'gitnexus', 'cua_driver', 'vocs_mission', 'Vocs.Mission'])('does not load a third-party server named %s', async (id) => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     bridge = await stubPiMcpBridge([third(id)], annotatedTools);
     expect(await mcpToolNames()).toEqual([]);
@@ -211,6 +244,10 @@ describe('the bridge mirrors the host name rules', () => {
 
   it('trusts exactly the host read-only allowlist', () => {
     expect(BUILTIN_READ_ONLY_TOOLS).toEqual(HOST_READ_ONLY_TOOLS);
+  });
+
+  it('trusts exactly the host Mission coordination tools', () => {
+    expect(MISSION_TOOLS).toEqual(HOST_MISSION_TOOLS);
   });
 
   const names = [

@@ -1,0 +1,311 @@
+/*
+ * Mission mode: the composer switch, the Lead's status strip, the handoff cards in a transcript, and
+ * the sidebar's Builder rows. Built from the shared tokens so every theme and Zen pick it up.
+ */
+
+/* Composer: the switch sits after the permission pill and lights up like Keep awake when on. */
+.run-controls .run-mission {
+  flex: none;
+}
+.run-controls .run-mission[aria-checked='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.run-controls .run-mission[aria-readonly='true'] {
+  cursor: default;
+}
+.run-controls .pill.run-permission.is-mission {
+  color: var(--purple);
+  background: var(--purple-soft);
+}
+/* The Lead's tier label is long: in a narrow composer it shortens with an ellipsis, like the model
+   pill, instead of pushing Send out of the composer. */
+.composer-actions .run-controls > .dropdown:has(.run-permission.is-mission) {
+  flex: 0 1 auto;
+  min-width: 38px;
+}
+.composer-actions .run-controls .pill.run-permission.is-mission {
+  max-width: 100%;
+}
+.pane .composer-box.is-mission {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+}
+.composer-box.is-ended textarea {
+  cursor: not-allowed;
+}
+@container (max-width: 520px) {
+  .composer-actions .run-mission .pill-text { display: none; }
+}
+/* The narrowest composer keeps only a switch that is on; /mission still starts one from the text. */
+@container (max-width: 340px) {
+  .composer-actions .run-mission[aria-checked='false'] { display: none; }
+}
+
+/* The Lead's status strip: one quiet line between the header and the transcript. */
+.mission-strip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 4px 12px 4px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.mission-strip-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.mission-strip-title .icon {
+  color: var(--accent);
+}
+.mission-strip-stat {
+  flex-shrink: 0;
+}
+.mission-strip-blocked {
+  color: var(--amber);
+  font-weight: 600;
+}
+.mission-strip-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+.mission-strip .btn {
+  flex-shrink: 0;
+}
+
+/* Handoff cards: compact, labelled, never a bubble that reads as if you had typed it. */
+.mission-card {
+  border: 1px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 60%, var(--border));
+  border-radius: 10px;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.mission-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 10px 6px 8px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 12.5px;
+  text-align: left;
+}
+button.mission-card-head {
+  cursor: pointer;
+}
+button.mission-card-head:hover {
+  background: var(--bg-hover);
+}
+.mission-card-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.mission-card-label {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 0;
+  max-width: 60%;
+}
+.mission-card-who {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.mission-card-summary {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.mission-card-toggle {
+  flex-shrink: 0;
+  font-size: 11.5px;
+}
+.mission-card-body {
+  padding: 0 12px 10px 38px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.mission-card-body > :first-child {
+  margin-top: 0;
+}
+.mission-card-body > :last-child {
+  margin-bottom: 0;
+}
+/* A long message folds to its first lines until opened; the full text stays in the DOM for Find. */
+.mission-card.folded .mission-card-body {
+  max-height: 9.5em;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 60%, transparent);
+}
+.mission-card .msg-images,
+.mission-card .msg-files {
+  padding: 0 12px 10px 38px;
+}
+.mission-card[data-kind='failed'],
+.mission-card[data-kind='stopped'],
+.mission-tool.tool-error {
+  border-left-color: color-mix(in srgb, var(--red) 60%, var(--border));
+}
+.mission-card[data-kind='failed'] .mission-card-glyph,
+.mission-tool.tool-error .mission-card-glyph {
+  color: var(--red);
+  background: var(--red-soft);
+}
+.mission-card[data-kind='question'],
+.mission-card[data-kind='approval'] {
+  border-left-color: color-mix(in srgb, var(--amber) 60%, var(--border));
+}
+.mission-card[data-kind='report'] .mission-card-glyph,
+.mission-tool[data-tool='finish_mission'] .mission-card-glyph {
+  color: var(--green);
+  background: var(--green-soft);
+}
+.mission-tool.tool-running .mission-card-glyph {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+.mission-tool-body {
+  border-top: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+.mission-tool-name {
+  padding: 6px 10px 0;
+}
+.mission-report {
+  display: grid;
+  gap: 8px;
+  padding: 2px 12px 12px 38px;
+  font-size: 13px;
+}
+.mission-report-title {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin-bottom: 2px;
+}
+.mission-report p,
+.mission-report ul {
+  margin: 0;
+}
+.mission-report ul {
+  padding-left: 18px;
+}
+
+/* A Builder's approval card says where its request is and what the Lead advised. */
+.approval-mission {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.approval-mission > .icon {
+  color: var(--accent);
+}
+.approval-mission-who {
+  font-weight: 600;
+  color: var(--fg);
+}
+.approval-recommendation {
+  border-left: 3px solid var(--accent);
+  padding: 4px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.approval-recommendation[data-verdict='deny'] {
+  border-left-color: var(--red);
+}
+
+/* Sidebar: Builders sit indented under their Lead, each with a status dot; the Lead has a marker. */
+.session-row.mission-builder .session-main {
+  margin-left: 14px;
+}
+:root[data-ui='zen'] .session-row.mission-builder .session-main {
+  margin-left: 10px;
+}
+.mission-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+.mission-dot[data-state='working'] {
+  background: var(--blue);
+}
+.mission-dot[data-state='waiting_lead'] {
+  background: var(--amber);
+}
+.mission-dot[data-state='done'] {
+  background: var(--green);
+}
+.mission-dot[data-state='failed'] {
+  background: var(--red);
+}
+.mission-dot[data-state='stopped'] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--fg-faint);
+}
+.session-mission {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* New Session: the Mission switch shares the permission field's control row. */
+.ns-permission-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.ns-permission-row select {
+  flex: 1;
+  min-width: 0;
+}
+.ns-mission {
+  flex-shrink: 0;
+}
+.ns-mission .toggle {
+  margin: 0;
+}

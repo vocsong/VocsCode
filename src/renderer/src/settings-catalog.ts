@@ -42,14 +42,15 @@ export const SETTINGS_PAGES = [
     { label: 'Cloud transcription', description: 'Speech provider and transcription model.', keywords: 'audio speech api cloud', anchor: 'voice-cloud' },
     { label: 'Local transcription', description: 'Private, on-device whisper.cpp models, GPU and idle timeout.', keywords: 'whisper cpu gpu download microphone local idle server', anchor: 'voice-local' },
   ] },
-  { id: 'sessions', label: 'Session defaults', icon: 'sessionPlus', group: 'Agent behavior', description: 'Starting choices for new sessions, plus app-wide context and goal behavior.', saveHint: 'Preferences save automatically · Use Add for new branch prefixes', topics: [
+  { id: 'sessions', label: 'Session defaults', icon: 'sessionPlus', group: 'Agent behavior', description: 'Starting choices for new sessions, plus app-wide context, goal and Mission mode behavior.', saveHint: 'Preferences save automatically · Use Add for new branch prefixes', topics: [
     { label: 'New sessions', description: 'Default harness, permission mode and reasoning effort.', keywords: 'agent model permissions approval full access effort', anchor: 'sessions-defaults' },
     { label: 'Context management', description: 'Choose when to automatically compact a session.', keywords: 'context window tokens compaction threshold percentage', anchor: 'sessions-context' },
     { label: 'Goal defaults', description: 'Auto-continue, iteration guard and harness-native goals.', keywords: 'automatic autonomous goal iterations continue', anchor: 'sessions-goals' },
+    { label: 'Mission mode', description: 'The harness, model, reasoning effort and permission mode every Mission Builder runs on.', keywords: 'mission lead builder builders same as lead harness model effort permission auto coordinate parallel', anchor: 'sessions-mission' },
     { label: 'Worktree branches', description: 'Manage the branch prefixes offered in every project.', keywords: 'git worktree isolation prefix branch', anchor: 'sessions-branches' },
   ] },
   { id: 'instructions', label: 'Instructions', icon: 'edit', group: 'Agent behavior', description: 'Tell your agents how you like to work. Shared rules, with room for exceptions.', saveHint: 'Use Save to apply your edits', topics: [
-    { label: 'Shared & harness instructions', description: 'Edit the app’s global and per-harness instruction files.', keywords: 'system prompt rules global markdown AGENTS CLAUDE APPEND_SYSTEM', anchor: 'instructions-editor' },
+    { label: 'Shared & harness instructions', description: 'Edit the app’s global and per-harness instruction files, and the Mission Lead and Builder add-ons.', keywords: 'system prompt rules global markdown AGENTS CLAUDE APPEND_SYSTEM mission lead builder role', anchor: 'instructions-editor' },
   ] },
   { id: 'assistant', label: 'Vesta & utility', icon: 'sparkles', group: 'Agent behavior', description: 'Choose the models that help behind the scenes.', saveHint: AUTO, topics: [
     { label: 'Utility model', description: 'A fast model for session titles and worktree names.', keywords: 'background cheap naming flash model', anchor: 'assistant-models' },

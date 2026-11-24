@@ -17,4 +17,5 @@
 @import './styles/panel.css' layer(components);
 @import './styles/dialogs.css' layer(components);
 @import './styles/views.css' layer(components);
+@import './styles/mission.css' layer(components);
 @import './styles/themes/nebula.css' layer(themes);

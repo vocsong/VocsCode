@@ -32,7 +32,8 @@ General is the starting point for daily preferences and common destinations. App
 interface mode (Standard, or the minimalist Zen layout), the live theme preview and the theme
 catalogue; the interface and the color theme are independent, and every theme works in both. See
 [Interface modes](INTERFACE-MODES.md). Session defaults owns new-session defaults, compaction,
-goals and worktree branch prefixes. Remembered per-project choices still take precedence for
+goals, worktree branch prefixes and the Mission mode Builder defaults (harness or Same as Lead,
+model, effort, tier; [Mission mode](MISSION-MODE.md)). Remembered per-project choices still take precedence for
 new-session harness, permission and effort defaults. Compaction is app-wide and can affect existing
 sessions at an idle boundary; the harness-native `/goal` preference updates existing sessions too.
 Auto-continue and iteration defaults are copied when a new goal is created.
