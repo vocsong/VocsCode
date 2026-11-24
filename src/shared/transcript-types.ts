@@ -169,6 +169,7 @@ export interface ApprovalQuestion {
   question: string;
   options?: { label: string; description?: string }[];
   allowOther?: boolean;
+  multiSelect?: boolean;
   secret?: boolean;
 }
 
@@ -199,6 +200,8 @@ export interface ApprovalDecision {
   optionId: string;
   note?: string;
   answers?: Record<string, string>;
+  /** Selected option labels for multi-select questions, keyed by question id. */
+  multiAnswers?: Record<string, string[]>;
   /** For 'allow' with edited input (e.g. modified command). */
   updatedInput?: unknown;
 }

@@ -16,6 +16,7 @@ import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { ANTIGRAVITY_ACP_ARGS, ANTIGRAVITY_SIGN_IN_MESSAGE, antigravityAccountEnv, connectAcp, isAntigravityAuthRequired } from './antigravity';
 import { acpModelCatalog, decodeAcpModelValue, findEffortOption, findModelOption, flattenSelect, type ConfigOptionLike } from './acp-config';
+import { buildAcpElicitationResponse, planAcpFormElicitation } from './acp-elicitation';
 
 const ACP_ENV_KEYS: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
@@ -169,7 +170,7 @@ export class AcpAdapter implements HarnessAdapter {
       const init = await withTimeout(
         this.conn.initialize({
           protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
+          clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, elicitation: { form: {} } },
           clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }
         } as unknown as acp.InitializeRequest),
         120_000,
@@ -274,6 +275,22 @@ export class AcpAdapter implements HarnessAdapter {
         this.armQuietTimer();
         try {
           return await this.onRequestPermission(params);
+        } finally {
+          if (this.child === child) {
+            this.pendingPermissions--;
+            this.armQuietTimer();
+          }
+        }
+      },
+      createElicitation: async (params: acp.CreateElicitationRequest) => {
+        if (this.child !== child || this.prompt?.recovering) return { action: 'cancel' };
+        this.pendingPermissions++;
+        this.armQuietTimer();
+        try {
+          return await this.onCreateElicitation(params, child);
+        } catch (e) {
+          this.ctx.log('warn', `acp elicitation cancelled: ${errorMessage(e)}`);
+          return { action: 'cancel' };
         } finally {
           if (this.child === child) {
             this.pendingPermissions--;
@@ -406,6 +423,29 @@ export class AcpAdapter implements HarnessAdapter {
       return selected(pick(['allow_once']) ?? chosen.optionId);
     }
     return selected(chosen.optionId);
+  }
+
+  private async onCreateElicitation(params: acp.CreateElicitationRequest, child: ChildProcess): Promise<acp.CreateElicitationResponse> {
+    if ('sessionId' in params && typeof params.sessionId === 'string' && this.sessionId && params.sessionId !== this.sessionId) {
+      return { action: 'cancel' };
+    }
+    const agentName = this.id === 'antigravity' ? 'Antigravity' : this.preset?.name ?? 'ACP agent';
+    const plan = planAcpFormElicitation(params, agentName);
+    if (!plan) return { action: 'decline' };
+    const decision = await this.ctx.requestApproval({
+      kind: 'question',
+      title: plan.title,
+      description: plan.description,
+      toolItemId: plan.toolItemId,
+      supportsQuestionComment: plan.supportsQuestionComment,
+      options: [
+        { id: 'allow', label: 'Answer', kind: 'allow' },
+        { id: 'deny', label: 'Skip', kind: 'deny' }
+      ],
+      questions: plan.questions
+    });
+    if (this.child !== child || this.prompt?.recovering) return { action: 'cancel' };
+    return buildAcpElicitationResponse(plan, decision);
   }
 
   private changesFromContent(content: unknown[] | undefined): FileChange[] | undefined {
