@@ -2,7 +2,7 @@
  * Renderer stylesheet entry point.
  *
  * Explicit CSS cascade layers eliminate import-order accidents between base rules,
- * feature stylesheets (settings, onboarding, mission, knowledge), animated themes,
+ * feature stylesheets (settings, onboarding, knowledge), animated themes,
  * and interface modes (Zen). Runtime palette tokens injected by theme.ts and the
  * mobile web shell (src/web/web.css) stay unlayered so they always win cleanly.
  */

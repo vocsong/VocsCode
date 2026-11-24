@@ -5,8 +5,7 @@ Technical reference moved out of the README. For the friendly overview, read the
 ## Source layout
 
 ```
-src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette, interface modes (no runtime deps);
-                  mission*.ts hold the Mission record, preset/config and command contracts
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette, interface modes (no runtime deps)
 src/main
   harness/        adapters → normalized SessionEvent stream
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
@@ -17,10 +16,7 @@ src/main
     acp.ts        Agent Client Protocol client (Google Antigravity and generic ACP agents)
     antigravity.ts  Antigravity CLI settings, account probe and quota decoding
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
-  mission/        durable Mission coordination (service/state/store), scoped tools, scheduling,
-                  workspaces, verification, delivery and restart recovery (docs/MISSIONS.md)
-  owned-windows-job.ts + terminal-process.ts   Windows Job Object supervisor that proves a process
-                  tree has ended (resources/mission/windows-check-job.ps1)
+  legacy-mission.ts   removes the retired Mission feature's coordination data from userData on startup
   process-tracker.ts + process-snapshot.ts + process-context.ts   the Processes panel: every process
                   the app started (sampled tree under main, saved for the next run), who it works for, and ending it;
                   the Windows table reader (and per-session Job Objects) is resources/processes/windows-process-snapshot.ps1
@@ -47,7 +43,6 @@ src/renderer      React 19 + zustand UI
     settings/     modular Settings sections (appearance, general, sessions, terminal, providers, harnesses, shortcuts, remote, about)
     SessionTitle.tsx  shared desktop and web session label with a harness pill and project | session name
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
-    mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
   styles.css      @layer entry importing modular stylesheets under styles/ (tokens, reset, layout, primitives, sidebar, conversation, panel, dialogs, views, themes/)
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
@@ -56,7 +51,7 @@ src/renderer      React 19 + zustand UI
   store.ts        session/layout/host Zustand store composed from slices under store/; api.ts wraps the preload bridge
   settings-nav.ts deep-link navigation into Settings sections without circular imports with SettingsView
   panes.ts        the split view's session pane model and the separate, transient file drawer target; components/SessionPanes.tsx renders the split
-  file-open.ts    where a session's files are read from (Mission workspaces) and how outside paths are only revealed; components/FilePreviewPane.tsx previews
+  file-open.ts    where a session's files are read from and how outside paths are only revealed; components/FilePreviewPane.tsx previews
 src/web           the browser shell at code.vocs.io/app (plain Vite build into relay/public/app)
   transport/      RelayTransport (window.harness over the e2e session, local `can` gate) + mirror backend + IndexedDB vault
   shell/          WebApp root, connection state, account probe, viewport keyboard inset
@@ -64,9 +59,8 @@ src/web           the browser shell at code.vocs.io/app (plain Vite build into r
   sheets/         bottom sheets: computers, devices, new session, terminal
   terminal/       the live terminal: stream controller, headless-xterm screen model, key mapping, view
   components/     web composer, session header, status chip, connection banner
-resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents, the MCP bridge and,
-                  for Mission-managed sessions only, vocs-code-mission.ts
-resources/mission the Windows Job Object helper (windows-check-job.ps1) shared by Mission checks and owned processes
+resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents and the MCP bridge
+
 resources/processes the read-only Windows process-table reader (Toolhelp snapshot) behind the Processes panel
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
 ```
@@ -110,8 +104,8 @@ Fallback discovery skips dependency/generated directories (`node_modules`, `.git
 `out`, `build`, `.next`, `.venv`, `venv`, `target`, `.vocs-code`) and does not follow symlinks.
 Exact contained paths there still open. Scans are bounded to 50,000 entries and fewer than
 100 matches; incomplete or unreadable scans ask for a full path instead of guessing.
-Absolute paths outside the session are never remapped into it. Mission resolution and reads
-use the same selected workspace; no sibling checkout or project-root fallback is allowed.
+Absolute paths outside the session are never remapped into it. Resolution and reads use the
+session's own workspace; no sibling checkout or project-root fallback is allowed.
 Transports without `fs:resolve` retain exact-path opening. Lookup and read failures stay in a
 single inline drawer notice with Retry and Copy path. An existing preview keeps its content and
 editor position when the next request fails within the same workspace.
@@ -146,8 +140,8 @@ input under an already-aborted signal. Admission is serialized, not model respon
 steers are each submitted once without dropping earlier directives. Pending old-run approvals are
 denied; late old-run dialogs cannot acquire a new grant. Cancellation failure refuses the new
 prompt rather than running it beside unproven old work. Normalized turn completion uses
-`agent_settled`, not intermediate `agent_end`; delayed stats cannot overwrite a newer run. Managed
-Mission input retains its broker-owned continuation policy. The Pi MCP bridge propagates per-call
+`agent_settled`, not intermediate `agent_end`; delayed stats cannot overwrite a newer run. The Pi
+MCP bridge propagates per-call
 cancellation without closing shared connections; remote cancellation is advisory, not proof that a
 remote mutation or its side effects stopped.
 
@@ -186,8 +180,7 @@ panel again.
 **Fast mode is a separate, per-session premium-speed preference**, not a reasoning level. The
 New Session dialog and composer's model menu expose `SessionConfig.fastMode` (off by default), with a
 cost warning before opt-in. `shared/fast-mode.ts` limits candidates to first-party OpenAI GPT-5/6
-(excluding Spark) and supported Anthropic Opus models; gateways, Cursor, ACP and Mission presets
-are not supported. Account entitlement is still the provider's decision. Idle-session changes go
+(excluding Spark) and supported Anthropic Opus models; gateways, Cursor and ACP are not supported. Account entitlement is still the provider's decision. Idle-session changes go
 through `sessions:setFastMode`; the manager refuses busy transitions and rolls back failed writes.
 A model switch to an incompatible route requires turning Fast mode off first. Same-harness forks
 retain the preference; cross-harness forks start at standard speed.
@@ -223,8 +216,7 @@ app uses a bounded, versioned, nonce-bound `VCODE_QUESTION::` select envelope in
 normalizes it into the same question card as Claude's `AskUserQuestion` and Codex's
 `requestUserInput`, then returns answer and context separately in a JSON RPC value. Cancellation,
 malformed/stale replies and unavailable UI never become fabricated user choices. A question is not
-a permission grant, including in Full access. Managed Mission sessions retain their broker-only
-question channel, and subagent/Vesta runtimes do not gain this tool.
+a permission grant, including in Full access. Subagent/Vesta runtimes do not gain this tool.
 
 Question cards show option descriptions upfront, keep optional context separate from choosing or
 typing an answer, and retain the submitted choice/context in compact history. Empty structured
@@ -316,7 +308,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - A coloured transcript link always opens something. The transcript distinguishes the browser, in-app GitHub PRs, text/file previews, image-file previews, inline image lightboxes, folders, and the system file manager by their destination. Capability and session checks determine the action, not a model-supplied style attribute. Markdown links render as `http(s)` links, as `data-file` references (`file-refs.ts` reads `file://`, percent-encoded, Codex `/G:/…:12` and `#L10-L20` targets), or as plain text when nothing here can open the target.
 - The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
 - Local images in assistant Markdown resolve against that session's checkout (`cwd`, not the main project root or renderer URL). Sanitized HTML carries inert references; the desktop loads bounded image bytes through the existing session-scoped `fs:readImage` handler, which also rejects symlink escapes. Never loosen the Markdown URI allowlist or CSP to expose filesystem paths. Missing, oversized and denied images show an unavailable caption; web Markdown continues to omit images.
-- Every process the app starts is tracked for the Processes panel without the spawning code knowing about it. `SessionManager` wraps each adapter in `ownedAdapter`, so a ChildProcess created during any adapter call (an SDK's CLI, MCP servers, tool shells) is claimed for that session through Node's `child_process` diagnostics channel; terminals come from `TerminalManager.activity()`; descendants inherit the owner. An app-wide process that a session's call may start lazily must be spawned under `withProcessOwner({ label })` (as the shared GitNexus server and Vesta are), or it is attributed to whichever session asked first. On Windows each session's processes also join a per-session Job Object (no limits, breakaway allowed, never kills), so a process started through a launcher that exits at once (`Start-Process` from a tool shell) is still listed under its session, flagged detached; Mission sessions and Job-owned shells are never put into one, so Mission's own Job ownership is untouched. Processes are named by PID *and* creation time everywhere; ending one re-checks a fresh sample, and the panel is desktop-only (not a remote channel).
+- Every process the app starts is tracked for the Processes panel without the spawning code knowing about it. `SessionManager` wraps each adapter in `ownedAdapter`, so a ChildProcess created during any adapter call (an SDK's CLI, MCP servers, tool shells) is claimed for that session through Node's `child_process` diagnostics channel; terminals come from `TerminalManager.activity()`; descendants inherit the owner. An app-wide process that a session's call may start lazily must be spawned under `withProcessOwner({ label })` (as the shared GitNexus server and Vesta are), or it is attributed to whichever session asked first. On Windows each session's processes also join a per-session Job Object (no limits, breakaway allowed, never kills), so a process started through a launcher that exits at once (`Start-Process` from a tool shell) is still listed under its session, flagged detached. Processes are named by PID *and* creation time everywhere; ending one re-checks a fresh sample, and the panel is desktop-only (not a remote channel).
 - API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo. Without OS encryption, API keys fall back to obfuscated storage with a warning, but the remote-access identity and enrollment secrets (`remote-host`, `remote-enroll`) stay in memory for that run only: remote access must be paired again after a restart.
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
@@ -337,42 +329,6 @@ A parked PR is checked again after two minutes even if the last check was unchan
 unavailable. Only the current refresh for the same session, cwd and worktree branch may
 publish or rearm a check, and busy adapters, pending turns and approvals block publication.
 
-## Mission ownership
-
-[Mission guide](MISSIONS.md) · [status and support matrix](MISSION-STATUS.md) · [specification](MISSION-SPEC-v0.2.md)
-
-Missions are experimental and run only with Pi and Claude Agent SDK presets on Windows. The harness matrix above
-describes ordinary sessions and says nothing about Mission support.
-
-`mission/runtime.ts` composes the privileged coordinator at desktop startup. `MissionService`
-owns versioned plans, generated profiles, task/attempt admission, mailbox, integration and delivery;
-`SessionManager` still owns every harness, normalized event, transcript, approval and usage ledger.
-Renderer state only reconstructs views and sends genuine user actions. There is one active lead
-and no second app/native goal loop on a managed participant.
-
-The journal is committed/fsynced before external effects. Stable operation identities and
-immutable receipts reconcile acknowledgment loss; checksummed snapshots are caches, not an
-alternative authority. Restart never automatically resumes pending Mission execution. Unknown
-schema versions, corrupt journals and uncertain process effects stay blocked rather than inferred
-from a newly empty process/session map.
-
-T5 and worker presets are immutable attempt snapshots. Live disablement/restrictions still
-apply at dispatch. Runtime readiness comes from the exact initialized adapter's model/effort,
-connection and coordination observations, not a merged catalog. The scoped loopback Mission
-broker binds role/session/generation/attempt authority in an ephemeral bearer capability; model
-payloads cannot select those identities or invoke user-only authorization/configuration controls.
-
-Workspace leases hold application writer admission across capture/integration and across the
-async runtime-start/dispatch gap. Verification owns isolated processes/resources until descendant
-quiescence is proven. Git worktrees, permission gates and process ownership are not an OS
-sandbox. Unexpected edits and uncertain cleanup remain retained. Actual test counts, exact content
-identity, independent review, settled operations and real delivery receipts gate completion.
-
-Generic IPC and remote mutations also check managed workspace ownership, including ordinary
-session aliases. The main diff is the accepted result versus baseline, not whichever participant
-is currently selected for inspection. Specialists remain owned sessions internally but are not
-independent sidebar chats or separately charged Mission rollups.
-
 ## Adding a harness
 
 Touch all of these: add an adapter in `src/main/harness/<id>.ts`, register the case in
@@ -388,8 +344,8 @@ one-time grants (`allow_once`): its "always" options would persist into the CLI'
 outlive the app's mode. Google permits auto-approval in a session a person drives; what consumer
 sign-in rules out is automated prompting (see below). The app keeps the
 ACP session identifier for resume and receives context usage through `usage_update`.
-The account route only accepts human-driven turns. The app goal loop, Missions and external
-controllers cannot dispatch Antigravity prompts. [Google ACP guidance](https://antigravity.google/docs/ide/extensions/acp/) · [Interactive use and quota](https://github.com/google-antigravity/antigravity-cli/issues/1493#issuecomment-6814901159)
+The account route only accepts human-driven turns. The app goal loop and external controllers
+cannot dispatch Antigravity prompts. [Google ACP guidance](https://antigravity.google/docs/ide/extensions/acp/) · [Interactive use and quota](https://github.com/google-antigravity/antigravity-cli/issues/1493#issuecomment-6814901159)
 
 ## Permission tiers
 
@@ -464,8 +420,8 @@ app instructions, knowledge or fork context are appended. It counts typed/pasted
 submission (including queued, steering and edited/resubmitted messages), using a rough estimate of
 one token per four Unicode code points, rounded up per message. It is not a model tokenizer or a
 billing measurement; language and code affect accuracy. Images, attached files, goal configuration,
-generated goal/Mission/subagent prompts, Mission mailbox input and per-subagent panel steering are
-not measured. Existing **Input** remains the provider's uncached input counter; cache tokens are
+generated goal/subagent prompts and per-subagent panel steering are not measured.
+ Existing **Input** remains the provider's uncached input counter; cache tokens are
 reported separately.
 
 The host stamps an owner/session id, submission id, timestamp and estimate on the transcript item.

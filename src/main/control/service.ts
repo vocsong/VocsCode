@@ -40,10 +40,8 @@ export class ControlService {
     journal: ControlJournal;
     sessions: SessionManager;
     settings: () => AppSettings;
-    /** Same Mission session/workspace guards as the desktop, not an IPC invoke tunnel. */
+    /** The desktop's session/workspace resource check, not an IPC invoke tunnel. */
     guard: ControlResourceGuard;
-    /** Required for discovery, not for the existing mutation paths. */
-    workspaceRevision?: () => number;
     now?: () => number;
   }) {}
   private now(): number { return this.deps.now?.() ?? Date.now(); }
@@ -65,7 +63,7 @@ export class ControlService {
         const stat = await fs.stat(canonicalRoot);
         if (!stat.isDirectory()) continue;
         projects.push({ id: `p_${randomUUID().replaceAll('-', '')}`, root, canonicalRoot, name: path.basename(root), identity: `${stat.dev}:${stat.ino}` });
-      } catch { /* Missing or managed roots are not enrollable. Never infer new access from them. */ }
+      } catch { /* Never infer new access from a root that failed enrollment. */ }
     }
     if (projects.length !== current.projects.length) await this.deps.journal.transaction((s) => {
       for (const project of projects) if (!s.projects.some((p) => key(p.root) === key(project.root) || key(p.canonicalRoot) === key(project.canonicalRoot))) s.projects.push(project);
@@ -133,16 +131,13 @@ export class ControlService {
   }
 
   private discoveryFence(principal: ControllerPrincipal, method: DiscoveryMethod, grant: ControlGrant, instanceId: string, projectId?: string) {
-    const workspaceRevision = this.deps.workspaceRevision;
-    if (!workspaceRevision) throw new ControlError('unavailable');
-    const workspace = workspaceRevision(), disabled = this.discoveryDisableRevision;
-    // The guard can hold an older Mission view across filesystem awaits. Recheck the committed
-    // publication and the same desktop grant synchronously with the final response projection.
+    const disabled = this.discoveryDisableRevision;
+    // Recheck the same desktop grant synchronously with the final response projection.
     return () => {
       const state = this.snapshot();
       const current = this.authorize(principal, method, projectId, state);
       if (current.id !== grant.id || current.revokedAt !== undefined || state.instanceId !== instanceId ||
-        disabled !== this.discoveryDisableRevision || workspace !== workspaceRevision()) throw new ControlError('denied');
+        disabled !== this.discoveryDisableRevision) throw new ControlError('denied');
       return { state, grant: current };
     };
   }
@@ -175,7 +170,7 @@ export class ControlService {
     this.authorize(principal, method, projectId);
     const project = await this.project(projectId);
     const session = this.deps.sessions.get(sessionId);
-    if (!session || session.mission || session.archived) throw new ControlError('denied');
+    if (!session || session.archived) throw new ControlError('denied');
     const checked = sessionIdentity(session);
     await checkControlWorkspace(session, project.canonicalRoot, this.deps.guard);
     // Synchronously after the last await: the workspace, mode and harness approved above are
@@ -243,7 +238,7 @@ export class ControlService {
         const checked: Array<{ session: SessionMeta; identity: string; workspace: string | undefined }> = [];
         for (const session of candidates) {
           try {
-            if (!session || session.mission || session.archived || !grant.permissionModes.includes(session.config.permissionMode) ||
+            if (!session || session.archived || !grant.permissionModes.includes(session.config.permissionMode) ||
               !grant.harnesses.includes(session.config.harness)) continue;
             const identity = sessionIdentity(session);
             const workspace = await checkControlWorkspace(session, project.canonicalRoot, this.deps.guard, true);

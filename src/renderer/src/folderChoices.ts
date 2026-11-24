@@ -6,14 +6,13 @@
  */
 import type { AppSettings, SessionMeta } from '../../shared/types';
 import { basename } from './format';
-import { isTopLevelSession } from './missions';
 import { recencyAt } from './sessionOrder';
 
 export interface FolderChoice {
   root: string;
   /** The folder's own name, the row's headline. */
   name: string;
-  /** Visible top-level sessions in the folder. */
+  /** Unarchived sessions in the folder. */
   sessionCount: number;
   /** The newest of those sessions' recency stamps; absent for a folder without a session. */
   lastActiveAt?: number;
@@ -31,7 +30,7 @@ export function folderChoices(sessions: SessionMeta[], settings: AppSettings | n
     return choice;
   };
   for (const s of sessions) {
-    if (s.archived || !isTopLevelSession(s)) continue;
+    if (s.archived) continue;
     const choice = choiceFor(s.config.projectRoot);
     choice.sessionCount += 1;
     choice.lastActiveAt = Math.max(choice.lastActiveAt ?? 0, recencyAt(s));

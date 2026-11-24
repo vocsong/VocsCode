@@ -195,6 +195,20 @@ describe('Pi adapter startup capability boundary', () => {
     expect(appends[1]).toContain('timeout_ms explicitly means milliseconds');
     await adapter.dispose();
   });
+  it('runs Pi as a plain child, stops it with a graceful stdin-EOF shutdown, and starts a fresh runtime after Stop', async () => {
+    const { adapter, commands, children } = await setup(['approvals', 'tools', 'subagents']);
+    await adapter.send({ text: 'First' });
+    expect(spawn.spawnTool).toHaveBeenCalledTimes(1);
+    await adapter.dispose();
+    expect(spawn.shutdownChild).toHaveBeenCalledTimes(1);
+    expect(spawn.shutdownChild).toHaveBeenCalledWith(children[0], 1500);
+    await adapter.send({ text: 'A new runtime after stop' });
+    expect(spawn.spawnTool).toHaveBeenCalledTimes(2);
+    expect(commands.filter((command) => command.type === 'prompt').map((command) => command.message)).toEqual(['First', 'A new runtime after stop']);
+    await adapter.dispose();
+    expect(spawn.shutdownChild).toHaveBeenCalledTimes(2);
+    expect(spawn.shutdownChild).toHaveBeenLastCalledWith(children[1], 1500);
+  });
   it('fails closed for required extension errors even after every readiness notification', async () => {
     const { adapter, commands } = await setup(['approvals', 'tools', 'subagents'], true);
     await expect(adapter.send({ text: 'must not reach Pi' })).rejects.toThrow('SDK import failed');

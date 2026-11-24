@@ -183,12 +183,10 @@ describe('exclusive controlled turns', () => {
     expect((await manager.transcript(meta.id)).filter((item) => item.kind === 'user').map((item) => item.text)).toEqual(['human']);
   });
 
-  it.each(['queued', 'starting', 'awaiting', 'running', 'goal', 'mission', 'uncertain'] as const)('rejects %s sessions before dispatch', async (state) => {
+  it.each(['queued', 'starting', 'awaiting', 'running', 'goal'] as const)('rejects %s sessions before dispatch', async (state) => {
     const { manager, meta } = await fixture();
     if (state === 'queued') meta.queued = 1;
     else if (state === 'goal') meta.goal = { objective: 'ongoing', status: 'active', createdAt: 1, updatedAt: 1, iterations: 0, maxIterations: 2, autoContinue: true };
-    else if (state === 'mission') meta.mission = { missionId: 'managed' } as never;
-    else if (state === 'uncertain') meta.workspaceWriterClaims = ['unknown_previous_runtime'];
     else meta.status = state;
     const beforeDispatch = vi.fn(async () => undefined);
     await expect(run(manager, 'operation', beforeDispatch)).rejects.toThrow();
@@ -539,8 +537,10 @@ describe('controller authorization before privileged effects', () => {
     let entered!: () => void, release!: () => void;
     const preparing = new Promise<void>((resolve) => { entered = resolve; });
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    // The last await before the adapter starts: the workspace writer claim.
-    vi.spyOn(manager as unknown as { claimWorkspaceWriter(): Promise<void> }, 'claimWorkspaceWriter').mockImplementationOnce(async () => { entered(); await gate; });
+    // The last await before the runtime is built: a resumed session's `/goal` driver refresh, which
+    // runs when the previous run left advertised harness commands behind.
+    manager.get('session')!.harnessCommands = ['compact'];
+    vi.spyOn(manager as unknown as { applyGoalDriver(): Promise<boolean> }, 'applyGoalDriver').mockImplementationOnce(async () => { entered(); await gate; return false; });
     await c.service.handle(c.principal, { method: 'sessions.send', params: { ...c.intent, sessionId: 'session', idempotencyKey: 'revoked-while-starting', text: 'Do the task' } });
     try {
       await preparing;

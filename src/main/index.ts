@@ -41,8 +41,7 @@ import { providerSecrets } from './secret-ids';
 import { createVocsAccount, VOCS_ACCOUNT_VAULT_IDS, vocsAccountRealm } from './vocs-account';
 import { createVocsHub, VOCS_HUB_VAULT_IDS } from './vocs-hub';
 import { SessionManager } from './session-manager';
-import { MissionRuntime } from './mission/runtime';
-import { ordinaryProcessOwnership as ordinaryOwnershipEnabled, ownedWindowsJobProbe } from './owned-windows-job';
+import { retireLegacyMissionData } from './legacy-mission';
 import { createProcessSource } from './process-snapshot';
 import { ProcessTracker } from './process-tracker';
 import { SettingsStore } from './settings';
@@ -105,7 +104,6 @@ if (!app.isPackaged || process.env.VOCS_CODE_USER_DATA) app.setPath('userData', 
 
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
-let missions: MissionRuntime | null = null;
 let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
 let remoteHost: RemoteHost | null = null;
@@ -234,12 +232,8 @@ async function main(): Promise<void> {
     },
     () => settings.get()
   );
-  // Ordinary Pi sessions and shells join Mission's process ownership only on Windows, with Missions
-  // configured, and once the bundled Job helper has proven itself here (probed lazily, just once).
-  const windowsJobHelper = runtime.resource('mission', 'windows-check-job.ps1');
-  const jobHelperProbe = ownedWindowsJobProbe(windowsJobHelper);
-  const ordinaryProcessOwnership = () => ordinaryOwnershipEnabled(settings.get(), jobHelperProbe);
-  ordinaryProcessOwnership(); // Start the probe early: a PTY spawn cannot wait for it.
+  // The retired Mission feature's coordination data goes; its worktrees are only reported.
+  void retireLegacyMissionData(userData, log);
 
   // Prefer an installed `gitnexus`; otherwise run it through npx. Both are resolved, because a bare
   // `npx` on Windows is a `.cmd` shim only the resolved path lets `spawnTool` find.
@@ -350,7 +344,7 @@ async function main(): Promise<void> {
   const graphSettings = () => resolveIntelligenceSettings(settings.get().intelligence).graphify;
   const graphSession = (id: string) => {
     const meta = store.get(id);
-    return meta && !meta.archived && !meta.mission && !meta.controlCreation && meta.cwd && meta.config?.projectRoot ? meta : null;
+    return meta && !meta.archived && !meta.controlCreation && meta.cwd && meta.config?.projectRoot ? meta : null;
   };
   const graphScheduler = new GraphScheduler({
     enabled: () => graphSettings().enabled && graphCommand() !== null,
@@ -371,7 +365,7 @@ async function main(): Promise<void> {
     // queues a request. Deleting durable memory is a desktop-owner action.
     session: (sessionId) => {
       const meta = store.get(sessionId);
-      if (!meta || meta.archived || meta.mission) return null;
+      if (!meta || meta.archived) return null;
       return {
         sessionId,
         projectRoot: meta.config.projectRoot,
@@ -419,8 +413,6 @@ async function main(): Promise<void> {
     revokeMemoryGateway: (sessionId) => memoryGateway.revoke(sessionId),
     restrictMemoryGateway: (sessionId) => memoryGateway.restrictToRead(sessionId),
     appInstructions: (harness) => appInstructions.effective(harness),
-    withWorkspaceDispatch: (meta, dispatch) => missions ? missions.admission.dispatch(meta.cwd, dispatch) : dispatch(),
-    ordinaryProcessOwnership,
     knowledgeDigest: (scope) => knowledge.digest(scope, { seedIfEmpty: true }),
     pushEvent: (env: SessionEventEnvelope) => {
       pushAll(PUSH_CHANNELS.sessionEvent, env);
@@ -450,7 +442,7 @@ async function main(): Promise<void> {
         const finished = session.archived === true || session.status === 'merged';
         const before = reflectedStates.get(session.id);
         reflectedStates.set(session.id, finished);
-        if (!finished || before !== false || session.mission || resolveIntelligenceSettings(settings.get().intelligence).reflection !== 'auto') continue;
+        if (!finished || before !== false || resolveIntelligenceSettings(settings.get().intelligence).reflection !== 'auto') continue;
         void intelligenceCore
           .reflect({ sessionId: session.id, projectRoot: session.config.projectRoot, cwd: session.cwd, ...(session.worktreeBranch ? { branch: session.worktreeBranch } : {}) }, { title: session.title }, 'auto')
           .catch((e) => log('debug', `intelligence: automatic reflection skipped: ${e instanceof Error ? e.message : String(e)}`));
@@ -517,10 +509,8 @@ async function main(): Promise<void> {
     internalPids: () => app.getAppMetrics().map((metric) => metric.pid),
     terminalRoots: () => {
       const titles = new Map((terminals?.list() ?? []).map((t) => [t.id, t.title]));
-      return (terminals?.activity() ?? []).map((a) => ({ pid: a.pid, sessionId: a.sessionId, terminalId: a.terminalId, title: titles.get(a.terminalId), owned: a.managed || !!a.ownershipNonce }));
+      return (terminals?.activity() ?? []).map((a) => ({ pid: a.pid, sessionId: a.sessionId, terminalId: a.terminalId, title: titles.get(a.terminalId) }));
     },
-    // Mission sessions prove quiescence through Jobs of their own; nothing of theirs joins a session Job.
-    adoptable: (owner) => !owner.sessionId || !sessionsRef.get(owner.sessionId)?.mission,
     registryFile: path.join(userData, 'processes.json'),
     cpuCount: os.availableParallelism(),
     onSummary: (summary) => pushAll(PUSH_CHANNELS.processSummary, summary),
@@ -550,27 +540,14 @@ async function main(): Promise<void> {
     settings: () => settings.get().terminal,
     version: app.getVersion(),
     cwdOf: (id) => sessionsRef.get(id)?.cwd,
-    beforeSpawn: (cwd) => missions?.admission.assertAvailableSync(cwd),
-    isManaged: (id) => !!sessionsRef.get(id)?.mission,
-    onActivity: (id) => { const missionId = sessionsRef.get(id)?.mission?.missionId; if (missionId) missions?.service.ownedActivityChanged(missionId); },
-    ordinaryProcessOwnership,
-    windowsJobHelper,
     push: (channel, payload) => {
       pushAll(channel, payload);
-      // A new shell joins its session's process Job at the next sample; make that one soon.
+      // Sample soon when a terminal changes.
       if (channel === PUSH_CHANNELS.terminalsChanged) processes.soon();
     },
     log
   });
   await terminals.load();
-  missions = new MissionRuntime({
-    userData, sessions: sessionsRef, settings, terminals,
-    windowsJobHelper,
-    changed: (view) => pushAll(PUSH_CHANNELS.missionsChanged, view.record), log: logTo,
-  });
-  const missionStore = missions.store;
-  // Recovery restores blocked/paused coordination state; it never launches a model on boot.
-  await missions.load();
 
   // Remote access (docs/REMOTE-ACCESS.md): the host needs the registry lazily, since
   // registerIpc itself consumes the host to bind the remote:* channels.
@@ -585,11 +562,10 @@ async function main(): Promise<void> {
   };
   const control = new ControlService({
     journal: controlJournal, sessions: sessionsRef, settings: () => settings.get(), guard: guardControlResource,
-    workspaceRevision: () => missionStore.publicationRevision,
   });
   const localControl = new LocalControl({
     supported: process.platform === 'win32', userData, roots: () => settings.get().folders,
-    sessions: sessionsRef, guard: guardControlResource, workspaceRevision: () => missionStore.publicationRevision,
+    sessions: sessionsRef, guard: guardControlResource,
     open: windowsLocalPipe(runtime.resource('control', 'windows-pipe.ps1')),
   });
   remoteHost = new RemoteHost({
@@ -638,8 +614,6 @@ async function main(): Promise<void> {
     secrets,
     sessions,
     keepAwake,
-    missions: missions.service,
-    withWorkspaceWrite: missions.admission.dispatch.bind(missions.admission),
     terminals,
     runtime,
     analytics,
@@ -708,7 +682,6 @@ async function main(): Promise<void> {
     // Palette and interface size changes don't emit nativeTheme's updated event.
     applyChrome();
     terminals?.updateSettings(s.terminal);
-    ordinaryProcessOwnership(); // Configuring Missions starts the Job helper probe.
   });
   currentPalette = settings.get().palette ?? DEFAULT_PALETTE;
   currentUiScale = settings.get().typography?.uiScale ?? 1;
@@ -782,8 +755,8 @@ async function main(): Promise<void> {
       }
     };
     // Each step is independent: a failed stop must never skip the persistence flushes after it.
-    const drainSessions = safe('mission shutdown', missions?.close()).then(async () => {
-      await safe('session stop', sessions?.stopAll());
+    const drainSessions = safe('session stop', sessions?.stopAll()).then(async () => {
+
       await safe('session persist flush', sessions?.flushPendingPersists());
       await safe('analytics flush', analytics.flush());
     });

@@ -216,7 +216,7 @@ describe('the bridge mirrors the host name rules', () => {
   const names = [
     ...MCP_BUILTIN_IDS,
     'vocs_memory', 'vocs.memory', 'Vocs-Memory', 'VOCS__MEMORY', '_vocs-memory_', 'vocs-memory.', 'vocsmemory', 'vocs-memory-2',
-    'GitNexus', 'gitnexus_', 'git-nexus', 'Git.Nexus', 'cua_driver', 'CUA.DRIVER', 'cua-driver-x', 'Vocs.Mission', 'vocs_missions',
+    'GitNexus', 'gitnexus_', 'git-nexus', 'Git.Nexus', 'cua_driver', 'CUA.DRIVER', 'cua-driver-x', 'Vocs.OpenRouter', 'vocs_openrouters',
     'notes', 'my-server', 'My_Server', 'a..b', 'A-B', '2server', 'x', 'x.', 'X_'
   ];
 

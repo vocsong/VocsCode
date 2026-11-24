@@ -90,10 +90,6 @@ async function fixture() {
 it('authorizes only the owner main frame and validates before touching session or power state', async () => {
   const { manager, seed, handler, owner, registry, choice, start, stop } = await fixture();
   await seed('s_live', { status: 'running' });
-  await seed('s_mission', {
-    status: 'running',
-    mission: { missionId: 'm_test', role: 'lead', generation: 1, sourceAccess: 'read_only', requestedTools: [], reasoningDefault: true }
-  });
   await seed('s_archived', { status: 'running', archived: true });
   const lookup = vi.spyOn(manager, 'get');
   for (const event of [{ ...owner, sender: {} }, { ...owner, senderFrame: {} }]) {
@@ -104,7 +100,7 @@ it('authorizes only the owner main frame and validates before touching session o
     expect(() => handler(owner, input)).toThrow();
   }
   expect(lookup).not.toHaveBeenCalled();
-  for (const id of ['s_missing', 's_archived', 's_mission']) expect(() => choice(id, true)).toThrow(/ordinary, unarchived/);
+  for (const id of ['s_missing', 's_archived']) expect(() => choice(id, true)).toThrow(/ordinary, unarchived/);
   expect(registry.channels()).not.toContain(KEEP_AWAKE_CHANNEL);
   expect(isRemoteChannel(KEEP_AWAKE_CHANNEL)).toBe(false);
   expect(agentChannels()).not.toContain(KEEP_AWAKE_CHANNEL);

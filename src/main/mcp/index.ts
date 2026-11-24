@@ -60,8 +60,6 @@ export interface SessionScope {
   branch?: string;
   /** The session being started, so a per-session capability can be bound to it. */
   sessionId?: string;
-  /** Managed Mission runs do not inherit the desktop's memory grants. */
-  managed?: boolean;
   /** Legacy memory cannot enforce a read-only capability. */
   readOnly?: boolean;
 }
@@ -147,7 +145,7 @@ async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps
       materialized = await sharedGitnexusDef(scope, def, deps);
       if (!materialized) continue;
     } else if (def.id === VOCS_MEMORY_SERVER_ID) {
-      if (scope.managed || !deps.memoryServerPath) continue;
+      if (!deps.memoryServerPath) continue;
       let memoryGateway: ReturnType<NonNullable<McpHostDeps['memoryGateway']>> = null;
       if (resolveIntelligenceSettings(scope.settings.intelligence).gateway) {
         // An unavailable or revoked gateway may never turn a scoped server into a direct disk reader.
@@ -168,12 +166,12 @@ async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps
 }
 
 /**
- * Connected Hub connections, as app-owned servers. Managed Mission runs do not inherit them, and
- * the app-wide and per-repo built-in switches keep them off like any other app server. A broker
- * failure leaves the session without them rather than failing its start.
+ * Connected Hub connections, as app-owned servers. The app-wide and per-repo built-in switches keep
+ * them off like any other app server. A broker failure leaves the session without them rather than
+ * failing its start.
  */
 async function resolveHub(scope: SessionScope, state: McpProjectState, deps: McpHostDeps): Promise<ResolvedServer[]> {
-  if (scope.managed || !deps.hubServers) return [];
+  if (!deps.hubServers) return [];
   const off = new Set([...(scope.settings.mcpDisabledBuiltins ?? []), ...(state.disabledBuiltin ?? [])]);
   try {
     return (await deps.hubServers()).filter((server) => !off.has(server.def.id));
@@ -229,13 +227,12 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
     if (def.id === VOCS_MEMORY_SERVER_ID) {
       return {
         def,
-        enabled: injectable && !off && !scope.managed && (usesGateway || (!scope.readOnly && wiki)),
+        enabled: injectable && !off && (usesGateway || (!scope.readOnly && wiki)),
         disabledGlobally: globalDisabled.includes(def.id),
         shared: false,
-        indexed: !scope.managed && (usesGateway || wiki),
+        indexed: usesGateway || wiki,
         claimed: canClaimBuiltins(scope.harness),
-        note: scope.managed ? 'Not available to managed Mission sessions.'
-          : usesGateway ? 'Uses the app’s scoped memory gateway; a wiki is optional.'
+        note: usesGateway ? 'Uses the app’s scoped memory gateway; a wiki is optional.'
           : scope.readOnly ? 'Legacy memory is not available in Plan mode.'
           : wiki ? 'Legacy mode: reads .vocs-code/wiki in this project.' : 'No project wiki yet — generate one from the Knowledge panel.'
       };

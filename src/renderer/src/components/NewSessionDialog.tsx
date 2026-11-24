@@ -14,7 +14,6 @@ import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { FolderPicker } from './FolderPicker';
 import { folderChoices } from '../folderChoices';
-import { MissionLaunch } from './mission/MissionLaunch';
 
 /** The prefix select's "Custom…" option; never a valid prefix itself (`:` cannot be in a ref). */
 const CUSTOM_PREFIX = ':custom';
@@ -23,15 +22,6 @@ const CUSTOM_PREFIX = ':custom';
 const NAME_SUGGEST_DELAY_MS = 700;
 
 export function NewSessionDialog() {
-  const kind = useStore((s) => s.newSessionKind);
-  const choices = <div className="mission-kind row gap8" role="group" aria-label="Session kind">
-    <Button variant={kind === 'normal' ? 'primary' : 'subtle'} aria-pressed={kind === 'normal'} onClick={() => useStore.setState({ newSessionKind: 'normal' })}>Normal session</Button>
-    <Button variant={kind === 'mission' ? 'primary' : 'subtle'} aria-pressed={kind === 'mission'} onClick={() => useStore.setState({ newSessionKind: 'mission' })}>Mission</Button>
-  </div>;
-  return kind === 'mission' ? <MissionLaunch choices={choices} /> : <NormalSessionDialog choices={choices} />;
-}
-
-function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const settings = useStore((s) => s.settings)!;
   const availability = useStore((s) => s.availability);
   const availabilityError = useStore((s) => s.availabilityError);
@@ -377,7 +367,6 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
       }
     >
       <div className="ns-toolbar">
-        {choices}
         <Button size="sm" variant="ghost" onClick={() => promptRef.current?.focus()}>Jump to first prompt</Button>
       </div>
       <div className="ns-grid">

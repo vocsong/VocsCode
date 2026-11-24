@@ -388,9 +388,6 @@ describe.runIf(enabled)('remote access settings', () => {
         cwd: folders[index], createdAt: now, updatedAt: now, harnessRef: {},
         usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
       }));
-      sessions.push({ ...sessions[0], id: 's_local_mission', title: 'Managed Mission session', mission: {
-        missionId: 'local-e2e-mission', role: 'lead', generation: 1, sourceAccess: 'read_only', requestedTools: [], reasoningDefault: true
-      } });
       await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
       for (const { id } of sessions) {
         const dir = path.join(userData, 'sessions', id);
@@ -467,7 +464,7 @@ describe.runIf(enabled)('remote access settings', () => {
         const denied = await call('sessions_list', { projectId: betaProject.id });
         expect(denied.isError).toBe(true);
         expect(denied.structuredContent).toEqual({ error: 'denied' });
-        for (const name of ['missions_list', 'sessions_transcript', 'sessions_send', 'invoke', 'control:local:enable']) {
+        for (const name of ['sessions_transcript', 'sessions_send', 'invoke', 'control:local:enable']) {
           const unknown = await call(name);
           expect(unknown.isError).toBe(true);
           expect(unknown.content).toEqual([{ type: 'text', text: expect.stringContaining(`Tool ${name} not found`) }]);

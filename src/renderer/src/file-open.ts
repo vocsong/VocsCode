@@ -3,34 +3,12 @@
  * store's `revealFile` (which selects the editor drawer, the Files tab or the system file manager)
  * and the drawer itself (which reads and shows the file).
  */
-import type { MissionRecord } from '../../shared/mission';
-import type { SessionMeta } from '../../shared/types';
 import { canInvoke, invoke, invokeErrorMessage, isMac, platform } from './api';
 
 /** What `app:showInFolder` opens, named the way the platform names it. Read on use, not at import:
  *  the store imports this module, and many tests stub `api` without the platform fields. */
 export function fileManagerName(): string {
   return isMac ? 'Finder' : platform === 'win32' ? 'File Explorer' : 'the file manager';
-}
-
-export interface FileScope {
-  /** The folder workspace-relative paths resolve against. */
-  root: string;
-  /** Mission sessions: the workspace the `fs:*` reads are scoped to; undefined is the integration result. */
-  missionWorkspaceId?: string;
-}
-
-/**
- * The folder a session's files live in. An ordinary session reads its own cwd. A Mission lead reads
- * a Mission workspace: `workspace` names one ('' is the integration result), and without it a file
- * the transcript mentions resolves in the lead's own workspace, where the lead actually works.
- */
-export function fileScope(session: SessionMeta, mission: MissionRecord | undefined, workspace?: string): FileScope {
-  if (!session.mission || !mission) return { root: session.cwd };
-  const lead = mission.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission.workspaces.find((w) => w.role === 'lead');
-  const id = workspace === undefined ? lead?.id : workspace || undefined;
-  const chosen = (id ? mission.workspaces.find((w) => w.id === id) : undefined) ?? mission.workspaces.find((w) => w.role === 'integration');
-  return { root: chosen?.path ?? session.cwd, missionWorkspaceId: id };
 }
 
 /**

@@ -10,7 +10,7 @@ export interface PowerBlocker {
 }
 
 /**
- * A desktop-host choice, never session metadata. Only work in a live, opted-in ordinary session
+ * A desktop-host choice, never session metadata. Only work in a live, opted-in, unarchived session
  * counts, regardless of where the turn came from. One blocker prevents idle sleep, not explicit
  * system sleep, and does not require the display to stay on.
  */
@@ -38,8 +38,8 @@ export class KeepAwake {
     let wanted = false;
     if (!this.quitting && this.optedIn.size) {
       const eligible = new Set<string>();
-      for (const { id, status, ongoing, mission, archived } of sessions) {
-        if (!this.optedIn.has(id) || mission || archived) continue;
+      for (const { id, status, ongoing, archived } of sessions) {
+        if (!this.optedIn.has(id) || archived) continue;
         eligible.add(id);
         wanted ||= status === 'starting' || status === 'running' || status === 'awaiting' || hasOngoingWork({ ongoing });
       }

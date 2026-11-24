@@ -14,7 +14,7 @@ export function insideControlWorkspace(root: string, target: string): boolean {
 
 /** Everything an ordinary-session workspace decision reads, including mutable session state. */
 export const controlSessionIdentity = (session: SessionMeta): string => JSON.stringify([session.id, session.createdAt, session.cwd, session.config.projectRoot,
-  session.config.permissionMode, session.config.harness, !!session.mission, !!session.archived]);
+  session.config.permissionMode, session.config.harness, !!session.archived]);
 
 export function freshControlSession(get: (id: string) => SessionMeta | undefined, checked: { session: SessionMeta; identity: string }): SessionMeta {
   const current = get(checked.session.id);
@@ -29,7 +29,7 @@ export async function controlDirectoryIdentity(directory: string): Promise<strin
 }
 
 async function canonicalControlCwd(session: SessionMeta, canonicalRoot: string, exactCase: boolean): Promise<string> {
-  if (session.mission || session.archived) throw new ControlError('denied');
+  if (session.archived) throw new ControlError('denied');
   const project = await fs.realpath(session.config.projectRoot);
   const actual = await fs.realpath(session.cwd);
   if (controlPathKey(project) !== controlPathKey(canonicalRoot) || controlPathKey(actual) !== controlPathKey(session.cwd) ||

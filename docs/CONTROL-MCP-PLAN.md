@@ -354,7 +354,7 @@ No implementation, deployment or client-compatibility result is claimed by this 
 ## References
 
 - [Remote design and trust model](REMOTE-ACCESS.md), [remote roadmap](REMOTE-ACCESS-ROADMAP.md)
-- [Architecture / harness permission matrix](ARCHITECTURE.md), [Mission limits](MISSION-STATUS.md)
+- [Architecture / harness permission matrix](ARCHITECTURE.md), Mission limits (`MISSION-STATUS.md`, removed with the Mission feature)
 - [Cloudflare MCP transport](https://developers.cloudflare.com/agents/model-context-protocol/protocol/transport/)
 - [Cloudflare MCP authorization](https://developers.cloudflare.com/agents/model-context-protocol/protocol/authorization/)
 - [Cloudflare MCP security](https://developers.cloudflare.com/agents/model-context-protocol/guides/securing-mcp-server/)

@@ -5,7 +5,7 @@ import { imageMimeType, type WorkspaceImage } from '../../../shared/image-files'
 import { FILE_PREVIEW_MAX_BYTES } from '../../../shared/ipc';
 import type { SessionMeta } from '../../../shared/types';
 import { canInvoke, invoke, invokeErrorMessage, modKey } from '../api';
-import { fileManagerName, fileScope } from '../file-open';
+import { fileManagerName } from '../file-open';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import type { FilePreviewTarget } from '../panes';
 import { useStore } from '../store';
@@ -55,8 +55,7 @@ function restoreFileText(text: string, original: string): string {
 export function FilePreviewPane({ visible = true }: { visible?: boolean }) {
   const target = useStore((s) => s.layout.filePreview);
   const session = useStore((s) => s.sessions.find((x) => x.id === target?.sessionId));
-  const mission = useStore((s) => (session?.mission ? s.missions[session.mission.missionId] : undefined));
-  // Drafts are in-memory only and follow the exact workspace and file, even when the drawer closes.
+  // Drafts are in-memory only and follow the exact session folder and file, even when the drawer closes.
   const [drafts, setDrafts] = useState<Drafts>(() => new Map());
   const pendingWrites = useRef(new Map<string, Promise<void>>()).current;
   const updateDraft = (key: string, draft?: Draft) => setDrafts((current) => {
@@ -66,8 +65,8 @@ export function FilePreviewPane({ visible = true }: { visible?: boolean }) {
     return next;
   });
   if (!visible || !target || !session) return null;
-  const root = fileScope(session, mission, target.missionWorkspaceId ?? '').root;
-  const scopeKey = JSON.stringify([session.id, session.mission?.missionId, target.missionWorkspaceId, root]);
+  const root = session.cwd;
+  const scopeKey = JSON.stringify([session.id, root]);
   return <ScopedPreview key={scopeKey} {...{ target, session, root, scopeKey, drafts, updateDraft, pendingWrites }} />;
 }
 
@@ -100,7 +99,6 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
   }, []);
 
   const sessionId = target.sessionId;
-  const scope = session.mission ? { missionWorkspaceId: target.missionWorkspaceId } : {};
   const current = (seq: number) => mounted.current && readSeq.current === seq && useStore.getState().layout.filePreview === target;
   const close = () => useStore.getState().closeFilePreview();
   const fail = (message: string, path: string, retry: () => void, missing = false) => {
@@ -120,8 +118,8 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
       if (pending) await pending;
       if (!current(seq)) return;
       const r = imageMimeType(rel)
-        ? { content: '', truncated: false, image: await invoke('fs:readImage', { sessionId, path: rel, ...scope }) }
-        : await invoke('fs:read', { sessionId, path: rel, maxBytes: FILE_PREVIEW_MAX_BYTES, ...scope });
+        ? { content: '', truncated: false, image: await invoke('fs:readImage', { sessionId, path: rel }) }
+        : await invoke('fs:read', { sessionId, path: rel, maxBytes: FILE_PREVIEW_MAX_BYTES });
       if (!current(seq)) return;
       if (discard) updateDraft(key);
       // Don't carry undo history across files, an explicit discard, or a changed disk baseline.
@@ -149,7 +147,7 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
       return;
     }
     setResolving(true);
-    invoke('fs:resolve', { sessionId, path: target.path, ...scope })
+    invoke('fs:resolve', { sessionId, path: target.path })
       .then((result) => {
         if (!current(seq)) return;
         setResolving(false);
@@ -199,7 +197,7 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
     const write = async () => {
       try {
         const content = restoreFileText(next.text, next.original);
-        await invoke('fs:writeText', { sessionId, path: preview.path, expectedContent: next.original, content, ...scope });
+        await invoke('fs:writeText', { sessionId, path: preview.path, expectedContent: next.original, content });
         if (mounted.current) setPreview((current) => current?.path === preview.path ? { ...current, content } : current);
         updateDraft(pathKey);
         useStore.setState((s) => ({ changesVersion: s.changesVersion + 1 }));
@@ -220,9 +218,9 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
     return installMarkdownHandlers(
       mdBody.current,
       (url) => void invoke('app:openExternal', { url }),
-      (p, line) => useStore.getState().revealFile(sessionId, p, line, { workspace: target.missionWorkspaceId ?? '' })
+      (p, line) => useStore.getState().revealFile(sessionId, p, line)
     );
-  }, [mdView, mdHtml, resolving, matches, sessionId, target.missionWorkspaceId]);
+  }, [mdView, mdHtml, resolving, matches, sessionId]);
   const image = preview?.image;
   const imageSrc = useMemo(() => (image && !image.tooLarge ? `data:${image.mimeType};base64,${image.data}` : ''), [image]);
   const title = preview?.path ?? target.path;
@@ -252,7 +250,7 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
         {isMd && (
           <Button size="sm" variant="ghost" icon={mdView ? 'file' : 'eye'} onClick={() => setMdView((v) => !v)} title={mdView ? 'Show source' : 'Show markdown preview'} aria-label={mdView ? 'Show source' : 'Show markdown preview'} />
         )}
-        {preview && !session.mission && canInvoke('app:openInEditor') && (
+        {preview && canInvoke('app:openInEditor') && (
           <Button
             size="sm"
             variant="ghost"
@@ -322,7 +320,7 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
           ) : preview.binary ? (
             <div className="file-binary">
               <span className="muted small">Binary file, no text preview.</span>
-              {!session.mission && canInvoke('app:showInFolder') && (
+              {canInvoke('app:showInFolder') && (
                 <Button size="sm" icon="folder" onClick={() => void invoke('app:showInFolder', { sessionId, path: `${root}/${preview.path}` }).then((r) => !r.ok && toast(r.error ?? 'Could not show the file', 'error'))}>
                   Show in {fileManagerName()}
                 </Button>

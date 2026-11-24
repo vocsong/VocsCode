@@ -366,7 +366,7 @@ describe('analytics dashboard', () => {
       expect(value('Input')).toBe('2.0k');
       expect(tile('Input')?.textContent).toContain('provider-reported uncached context');
       expect(view.container.textContent).toContain('not just typed text');
-      for (const text of ['ordinary-session message text', 'original submitted text', 'counted once', 'including pasted text', 'attachments', 'system/context', 'tool output', 'automated prompts', 'automatic goal prompts', 'Mission mailbox', 'goal configuration', 'subagent-panel steering', 'one token per four Unicode characters', 'not model-specific billing', 'tracking starts with this update', 'legacy unmarked messages are not reconstructed']) {
+      for (const text of ['ordinary-session message text', 'original submitted text', 'counted once', 'including pasted text', 'attachments', 'system/context', 'tool output', 'automated prompts', 'automatic goal prompts', 'Goal configuration', 'subagent-panel steering', 'one token per four Unicode characters', 'not model-specific billing', 'tracking starts with this update', 'legacy unmarked messages are not reconstructed']) {
         expect(view.container.textContent).toContain(text);
       }
       expect(ui.getByRole('img', { name: 'User input per day (est.)' })).toBeTruthy();

@@ -4,7 +4,6 @@ import { invoke } from './api';
 import { useStore } from './store';
 import { createTerminal } from './terminal/host';
 import { archiveSession } from './sessionActions';
-import { MISSION_MANAGED_REASON, pauseMissionSession } from './missions';
 
 /** Runs one bound command; session commands are a no-op when no session is active. */
 export function runShortcutCommand(cmd: ShortcutCommand): void {
@@ -16,7 +15,6 @@ export function runShortcutCommand(cmd: ShortcutCommand): void {
       void archiveSession(s!, st.toast);
       break;
     case 'session.fork':
-      if (s!.mission) { st.toast(MISSION_MANAGED_REASON, 'info'); break; }
       void invoke('sessions:fork', { id: s!.id })
         .then((f) => {
           if (f) {
@@ -27,7 +25,7 @@ export function runShortcutCommand(cmd: ShortcutCommand): void {
         .catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error'));
       break;
     case 'session.interrupt':
-      pauseMissionSession(s!);
+      void invoke('sessions:interrupt', { id: s!.id });
       break;
     case 'session.pin':
       void invoke('sessions:pin', { id: s!.id, pinned: !s!.pinned });

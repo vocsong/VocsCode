@@ -34,9 +34,9 @@ export function bootErrorMessage(error: unknown): string {
  * only a list with no active session at all leaves nothing to select.
  */
 export function replacementFor(previous: SessionMeta[], next: SessionMeta[], activeId: string): SessionMeta | undefined {
-  const visible = next.filter((x) => !x.archived && x.mission?.role !== 'worker');
+  const visible = next.filter((x) => !x.archived);
   const root = previous.find((x) => x.id === activeId)?.config.projectRoot;
-  const rows = sortSessionRows(previous.filter((x) => !x.archived && x.mission?.role !== 'worker' && x.config.projectRoot === root));
+  const rows = sortSessionRows(previous.filter((x) => !x.archived && x.config.projectRoot === root));
   const at = rows.findIndex((x) => x.id === activeId);
   const neighbour = at === -1 ? undefined : rows[at + 1] ?? rows[at - 1];
   const picked = neighbour && visible.find((x) => x.id === neighbour.id);
@@ -95,9 +95,5 @@ export async function applyLayout(rt: StoreRuntime, set: Setter, get: Getter, la
   const activeId = panes.activePane(layout).sessionId;
   set({ layout, activeId, view: 'chat' });
   pushHistory(rt, set, get, { view: 'chat', sessionId: activeId });
-  for (const pane of layout.panes) {
-    const session = pane.sessionId ? get().sessions.find((s) => s.id === pane.sessionId) : undefined;
-    if (session?.mission) void get().loadMission(session.mission.missionId);
-  }
   await Promise.all(layout.panes.map((p) => (p.sessionId ? get().loadTranscript(p.sessionId) : undefined)));
 }

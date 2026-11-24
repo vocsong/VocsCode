@@ -251,7 +251,7 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     const focusPush = waitFrame(ws, (m) => m.t === 'd');
     await host.broadcastPush('push:desktopFocus', { sessionId: 's1', at: 9, windowFocused: true });
     expect(await openFrame(session.key, (await focusPush).payload as never)).toEqual({ type: 'push', channel: 'push:desktopFocus', payload: { sessionId: 's1', at: 9, windowFocused: true } });
-    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:desktopFocus', 'push:missionsChanged', 'push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
+    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:desktopFocus', 'push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
 
     ws.close();
     await host.disable();
@@ -452,7 +452,7 @@ describe('remote terminal over e2e (P3.5 read/write)', () => {
       await sleep(100);
       expect(other.pushes('push:remoteTerminal')).toEqual([]);
 
-      // Typing reaches the registry (and its Mission terminal guards); the first keystroke is audited once.
+      // Typing reaches the registry; the first keystroke is audited once.
       expect(await watcher.invoke('terminal:input', { terminalId: 't1', data: 'ls\r' })).toMatchObject({ ok: true });
       expect(await watcher.invoke('terminal:input', { terminalId: 't1', data: 'pwd\r' })).toMatchObject({ ok: true });
       expect(registryCalls.filter((c) => c.channel === 'terminal:input').map((c) => c.request)).toEqual([

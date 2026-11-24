@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { LocalControl, type OpenLocalPipe } from '../src/main/control/local';
-import { MissionStore, type MissionState } from '../src/main/mission/store';
 import { emptyUsage } from '../src/main/models/static-models';
 import { deferred } from '../src/main/util/async';
 import { decodeLocalControlTarget, type LocalControlTarget } from '../src/shared/local-control';
@@ -13,7 +12,7 @@ import type { SessionMeta } from '../src/shared/types';
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { await Promise.all(cleanup.splice(0).map((remove) => remove())); });
 
-async function fixture(workspaceRevision = () => 0) {
+async function fixture() {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-local-control-'));
   cleanup.push(() => fs.rm(tmp, { recursive: true, force: true }));
   const root = await fs.realpath(tmp);
@@ -32,7 +31,7 @@ async function fixture(workspaceRevision = () => 0) {
     handle.push(options);
     return { pid: 321, started: '137000000000012345', close };
   });
-  const control = new LocalControl({ supported: true, userData: root, roots: () => roots, sessions, guard, open, workspaceRevision });
+  const control = new LocalControl({ supported: true, userData: root, roots: () => roots, sessions, guard, open });
   const initial = await control.ownerState();
   const projectId = initial.projects.find((item) => item.name === 'approved')!.id;
   const otherId = initial.projects.find((item) => item.name === 'approved-sibling')!.id;
@@ -144,41 +143,6 @@ it('does not publish metadata from a cwd that changed while the workspace guard 
   expect(await f.handle[0]!.dispatch(f.request(target, 'sessions.list', {
     instanceId: target.instanceId, projectId: f.projectId,
   }))).toEqual({ ok: true, result: { items: [], nextOffset: null } });
-});
-
-it('drops an in-flight metadata reply when Mission ownership commits even if its snapshot fails', async () => {
-  type OwnershipState = MissionState & { ownedSessionId: string | null };
-  let journal: MissionStore<OwnershipState> | undefined;
-  const f = await fixture(() => journal?.publicationRevision ?? 0);
-  const store = journal = new MissionStore<OwnershipState>(f.root, { validate: () => true, snapshotEvery: 1 });
-  const id = 'mission-test';
-  await store.create({ id, schemaVersion: 1, revision: 0, lastEventSequence: 0, ownedSessionId: null }, {
-    actor: 'user:test', expectedRevision: 0, idempotencyKey: 'create', kind: 'create',
-  });
-  const target = await f.enable();
-  const checked = deferred<void>(), resume = deferred<void>();
-  f.guard.mockImplementation(async ({ sessionId }) => {
-    if (sessionId !== f.allowed.id) return;
-    if (store.get(id)?.ownedSessionId === sessionId) throw new Error('Mission-owned workspace');
-    checked.resolve();
-    await resume.promise;
-  });
-  const read = () => f.handle[0]!.dispatch(f.request(target, 'sessions.list', { instanceId: target.instanceId, projectId: f.projectId }));
-  const inFlight = read();
-  await Promise.race([checked.promise, inFlight.then(() => { throw new Error('Discovery returned without checking the session'); })]);
-  const rename = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('injected snapshot failure'));
-  try {
-    await expect(store.transact(id, { actor: 'user:test', expectedRevision: 1, idempotencyKey: 'own', kind: 'own' }, (draft) => {
-      draft.ownedSessionId = f.allowed.id;
-    })).rejects.toMatchObject({ code: 'BLOCKED' });
-    expect(store.get(id)?.ownedSessionId).toBe(f.allowed.id);
-  } finally {
-    rename.mockRestore();
-    resume.resolve();
-    await inFlight;
-  }
-  expect(await inFlight).toEqual({ ok: false, error: 'denied' });
-  expect(await read()).toEqual({ ok: true, result: { items: [], nextOffset: null } });
 });
 
 it.each(['revoke', 'renderer unload'] as const)('stops an in-progress listener setup on %s', async (reason) => {

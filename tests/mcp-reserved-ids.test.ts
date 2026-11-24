@@ -16,7 +16,7 @@ import { SettingsStore, defaultSettings, mcpServersSaveError, normalizeMcpServer
 
 const MEMORY_ALIASES = ['vocs_memory', 'vocs.memory', 'Vocs-Memory'];
 const CODE_GRAPH_ALIASES = ['GitNexus', 'GITNEXUS', 'gitnexus_'];
-const ALIASES = [...MEMORY_ALIASES, ...CODE_GRAPH_ALIASES, 'cua_driver', 'Vocs.Mission'];
+const ALIASES = [...MEMORY_ALIASES, ...CODE_GRAPH_ALIASES, 'cua_driver'];
 
 const dirs: string[] = [];
 const savedHome = process.env.GITNEXUS_HOME;
