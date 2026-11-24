@@ -16,7 +16,10 @@
   --file-code-name: color-mix(in srgb, var(--blue) 75%, var(--fg));
   --file-code-error: color-mix(in srgb, var(--red) 75%, var(--fg));
 }
+}
 
+/* CodeMirror injects unlayered defaults at runtime. Keep these scoped overrides unlayered too,
+   or the defaults win regardless of specificity (including the light line-number gutter). */
 .file-source-editor .cm-editor {
   flex: 1;
   min-width: 0;
@@ -87,6 +90,7 @@
   color: var(--file-code-error);
 }
 
+@layer features {
 .file-source-editor :is(.tok-keyword, .tok-atom, .tok-bool, .tok-meta) {
   color: var(--file-code-keyword);
 }

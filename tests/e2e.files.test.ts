@@ -245,7 +245,7 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     // A zip's local file header: binary, so the panel must say so rather than decode it.
     const zipHeader = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]);
     await fs.writeFile(path.join(checkout, 'src', 'bundle.zip'), zipHeader);
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { theme: 'system' }));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { theme: 'system', palette: 'dusk' }));
 
     const sid = 's_file_e2e';
     const session = {
@@ -365,24 +365,49 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     expect(await previewLabel.locator(':scope > span').allTextContents()).toEqual(sessionLabel);
     const conversationColors = await pillColors(win.locator('.pane.active .header .session-label'));
     expect(await pillColors(previewLabel)).toEqual(conversationColors);
-    await fs.mkdir(shots, { recursive: true });
-    await win.screenshot({ path: path.join(shots, 'files-01-preview.png') });
 
-    // Check the real computed colors once the TypeScript grammar has loaded. Change the System
-    // theme's color scheme while the same source editor is open, without touching transcript links.
+    // Check the painted gutter and syntax colors as the System scheme changes in the open editor.
     const syntaxLine = editor.locator('.cm-line').filter({ hasText: /^export const line300 = "target";$/ });
     const keyword = syntaxLine.locator('span').filter({ hasText: /^export$/ });
     const string = syntaxLine.locator('span').filter({ hasText: /^"target"$/ });
     const syntaxColors = () => Promise.all([keyword, string].map((token) => token.evaluate((el) => getComputedStyle(el).color)));
+    const expectGutterPalette = async (scheme: 'light' | 'dark') => {
+      await expect.poll(() => win.locator('html').getAttribute('data-scheme')).toBe(scheme);
+      const { actual, expected } = await filePane.locator('.cm-gutters-before').evaluate((gutter) => {
+        const gutterStyle = getComputedStyle(gutter);
+        const activeStyle = getComputedStyle(gutter.querySelector('.cm-activeLineGutter')!);
+        // Resolve tokens through Chromium too, so hex and color-mix() use the same serialization.
+        const swatch = document.createElement('span');
+        swatch.hidden = true;
+        document.body.append(swatch);
+        const color = (token: string) => {
+          swatch.style.color = `var(${token})`;
+          return getComputedStyle(swatch).color;
+        };
+        try {
+          return {
+            actual: [gutterStyle.backgroundColor, gutterStyle.color, gutterStyle.borderRightColor, activeStyle.backgroundColor, activeStyle.color],
+            expected: [color('--bg-sunken'), color('--fg-muted'), color('--border'), color('--accent-soft'), color('--fg')],
+          };
+        } finally {
+          swatch.remove();
+        }
+      });
+      expect(actual, `${scheme} gutter colors`).toEqual(expected);
+    };
     await win.emulateMedia({ colorScheme: 'light' });
     await keyword.waitFor({ timeout: 10_000 });
     await string.waitFor({ timeout: 10_000 });
+    await expectGutterPalette('light');
     const lightColors = await syntaxColors();
     expect(lightColors[0]).not.toBe(lightColors[1]);
     await win.emulateMedia({ colorScheme: 'dark' });
-    await expect.poll(syntaxColors, { timeout: 10_000 }).not.toEqual(lightColors);
+    await expectGutterPalette('dark');
     const darkColors = await syntaxColors();
+    expect(darkColors).not.toEqual(lightColors);
     expect(darkColors[0]).not.toBe(darkColors[1]);
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'files-01-preview.png') });
     await win.emulateMedia({ colorScheme: null });
 
     // Use the keyboard to follow the covered link. Repeated misses keep the same editor and line
