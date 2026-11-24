@@ -3,6 +3,7 @@
  * Keep this file free of Node/Electron/DOM imports.
  */
 import type { HarnessId, ModelRef } from './harness-types';
+import type { ApprovalMissionRoute, MissionMessageMeta } from './mission-mode';
 import type { SubagentRunMode, SubagentRunStatus } from './subagents';
 import type { UsageTotals } from './usage-types';
 
@@ -79,6 +80,9 @@ export type TranscriptItem =
       /** Host-measured original message text, before prompt assembly. Absent on legacy/automated input.
        * The receipt survives replay; its owner prevents copied fork history being counted again. */
       userInput?: { id: string; sessionId: string; ts: number; tokens: number };
+      /** Written by Mission mode, not typed by the user: a kickoff, a Lead↔Builder message or a report. */
+      origin?: 'mission';
+      mission?: MissionMessageMeta;
     }
   | {
       id: string;
@@ -120,6 +124,8 @@ export type TranscriptItem =
       request: ApprovalRequest;
       decision?: ApprovalDecision;
       decidedAt?: number;
+      /** Mission mode: whether the Builder's Lead or the user answered. Absent means the user. */
+      decidedBy?: 'lead' | 'user';
     }
   | {
       id: string;
@@ -193,7 +199,10 @@ export interface ApprovalRequest {
   createdAt: number;
   /** Related transcript tool item id, when known. */
   toolItemId?: string;
+  /** Mission mode: a Builder's request, routed to its Lead first. */
+  mission?: ApprovalMissionRoute;
 }
+
 
 export interface ApprovalDecision {
   optionId: string;

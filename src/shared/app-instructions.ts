@@ -16,7 +16,10 @@ import type { AppInstructionScope, HarnessId } from './types';
 export const APP_INSTRUCTION_MAX_CHARS = 16_000;
 
 /** In the order the editor shows them: shared first, then one tab per harness family. */
-export const APP_INSTRUCTION_SCOPES: AppInstructionScope[] = ['global', 'pi', 'claude', 'codex', 'cursor', 'acp', 'native'];
+export const APP_INSTRUCTION_SCOPES: AppInstructionScope[] = ['global', 'pi', 'claude', 'codex', 'cursor', 'acp', 'native', 'lead', 'builder'];
+
+/** Mission mode role add-ons: appended to the built-in Lead or Builder prompt, never to ordinary sessions. */
+export const MISSION_INSTRUCTION_SCOPES: readonly AppInstructionScope[] = ['lead', 'builder'];
 
 export const APP_INSTRUCTION_LABELS: Record<AppInstructionScope, string> = {
   global: 'All harnesses',
@@ -25,7 +28,9 @@ export const APP_INSTRUCTION_LABELS: Record<AppInstructionScope, string> = {
   codex: 'Codex',
   cursor: 'Cursor',
   acp: 'ACP agents',
-  native: 'Native'
+  native: 'Native',
+  lead: 'Mission Lead',
+  builder: 'Mission Builder'
 };
 
 export const APP_INSTRUCTION_HINTS: Record<AppInstructionScope, string> = {
@@ -35,7 +40,9 @@ export const APP_INSTRUCTION_HINTS: Record<AppInstructionScope, string> = {
   codex: 'Added for both Codex harnesses (app-server and exec), after the shared text.',
   cursor: 'Added for Cursor sessions only, after the shared text.',
   acp: 'Added for ACP agents and Google Antigravity, after the shared text.',
-  native: 'Added for the native loop only, after the shared text.'
+  native: 'Added for the native loop only, after the shared text.',
+  lead: 'Added to the built-in Mission mode Lead prompt. The Lead plans and coordinates; it never edits files.',
+  builder: 'Added to the built-in Mission mode Builder prompt. Builders implement, test and verify before reporting done.'
 };
 
 /** Which scope's file a session's harness reads. Both Codex harnesses share one family. */

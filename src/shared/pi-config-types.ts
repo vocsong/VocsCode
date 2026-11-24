@@ -60,7 +60,7 @@ export interface PiPromptFile {
  * own global files (`APPEND_SYSTEM.md`, `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`), which the
  * app never edits and which keep applying through their own engine.
  */
-export type AppInstructionScope = 'global' | 'pi' | 'claude' | 'codex' | 'cursor' | 'acp' | 'native';
+export type AppInstructionScope = 'global' | 'pi' | 'claude' | 'codex' | 'cursor' | 'acp' | 'native' | 'lead' | 'builder';
 
 export interface AppInstructionFile {
   scope: AppInstructionScope;

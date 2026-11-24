@@ -1,3 +1,5 @@
+import { BUILDER_TOOLS, LEAD_TOOLS, MISSION_SERVER_ID } from './mission-mode';
+
 /**
  * Tools that Vocs Code's own MCP servers expose read-only. Every permission tier, Plan included,
  * runs these without asking; every other tool from these servers follows the tier like any other
@@ -25,6 +27,26 @@ export const BUILTIN_READ_ONLY_TOOLS: Readonly<Record<string, readonly string[]>
     'verify_state', 'zoom'
   ]
 };
+
+/**
+ * Mission mode coordination tools (`vocs-mission`). They never touch the workspace, so they run in
+ * every tier, Plan included: the Lead is in Plan by design. The role check is the gateway's: a
+ * session's token only lists and accepts its own role's tools, and only mission sessions get the
+ * server at all. Mirrors MISSION_TOOLS in resources/pi/vocs-code-mcp.ts.
+ */
+export const BUILTIN_MISSION_TOOLS: Readonly<Record<string, readonly string[]>> = {
+  [MISSION_SERVER_ID]: [...LEAD_TOOLS, ...BUILDER_TOOLS]
+};
+
+/** True when `tool` is a Mission coordination tool of the built-in server `serverId`. */
+export function isBuiltinMissionTool(serverId: string, tool: string): boolean {
+  return Object.prototype.hasOwnProperty.call(BUILTIN_MISSION_TOOLS, serverId) && BUILTIN_MISSION_TOOLS[serverId]!.includes(tool);
+}
+
+/** Tools every tier runs without asking: the read-only built-ins plus the Mission coordination tools. */
+export function isBuiltinTrustedTool(serverId: string, tool: string): boolean {
+  return isBuiltinReadOnlyTool(serverId, tool) || isBuiltinMissionTool(serverId, tool);
+}
 
 /** True when `tool` is a read-only tool of the built-in server `serverId`. */
 export function isBuiltinReadOnlyTool(serverId: string, tool: string): boolean {

@@ -4,6 +4,7 @@
  */
 import type { EffortLevel, FastModeStatus, HarnessId, HarnessRef, ModelInfo, ModelRef, PermissionMode } from './harness-types';
 import type { HarnessCommand } from './harness-commands';
+import type { SessionMission } from './mission-mode';
 import type { ApprovalDecision, ApprovalRequest, FileAttachment, ImageAttachment, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem } from './transcript-types';
 import type { UsageTotals } from './usage-types';
 
@@ -75,6 +76,8 @@ export interface SessionMeta {
   forkedFrom?: string;
   /** Host-allocated controller creation receipt; never accepted from ordinary create/patch. */
   controlCreation?: { operationId: string; requestHash: string };
+  /** Mission mode identity: a Lead or one of its Builders. Host-owned; a renderer patch cannot set it. */
+  mission?: SessionMission;
   /** Effective working directory (worktree path if isolated). */
   cwd: string;
   /**
@@ -221,4 +224,7 @@ export interface CreateSessionRequest {
   worktreeName?: string;
   /** With `config.useWorktree`: the local branch the new branch starts from; absent is the repository's HEAD. */
   worktreeBase?: string;
+  /** Start the session as a Mission mode Lead (desktop owner only). The initial prompt is required. */
+  mission?: true;
 }
+
