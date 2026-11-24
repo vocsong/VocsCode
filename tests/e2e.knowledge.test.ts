@@ -3,7 +3,7 @@
  * the right panel's Knowledge tab without any accept step, labels and provenance are shown, a claim
  * is rejected (tombstoned) from its row, and an open page's anchors and relation graph render.
  * Graphify indexes a real Git checkout locally; a keyless Native harness fixture exercises
- * passive recall and the authenticated MCP draft review flow. Requires `npm run build`;
+ * passive recall, local usage accounting, and authenticated MCP draft review. Requires `npm run build`;
  * gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { KNOWLEDGE_PUBLISH_DIR, serializeKnowledgeDocument, type KnowledgePageMeta } from '../src/shared/knowledge';
+import type { KnowledgeUsageReport, KnowledgeUsageTotals } from '../src/shared/knowledge-usage';
 import { MCP_BUILTIN_IDS, type SessionMeta, type TranscriptItem } from '../src/shared/types';
 import { isolatedEnv, openNewSession, seedSettings } from './e2e-ui';
 
@@ -386,13 +387,19 @@ describe.runIf(enabled)('project knowledge panel', () => {
     }
   }, 180_000);
 
-  it('recalls a cited local lesson on demand, keeps an agent wiki draft pending review, and honors reflection off', async () => {
+  it('recalls a cited local lesson on demand, tracks opt-in usage through restart, and keeps an agent draft pending review', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-local-reflection-e2e-'));
     const userData = path.join(tmp, 'userData');
+    const usageFile = path.join(userData, 'intelligence', 'knowledge-usage.json');
     const project = path.join(tmp, 'retry-project');
+    const otherProject = path.join(tmp, 'untracked-project');
+    const otherSession = sessionFor(otherProject, 's_knowledge_untracked', 'Untracked session');
     const title = 'Retry investigation';
+    const freshTitle = 'Fresh lease session';
     const model = 'fixture-chat';
     const recallQuery = 'quasar retry fence';
+    const wikiQuery = 'heliostamp'; // A wiki-only match, independent of asynchronous transcript indexing.
+    const emptyQuery = 'amethystflywheel';
     const lesson = 'Retain the quasar retry fence until its persisted acknowledgment has been read.';
     const detail = 'The second worker tried to replay a completed write while the acknowledgment was still being read.';
     const currentTitle = 'Job journal format'; // Positive control for startup priming.
@@ -483,14 +490,16 @@ describe.runIf(enabled)('project knowledge panel', () => {
       if (!address || typeof address === 'string') throw new Error('Reflection fixture did not bind a TCP address');
       const wiki = path.join(project, '.vocs-code', 'wiki', 'conventions');
       const source = path.join(project, sourceRef);
-      await Promise.all([userData, wiki, path.dirname(source)].map((dir) => fs.mkdir(dir, { recursive: true })));
+      await Promise.all([userData, wiki, path.dirname(source), otherProject].map((dir) => fs.mkdir(dir, { recursive: true })));
+      await seedSessions(userData, otherSession);
       await fs.writeFile(source, 'export function stopLease(cancelRenewal: () => void, release: () => void) {\n  cancelRenewal();\n  release();\n}\n');
       await fs.writeFile(path.join(wiki, 'job-journal.md'), serializeKnowledgeDocument(pageMeta({
-        id: 'conventions/job-journal', title: currentTitle, claim: 'The job journal is append-only.'
+        id: 'conventions/job-journal', title: currentTitle, claim: 'The job journal is append-only.', keywords: [wikiQuery]
       }), 'Append a new entry instead of rewriting old entries.'));
       // Leave intelligence, knowledge and the utility model unset. Override the built-in keyless
       // provider too, so even a mistaken background fallback reaches only the loopback server.
       await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+        folders: [project, otherProject], folderOrder: [project, otherProject],
         defaultHarness: 'native', defaultPermissionMode: 'ask', defaultModelByHarness: { native: { provider: 'ollama', model } },
         providers: [{ id: 'ollama', kind: 'ollama', enabled: true, baseUrl: `http://127.0.0.1:${address.port}/v1`,
           models: [{ id: model, provider: 'ollama', displayName: 'Fixture chat' }] }],
@@ -512,6 +521,35 @@ describe.runIf(enabled)('project knowledge panel', () => {
       const tab = async (view: 'knowledge' | 'sources' | 'memory' | 'evidence') => { await win.getByTestId(`knowledge-view-${view}`).click(wait); };
       const reflection = () => win.getByTestId('setting-reflection');
       const readView = () => win.evaluate((id) => window.harness.invoke('intelligence:view', { sessionId: id }), sessionId);
+      // Read the exact counters and ephemeral receipt from the real owner IPC, not renderer state.
+      const readUsage = (id = sessionId) => win.evaluate((id) => window.harness.invoke('intelligence:usage:view', { sessionId: id, days: 7 }), id);
+      const emptyTotals: KnowledgeUsageTotals = {
+        hit: 0, empty: 0, failed: 0, helped: 0, notHelpful: 0, staleGraph: 0, truncated: 0,
+        sources: {}, p50: null, p95: null, meanResponseBytes: null
+      };
+      const offUsage: KnowledgeUsageReport = { enabled: false, days: 7, desktop: emptyTotals, agent: emptyTotals };
+      const usage = () => win.getByRole('tabpanel', { name: 'Usage', exact: true });
+      const tracking = () => usage().getByRole('checkbox', { name: 'Track usage for this project', exact: true });
+      const openUsage = async () => {
+        await win.getByRole('tab', { name: 'Usage', exact: true }).click(wait);
+        await tracking().waitFor(wait);
+      };
+      const evidence = () => win.getByTestId('evidence-view');
+      const evidenceRows = () => evidence().getByTestId('evidence-row');
+      const searchFeedback = () => evidence().getByRole('group', { name: 'Did this search help?', exact: true });
+      const searchEvidence = async (query: string) => {
+        const input = evidence().getByTestId('evidence-query');
+        await input.clear(wait); // Reset the previous response, including when polling the same query.
+        await input.fill(query, wait);
+        await evidence().getByTestId('evidence-search').click(wait);
+        await evidence().getByText(/^Detected intent:/).waitFor(wait);
+      };
+      const searchWiki = async () => {
+        await searchEvidence(wikiQuery);
+        await evidenceRows().getByRole('heading', { name: currentTitle, exact: true }).waitFor(wait);
+        expect(await evidenceRows().count()).toBe(1);
+        expect(await evidenceRows().getByText('wiki', { exact: true }).count()).toBe(1);
+      };
       const sendTurn = async (index: 0 | 1) => {
         // The idle Composer sends as the user with mode 'now', not a queued or Plan turn.
         await win.getByPlaceholder(/^(Message the agent|Ask anything)/).fill(turns[index].prompt, wait);
@@ -521,7 +559,7 @@ describe.runIf(enabled)('project knowledge panel', () => {
             has: win.getByText(`Allow ${recordDraft.function.name}?`, { exact: true })
           });
           await approval.waitFor(wait);
-          // Native ran both reads while Local was on. Disable capture before the final reply,
+          // Native ran the lookups while Local was on. Disable capture before the final reply,
           // without adding a chat turn. Permission to file the draft does not review the claim.
           await reflection().selectOption('off', wait);
           await expect.poll(async () => (await readView()).settings.reflection, wait).toBe('off');
@@ -545,6 +583,9 @@ describe.runIf(enabled)('project knowledge panel', () => {
       };
 
       await openKnowledge(win, title);
+      await openUsage();
+      expect(await tracking().isChecked()).toBe(false);
+      await usage().getByText('No lookups recorded in this period.', { exact: true }).waitFor(wait);
       await tab('sources');
       expect(await reflection().inputValue(wait)).toBe('local');
       expect(await reflection().locator('option:checked').textContent(wait)).toMatch(/local after completed turns/i);
@@ -577,13 +618,28 @@ describe.runIf(enabled)('project knowledge panel', () => {
       const learnedId = records[0]!.id;
 
       await tab('evidence');
-      const evidence = win.getByTestId('evidence-view');
-      expect(await evidence.getByTestId('evidence-scope').inputValue(wait)).toBe('project');
-      await evidence.getByTestId('evidence-query').fill(recallQuery, wait);
-      await evidence.getByTestId('evidence-search').click(wait);
-      const result = evidence.getByTestId('evidence-row').filter({ hasText: recallQuery, has: win.getByText('memory', { exact: true }) });
+      expect(await evidence().getByTestId('evidence-scope').inputValue(wait)).toBe('project');
+      await searchEvidence(recallQuery);
+      const result = evidenceRows().filter({ hasText: recallQuery, has: win.getByText('memory', { exact: true }) });
       await result.getByText('candidate', { exact: true }).waitFor(wait);
       await result.getByText('history', { exact: true }).waitFor(wait);
+      expect(await searchFeedback().count()).toBe(0);
+      expect(await readUsage()).toEqual(offUsage);
+      await expect(fs.stat(usageFile)).rejects.toMatchObject({ code: 'ENOENT' });
+
+      await openUsage();
+      await tracking().press('Space', wait);
+      await expect.poll(() => tracking().isChecked(), wait).toBe(true);
+      expect(await readUsage()).toEqual({ ...offUsage, enabled: true });
+      await tab('evidence');
+      await searchWiki();
+      const helped = searchFeedback().getByRole('button', { name: 'Helped', exact: true });
+      await helped.click(wait);
+      await expect.poll(() => helped.getAttribute('aria-pressed', wait), wait).toBe('true');
+      await searchEvidence(emptyQuery);
+      await evidence().getByText(/^No evidence matched/).waitFor(wait);
+      expect(await evidenceRows().count()).toBe(0);
+      await searchFeedback().waitFor(wait);
 
       await tab('sources');
       await sendTurn(1);
@@ -614,6 +670,28 @@ describe.runIf(enabled)('project knowledge panel', () => {
 
       const receipt = JSON.parse(recorded!.output!) as { id: string };
       expect(receipt).toMatchObject({ stored: 'wiki', state: 'draft', id: expect.stringMatching(/^[^\s]+$/) });
+
+      await openUsage();
+      const agentVote = usage().getByRole('group', { name: 'Did this agent lookup help?', exact: true })
+        .getByRole('button', { name: 'Not helpful', exact: true });
+      await agentVote.click(wait);
+      await expect.poll(() => agentVote.getAttribute('aria-pressed', wait), wait).toBe('true');
+      const { recentAgent, ...savedUsage } = await readUsage();
+      // Ordinary history can arrive before or after this turn and may be deduplicated in a packet.
+      // Compare the counters to what was actually delivered, not to transcript index flush timing.
+      const compiledHistory = /\[history:/.test(compiled!.output!);
+      const historyCalls = Number(compiledHistory) + Number(JSON.parse(recalled!.output!).history.length > 0);
+      expect(recentAgent).toMatchObject({
+        lookup: 'context_compile', outcome: 'hit', sources: [...(compiledHistory ? ['history'] : []), 'passive'], receipt: expect.any(String), vote: 'not-helpful'
+      });
+      // Two desktop searches, three MCP reads; neither the MCP draft nor feedback is a lookup.
+      expect(savedUsage).toEqual({
+        ...offUsage, enabled: true,
+        desktop: { ...emptyTotals, hit: 1, empty: 1, helped: 1, sources: { wiki: 1 }, p50: expect.anything() },
+        agent: { ...emptyTotals, hit: 2, empty: 1, notHelpful: 1, sources: { ...(historyCalls ? { history: historyCalls } : {}), passive: 2 }, p50: expect.anything(),
+          meanResponseBytes: expect.any(Number) }
+      });
+      expect(savedUsage.agent.meanResponseBytes).toBeGreaterThan(0);
       const draftQueue = () => win.getByTestId('knowledge-proposals');
       const draftRow = () => draftQueue().getByRole('button', { name: `Review draft: ${draft.title} (Repository)`, exact: true });
       const wikiRow = () => win.getByTestId(/^knowledge-page-/).filter({ hasText: draft.title });
@@ -637,20 +715,38 @@ describe.runIf(enabled)('project knowledge panel', () => {
       await wikiDetail().getByTitle('Back to the list', { exact: true }).click(wait);
       await draftRow().waitFor(wait);
 
+      expect(await readUsage(otherSession.id)).toEqual(offUsage);
+
       // Priming is computed at session creation. A fresh session (with no turn) gets the known
       // current page but not the draft, so a missing digest cannot make this assertion pass.
-      const freshId = await startNamedSession('Fresh lease session');
+      const freshId = await startNamedSession(freshTitle);
       const digest = await win.evaluate(async (id) => (await window.harness.invoke('sessions:get', { id }))?.knowledgeDigest, freshId);
       expect(digest).toContain(currentTitle);
       expect(digest).not.toContain(draft.title);
       expect(digest).not.toContain(receipt.id);
       expect(digest).not.toContain(lesson);
+      // Aggregates follow the held session's project; the recent lookup is session-local.
+      expect(await readUsage(freshId)).toEqual(savedUsage);
       await expect(fs.stat(path.join(project, KNOWLEDGE_PUBLISH_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
 
       await app!.close();
       app = null;
+      const diskUsage = await fs.readFile(usageFile, 'utf8');
+      expect(diskUsage).not.toMatch(/receipt|query|[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}/i);
+      for (const content of [recentAgent!.receipt, wikiQuery, emptyQuery, recallQuery, lesson, draft.title, draft.claim,
+        title, freshTitle, currentTitle, project, path.basename(project), sessionId, learnedId, receipt.id]) {
+        expect(diskUsage).not.toContain(JSON.stringify(content).slice(1, -1));
+      }
       win = await launchApp(userData);
       await openKnowledge(win, title);
+      await openUsage();
+      expect(await tracking().isChecked()).toBe(true);
+      expect(await readUsage()).toEqual(savedUsage);
+      await usage().getByText(/^No recent agent lookup for this session\./).waitFor(wait);
+      await usage().getByRole('region', { name: 'Desktop Evidence', exact: true }).getByText('1 of 2 lookups rated', { exact: true }).waitFor(wait);
+      await usage().getByRole('region', { name: 'Agent lookups', exact: true }).getByText('1 of 3 lookups rated', { exact: true }).waitFor(wait);
+      const sources = usage().getByRole('table', { name: 'Lookups by returned source', exact: true });
+      expect(await sources.getByRole('row', { name: /^Passive learning notes/ }).getByRole('cell').allTextContents()).toEqual(['0', '2']);
       await tab('sources');
       expect(await reflection().inputValue(wait)).toBe('off');
       await tab('memory');
@@ -668,6 +764,19 @@ describe.runIf(enabled)('project knowledge panel', () => {
       expect({ personal: afterReview.personal, shared: afterReview.shared, promotions: afterReview.promotions })
         .toEqual({ personal: [], shared: [], promotions: [] });
       await expect(fs.stat(path.join(project, KNOWLEDGE_PUBLISH_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
+      await openUsage();
+      await tracking().press('Space', wait);
+      await expect.poll(() => tracking().isChecked(), wait).toBe(false);
+      await tab('evidence');
+      await searchWiki();
+      expect(await searchFeedback().count()).toBe(0);
+      expect(await readUsage()).toEqual({ ...savedUsage, enabled: false });
+      await openUsage();
+      await usage().getByRole('button', { name: 'Clear counts', exact: true }).click(wait);
+      await usage().getByRole('button', { name: 'Confirm clear counts', exact: true }).click(wait);
+      await usage().getByText('No lookups recorded in this period.', { exact: true }).waitFor(wait);
+      expect(await readUsage()).toEqual(offUsage);
+      expect(JSON.parse(await fs.readFile(usageFile, 'utf8')).projects).toEqual({});
       expect(requests).toEqual([...turns.map(({ prompt }) => prompt), continuation]);
     } finally {
       await app?.close().catch(() => undefined);

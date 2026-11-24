@@ -7,8 +7,9 @@ import {
   resolveIntelligenceSettings, type ContextPacket, type GraphIndexStatus, type IntelligenceSearchResponse, type IntelligenceSettings, type IntelligenceView,
   type MemoryRecord, type MemoryState, type ProjectCollection, type ProjectIdentity, type PromotionRequest
 } from '../src/shared/intelligence';
-import type { IpcChannel, PushPayloads } from '../src/shared/ipc';
+import type { IpcChannel, IpcRequest, IpcResponse, PushPayloads } from '../src/shared/ipc';
 import type { KnowledgePageDetail, KnowledgePageSummary, KnowledgeView } from '../src/shared/knowledge';
+import type { KnowledgeUsageReport, KnowledgeUsageTotals, KnowledgeUsageVote, RecentKnowledgeLookup } from '../src/shared/knowledge-usage';
 import type { SessionMeta } from '../src/shared/types';
 
 const { invoke, canInvoke, on } = vi.hoisted(() => ({ invoke: vi.fn(), canInvoke: vi.fn(), on: vi.fn() }));
@@ -68,7 +69,7 @@ function setup(initial = ledger(), replies: Partial<Record<IpcChannel, unknown>>
 async function click(element: HTMLElement) {
   await act(async () => { fireEvent.click(element); });
 }
-async function openView(view: 'memory' | 'collections' | 'evidence' | 'sources') {
+async function openView(view: 'memory' | 'collections' | 'evidence' | 'usage' | 'sources') {
   await click(screen.getByTestId(`knowledge-view-${view}`));
   return screen.findByTestId(`${view}-view`);
 }
@@ -119,7 +120,10 @@ describe('Knowledge workspace', () => {
     expect(memory.tabIndex).toBe(0);
     fireEvent.keyDown(memory, { key: 'End' });
     expect(document.activeElement).toBe(sources);
-    fireEvent.keyDown(sources, { key: 'Home' });
+    const usage = screen.getByRole('tab', { name: 'Usage' });
+    fireEvent.keyDown(sources, { key: 'ArrowLeft' });
+    expect(document.activeElement).toBe(usage);
+    fireEvent.keyDown(usage, { key: 'Home' });
     expect(document.activeElement).toBe(knowledge);
     expect(intelligenceCalls()).toEqual([]);
 
@@ -137,6 +141,7 @@ describe('Knowledge workspace', () => {
     await click(await screen.findByTestId('knowledge-page-wiki/start'));
     expect(screen.getByTestId('knowledge-detail').textContent).toContain('The wiki body.');
     expect(screen.queryByTestId('knowledge-view-memory')).toBeNull();
+    expect(screen.queryByTestId('knowledge-view-usage')).toBeNull();
     expect(screen.queryByTestId('knowledge-view-sources')).toBeNull();
     expect(screen.queryByTestId('knowledge-promote')).toBeNull();
     expect(intelligenceCalls()).toEqual([]);
@@ -183,6 +188,148 @@ describe('Knowledge workspace', () => {
     expect(intelligenceCalls()).toEqual([
       ['intelligence:view', { sessionId: 's1' }], ['intelligence:promote', { sessionId: 's1', pageId: checked.id, to: 'personal' }]
     ]);
+  });
+});
+
+describe('Local Knowledge usage', () => {
+  const totals = (over: Partial<KnowledgeUsageTotals> = {}): KnowledgeUsageTotals => ({
+    hit: 0, empty: 0, failed: 0, helped: 0, notHelpful: 0, staleGraph: 0, truncated: 0, sources: {}, p50: null, p95: null,
+    meanResponseBytes: null, ...over
+  });
+  const usage = (over: Partial<KnowledgeUsageReport> = {}): KnowledgeUsageReport => ({ enabled: false, days: 7, desktop: totals(), agent: totals(), ...over });
+  const toggle = () => screen.getByRole<HTMLInputElement>('checkbox', { name: 'Track usage for this project' });
+  const rating = { name: 'Did this agent lookup help?' };
+  const refresh = () => click(screen.getByRole('button', { name: 'Refresh' }));
+
+  it('loads only usage, opts in explicitly, and clears retained history only on confirmation', async () => {
+    let current = usage();
+    setup(ledger(), {
+      'intelligence:usage:view': ({ days }: IpcRequest<'intelligence:usage:view'>) => (current = { ...current, days }),
+      'intelligence:usage:configure': ({ enabled }: IpcRequest<'intelligence:usage:configure'>) => (current = { ...current, enabled }),
+      'intelligence:usage:clear': ({ days }: IpcRequest<'intelligence:usage:clear'>) => (current = usage({ enabled: current.enabled, days }))
+    });
+    expect(intelligenceCalls()).toEqual([]);
+    await openView('usage');
+    expect(intelligenceCalls()).toEqual([['intelligence:usage:view', { sessionId: 's1', days: 7 }]]);
+    expect(toggle().checked).toBe(false);
+    expect(screen.getByText(/only daily aggregates are saved on this computer.*no queries, results.*never appear in the web dashboard/i)).toBeTruthy();
+    await click(toggle());
+    expect(toggle().checked).toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith('intelligence:usage:configure', { sessionId: 's1', days: 7, enabled: true });
+
+    current = { ...current,
+      desktop: totals({ hit: 3, empty: 2, failed: 1, helped: 1, notHelpful: 1, sources: { wiki: 3, memory: 1 }, p50: 5, truncated: 1 }),
+      agent: totals({ hit: 20, empty: 3, failed: 2, helped: 2, notHelpful: 1, sources: { memory: 4, passive: 6 }, p50: 50, p95: 'overflow', staleGraph: 1, meanResponseBytes: 640 })
+    };
+    await act(async () => update(screen.getByLabelText('Report period'), '30'));
+    expect(invoke).toHaveBeenLastCalledWith('intelligence:usage:view', { sessionId: 's1', days: 30 });
+    const desktop = within(screen.getByRole('region', { name: 'Desktop Evidence' }));
+    const agent = within(screen.getByRole('region', { name: 'Agent lookups' }));
+    for (const [name, value] of Object.entries({ 'Hit (with evidence)': '3 of 6 lookups', Empty: '2', Failed: '1', Helped: '1 of 2 rated',
+      'Not helpful': '1', 'Feedback coverage': '2 of 6 lookups rated', 'Local lookup p50': '≤ 5 ms', 'Local lookup p95': 'Not enough samples', Truncated: '1' })) {
+      expect(desktop.getByText(name).nextElementSibling?.textContent).toBe(value);
+    }
+    expect(agent.getByText('20 of 25 lookups')).toBeTruthy();
+    expect(agent.getByText('2 of 3 rated')).toBeTruthy();
+    expect(agent.getByText('3 of 25 lookups rated')).toBeTruthy();
+    expect(agent.getByText(`> ${(10000).toLocaleString()} ms`)).toBeTruthy();
+    expect(agent.getByText('640 bytes')).toBeTruthy();
+    expect(agent.getByText('Stale graph').nextElementSibling?.textContent).toBe('1');
+    const sources = within(screen.getByRole('table', { name: 'Lookups by returned source' }));
+    for (const [source, cells] of [['Memory', ['1', '4']], ['Passive learning notes', ['0', '6']]] as const) {
+      const row = sources.getByRole('rowheader', { name: source }).closest('tr')!;
+      expect(within(row).getAllByRole('cell').map((cell) => cell.textContent)).toEqual(cells);
+    }
+    await refresh();
+    expect(invoke).toHaveBeenLastCalledWith('intelligence:usage:view', { sessionId: 's1', days: 30 });
+    await click(toggle());
+    expect(toggle().checked).toBe(false);
+    expect(desktop.getByText('3 of 6 lookups')).toBeTruthy();
+    await click(screen.getByTestId('usage-clear'));
+    expect(invoke).not.toHaveBeenCalledWith('intelligence:usage:clear', expect.anything());
+    expect(screen.getByText(/clear all stored usage counts for this project, not just this period/i)).toBeTruthy();
+    await click(screen.getByTestId('usage-clear-confirm'));
+    expect(invoke).toHaveBeenLastCalledWith('intelligence:usage:clear', { sessionId: 's1', days: 30 });
+    expect(screen.getByText('No lookups recorded in this period.')).toBeTruthy();
+    expect(toggle().checked).toBe(false);
+    expect(intelligenceCalls().every(([channel]) => channel.startsWith('intelligence:usage:'))).toBe(true);
+  });
+
+  it('allows a failed report read to be retried and keeps the last report on mutation failure', async () => {
+    let reads = 0;
+    const before = usage({ desktop: totals({ hit: 3 }) });
+    setup(ledger(), {
+      'intelligence:usage:view': () => { if (++reads === 1) throw new Error('Usage read failed'); return before; },
+      'intelligence:usage:configure': () => { throw new Error("Error invoking remote method 'intelligence:usage:configure': Error: Could not save"); },
+      'intelligence:usage:clear': () => { throw new Error('Could not clear'); }
+    });
+    await openView('usage');
+    expect(screen.getByRole('alert').textContent).toBe('Usage read failed');
+    expect(screen.queryByRole('checkbox', { name: 'Track usage for this project' })).toBeNull();
+    await refresh();
+    expect(screen.queryByRole('alert')).toBeNull();
+    await click(toggle());
+    expect(screen.getByRole('alert').textContent).toBe('Could not save');
+    expect(toggle().checked).toBe(false);
+    await click(screen.getByTestId('usage-clear'));
+    await click(screen.getByTestId('usage-clear-confirm'));
+    expect(screen.getByRole('alert').textContent).toBe('Could not clear');
+    expect(screen.getByText('3 of 3 lookups')).toBeTruthy();
+    expect((screen.getByTestId('usage-clear-confirm') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('rates the reported latest agent receipt, reloads votes and expires the handle in place', async () => {
+    vi.useFakeTimers();
+    const latest: RecentKnowledgeLookup = {
+      receipt: 'agent-receipt', endedAt: Date.now() - 3_599_000, lookup: 'memory_recall', outcome: 'hit', sources: ['passive']
+    };
+    let recorded: KnowledgeUsageVote = 'not-helpful';
+    setup(ledger(), {
+      'intelligence:usage:view': () => usage({ enabled: true, recentAgent: { ...latest, vote: recorded },
+        agent: totals({ hit: 1, helped: Number(recorded === 'helped'), notHelpful: Number(recorded === 'not-helpful') }) }),
+      'intelligence:usage:vote': ({ vote }: IpcRequest<'intelligence:usage:vote'>) => { recorded = vote; return true; }
+    });
+    await click(screen.getByRole('tab', { name: 'Usage' }));
+    expect(screen.getByTestId('usage-view').querySelector('time')?.dateTime).toBe(new Date(latest.endedAt).toISOString());
+    const feedback = within(screen.getByRole('group', rating));
+    expect(feedback.getByRole('button', { name: 'Not helpful', pressed: true })).toBeTruthy();
+    await click(feedback.getByRole('button', { name: 'Helped' }));
+    expect(intelligenceCalls().slice(-2)).toEqual([
+      ['intelligence:usage:vote', { sessionId: 's1', receipt: latest.receipt, vote: 'helped' }],
+      ['intelligence:usage:view', { sessionId: 's1', days: 7 }]
+    ]);
+    expect(feedback.getByRole('button', { name: 'Helped', pressed: true })).toBeTruthy();
+    expect(screen.getByText('1 of 1 rated')).toBeTruthy();
+    await advance(1_000);
+    expect(screen.queryByRole('group', rating)).toBeNull();
+    expect(screen.getByText(/no recent agent lookup for this session/i)).toBeTruthy();
+    expect(intelligenceCalls()).toHaveLength(3);
+  });
+
+  it('discards stale usage reports and does not refresh an old session after its vote settles', async () => {
+    const stale = deferred<KnowledgeUsageReport>();
+    const pending = deferred<boolean>();
+    const latest: RecentKnowledgeLookup = { receipt: 's1-latest', endedAt: Date.now(), lookup: 'context_compile', outcome: 'empty', sources: [] };
+    let reads = 0;
+    const instance = setup(ledger(), {
+      'intelligence:usage:view': ({ sessionId }: IpcRequest<'intelligence:usage:view'>) => sessionId === 's2'
+        ? usage({ enabled: true })
+        : ++reads === 1 ? stale.promise : usage({ enabled: true, recentAgent: latest }),
+      'intelligence:usage:vote': pending.promise
+    });
+    await openView('usage');
+    await act(async () => { instance.rerender(<KnowledgeTab session={session('s2')} />); });
+    expect(screen.queryByRole('group', rating)).toBeNull();
+    await act(async () => { instance.rerender(<KnowledgeTab session={session()} />); });
+    await act(async () => { stale.resolve(usage()); });
+    expect(toggle().checked).toBe(true);
+    await click(within(screen.getByRole('group', rating)).getByRole('button', { name: 'Not helpful' }));
+    expect(invoke).toHaveBeenLastCalledWith('intelligence:usage:vote', { sessionId: 's1', receipt: latest.receipt, vote: 'not-helpful' });
+    await act(async () => { instance.rerender(<KnowledgeTab session={session('s2')} />); });
+    await act(async () => { pending.resolve(true); });
+    expect(screen.queryByRole('group', rating)).toBeNull();
+    expect(reads).toBe(2);
+    expect(invoke).toHaveBeenLastCalledWith('intelligence:usage:view', { sessionId: 's2', days: 7 });
   });
 });
 
@@ -730,7 +877,49 @@ describe('Collections, Sources and Evidence', () => {
     expect(invoke).toHaveBeenCalledWith('intelligence:compile', request);
     expect(screen.getByTestId('evidence-packet').textContent).toBe(packet.text);
     expect(screen.getByText('12 of 250 tokens · truncated')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Helped' })).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith('intelligence:usage:vote', expect.anything());
     update(screen.getByTestId('evidence-query'), 'Another question');
     await waitFor(() => expect(screen.queryByTestId('evidence-packet')).toBeNull());
+  });
+
+  it('rates search and packet receipts independently, allows replacing a vote and handles a refused receipt', async () => {
+    const query = 'Cache timing';
+    const result: IpcResponse<'intelligence:search'> = {
+      query, intent: 'history', scope: { projectId: alpha.id, projectName: alpha.name, collections: [] },
+      results: [], conflicts: [], missing: [], usageReceipt: 'search-receipt'
+    };
+    const packet: ContextPacket = {
+      query, intent: result.intent, scope: result.scope, text: '# Context', sections: [], conflicts: [], missing: [], usedTokens: 3, budgetTokens: 250, truncated: false
+    };
+    let compiles = 0;
+    setup(ledger(), {
+      'intelligence:search': result,
+      'intelligence:compile': () => ({ ...packet, usageReceipt: `packet-${++compiles}` }),
+      'intelligence:usage:vote': ({ receipt }: IpcRequest<'intelligence:usage:vote'>) => receipt !== 'packet-1'
+    });
+    await openView('evidence');
+    update(screen.getByTestId('evidence-query'), query);
+    await click(screen.getByTestId('evidence-search'));
+    await click(screen.getByTestId('evidence-compile'));
+    const search = within(screen.getByRole('group', { name: 'Did this search help?' }));
+    const packetRating = () => within(screen.getByRole('group', { name: 'Did this context packet help?' }));
+    await click(search.getByRole('button', { name: 'Helped' }));
+    expect(search.getByRole('button', { name: 'Helped', pressed: true })).toBeTruthy();
+    await click(search.getByRole('button', { name: 'Not helpful' }));
+    expect(search.getByRole('button', { name: 'Not helpful', pressed: true })).toBeTruthy();
+    await click(packetRating().getByRole('button', { name: 'Helped' }));
+    expect(packetRating().getByRole('alert').textContent).toContain('can no longer be rated');
+    expect((packetRating().getByRole('button', { name: 'Helped', pressed: false }) as HTMLButtonElement).disabled).toBe(true);
+    await click(screen.getByTestId('evidence-compile'));
+    expect(packetRating().queryByRole('alert')).toBeNull();
+    await click(packetRating().getByRole('button', { name: 'Helped' }));
+    expect(packetRating().getByRole('button', { name: 'Helped', pressed: true })).toBeTruthy();
+    expect(intelligenceCalls().filter(([channel]) => channel === 'intelligence:usage:vote').map(([, payload]) => payload)).toEqual([
+      { sessionId: 's1', receipt: 'search-receipt', vote: 'helped' },
+      { sessionId: 's1', receipt: 'search-receipt', vote: 'not-helpful' },
+      { sessionId: 's1', receipt: 'packet-1', vote: 'helped' },
+      { sessionId: 's1', receipt: 'packet-2', vote: 'helped' }
+    ]);
   });
 });

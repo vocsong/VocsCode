@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 import { resolveIntelligenceSettings } from '../../../shared/intelligence';
 import { authorityOf, isPendingStatus, isServable, pageIdFromPath, pathForProposal, type KnowledgeGraph, type KnowledgeJobState, type KnowledgePageDetail, type KnowledgePageSummary, type KnowledgeView } from '../../../shared/knowledge';
 import type { SessionMeta } from '../../../shared/types';
-import { canInvoke, invoke } from '../api';
+import { canInvoke, invoke, isWeb } from '../api';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
 import { HighlightedSnippet } from './HighlightedSnippet';
@@ -11,13 +11,15 @@ import { CollectionsView } from './knowledge/CollectionsView';
 import { EvidenceView } from './knowledge/EvidenceView';
 import { MemoryRefresh, MemoryView } from './knowledge/MemoryView';
 import { SourcesView } from './knowledge/SourcesView';
+import { UsageView } from './knowledge/UsageView';
 import { InlineError, PromoteControl } from './knowledge/controls';
 import { errorMessage, useIntelligence, useScopeGuard, type IntelligenceController, type KnowledgeSection } from './knowledge/useIntelligence';
 import './knowledge/knowledge.css';
 
 const SECTIONS = [
-  ['knowledge', 'Knowledge'], ['memory', 'Memory'], ['collections', 'Collections'], ['evidence', 'Evidence'], ['sources', 'Sources']
+  ['knowledge', 'Knowledge'], ['memory', 'Memory'], ['collections', 'Collections'], ['evidence', 'Evidence'], ['usage', 'Usage'], ['sources', 'Sources']
 ] as const;
+type SectionEntry = (typeof SECTIONS)[number];
 const INTELLIGENCE_SECTIONS = { memory: MemoryView, collections: CollectionsView, evidence: EvidenceView, sources: SourcesView };
 
 /** Keep the panel entry and wiki as the default; activating another tab is an explicit read. */
@@ -32,67 +34,75 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
       <WikiView key={scope} session={session} active intelligence={null} />
     </div>
   );
+  const showUsage = !isWeb && canInvoke('intelligence:usage:view');
+  const sections = showUsage ? SECTIONS : SECTIONS.filter(([section]) => section !== 'usage');
+  const activeSection = !showUsage && active === 'usage' ? 'knowledge' : active;
+  const focusSection = !showUsage && focused === 'usage' ? activeSection : focused;
   return (
     <div className="knowledge-workspace" data-testid="knowledge-tab">
       <div className="knowledge-view-tabs" role="tablist" aria-label="Project knowledge views" onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget)) setFocused(active);
+        if (!e.currentTarget.contains(e.relatedTarget)) setFocused(activeSection);
       }}>
-        {SECTIONS.map(([section, label], index) => (
+        {sections.map(([section, label], index) => (
           <button key={section} type="button" role="tab" id={`${id}-${section}-tab`} aria-controls={`${id}-${section}-panel`}
-            aria-selected={active === section} tabIndex={focused === section ? 0 : -1} data-testid={`knowledge-view-${section}`}
+            aria-selected={activeSection === section} tabIndex={focusSection === section ? 0 : -1} data-testid={`knowledge-view-${section}`}
             onFocus={() => setFocused(section)} onClick={() => { setActive(section); setFocused(section); }} onKeyDown={(e) => {
-              const count = SECTIONS.length;
+              const count = sections.length;
               const next = e.key === 'ArrowRight' ? (index + 1) % count : e.key === 'ArrowLeft' ? (index + count - 1) % count
                 : e.key === 'Home' ? 0 : e.key === 'End' ? count - 1 : null;
               if (next === null) return;
               e.preventDefault();
               // Focus moves without starting a read until the user activates the tab.
-              e.currentTarget.ownerDocument.getElementById(`${id}-${SECTIONS[next][0]}-tab`)?.focus();
+              e.currentTarget.ownerDocument.getElementById(`${id}-${sections[next][0]}-tab`)?.focus();
             }}>{label}</button>
         ))}
       </div>
-      <KnowledgeSession key={scope} session={session} active={active} id={id} />
+      <KnowledgeSession key={scope} session={session} active={activeSection} sections={sections} id={id} />
     </div>
   );
 }
 
 /** A different session or checkout cannot inherit the previous view, drafts or pending replies. */
-function KnowledgeSession({ session, active, id }: { session: SessionMeta; active: KnowledgeSection; id: string }) {
+function KnowledgeSession({ session, active, sections, id }: { session: SessionMeta; active: KnowledgeSection; sections: readonly SectionEntry[]; id: string }) {
   const intelligence = useIntelligence(session.id);
   const { view, busy, errors, refresh, run } = intelligence;
   const settings = useStore((s) => s.settings?.intelligence);
   const lastSettings = useRef(settings);
+  // Usage reads only the local aggregate report, not the memory ledger.
+  const needsIntelligence = active !== 'knowledge' && active !== 'usage';
   useEffect(() => {
-    if (active !== 'knowledge' && !view && !busy && !errors.load) void refresh();
-  }, [active, view, busy, errors.load, refresh]);
+    if (needsIntelligence && !view && !busy && !errors.load) void refresh();
+  }, [needsIntelligence, view, busy, errors.load, refresh]);
 
   useEffect(() => {
-    if (active === 'knowledge' || !view || busy || settings === lastSettings.current) return;
+    if (!needsIntelligence || !view || busy || settings === lastSettings.current) return;
     lastSettings.current = settings;
     // An app-wide settings push can arrive after switching away from the session that wrote it.
     if (JSON.stringify(resolveIntelligenceSettings(settings)) !== JSON.stringify(view.settings)) void refresh();
-  }, [active, view, busy, settings, refresh]);
+  }, [needsIntelligence, view, busy, settings, refresh]);
 
-  return SECTIONS.map(([section]) => {
+  return sections.map(([section]) => {
     const selected = section === active;
-    const View = section === 'knowledge' ? null : INTELLIGENCE_SECTIONS[section];
-    return (
-      <div key={section} role="tabpanel" id={`${id}-${section}-panel`} aria-labelledby={`${id}-${section}-tab`} hidden={!selected} tabIndex={0}>
-        {section === 'knowledge' ? <WikiView session={session} active={selected} intelligence={intelligence} /> : selected && View && (
-          <div className="intelligence-panel" data-testid={view ? `${section}-view` : undefined}>
-            {section === 'memory' && <MemoryRefresh sessionId={session.id} busy={busy} run={run} />}
-            <InlineError>{errors[section]}</InlineError>
-            {errors.load && <div className="intelligence-inline">
-              <InlineError>{errors.load}</InlineError>
-              <Button size="sm" disabled={busy} onClick={() => void refresh()}>Retry</Button>
-            </div>}
-            {view ? <View sessionId={session.id} view={view} busy={busy} run={(work) => run(section, work)} /> : !errors.load && (
-              <div className="intelligence-row muted" role="status"><Spinner size={14} /> Reading project memory…</div>
-            )}
-          </div>
-        )}
-      </div>
-    );
+    let content: React.ReactNode;
+    if (section === 'knowledge') content = <WikiView session={session} active={selected} intelligence={intelligence} />;
+    else if (section === 'usage') content = selected ? <UsageView sessionId={session.id} /> : null;
+    else if (selected) {
+      const View = INTELLIGENCE_SECTIONS[section];
+      content = (
+        <div className="intelligence-panel" data-testid={view ? `${section}-view` : undefined}>
+          {section === 'memory' && <MemoryRefresh sessionId={session.id} busy={busy} run={run} />}
+          <InlineError>{errors[section]}</InlineError>
+          {errors.load && <div className="intelligence-inline">
+            <InlineError>{errors.load}</InlineError>
+            <Button size="sm" disabled={busy} onClick={() => void refresh()}>Retry</Button>
+          </div>}
+          {view ? <View sessionId={session.id} view={view} busy={busy} run={(work) => run(section, work)} /> : !errors.load && (
+            <div className="intelligence-row muted" role="status"><Spinner size={14} /> Reading project memory…</div>
+          )}
+        </div>
+      );
+    }
+    return <div key={section} role="tabpanel" id={`${id}-${section}-panel`} aria-labelledby={`${id}-${section}-tab`} hidden={!selected} tabIndex={0}>{content}</div>;
   });
 }
 

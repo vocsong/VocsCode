@@ -3,6 +3,9 @@
 This offline benchmark asks three different questions: how much work an index saves on reuse,
 which evidence sources find a known answer, and whether a saved note adds anything beyond the
 same session-history search. It does **not** grade model answers or estimate paid token savings.
+For everyday use, [Knowledge → Usage](INTELLIGENCE.md#measure-whether-knowledge-helps) collects
+opt-in local lookup counts and explicit usefulness ratings; keep those observations separate from
+these fixed-probe results.
 
 ## Reference results
 

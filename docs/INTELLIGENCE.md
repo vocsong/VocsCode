@@ -7,6 +7,7 @@ Open a session, then **Knowledge** in the right panel (Standard or Zen). The **K
 | **Memory** | Read automatically saved notes, record a lesson or preference, reflect on a session, review or forget memory, and export or import project records. |
 | **Collections** | See the current project identity and choose which known local projects may share knowledge. Membership starts with promoted records only. Enabling wiki sharing exposes current project wiki claims, not branch pages, source bodies or other sessions' transcripts. |
 | **Evidence** | Search this project, or explicitly look across its collections. Compile a bounded packet with citations, history, missing providers, stale evidence and known conflicts. |
+| **Usage** | Opt in to tracking for this project, inspect 7 or 30 days of local usage, and rate the latest lookup from the current agent session. |
 | **Sources** | Manage the tool gateway, collection search, personal recall, reflection and the built-in Graphify index. |
 
 ## What to trust
@@ -19,6 +20,41 @@ Open a session, then **Knowledge** in the right panel (Standard or Zen). The **K
 ## Privacy and storage
 
 Project IDs, collection memberships and pending promotions live in the desktop profile (`userData/intelligence`), alongside the SQLite memory ledger and its derived search index. Project identity is local and stable across a repository's linked worktrees. It is not an account identity; matching a repository name is not permission to share. Project-only retrieval does not fan out. Personal recall is off by default; preferences are declared by the user, never inferred during reflection. The project export is a local JSON file and excludes personal and collection records, the transcript index and graph caches. An import does not carry the authority of the exporting user.
+
+## Measure whether Knowledge helps
+
+Open **Knowledge → Usage** in a normal Vocs Code development session and enable tracking for the
+project you want to measure. It's off by default, has no backfill, and doesn't change what agents
+receive or make extra model calls. Use Vocs Code as usual, then return to see the report. Rate an
+Evidence result (including an empty result) where it appears, or use **Usage** to rate the latest
+agent lookup from the selected session. If the report was already open, press **Refresh** first.
+A rating can be changed while its receipt is valid; receipts expire after one hour or restart.
+
+| Metric | What it tells you |
+| --- | --- |
+| Lookups with evidence, no evidence, or failed | Whether each measured request returned any evidence, split between **Desktop Evidence** and **Agent tools**. Empty isn't wrong, and a hit isn't necessarily relevant. A retry is another lookup, not another question. |
+| Helped, didn't help, and how many were rated | Direct feedback from you. Compare helped / rated alongside rated / total, not helped / total. Unrated lookups aren't negative votes, and the people or tasks that get rated may not be representative. |
+| Wiki, memory, local learning, history, graph, collections | Number of lookups that returned each source. Several sources can appear in one lookup, and the source counts don't assign credit. A compiled packet counts only the evidence that fit, once. |
+| Local latency, stale graph, truncated packets, tool response size | Where to investigate friction. Latency uses coarse p50/p95 buckets (p95 needs at least 20 lookups). Agent response size is local tool text in UTF-8 bytes for hits and empty results, not billed input tokens. |
+
+The scope is desktop Evidence search/compile and evidence-returning calls through the authenticated
+memory gateway. Standalone MCP, wiki browsing, startup priming, index jobs, writes, and requests
+refused or abandoned at the gateway aren't counted. A hit means the app returned evidence; it
+can't tell whether a model used it or a user saw it. Numbers are by the
+requesting project's root, so its worktrees share them; independent clones don't pool counts.
+
+The app saves daily counters and coarse latency buckets under a hashed root in
+`userData/intelligence/knowledge-usage.json`. It doesn't save queries, prompts, results, citations,
+paths or session IDs in that file. The report never goes to code.vocs.io. The windows count UTC
+calendar days including today. Counts older than 30 days are removed on the next launch or write.
+Switching tracking off keeps existing totals; **Clear counts** deletes them for this project
+without changing whether tracking is on or touching the wiki, memory, or transcripts.
+
+For a first read, use the 7-day window on Vocs Code and check the counts and rating coverage before
+comparing percentages. A lot of lookups with no evidence suggests a coverage problem; a lot of
+hits rated unhelpful suggests a relevance problem. To measure **time or tokens saved**, run a
+separate comparison with the same model and held-out tasks, independent correctness checks,
+and actual usage per correct answer. See the [offline benchmark](KNOWLEDGE-BENCHMARK.md).
 
 ## What works in the background
 

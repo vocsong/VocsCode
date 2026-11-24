@@ -28,6 +28,7 @@ import { MemoryStore } from './intelligence/memory-store';
 import { PassiveLearning } from './intelligence/passive-learning';
 import { normalizeRoot, ProjectRegistry } from './intelligence/registry';
 import { IntelligenceService } from './intelligence/service';
+import { KnowledgeUsage } from './intelligence/usage';
 import { resolveIntelligenceSettings } from '../shared/intelligence';
 import { GITNEXUS_SERVER_ID, gitnexusSharedRoots, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './mcp/gitnexus';
 import { GitnexusIndexer } from './mcp/indexer';
@@ -294,6 +295,8 @@ async function main(): Promise<void> {
   // Graphify cache, and the gateway. Passive turn capture stays on-device; model-assisted
   // wiki jobs and session reflection are separate paths.
   const intelligenceDir = path.join(userData, 'intelligence');
+  const knowledgeUsage = new KnowledgeUsage(intelligenceDir, { log });
+  await knowledgeUsage.load();
   const projectRegistry = new ProjectRegistry(intelligenceDir, { log, facts: (root) => gitIdentityFacts(root) });
   const memoryStore = new MemoryStore(intelligenceDir, { log });
   memoryStore.init();
@@ -375,7 +378,8 @@ async function main(): Promise<void> {
         allowCollections: resolveIntelligenceSettings(settings.get().intelligence).collections
       };
     },
-    call: (session, tool, args, signal) => callIntelligenceTool({ intelligence: intelligenceCore, knowledge }, session, tool, args, signal)
+    beginUsage: (session, tool) => knowledgeUsage.begin(session, 'agent', tool),
+    call: (session, tool, args, signal, observe) => callIntelligenceTool({ intelligence: intelligenceCore, knowledge }, session, tool, args, signal, observe)
   });
   await intelligenceGateway.start();
   const memoryGateway = intelligenceGateway;
@@ -620,6 +624,7 @@ async function main(): Promise<void> {
     search,
     knowledge,
     intelligence: intelligenceCore,
+    knowledgeUsage,
     revokeMemoryGrants: () => memoryGateway.revokeAll(),
     gitnexusIndexer,
     appInstructions,
@@ -767,6 +772,7 @@ async function main(): Promise<void> {
       safe('intelligence gateway close', intelligenceGateway?.close()),
       safe('Graphify shutdown', Promise.all([graphScheduler.close(), graphify.cancel()])),
       safe('memory ledger close', Promise.resolve(passiveLearning?.close()).finally(() => memoryStore.close())),
+      safe('knowledge usage flush', knowledgeUsage.close()),
       safe('web server stop', webServer?.stop()),
       safe('vesta shutdown', registry.shutdown()),
       safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop())),
