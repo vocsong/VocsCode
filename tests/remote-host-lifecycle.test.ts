@@ -293,7 +293,7 @@ describe('Connect with Vocs: adding and pairing through a signed-in owner', () =
       // check code the page will show.
       expect(opened).toHaveLength(1);
       const link = new URL(opened[0]);
-      expect(link.origin + link.pathname).toBe(`${r.base}/app`);
+      expect(link.origin + link.pathname).toBe(`${r.base}/dashboard`);
       const nonceHash = link.searchParams.get('connect')!;
       expect(nonceHash).toMatch(/^[0-9a-f]{64}$/);
       expect(desktop.state()).toMatchObject({ status: 'connecting', signIn: { link: opened[0], checkCode: connectCheckCode(nonceHash) } });
