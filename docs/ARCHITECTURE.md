@@ -276,16 +276,20 @@ latest list from a same-harness session in the same project. Harnesses that cann
 so in the popover instead of looking empty; the list is kept off remote frames.
 
 The app-owned `/usage` opens the right-hand Usage tab without sending a prompt. An advertised
-harness command of the same name still runs via `//usage`. The separate **Subscriptions** view
-shows account limits independent of the active session. Neither opening it nor switching sessions
-queries a provider. `subscriptions:read` and `subscriptions:openUsage` are desktop-owner-only:
-Codex uses the documented app-server account read over a short-lived process without a thread or a
-turn, shared by both Codex adapters. It keeps the CLI's saved login but not ambient auth or endpoint
-variables, uses isolated app-server state, and disables Codex remote-control startup. The renderer
-holds only the bounded snapshot during the open
-panel, separate from tokens, spend and context. Other actions open fixed vendor pages (Claude,
-Cursor or ChatGPT) or the interactive Antigravity CLI, where the user types `/usage`. Nothing
-submits a session prompt, runs Antigravity headlessly for quota, or forwards account data remotely.
+harness command of the same name still runs via `//usage`. **Subscription limits** appear inline,
+separate from session tokens, spend and context. `subscriptions:*` actions are desktop-owner-only.
+Opening Usage with a detected ChatGPT sign-in reads Codex’s documented app-server account windows
+once per panel visit, not on a timer or session switch. That short-lived stdio process never starts
+a thread or turn. It uses the saved CLI login, isolated app-server state, no ambient auth or endpoint
+overrides, and disabled Remote Control. Both Codex modes share that account read.
+
+Claude’s `rate_limit_event` can report subscription windows during a normal turn. The running
+adapter keeps only recent observations for its own session; `subscriptions:claudeObserved` reads
+those in memory. No cold-start quota read, normalized session event, transcript entry, or broadcast
+is needed. The panel labels the values as last reported and clears them on expiry. Vendor actions
+open fixed usage pages or the interactive Antigravity CLI, where the user types `/usage`. Opening
+Usage never submits a prompt, polls a provider, runs Antigravity headlessly, or exposes account
+windows to a remote client.
 
 `/goal` has a per-session driver (`src/shared/goal-driver.ts`): the harness reports the slash
 commands it accepts (above), and when

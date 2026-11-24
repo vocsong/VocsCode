@@ -1064,18 +1064,12 @@ body.resizing {
 /* Usage page: a session dashboard inside a narrow column. The chart primitives are the analytics
    ones, so only the panel-scale overrides and the panel-only marks (turn columns, error log) live
    here. Status hues stay reserved for status; mixes use the categorical --chart-N slots. */
-.usage,
-.usage-session {
+.usage {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
-}
-.usage {
   padding: 10px 12px 14px;
-}
-.usage > .segmented {
-  align-self: flex-start;
 }
 .usage-hero {
   display: flex;

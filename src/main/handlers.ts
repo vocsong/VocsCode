@@ -648,6 +648,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     // One process per account check, even if the user closes and reopens the panel mid-read.
     return codexQuotaRead ??= readCodexSubscriptionQuota(runtime).finally(() => { codexQuotaRead = undefined; });
   });
+  handle('subscriptions:claudeObserved', (input) => {
+    const parsed = z.strictObject({ sessionId: z.string().max(128).regex(/^[a-zA-Z0-9_-]+$/) }).safeParse(input);
+    if (!parsed.success) throw new Error('Invalid Claude quota request.');
+    return sessions.claudeSubscriptionWindows(parsed.data.sessionId);
+  });
   handle('subscriptions:openUsage', async (input) => {
     const parsed = z.strictObject({ provider: z.enum(SUBSCRIPTION_PROVIDERS) }).safeParse(input);
     if (!parsed.success) throw new Error('Unsupported subscription usage action.');

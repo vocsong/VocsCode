@@ -310,6 +310,28 @@ describe('handler registry', () => {
     expect(calls).toEqual([]);
   });
 
+  it('returns only the requested live Claude observation to the desktop owner', async () => {
+    const output = [{ name: 'Weekly limit', remainingFraction: 0.3, observedAt: 1000, expiresAt: 2000 }];
+    const observe = vi.fn((id: string) => id === 's_claude' ? output : []);
+    const { registry, pushes, calls } = stubDeps({ sessions: { claudeSubscriptionWindows: observe } as unknown as SessionManager });
+    const channel = 'subscriptions:claudeObserved';
+    const request = { sessionId: 's_claude' };
+    expect(isRemoteChannel(channel)).toBe(false);
+    expect(agentChannels().includes(channel as never)).toBe(false);
+    for (const actor of ['user', 'agent'] as const) {
+      await expect(registry.invoke(channel, request, actor)).rejects.toThrow(/desktop owner/);
+    }
+    for (const input of [undefined, { sessionId: '' }, { sessionId: '../s_claude' }, { ...request, provider: 'claude' }]) {
+      await expect(registry.invoke(channel, input, 'desktop')).rejects.toThrow(/Invalid Claude quota request/);
+    }
+    expect(observe).not.toHaveBeenCalled();
+    await expect(registry.invoke(channel, request, 'desktop')).resolves.toEqual(output);
+    await expect(registry.invoke(channel, { sessionId: 's_other' }, 'desktop')).resolves.toEqual([]);
+    expect(observe.mock.calls).toEqual([['s_claude'], ['s_other']]);
+    expect(pushes).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
   it('opens only fixed vendor sites or the interactive Antigravity CLI', async () => {
     const { registry, deps, calls } = stubDeps();
     const launch = vi.mocked(openAntigravityUsage).mockReset().mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: false, error: 'No terminal' });

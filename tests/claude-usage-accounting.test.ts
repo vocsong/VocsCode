@@ -14,7 +14,8 @@
  */
 import type { AppSettings, ModelRef, ProviderConfig, SessionEvent, SessionMeta } from '../src/shared/types';
 import type { HarnessContext } from '../src/main/harness/types';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AsyncQueue, deferred } from '../src/main/util/async';
 
 const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: queryMock }));
@@ -370,5 +371,192 @@ describe('Claude process lifecycle accounting', () => {
     expect(turnRows(events)).toHaveLength(1);
     expect(lastUsage(events)?.totals).toMatchObject({ turns: 1 });
     expect(lastUsage(events)?.totals.costUsd).toBeCloseTo(0.1506, 9);
+  });
+});
+
+describe('Claude subscription observation', () => {
+  const init = { type: 'system', subtype: 'init', session_id: 'sdk1', apiKeySource: 'none' };
+  const account = { apiProvider: 'firstParty', subscriptionType: 'Claude Max' };
+  const sample = (info: Record<string, unknown> = {}) => ({
+    type: 'rate_limit_event', session_id: 'sdk1',
+    rate_limit_info: { status: 'allowed_warning', rateLimitType: 'five_hour', utilization: 0.25, resetsAt: T0 / 1_000 + 120, ...info }
+  });
+
+  async function open(s = settings([ANTHROPIC]), meta: Partial<SessionMeta> = {}) {
+    const events: SessionEvent[] = [];
+    const ctx = { ...stubCtx(s, undefined, events, meta), updateMeta: vi.fn(), updateRef: vi.fn(), log: vi.fn() };
+    const frames = new AsyncQueue<{ message: object; handled(): void } | Error>();
+    const sdk = {
+      async *[Symbol.asyncIterator]() {
+        for await (const frame of frames) {
+          if (frame instanceof Error) throw frame;
+          yield frame.message;
+          frame.handled();
+        }
+      },
+      close: () => frames.close(),
+      accountInfo: vi.fn().mockResolvedValue(account),
+      supportedModels: vi.fn().mockResolvedValue([]),
+      supportedCommands: vi.fn().mockResolvedValue([]),
+      getUsage: vi.fn(), getSettings: vi.fn(), applyFlagSettings: vi.fn(), streamInput: vi.fn()
+    };
+    queryMock.mockReturnValueOnce(sdk);
+    const adapter = new ClaudeAdapter(ctx);
+    expect(adapter.observedSubscriptionWindows()).toEqual([]);
+    await adapter.start();
+    return { adapter, sdk, events, ctx, frames, emit: (message: object) => new Promise<void>((handled) => frames.push({ message, handled })) };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0);
+    for (const key of [
+      'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_UNIX_SOCKET',
+      'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+      'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_GATEWAY',
+      '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL'
+    ]) vi.stubEnv(key, undefined);
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('observes ordinary turns only, without touching the normalized stream or querying the provider', async () => {
+    const { adapter, sdk, emit, events, ctx } = await open();
+    try {
+      await emit(sample()); // An event without an ordinary turn's init is not enough.
+      expect(sdk.accountInfo).not.toHaveBeenCalled();
+      await emit(init);
+      await emit(turnStarted);
+      const count = events.length;
+      const sideEffects = [ctx.updateMeta, ctx.updateRef, ctx.log].map((fn) => fn.mock.calls.length);
+      await emit(sample());
+      await emit(sample({ rateLimitType: 'seven_day', utilization: 1, resetsAt: T0 / 1_000 + 3_600 }));
+      const windows = adapter.observedSubscriptionWindows();
+      expect(windows).toEqual([
+        { name: '5-hour limit', remainingFraction: 0.75, resetAt: new Date(T0 + 120_000).toISOString(), observedAt: T0, expiresAt: T0 + 120_000 },
+        { name: 'Weekly limit', remainingFraction: 0, resetAt: new Date(T0 + 3_600_000).toISOString(), observedAt: T0, expiresAt: T0 + 600_000 }
+      ]);
+      windows[0]!.remainingFraction = 0;
+      expect(adapter.observedSubscriptionWindows()[0]?.remainingFraction).toBe(0.75);
+      expect(events).toHaveLength(count);
+      expect([ctx.updateMeta, ctx.updateRef, ctx.log].map((fn) => fn.mock.calls.length)).toEqual(sideEffects);
+      expect(ctx.session().usage).toEqual(ZERO_USAGE);
+      expect(sdk.accountInfo).toHaveBeenCalledOnce();
+      expect(queryMock).toHaveBeenCalledOnce();
+      for (const fn of [sdk.getUsage, sdk.getSettings, sdk.applyFlagSettings, sdk.streamInput]) expect(fn).not.toHaveBeenCalled();
+      expect(queryMock.mock.calls[0]?.[0].prompt.size).toBe(0);
+      await emit({ type: 'result', subtype: 'success', duration_ms: 1_000, total_cost_usd: 0.25 });
+      expect(lastUsage(events)?.totals).toEqual({ ...ZERO_USAGE, turns: 1, costUsd: 0.25 });
+      expect(adapter.observedSubscriptionWindows()).toHaveLength(2);
+      vi.setSystemTime(T0 + 120_000);
+      expect(adapter.observedSubscriptionWindows().map((w) => w.name)).toEqual(['Weekly limit']);
+      vi.setSystemTime(T0 + 600_000);
+      expect(adapter.observedSubscriptionWindows()).toEqual([]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it.each([
+    { name: 'configured gateway', providers: [{ ...ANTHROPIC, baseUrl: 'https://gateway.example.test' }] },
+    { name: 'app key route', useProviderKey: true },
+    { name: 'effective custom endpoint', env: ['ANTHROPIC_BASE_URL', 'https://api.anthropic.com.example.test'] },
+    { name: 'inherited API key', env: ['ANTHROPIC_API_KEY', 'test-api-key'] },
+    { name: 'inherited bearer', env: ['ANTHROPIC_AUTH_TOKEN', 'test-bearer'] },
+    { name: 'other cloud', env: ['CLAUDE_CODE_USE_BEDROCK', '1'] },
+    { name: 'CLI-managed key', apiKeySource: '/login managed key' }
+  ])('refuses $name despite a subscription-shaped event', async ({ providers, useProviderKey, env, apiKeySource }) => {
+    if (env) vi.stubEnv(env[0]!, env[1]);
+    const s = settings(providers ?? [ANTHROPIC]);
+    s.claude.useProviderKey = useProviderKey ?? false;
+    const { adapter, sdk, emit } = await open(s);
+    try {
+      await emit({ ...init, apiKeySource: apiKeySource ?? init.apiKeySource });
+      await emit(sample());
+      expect(adapter.observedSubscriptionWindows()).toEqual([]);
+      expect(sdk.accountInfo).not.toHaveBeenCalled();
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it.each(['gateway', 'vertex', undefined])('requires cached first-party account provenance (got %s)', async (apiProvider) => {
+    const { adapter, sdk, emit } = await open();
+    try {
+      sdk.accountInfo.mockResolvedValue({ ...account, apiProvider });
+      await emit(init);
+      await emit(sample());
+      expect(sdk.accountInfo).toHaveBeenCalledOnce();
+      expect(adapter.observedSubscriptionWindows()).toEqual([]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it('rejects malformed, model-specific, and extra-usage samples', async () => {
+    const { adapter, emit } = await open();
+    try {
+      await emit(init);
+      for (const info of [
+        { utilization: Number.NaN }, { utilization: 1.1 }, { utilization: -0.01 }, { utilization: undefined },
+        { resetsAt: T0 }, { resetsAt: T0 / 1_000 }, { resetsAt: Infinity },
+        { rateLimitType: 'seven_day_opus' }, { rateLimitType: 'overage' }, { rateLimitType: 'seven_day_overage_included' },
+        { isUsingOverage: true }, { overageInUse: true }
+      ]) {
+        await emit(sample(info));
+        expect(adapter.observedSubscriptionWindows()).toEqual([]);
+      }
+      await emit(sample({ status: 'allowed', utilization: 0, resetsAt: undefined }));
+      expect(adapter.observedSubscriptionWindows()).toEqual([{
+        name: '5-hour limit', remainingFraction: 1, observedAt: T0, expiresAt: T0 + 600_000
+      }]);
+      await emit(sample({ utilization: undefined }));
+      expect(adapter.observedSubscriptionWindows()).toEqual([]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it.each(['stopped', 'error', 'disposed'] as const)('forgets observations when the Query is %s', async (ending) => {
+    const { adapter, emit, events, frames } = await open();
+    try {
+      await emit(init);
+      await emit(sample({}));
+      expect(adapter.observedSubscriptionWindows()).toHaveLength(1);
+      if (ending === 'disposed') {
+        const late = emit(sample({ utilization: 0.1 }));
+        await adapter.dispose();
+        await late;
+      } else {
+        if (ending === 'error') frames.push(new Error('mock stream failure'));
+        else frames.close();
+        await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ type: 'status', status: ending }));
+      }
+      expect(adapter.observedSubscriptionWindows()).toEqual([]);
+    } finally {
+      if (ending !== 'disposed') await adapter.dispose();
+    }
+  });
+
+  it('never carries observations across a session id change or new Query, even with a pending account check', async () => {
+    const first = await open();
+    const pending = deferred<typeof account>();
+    first.sdk.accountInfo.mockReturnValue(pending.promise);
+    await first.emit(init);
+    await first.emit(sample());
+    expect(first.adapter.observedSubscriptionWindows()).toEqual([]);
+    await first.emit({ ...init, session_id: 'sdk2' });
+    pending.resolve(account);
+    await first.emit(sample()); // The old id's event is late.
+    expect(first.adapter.observedSubscriptionWindows()).toEqual([]);
+    await first.emit({ ...sample(), session_id: 'sdk2' });
+    expect(first.adapter.observedSubscriptionWindows()).toHaveLength(1);
+    await first.adapter.dispose();
+    const resumed = await open(settings([ANTHROPIC]), { harnessRef: { claudeSessionId: 'sdk2' } });
+    try {
+      await resumed.emit({ ...init, session_id: 'sdk2' });
+      expect(resumed.adapter.observedSubscriptionWindows()).toEqual([]);
+    } finally {
+      await resumed.adapter.dispose();
+    }
   });
 });
