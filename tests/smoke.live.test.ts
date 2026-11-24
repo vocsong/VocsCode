@@ -356,13 +356,6 @@ describe('live harness smoke', () => {
     assertSuccessfulTurn(items, events, 'PONG');
   });
 
-  it.runIf(want('antigravity'))('Antigravity reads quota through the signed-in CLI', async () => {
-    const { ctx } = await makeCtx('antigravity');
-    const quota = await ctx.runtime.antigravityQuota();
-    expect(quota.groups.length).toBeGreaterThan(0);
-    expect(quota.groups[0].buckets[0]).toMatchObject({ name: expect.any(String), remainingFraction: expect.any(Number) });
-  });
-
   it.runIf(want('antigravity'))('Antigravity lists Gemini models and answers a prompt', async () => {
     const { ctx, items, events, waitTurn, meta } = await makeCtx('antigravity', { permissionMode: 'ask' });
     const adapter = createAdapter('antigravity', ctx);

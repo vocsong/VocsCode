@@ -7,12 +7,6 @@ export type LoginHarnessId = 'claude' | 'codex' | 'pi' | 'antigravity';
 export const ANTIGRAVITY_INSTALL_URL = 'https://antigravity.google/docs/getting-started?tab=cli';
 export const ANTIGRAVITY_MIN_VERSION = '1.5.12';
 
-export interface AntigravityQuota {
-  groups: {
-    name: string;
-    buckets: { name: string; remainingFraction: number; resetAt?: string }[];
-  }[];
-}
 export interface SetupRequirement {
   id: 'sdk' | 'node' | 'npm' | 'git' | 'runtime';
   name: string;

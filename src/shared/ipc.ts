@@ -3,7 +3,8 @@ import type { VocsAccountSignInRequest, VocsAccountState, VocsHubConnectionReque
 import type { ControlGrantInput, ControlOwnerState } from './control';
 import type { LocalControlOwnerState } from './local-control';
 import type { HousekeepInventory, HousekeepOutcome, HousekeepPreview } from './housekeep';
-import type { AntigravityQuota, HarnessSetupStatus, LoginHarnessId } from './harness-setup';
+import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
+import type { InlineSubscriptionProvider, OpenSubscriptionUsageResult, SubscriptionLimits, SubscriptionProvider } from './subscription-usage';
 import type {
   AnalyticsSummary,
   AppInstructionFile,
@@ -214,8 +215,10 @@ export interface IpcContract {
   'harness:setup': [{ harness: HarnessId }, HarnessSetupStatus];
   /** Desktop-owner action only. Opens the selected runtime's vendor login in a terminal. */
   'harness:login': [{ harness: LoginHarnessId; device?: boolean }, { ok: boolean; error?: string }];
-  /** Desktop-owner action only. Returns account quota bars, never credentials or raw CLI output. */
-  'harness:antigravityQuota': [void, AntigravityQuota];
+  /** Desktop-owner action only. Reads provider account windows, never credentials or raw output. */
+  'subscriptions:read': [{ provider: InlineSubscriptionProvider }, SubscriptionLimits];
+  /** Desktop-owner action only. Opens a fixed vendor usage page or its interactive CLI. */
+  'subscriptions:openUsage': [{ provider: SubscriptionProvider }, OpenSubscriptionUsageResult];
   /** Served from a 7-day disk cache of the last clean discovery; `refresh` rediscovers now. */
   'harness:models': [
     { harness: HarnessId; acpAgent?: string; projectRoot?: string; refresh?: boolean },
