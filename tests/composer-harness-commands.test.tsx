@@ -116,6 +116,26 @@ describe('composer harness commands', () => {
     expect(invokeMock.mock.calls.some(([channel]) => channel === 'harness:antigravityQuota')).toBe(false);
   });
 
+  it.each(['/USAGE', '/Usage '])('keeps %j local instead of sending it as a prompt', (input) => {
+    useStore.setState({ panelTab: 'changes', panelOpen: false });
+    const c = mount(session('s1', 'antigravity'));
+    c.type(input);
+    c.key('Enter');
+    expect(useStore.getState()).toMatchObject({ panelTab: 'usage', panelOpen: true });
+    expect(c.ta.value).toBe('');
+    expect(sent()).toEqual([]);
+  });
+
+  it('only delegates /goal even if a saved session has different native-goal metadata', () => {
+    useStore.setState({ panelTab: 'changes', panelOpen: false });
+    const c = mount(session('s1', 'claude', { nativeGoal: 'usage' }));
+    c.type('/usage');
+    expect(c.rows()).toEqual(['app:/usage']);
+    c.key('Enter');
+    expect(useStore.getState()).toMatchObject({ panelTab: 'usage', panelOpen: true });
+    expect(sent()).toEqual([]);
+  });
+
   it('keeps an advertised harness /usage reachable as //usage', async () => {
     const c = mount(session('s1', 'claude', { harnessCommandList: [{ name: 'usage', kind: 'command' }] }));
     c.type('/usage');
