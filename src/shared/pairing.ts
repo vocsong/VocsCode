@@ -32,9 +32,10 @@ export function pairingLink(relayUrl: string | undefined, code: string): string 
  *  leaves the desktop before the owner grants it. */
 export const CONNECT_HASH_PATTERN = /^[0-9a-f]{64}$/;
 
-/** The page a desktop opens for "Connect with Vocs": sign in, then add this computer. */
+/** The page a desktop opens for "Connect with Vocs": sign in, then add this computer. Released
+ *  desktops open `/app?connect=`, which the relay redirects here. */
 export function connectLink(relayUrl: string | undefined, nonceHash: string): string {
-  return `${remoteOrigin(relayUrl)}/app?connect=${nonceHash}`;
+  return `${remoteOrigin(relayUrl)}/dashboard?connect=${nonceHash}`;
 }
 
 /** A short code derived from the connect hash, shown by both the desktop and the page, so the

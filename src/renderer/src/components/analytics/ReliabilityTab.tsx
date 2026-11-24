@@ -14,6 +14,7 @@ import { Badge, Button } from '../ui';
 import { BarList, ChartCard, ColumnChart, DataTable, LineChart, StackedBar, type TableSpec } from './charts';
 import { fmtCompact, fmtDay, fmtMs, fmtPct, HARNESS_ORDER, harnessColor, plural, type ChartSeries, type Scope } from './model';
 import { Footnotes, KpiGrid, StatTile } from './tiles';
+import { useAnalyticsEnv } from './env';
 
 /** Sample-size note shown beside a rate when it is too small to lean on; never colour alone. */
 const CONFIDENCE_NOTE: Record<Rate['confidence'], string | undefined> = { insufficient: 'n<20', very_low: 'n<50', low: 'n<100', ok: undefined };
@@ -186,6 +187,7 @@ function ExecutionList({ rows }: { rows: ExecutionRecord[] }) {
 }
 
 export function ReliabilityTab({ scope, summary }: { scope: Scope; summary: AnalyticsSummary }) {
+  const { drillDown } = useAnalyticsEnv();
   const report = summary.reliability;
   const o = report.overall;
   const [signature, setSignature] = useState<string | undefined>();
@@ -194,7 +196,7 @@ export function ReliabilityTab({ scope, summary }: { scope: Scope; summary: Anal
   const [showAllSignatures, setShowAllSignatures] = useState(false);
 
   useEffect(() => {
-    if (!signature) return;
+    if (!signature || !drillDown) return;
     let cancelled = false;
     setLoadingExamples(true);
     void invoke('analytics:executions', { signature, days: scope.range, limit: 20 })
@@ -210,7 +212,7 @@ export function ReliabilityTab({ scope, summary }: { scope: Scope; summary: Anal
     return () => {
       cancelled = true;
     };
-  }, [signature, scope.range, report.coverage.records]);
+  }, [signature, scope.range, report.coverage.records, drillDown]);
 
   const dates = report.trend.map((p) => p.date);
   const outcomeTrend: ChartSeries[] = [
@@ -324,7 +326,8 @@ export function ReliabilityTab({ scope, summary }: { scope: Scope; summary: Anal
                     Close
                   </Button>
                 </div>
-                {!loadingExamples && <ExecutionList rows={examples} />}
+                {!drillDown && <p className="muted small" data-testid="reliability-examples-local">Representative executions stay on the computer that ran them; open Analytics in Vocs Code there to see them.</p>}
+                {drillDown && !loadingExamples && <ExecutionList rows={examples} />}
               </div>
             )}
           </>
