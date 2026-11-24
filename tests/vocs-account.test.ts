@@ -11,7 +11,7 @@ const account = (id = 'a'.repeat(64), T: { identityIssuer: string; hub: string }
 const brokers: ReturnType<typeof createVocsAccount>[] = [];
 afterEach(() => { for (const broker of brokers.splice(0)) broker.dispose(); vi.useRealTimers(); });
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => resolve = r); return { promise, resolve }; }
-function fixture(tokenOptions: Record<string, unknown> = {}, realm: VocsAccountRealm | null = 'staging') {
+function fixture(tokenOptions: Record<string, unknown> = {}, realm: VocsAccountRealm | null = 'staging', extra: Partial<Parameters<typeof createVocsAccount>[0]> = {}) {
   const T = VOCS_REALMS[realm ?? 'production'];
   let browserUrl: URL | undefined;
   const calls: string[] = [];
@@ -56,7 +56,7 @@ function fixture(tokenOptions: Record<string, unknown> = {}, realm: VocsAccountR
     callback.searchParams.set('code', 'synthetic-code'); callback.searchParams.set('state', browserUrl.searchParams.get('state')!);
     expect((await fetch(callback)).status).toBe(200);
   });
-  const broker = createVocsAccount({ ...(realm ? { realm } : {}), fetch: network as typeof fetch, openExternal, timeoutMs: 2000 }); brokers.push(broker);
+  const broker = createVocsAccount({ ...(realm ? { realm } : {}), fetch: network as typeof fetch, openExternal, timeoutMs: 2000, ...extra }); brokers.push(broker);
   return { broker, network, calls, catalog, revoke, exchange, openExternal };
 }
 describe('staging account broker: actual SDK and loopback boundary', () => {
@@ -95,6 +95,23 @@ describe('staging account broker: actual SDK and loopback boundary', () => {
     { ...account(), token: 'unexpected-secret-field' }
   ])('rejects untrusted catalog shape or endpoint', async body => {
     const f = fixture(); f.catalog.mockResolvedValue(Response.json(body)); expect((await f.broker.signIn()).status).toBe('signed_out');
+  });
+  it.each([
+    [['models:read', 'speech:write', 'audio:read']],
+    [['models:read', 'audio:read']],
+    [['speech:write', 'models:read']]
+  ])('accepts production Hub account scopes %j', async accountScopes => {
+    const f = fixture(); f.catalog.mockResolvedValue(Response.json({ ...account(), connections: [{ ...account().connections[0], accountScopes }] }));
+    const state = await f.broker.signIn();
+    expect(state.status).toBe('signed_in');
+    expect(state.connections[0].accountScopes).toEqual(accountScopes);
+  });
+  it.each([
+    [[]], [['speech:write', 'audio:read']], [['models:read', 'models:read']], [['models:read', 'speech:write', 'speech:write']],
+    [['models:read', 'admin']], [['models:read', 'speech:write', 'audio:read', 'audio:read']], ['models:read']
+  ])('rejects Hub account scopes %j', async accountScopes => {
+    const f = fixture(); f.catalog.mockResolvedValue(Response.json({ ...account(), connections: [{ ...account().connections[0], accountScopes }] }));
+    expect((await f.broker.signIn()).status).toBe('signed_out');
   });
   it('rejects unexpected account changes on refresh', async () => {
     const f = fixture(); await f.broker.signIn(); f.catalog.mockResolvedValue(Response.json(account('b'.repeat(64))));
@@ -136,6 +153,54 @@ describe('staging account broker: actual SDK and loopback boundary', () => {
   it('does not leak synchronous controller construction errors', async () => {
     const broker = createVocsAccount({ openExternal: async () => {}, createOAuth: () => { throw new Error('PRIVATE_DETAIL'); } }); brokers.push(broker);
     const state = await broker.signIn(); expect(state.status).toBe('signed_out'); expect(state.error).not.toContain('PRIVATE_DETAIL');
+  });
+});
+
+describe('Hub connections through the account broker', () => {
+  function hubStub() {
+    const hubState = [{ id: 'openrouter' as const, serverId: 'vocs-openrouter', status: 'disconnected' as const }];
+    return {
+      states: vi.fn(() => structuredClone(hubState)), connect: vi.fn(async () => undefined), cancel: vi.fn(), disconnect: vi.fn(async () => undefined),
+      accountSeen: vi.fn(async () => undefined), accountSignedOut: vi.fn(async () => undefined), refuse: vi.fn(), dispose: vi.fn(async () => undefined)
+    };
+  }
+  it('connects only the verified catalog connection, under the account the catalog named', async () => {
+    const hub = hubStub(); const f = fixture({}, 'staging', { hub });
+    // Signed out: nothing to connect.
+    expect((await f.broker.hubConnect('openrouter')).hub).toEqual(hub.states());
+    expect(hub.refuse).toHaveBeenCalledExactlyOnceWith('openrouter', 'signed_out');
+    expect(hub.connect).not.toHaveBeenCalled();
+    await f.broker.signIn();
+    expect(hub.accountSeen).toHaveBeenCalledExactlyOnceWith('a'.repeat(64), account().connections);
+    await f.broker.hubConnect('openrouter');
+    expect(hub.connect).toHaveBeenCalledExactlyOnceWith(account().connections[0], 'a'.repeat(64));
+    // A catalog without it refuses instead of connecting anything.
+    f.catalog.mockResolvedValue(Response.json({ ...account(), connections: [] }));
+    await f.broker.refresh();
+    expect(hub.accountSeen).toHaveBeenLastCalledWith('a'.repeat(64), []);
+    await f.broker.hubConnect('openrouter');
+    expect(hub.connect).toHaveBeenCalledTimes(1);
+    expect(hub.refuse).toHaveBeenLastCalledWith('openrouter', 'not_listed');
+    f.broker.hubCancel('openrouter'); expect(hub.cancel).toHaveBeenCalledExactlyOnceWith('openrouter');
+    await f.broker.hubDisconnect('openrouter'); expect(hub.disconnect).toHaveBeenCalledExactlyOnceWith('openrouter');
+  });
+  it('a different account in the catalog reaches the Hub broker, and sign-out ends every connection', async () => {
+    const hub = hubStub(); const f = fixture({}, 'staging', { hub });
+    await f.broker.signIn(); await f.broker.signOut();
+    expect(hub.accountSignedOut).toHaveBeenCalledTimes(1);
+    f.catalog.mockResolvedValue(Response.json(account('b'.repeat(64))));
+    await f.broker.signIn();
+    expect(hub.accountSeen).toHaveBeenLastCalledWith('b'.repeat(64), account().connections);
+    // Quitting disposes the Hub broker with the account.
+    await f.broker.dispose(); expect(hub.dispose).toHaveBeenCalledTimes(1);
+  });
+  it('a temporary sign-in ending on its own leaves Hub connections alone', async () => {
+    const hub = hubStub(); const f = fixture({ expires_in: 1 }, 'staging', { hub });
+    await f.broker.signIn();
+    await new Promise(r => setTimeout(r, 1050));
+    expect(f.broker.get().status).toBe('signed_out');
+    expect(hub.accountSignedOut).not.toHaveBeenCalled();
+    expect(hub.disconnect).not.toHaveBeenCalled();
   });
 });
 

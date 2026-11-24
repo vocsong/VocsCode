@@ -334,6 +334,35 @@ describe('session resume persistence', () => {
     }
   });
 
+  it('hands a session the connected Vocs MCP Hub proxy, read live at each start', async () => {
+    const home = path.join(tmpRoot, 'hub-runtime');
+    const store = new SessionStore(home);
+    await store.load();
+    const meta = persistedMeta('native', {});
+    meta.cwd = meta.config.projectRoot = home;
+    await store.upsert(meta);
+    const settings = defaultSettings();
+    settings.mcpDisabledBuiltins = ['gitnexus', 'cua-driver', 'vocs-memory'];
+    const proxied = { def: { id: 'vocs-openrouter', transport: 'http' as const, url: 'http://127.0.0.1:14142/hub/openrouter', headers: { Authorization: 'Bearer proxy-capability' }, builtin: 'vocs-openrouter' }, missing: [], secretEnvKeys: [], secretHeaderKeys: ['Authorization'] };
+    let connected = true;
+    const hubServers = vi.fn(async () => connected ? [proxied] : []);
+    const manager = new SessionManager({ ...makeManagerDeps(store), settings: { get: () => settings } as never, hubServers });
+    try {
+      await manager.send(meta.id, { text: 'Start one runtime' });
+      const first = mocks.adapterCalls.at(-1)!.ctx;
+      await expect(first.mcpServers()).resolves.toEqual([proxied]);
+      await manager.stop(meta.id);
+      await expect(first.mcpServers()).rejects.toThrow(/no longer current/);
+      // Disconnected meanwhile: the next runtime starts without it.
+      connected = false;
+      await manager.send(meta.id, { text: 'Start another runtime' });
+      await expect(mocks.adapterCalls.at(-1)!.ctx.mcpServers()).resolves.toEqual([]);
+      expect(hubServers).toHaveBeenCalledTimes(2);
+    } finally {
+      await manager.stopAll();
+    }
+  });
+
   it('round-trips every harness ref through the store and a fresh manager', async () => {
     const dir = path.join(tmpRoot, 'store-roundtrip');
     const store = new SessionStore(dir);

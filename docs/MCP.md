@@ -623,14 +623,19 @@ restricted to the exact resource URL. Legacy SSE servers that redirect messages 
 a different path are rejected, rather than silently forwarding credentials there;
 qualifying a separately authorized endpoint contract is future work.
 
-This is a backend foundation, **not a shipped sign-in UI or universal Vocs account
-login**. Tokens are isolated per controller and memory-only; refresh tokens are
-discarded. Each explicit login registers a fresh public client with its ephemeral
-callback. No master account session, provider key, token or verifier is copied into
-the renderer, server definitions or subprocess configuration. It does not use the
-existing API-key store's obfuscated fallback. Durable renewal and secure OS-vault
-persistence require the account/device revocation contract and are deliberately
-not enabled yet. Browser-only Hub catalog endpoints must not be accessed by
+The controller itself is not a sign-in UI. Tokens are isolated per controller and
+memory-only, and by default refresh tokens are discarded. Two callers opt into more,
+explicitly: the Vocs account's device enrollment (`deviceName`) and Hub connections
+(`keepRefreshToken`, below). Either way the refresh token is stripped from the token
+response before the SDK parses it, so the SDK's own refresh logic never sees one; the
+opted-in caller receives it once (`takeDeviceGrant()` / `takeRefreshGrant()`), and a
+grant that arrives but is never handed over (cancelled, failed, cleared first) is
+passed to the caller's `onAbandoned…` hook for revocation. `keepRefreshToken` also
+registers the dynamic client with `grant_types: ["authorization_code","refresh_token"]`.
+Each explicit login registers a fresh public client with its ephemeral callback. No
+master account session, provider key, token or verifier is copied into the renderer,
+server definitions or subprocess configuration. It does not use the existing API-key
+store's obfuscated fallback. Browser-only Hub catalog endpoints must not be accessed by
 copying browser cookies into this client.
 
 The SDK integration fixture exercises real discovery, registration, PKCE, loopback
@@ -652,3 +657,54 @@ resource only; it cannot discover an issuer, mutate PKCE/client state or launch
 browser authorization. A new sign-in or logout invalidates old contexts, including
 401 continuations whose response body completes after the connection is closed.
 Connection creation during explicit sign-in is rejected until that sign-in ends.
+
+### Vocs MCP Hub connections (app-owned `vocs-openrouter`)
+
+`src/main/vocs-hub.ts` turns a Hub catalog connection (Settings → Vocs account → Hub
+connections) into an app-owned MCP server. **Connect** is offered for a catalog entry with
+`authorization: 'oauth_required'` and a non-null `authorizationServer`; the renderer passes
+only the connection id, and main takes resource, issuer and scopes from the catalog it
+verified (`accountScopes`, any duplicate-free subset of `models:read`, `speech:write`,
+`audio:read` that includes `models:read`). It runs `createNativeMcpOAuth` with
+`resource = connection.resource`, `issuer = connection.authorizationServer` (pinned to the
+realm's Hub), `maxTokenAgeSeconds: 900` and `keepRefreshToken: true`: dynamic public
+registration as "Vocs Code", S256 PKCE, the system browser and a loopback callback.
+
+**Tokens.** Only the rotating refresh token is persisted, in `SecretStore` under the
+keychain-only id `vocs-hub:<realm>:<connection>` as
+`{v,issuer,resource,clientId,scopes,refreshToken,accountId}` (never obfuscated on disk;
+reserved from every provider-keyed path). Access tokens (15 minutes) stay in memory. A
+refresh is `grant_type=refresh_token&refresh_token&client_id` at `<hub>/oauth/token`; the
+rotated token is written to the vault before the new access token is used, and a failed
+write keeps the connection for this run and revokes it at quit (bounded), as does a machine
+without a keychain. At startup the record is read from the vault only (checked against the
+pinned realm; anything else is removed unused); the first proxied call renews it.
+`invalid_grant` means the user revoked it on the Hub dashboard (or the account or a scope
+grant went away): the connection is cleared locally and the page says "Disconnected on
+mcp.vocs.io — connect again". A lost or unreachable refresh keeps the connection, since the
+previous refresh token stays valid until a new one is used.
+
+**Proxy.** While connected, `resolveForSession` adds `vocs-openrouter` (reserved in
+`MCP_BUILTIN_IDS`, `builtin` provenance set) for every `inject`/`client` harness, except
+managed Mission runs and when the app-wide or per-repo built-in switch has it off. Its
+definition is `http://127.0.0.1:<port>/hub/openrouter` with an app-minted bearer for that
+connection instance, marked `secretHeaderKeys: ['Authorization']` like the Mission broker:
+Codex exec passes it through the environment, other harnesses receive it the way they
+receive any HTTP header (Claude's `--mcp-config`, Pi's session-dir `mcp.json`). The Hub token
+never reaches a harness. The proxy accepts only that bearer, the exact path, a loopback
+`Host`, no `Origin`, and JSON POSTs up to 1 MiB (GET/DELETE: 405); it forwards the body with
+the same `Content-Type`/`Accept` (and `MCP-Protocol-Version`) to the exact resource URL with
+`Authorization: Bearer <hub token>`, follows no redirects, streams the answer back (32 MiB
+cap) and strips `WWW-Authenticate`. It renews first when the token has under 60 s left, and
+on a Hub 401 renews once and retries once; a second 401 is a 502 (never a 401, which would
+start the harness's own OAuth against the proxy). Concurrent calls share one refresh.
+
+**Ending.** Disconnect removes the connection from memory at once (new sessions stop getting
+it; running sessions' bearer is refused), revokes the refresh token at the Hub with RFC 7009
+(`token` and `client_id` posted to `<hub>/oauth/token` without `grant_type`, best effort,
+5 s), then deletes the vault entry. Vocs account sign-out, a verified catalog naming a
+different account, and a catalog that no longer lists the connection as authorizable each
+disconnect the same way. A temporary sign-in expiring, an ended kept sign-in, offline and
+catalog errors do not: the Hub grant is separate and stays usable.
+Tests: `tests/vocs-hub.test.ts` (fake Hub on a local HTTP server, real SDK OAuth and MCP
+client), `tests/mcp-oauth.test.ts`, `e2e.vocs-account` (keychain restore and Disconnect).

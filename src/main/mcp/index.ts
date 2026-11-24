@@ -42,6 +42,11 @@ export interface McpHostDeps {
   memoryUserData?: string;
   /** Mints this session's gateway endpoint and capability token; null when the gateway is off. */
   memoryGateway?: (sessionId: string) => { url: string; token: string } | null;
+  /**
+   * Connected Vocs MCP Hub connections (`main/vocs-hub.ts`): loopback proxy servers carrying an
+   * app-minted bearer, never the Hub token. Empty while nothing is connected.
+   */
+  hubServers?: () => Promise<ResolvedServer[]>;
 }
 
 export interface SessionScope {
@@ -163,6 +168,22 @@ async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps
 }
 
 /**
+ * Connected Hub connections, as app-owned servers. Managed Mission runs do not inherit them, and
+ * the app-wide and per-repo built-in switches keep them off like any other app server. A broker
+ * failure leaves the session without them rather than failing its start.
+ */
+async function resolveHub(scope: SessionScope, state: McpProjectState, deps: McpHostDeps): Promise<ResolvedServer[]> {
+  if (scope.managed || !deps.hubServers) return [];
+  const off = new Set([...(scope.settings.mcpDisabledBuiltins ?? []), ...(state.disabledBuiltin ?? [])]);
+  try {
+    return (await deps.hubServers()).filter((server) => !off.has(server.def.id));
+  } catch {
+    deps.log?.('warn', 'mcp: Vocs MCP Hub connections are unavailable for this session');
+    return [];
+  }
+}
+
+/**
  * The servers one session should be started with: merged, switched, `${VAR}`-resolved and with
  * stdio commands normalized for the platform.
  */
@@ -177,6 +198,7 @@ export async function resolveForSession(scope: SessionScope, deps: McpHostDeps):
   if (repo.error) deps.log?.('warn', `mcp: ${repo.file} could not be used: ${repo.error}`);
   for (const r of rejectedServers(globals, repo.servers)) deps.log?.('warn', `mcp ${r.id} (${r.scope}) not loaded: ${r.reason}`);
   const out: ResolvedServer[] = await resolveBuiltins(scope, state, deps);
+  out.push(...await resolveHub(scope, state, deps));
   for (const def of chosen) {
     const resolved = await resolveVars(def, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });
     if (resolved.missing.length) deps.log?.('warn', `mcp ${def.id}: no value for ${resolved.missing.join(', ')}`);

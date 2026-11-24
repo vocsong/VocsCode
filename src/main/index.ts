@@ -37,6 +37,7 @@ import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
 import { providerSecrets } from './secret-ids';
 import { createVocsAccount, VOCS_ACCOUNT_VAULT_IDS, vocsAccountRealm } from './vocs-account';
+import { createVocsHub, VOCS_HUB_VAULT_IDS } from './vocs-hub';
 import { SessionManager } from './session-manager';
 import { MissionRuntime } from './mission/runtime';
 import { ordinaryProcessOwnership as ordinaryOwnershipEnabled, ownedWindowsJobProbe } from './owned-windows-job';
@@ -156,10 +157,15 @@ async function main(): Promise<void> {
   installAppProcessHandlers();
   const settings = new SettingsStore(userData, logTo);
   await settings.load();
-  // Remote-access identity and enrollment secrets, and a Vocs sign-in kept on this computer, never
-  // fall back to obfuscated storage on disk: without a real OS keychain they live for this run only.
-  const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll'], keychainOnly: VOCS_ACCOUNT_VAULT_IDS });
+  // Remote-access identity and enrollment secrets, a Vocs sign-in kept on this computer and a Vocs
+  // MCP Hub connection never fall back to obfuscated storage on disk: without a real OS keychain
+  // they live for this run only.
+  const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll'], keychainOnly: [...VOCS_ACCOUNT_VAULT_IDS, ...VOCS_HUB_VAULT_IDS] });
   await secrets.load();
+  // Vocs MCP Hub connections: a refresh token in the keychain, access tokens in memory, and a
+  // loopback proxy for sessions. Restoring reads the vault only; the first proxied call renews.
+  const vocsHub = createVocsHub({ realm: vocsAccountRealm(), openExternal: (url) => shell.openExternal(url), vault: secrets, isOnline: () => net.isOnline(), log: logTo });
+  void vocsHub.restore();
   const store = new SessionStore(userData, logTo);
   await store.load();
   // The app's own instruction layer (Settings → Instructions), shared by the session manager and
@@ -378,6 +384,7 @@ async function main(): Promise<void> {
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
     memoryUserData: userData,
     memoryGateway: (sessionId) => memoryGateway.attach(sessionId),
+    hubServers: () => vocsHub.servers(),
     revokeMemoryGateway: (sessionId) => memoryGateway.revoke(sessionId),
     restrictMemoryGateway: (sessionId) => memoryGateway.restrictToRead(sessionId),
     appInstructions: (harness) => appInstructions.effective(harness),
@@ -577,7 +584,7 @@ async function main(): Promise<void> {
   });
 
   // Built here, not in the registry, because it needs the OS vault; restored after the window opens.
-  const vocsAccount = createVocsAccount({ realm: vocsAccountRealm(), openExternal: (url) => shell.openExternal(url), vault: secrets, isOnline: () => net.isOnline() });
+  const vocsAccount = createVocsAccount({ realm: vocsAccountRealm(), openExternal: (url) => shell.openExternal(url), vault: secrets, isOnline: () => net.isOnline(), hub: vocsHub });
   const registry = registerIpc({
     vocsAccount,
     settings,
