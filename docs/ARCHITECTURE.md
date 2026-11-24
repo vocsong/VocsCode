@@ -213,18 +213,22 @@ app-owned `ask_user` tool through `vocs-code-tools.ts` / `question-tool.ts`. It 
 a time with optional described choices, a typed alternative and additional context. Pi's built-in
 tool set has no question tool, and its example TUI `custom()` dialogs do not work in RPC mode; the
 app uses a bounded, versioned, nonce-bound `VCODE_QUESTION::` select envelope instead. The adapter
-normalizes it into the same question card as Claude's `AskUserQuestion` and Codex's
-`requestUserInput`, then returns answer and context separately in a JSON RPC value. Cancellation,
+normalizes it into the same question card as Claude's `AskUserQuestion`, Codex's
+`requestUserInput`, and ACP's `elicitation/create` (`mode: "form"`, used by Google Antigravity's
+`ask_question`), then returns answer and context separately in a JSON RPC value. Cancellation,
 malformed/stale replies and unavailable UI never become fabricated user choices. A question is not
 a permission grant, including in Full access. Subagent/Vesta runtimes do not gain this tool.
 
-Question cards show option descriptions upfront, keep optional context separate from choosing or
+Question cards show option descriptions upfront, support single-select and multi-select choices,
+keep optional context separate from choosing or
 typing an answer, and retain the submitted choice/context in compact history. Empty structured
 answers cannot be submitted. Pi's serialized response budget is validated in the card and by
 SessionManager before the pending dialog is consumed, so an oversized pasted response remains
 editable and can be corrected instead of becoming an irreversible tool error. `ApprovalDecision`
-continues to store raw `answers` plus `note`; Claude and Codex append the note as explicitly labeled
-model-facing context at their adapter boundary. Skip never forwards a stale selected choice. Raw
+continues to store raw `answers` (plus `multiAnswers` for multi-select questions) and `note`; Claude and Codex append the note as explicitly labeled
+model-facing context at their adapter boundary, and ACP form elicitations with companion `_other`
+fields route typed alternatives and optional context through those fields (forms without `_other`
+set `supportsQuestionComment: false`). Skip never forwards a stale selected choice. Raw
 third-party Pi dialogs can require exact scalar values, so their normalized requests set
 `supportsQuestionComment: false` instead of offering a comment field that would be discarded or
 corrupt an extension's response. Ordinary tool-permission note semantics are unchanged.
