@@ -492,7 +492,7 @@ export class KnowledgeStore {
         updatedBy: DRAFT_ORIGIN
       };
       signal?.throwIfAborted();
-      await this.ensureIgnored(scope);
+      await this.ensureIgnored(scope, signal);
       await ensureDir(path.dirname(file));
       signal?.throwIfAborted();
       await writeFileAtomic(file, serializeKnowledgeDocument(meta, body));
@@ -702,12 +702,12 @@ export class KnowledgeStore {
   /* Internals                                                          */
   /* ------------------------------------------------------------------ */
 
-  /** First write into a project makes sure `.vocs-code/` never shows up as untracked. */
-  private async ensureIgnored(scope: KnowledgeScope): Promise<void> {
+  /** Keep local knowledge out of Git status when the checkout has a normal exclude file. */
+  private async ensureIgnored(scope: KnowledgeScope, signal?: AbortSignal): Promise<void> {
     if (this.ignored.has(scope.projectRoot)) return;
     this.ignored.add(scope.projectRoot);
     try {
-      await excludeVocsCodeDir(scope.projectRoot);
+      await excludeVocsCodeDir(scope.projectRoot, signal);
     } catch {
       /* not a git repo, or unreadable: the wiki still works, it is just visible to git */
     }

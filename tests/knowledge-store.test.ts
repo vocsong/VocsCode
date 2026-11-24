@@ -465,6 +465,26 @@ describe('automatic knowledge drafts', () => {
     expect(await fs.readFile(exclude, 'utf8')).toBe('# Git fixture\n.vocs-code/\n');
   });
 
+  it.each(['linked Git metadata directory', 'shared exclude inode'] as const)('does not edit a %s when saving a draft', async (kind) => {
+    const projectRoot = tmpDir('vocs-kb-draft-exclude-');
+    const outside = tmpDir('vocs-kb-exclude-neighbor-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const original = '# Unchanged local fixture\n';
+    const target = path.join(outside, 'exclude');
+    const info = path.join(projectRoot, '.git', 'info');
+    await fs.writeFile(target, original);
+    if (kind === 'linked Git metadata directory') {
+      await fs.mkdir(path.dirname(info));
+      await fs.symlink(outside, info, process.platform === 'win32' ? 'junction' : 'dir');
+    } else {
+      await fs.mkdir(info, { recursive: true });
+      await fs.link(target, path.join(info, 'exclude'));
+    }
+    const { id } = await service().draft(scope, finding);
+    expect((await service().view(scope)).proposals).toMatchObject([{ id, status: 'draft' }]);
+    expect(await fs.readFile(target, 'utf8')).toBe(original);
+  });
+
   it('coalesces a claim across writers and creates a reviewed current page only on explicit review', async () => {
     const projectRoot = tmpDir('vocs-kb-draft-repeat-');
     const scope = { projectRoot, cwd: projectRoot };

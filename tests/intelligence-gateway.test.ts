@@ -91,6 +91,13 @@ async function post(config: Attachment, body = statusCall, opts?: Parameters<typ
   return response;
 }
 
+function expectRejected(reply: Awaited<ReturnType<typeof post>>, status: number, token: string) {
+  expect(reply.status).toBe(status);
+  expect(reply.headers['cache-control']).toBe('no-store');
+  expect(reply.headers['access-control-allow-origin']).toBeUndefined();
+  expect(reply.text.includes(token)).toBe(false);
+}
+
 interface Reply {
   jsonrpc: string;
   id: number;
@@ -173,6 +180,8 @@ function knowledgeForTests() {
 }
 
 describe('authenticated intelligence gateway', () => {
+  const bodyLimit = 1_000_000;
+
   it('rejects unauthenticated, browser-origin and malformed HTTP calls before dispatch', async () => {
     const { config, dispatch, log } = await fixture();
     const cases: [number, Parameters<typeof openRequest>[1], string?][] = [
@@ -193,21 +202,32 @@ describe('authenticated intelligence gateway', () => {
       [400, {}, wire('knowledge_search', { query: config.token })]
     ];
     for (const [status, opts, body] of cases) {
-      const reply = await post(config, body, opts);
-      expect(reply.status).toBe(status);
-      expect(reply.headers['cache-control']).toBe('no-store');
-      expect(reply.headers['access-control-allow-origin']).toBeUndefined();
-      expect(reply.text.includes(config.token)).toBe(false);
+      expectRejected(await post(config, body, opts), status, config.token);
     }
-    const oversized = 'x'.repeat(1_000_001);
-    expect((await post(config, oversized, { headers: { 'Content-Length': oversized.length } })).status).toBe(413);
-    const streamed = openRequest(config);
-    streamed.req.write(oversized);
-    streamed.req.end();
-    expect((await streamed.response).status).toBe(413);
+    // The declared size is enough to reject. Uploading a body can race the server's close.
+    const declared = await post(config, '', { headers: { 'Content-Length': bodyLimit + 1 } });
+    expectRejected(declared, 413, config.token);
+    expect(declared.json).toEqual({ error: 'Request too large' });
     expect(dispatch).not.toHaveBeenCalled();
     expect(log).not.toHaveBeenCalled();
     expect((await post(config, statusCall, { headers: { 'Content-Type': 'application/json; charset=UTF-8' } })).json).toEqual({ result: ok({ sessionId: 's1', name: 'knowledge_status', args: {} }) });
+  });
+
+  it('rejects an oversized chunked HTTP body before dispatch', async () => {
+    const { config, dispatch, log } = await fixture();
+    const { req, response } = openRequest(config, { headers: { 'Transfer-Encoding': 'chunked' } });
+    try {
+      // Cross the limit with real bytes but leave the upload open until the gateway rejects it.
+      req.write('x'.repeat(bodyLimit));
+      req.write('x');
+      const streamed = await response;
+      expectRejected(streamed, 413, config.token);
+      expect(streamed.json).toEqual({ error: 'Request too large' });
+    } finally {
+      req.destroy();
+    }
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('requires advertised tools, exact argument schemas and an attenuated live grant', async () => {
