@@ -267,7 +267,19 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     const missionSwitch = win.getByRole('checkbox', { name: 'Mission mode', exact: true });
     await missionSwitch.waitFor(wait);
     expect(await missionSwitch.isChecked()).toBe(false);
-    await missionSwitch.locator('..').click();
+    const missionToggle = missionSwitch.locator('..');
+    const [promptLabelBox, missionToggleBox] = await Promise.all([
+      win.getByText('First prompt (optional)', { exact: true }).boundingBox(wait),
+      missionToggle.boundingBox(wait),
+    ]);
+    if (!promptLabelBox || !missionToggleBox) throw new Error('Expected rendered boxes for the First prompt label and Mission toggle');
+    const promptCenterY = promptLabelBox.y + promptLabelBox.height / 2;
+    const missionCenterY = missionToggleBox.y + missionToggleBox.height / 2;
+    expect(Math.abs(missionCenterY - promptCenterY), 'Mission shares the First prompt label’s center line').toBeLessThanOrEqual(4);
+    const gap = missionToggleBox.x - (promptLabelBox.x + promptLabelBox.width);
+    expect(gap, 'Mission sits to the right of the First prompt label').toBeGreaterThanOrEqual(0);
+    expect(gap, 'Mission sits immediately beside the First prompt label').toBeLessThanOrEqual(32);
+    await missionToggle.click();
     expect(await missionSwitch.isChecked()).toBe(true);
     const permissions = win.getByLabel('Permissions', { exact: true });
     expect(await permissions.inputValue()).toBe('plan');
