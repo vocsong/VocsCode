@@ -239,6 +239,15 @@ A dev run without a staged worker checks fallback instead. There are no provider
 The path-filtered `graphify-bundle.yml` runs the packaged worker natively on Linux x64 and both Mac
 architectures, and verifies Mac signatures. It does not publish assets or run the full release suite.
 
+### Knowledge benchmark
+
+Run `node scripts/benchmark-knowledge.mjs` after staging Graphify and building as above. It measures
+first index, unchanged restart, a commit refresh and ranked Evidence retrieval on pinned Vocs Code,
+plus transcript-index reuse and Local versus Off recall on synthetic sessions. It takes several
+minutes, starts no real model, and prints the paths to `desktop.json` and `history.json`. Use
+`--history-only` to run the latter without a desktop build. This is opt-in measurement, not a CI
+latency gate. See the [reference report and methodology](KNOWLEDGE-BENCHMARK.md).
+
 ## Coverage rules for high-risk paths
 
 Beyond the ordinary regression test, these areas carry a required test shape:
