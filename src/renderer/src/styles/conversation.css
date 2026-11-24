@@ -238,39 +238,17 @@
   height: 100%;
   pointer-events: none;
   fill: none;
-  stroke: color-mix(in srgb, var(--blue) 80%, var(--fg));
+  stroke: color-mix(in srgb, var(--blue) 74%, var(--fg));
   stroke-linecap: round;
   stroke-linejoin: round;
-  filter: drop-shadow(0 0 1.5px var(--blue));
+  filter: drop-shadow(0 0 0.8px var(--blue));
 }
 .fast-mode-electric path {
-  vector-effect: non-scaling-stroke;
-  stroke-width: 1;
+  stroke-width: 0.8;
 }
-.fast-mode-electric .fast-mode-electric-trunk {
-  stroke-width: 1.5;
-}
-/* Static branched arcs are the default; only animate when motion is welcome. */
-@media (prefers-reduced-motion: no-preference) {
-  .fast-mode-electric-arc {
-    animation: fast-mode-electric-crackle 1.6s ease-in-out infinite;
-  }
-  .fast-mode-electric-arc + .fast-mode-electric-arc {
-    animation-delay: -0.8s;
-  }
-  .fast-mode-electric .fast-mode-electric-trunk {
-    stroke-dasharray: 0.66 0.12 0.13 0.09;
-    animation: fast-mode-electric-travel 1.6s linear infinite;
-  }
-  @keyframes fast-mode-electric-crackle {
-    0%, 100% { opacity: 0.55; }
-    8%, 40% { opacity: 1; }
-    27% { opacity: 0.72; }
-    64% { opacity: 0.45; }
-  }
-  @keyframes fast-mode-electric-travel {
-    to { stroke-dashoffset: -1; }
-  }
+.fast-mode-electric .fast-mode-electric-fork {
+  stroke-width: 0.5;
+  opacity: 0.72;
 }
 /* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */
 .pill-effort {

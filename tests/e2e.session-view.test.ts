@@ -878,12 +878,72 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
       const electric = modelPill.locator('svg.fast-mode-electric');
-      const animatedArcs = () => electric.evaluate((el) => el.getAnimations({ subtree: true }).length);
+      const readArcs = (observeMs = 0) => electric.evaluate(async (svg, duration) => {
+        const snapshot = () => {
+          const geometry: string[] = [];
+          const visible: { d: string; strokeWidth: number; x: number; y: number }[] = [];
+          const { width, height } = (svg as SVGSVGElement).viewBox.baseVal;
+          for (const path of svg.querySelectorAll('path')) {
+            const d = path.getAttribute('d')?.trim();
+            if (!d) continue;
+            geometry.push(d);
+            const style = getComputedStyle(path);
+            if (style.stroke !== 'none' && Number(style.strokeOpacity) > 0 && path.getTotalLength() > 0
+              && path.checkVisibility({ opacityProperty: true, visibilityProperty: true })) {
+              const box = path.getBBox();
+              visible.push({ d, strokeWidth: Number.parseFloat(style.strokeWidth), x: (box.x + box.width / 2) / width, y: (box.y + box.height / 2) / height });
+            }
+          }
+          return { geometry: geometry.sort(), visible };
+        };
+        const nextFrame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
+        if (duration > 0) {
+          // Let the media-query change and its redraw settle before checking for continued motion.
+          await nextFrame();
+          await nextFrame();
+        }
+        const first = snapshot();
+        const signature = JSON.stringify(first);
+        const until = performance.now() + duration;
+        while (performance.now() < until) {
+          await nextFrame();
+          if (JSON.stringify(snapshot()) !== signature) return { ...first, stable: false };
+        }
+        return { ...first, stable: true };
+      }, observeMs);
+
       await win.emulateMedia({ reducedMotion: 'no-preference' });
-      await expect.poll(animatedArcs).toBeGreaterThan(0);
+      await electric.waitFor({ state: 'visible' });
+      expect(await electric.evaluate((el) => getComputedStyle(el).pointerEvents)).toBe('none');
+      let initialGeometry: Set<string> | undefined;
+      const strokeWidths = new Set<number>();
+      const rims = new Set<string>();
+      let changed = false;
+      await expect.poll(async () => {
+        const { geometry, visible } = await readArcs();
+        if (!visible.length) return false;
+        for (const { strokeWidth, x, y } of visible) {
+          strokeWidths.add(strokeWidth);
+          if (x < 0.08) rims.add('left');
+          if (x > 0.92) rims.add('right');
+          if (y < 0.25) rims.add('top');
+          if (y > 0.75) rims.add('bottom');
+        }
+        // A fade or a change in which existing paths are visible isn't new arc geometry.
+        const initial = initialGeometry ??= new Set(geometry);
+        changed ||= visible.some(({ d }) => !initial.has(d));
+        return changed && rims.size === 4;
+      }, { interval: 80, timeout: 5_000, message: `${theme}: new visible Fast arcs reach all four sides` }).toBe(true);
+
       await win.emulateMedia({ reducedMotion: 'reduce' });
-      await expect.poll(animatedArcs).toBe(0);
-      expect(await electric.isVisible()).toBe(true);
+      const reduced = await readArcs(1_000);
+      expect(reduced.visible.length, `${theme}: reduced motion still shows Fast arcs`).toBeGreaterThan(0);
+      expect(reduced.stable, `${theme}: reduced motion keeps the Fast arcs static`).toBe(true);
+      for (const arc of reduced.visible) strokeWidths.add(arc.strokeWidth);
+      for (const width of strokeWidths) {
+        expect(width, `${theme}: visible Fast arc stroke width in CSS px`).toBeGreaterThan(0);
+        expect(width, `${theme}: visible Fast arc stroke width in CSS px`).toBeLessThan(1);
+      }
       await win.emulateMedia({ reducedMotion: 'no-preference' });
       const permission = footer.getByRole('button', { name: 'Permission mode: Full', exact: true });
       await permission.waitFor();
