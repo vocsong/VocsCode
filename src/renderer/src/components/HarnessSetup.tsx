@@ -2,8 +2,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { HarnessId } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
-import { harnessStatus, type AntigravityQuota, type HarnessSetupStatus, type LoginHarnessId } from '../../../shared/harness-setup';
-import { invoke } from '../api';
+import { harnessStatus, type HarnessSetupStatus, type LoginHarnessId } from '../../../shared/harness-setup';
+import { canInvoke, invoke, invokeErrorMessage, isWeb } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Icon, Spinner } from './ui';
 
@@ -18,8 +18,7 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
   onChange: (status: HarnessSetupStatus | null, pending?: boolean) => void;
 }) {
   const [status, setStatus] = useState<HarnessSetupStatus | null>(null);
-  const [busy, setBusy] = useState<'check' | 'install' | 'login' | 'quota' | null>(null);
-  const [quota, setQuota] = useState<AntigravityQuota | null>(null);
+  const [busy, setBusy] = useState<'check' | 'install' | 'login' | 'usage' | null>(null);
   const [awaitingLogin, setAwaitingLogin] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -27,11 +26,12 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
   const generation = useRef(0);
   const change = useRef(onChange);
   change.current = onChange;
+  const canOpenUsage = harness === 'antigravity' && status?.availability.available === true &&
+    status.availability.authenticated === true && !awaitingLogin && !isWeb && canInvoke('subscriptions:openUsage');
 
   const check = async () => {
     const request = ++generation.current;
     setBusy('check'); setStatus(null); setAwaitingLogin(false);
-    setQuota(null);
     setProblem(null);
     change.current(null, true);
     try {
@@ -78,7 +78,6 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
     if (!status?.loginId || busy) return;
     const request = ++generation.current;
     setBusy('login'); setProblem(null); setNotice(null);
-    setQuota(null);
     change.current(null, true);
     let launched = false;
     try {
@@ -96,15 +95,17 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
     }
   };
 
-  const checkQuota = async () => {
-    if (busy) return;
+  const openUsage = async () => {
+    if (!canOpenUsage || busy) return;
     const request = ++generation.current;
-    setBusy('quota'); setProblem(null); setQuota(null);
+    setBusy('usage'); setProblem(null); setNotice(null);
     try {
-      const result = await invoke('harness:antigravityQuota', undefined);
-      if (request === generation.current) setQuota(result);
+      const { kind } = await invoke('subscriptions:openUsage', { provider: 'antigravity' });
+      if (request === generation.current) {
+        setNotice(kind === 'terminal' ? 'Antigravity terminal launcher started. If no terminal appears, check your terminal installation and retry.' : 'Usage page opened in your browser.');
+      }
     } catch (error) {
-      if (request === generation.current) setProblem(message(error));
+      if (request === generation.current) setProblem(invokeErrorMessage(error));
     } finally {
       if (request === generation.current) setBusy(null);
     }
@@ -116,7 +117,7 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
       <strong>Runtime and sign-in</strong><Badge tone={badge.tone}>{badge.label}</Badge><span className="spacer" />
       <Button size="sm" variant="ghost" disabled={!!busy} icon="refresh" onClick={() => void check()}>Recheck setup</Button>
     </div>
-    {busy && <p role="status"><Spinner size={13} /> {busy === 'install' ? 'Installing into Vocs Code’s private runtime folder. This can take a few minutes…' : busy === 'login' ? 'Opening the vendor sign-in…' : busy === 'quota' ? 'Checking Antigravity quota…' : 'Checking this machine…'}</p>}
+    {busy && <p role="status"><Spinner size={13} /> {busy === 'install' ? 'Installing into Vocs Code’s private runtime folder. This can take a few minutes…' : busy === 'login' ? 'Opening the vendor sign-in…' : busy === 'usage' ? 'Opening Antigravity usage…' : 'Checking this machine…'}</p>}
     {problem && <div className="callout warn" role="alert">{problem}</div>}
     {notice && <p className="callout" role="status">{notice}</p>}
     {status && <>
@@ -125,20 +126,9 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
       {status.availability.available && status.loginId && <div className="row gap8 wrap">
         <Button disabled={!!busy} onClick={() => void login()}>{loginLabels[status.loginId]}</Button>
         {status.loginId === 'codex' && <Button disabled={!!busy} variant="ghost" onClick={() => void login(true)}>Use device sign-in</Button>}
-        {harness === 'antigravity' && status.availability.authenticated === true && !awaitingLogin &&
-          <Button disabled={!!busy} variant="ghost" onClick={() => void checkQuota()}>Check Antigravity quota</Button>}
+        {canOpenUsage && <Button disabled={!!busy} variant="ghost" onClick={() => void openUsage()}>Open Antigravity usage</Button>}
       </div>}
-      {quota && <div aria-live="polite" aria-label="Antigravity account quota">
-        {quota.groups.map((group) => <div key={group.name}>
-          <strong>{group.name}</strong>
-          <ul>
-            {group.buckets.map((bucket) => <li key={bucket.name}>
-              {bucket.name} · <span>{Math.round(bucket.remainingFraction * 100)}% remaining</span>
-              {bucket.resetAt && <> · Resets {new Date(bucket.resetAt).toLocaleString()}</>}
-            </li>)}
-          </ul>
-        </div>)}
-      </div>}
+      {canOpenUsage && <p className="muted small">In the Antigravity terminal, type <code>/usage</code> and press Enter to see your account limits.</p>}
       {status.availability.authMethod === 'api-key' && <p className="callout warn">API credentials are configured. API usage is billed separately from a Claude or ChatGPT subscription.</p>}
       {!status.availability.available && <>
         {status.installId && <Button disabled={!!busy || !status.canInstall} onClick={() => void install()}>Install {status.installId === 'dsh' ? 'DeepSeek Harness' : HARNESS_BY_ID[harness].name}</Button>}

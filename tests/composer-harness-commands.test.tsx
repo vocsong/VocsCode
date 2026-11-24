@@ -113,7 +113,7 @@ describe('composer harness commands', () => {
     await waitFor(() => expect(useStore.getState()).toMatchObject({ panelTab: 'usage', panelOpen: true }));
     expect(c.ta.value).toBe('');
     expect(sent()).toEqual([]);
-    expect(invokeMock.mock.calls.some(([channel]) => channel === 'harness:antigravityQuota')).toBe(false);
+    expect(invokeMock.mock.calls.some(([channel]) => channel.startsWith('subscriptions:'))).toBe(false);
   });
 
   it.each(['/USAGE', '/Usage '])('keeps %j local instead of sending it as a prompt', (input) => {

@@ -1064,12 +1064,18 @@ body.resizing {
 /* Usage page: a session dashboard inside a narrow column. The chart primitives are the analytics
    ones, so only the panel-scale overrides and the panel-only marks (turn columns, error log) live
    here. Status hues stay reserved for status; mixes use the categorical --chart-N slots. */
-.usage {
+.usage,
+.usage-session {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 10px 12px 14px;
   min-width: 0;
+}
+.usage {
+  padding: 10px 12px 14px;
+}
+.usage > .segmented {
+  align-self: flex-start;
 }
 .usage-hero {
   display: flex;
@@ -1171,18 +1177,36 @@ body.resizing {
   background: var(--bg-elev);
   overflow-wrap: anywhere;
 }
-.usage-quota .usage-block-head {
+.usage-quota-title,
+.usage-quota-actions {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  justify-content: space-between;
   gap: 4px 8px;
 }
+.usage-quota-title {
+  justify-content: space-between;
+}
+.usage-quota-title h5 {
+  font-size: 12px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--fg);
+}
+.usage p.usage-note,
 .usage-quota .callout {
   margin: 0;
 }
+.usage-quota-results,
 .usage-quota-group {
   display: grid;
   gap: 8px;
   font-size: 12px;
+  min-width: 0;
+}
+.usage-quota-results {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
 }
 .usage-switch {
   display: flex;
