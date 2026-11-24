@@ -144,6 +144,8 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
 export interface BranchGitState {
   pr: boolean;
   merged: boolean;
+  /** The exact PR the session named was closed without merging. */
+  closed?: true;
   /** An unavailable lookup is not evidence that an existing PR went away. */
   unknown?: true;
 }
@@ -297,7 +299,7 @@ async function explicitPrState(cwd: string, ref: PrRef): Promise<BranchGitState>
     const pr = JSON.parse(r.stdout) as PrInfo | null;
     const resolved = typeof pr?.url === 'string' ? parseGitHubPullRequestUrl(pr.url) : undefined;
     if (pr?.number === target.number && resolved?.url.toLowerCase() === target.url.toLowerCase() && isPrState(pr.state)) {
-      return { pr: pr.state === 'OPEN', merged: pr.state === 'MERGED' };
+      return { pr: pr.state === 'OPEN', merged: pr.state === 'MERGED', ...(pr.state === 'CLOSED' ? { closed: true as const } : {}) };
     }
   } catch { /* Unavailable is not evidence for an older PR. */ }
   return unknownBranchGitState();
@@ -605,8 +607,9 @@ type PrResult = { ok: boolean; url?: string; output?: string };
 const GH_REQUIRED = 'GitHub CLI (gh) is required — install it and run `gh auth login`.';
 const noGh = (): PrResult => ({ ok: false, output: GH_REQUIRED });
 
-async function gh(cwd: string | undefined, args: string[], timeoutMs = 120_000): Promise<CaptureResult> {
-  const r = await runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+/** Runs the GitHub CLI; `input` is written to its stdin (for `--body-file -`). */
+export async function gh(cwd: string | undefined, args: string[], timeoutMs = 120_000, input?: string): Promise<CaptureResult> {
+  const r = await runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, ...(input !== undefined ? { input } : {}) });
   // gh talks to GitHub: a timeout or a non-zero exit here is the reason a PR badge or list is missing.
   const location = cwd ? ` in ${cwd}` : '';
   if (timedOut(r)) gitLog('warn', `gh ${describeArgs(args)}${location} timed out after ${timeoutMs}ms`);
@@ -616,8 +619,12 @@ async function gh(cwd: string | undefined, args: string[], timeoutMs = 120_000):
 
 const prUrlIn = (out: string): string | undefined => out.match(PR_URL)?.[0];
 
-/** Pushes `head` (default: the current branch) and opens a PR into `base` (gh). Refuses a dirty tree so the PR is complete. */
-export async function gitCreatePr(cwd: string, base: string, head?: string): Promise<PrResult> {
+/**
+ * Pushes `head` (default: the current branch) and opens a PR into `base` (gh). Refuses a dirty tree
+ * so the PR is complete. Without `pr` gh fills title and body from the commits; with it the body
+ * goes through stdin, so no length or quoting limit of the command line applies.
+ */
+export async function gitCreatePr(cwd: string, base: string, head?: string, pr?: { title: string; body: string }): Promise<PrResult> {
   if (!(await gitRoot(cwd))) return { ok: false, output: 'Not a git repository' };
   if (!ghBin()) return noGh();
   const current = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
@@ -636,7 +643,9 @@ export async function gitCreatePr(cwd: string, base: string, head?: string): Pro
   }
   const push = await git(cwd, ['push', '-u', 'origin', branch], 120_000);
   if (push.code !== 0) return { ok: false, output: (push.stderr || push.stdout).trim() || 'git push failed' };
-  const r = await gh(cwd, ['pr', 'create', '--base', base, '--head', branch, '--fill']);
+  const r = pr
+    ? await gh(cwd, ['pr', 'create', '--base', base, '--head', branch, '--title', pr.title, '--body-file', '-'], 120_000, pr.body)
+    : await gh(cwd, ['pr', 'create', '--base', base, '--head', branch, '--fill']);
   const out = (r.stdout + r.stderr).trim();
   if (r.truncated) return { ok: false, output: 'gh pr create response was truncated' };
   if (r.code !== 0) return { ok: false, output: out || 'gh pr create failed' };
