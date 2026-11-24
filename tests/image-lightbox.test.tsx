@@ -33,11 +33,36 @@ describe('ImageLightbox', () => {
     { src: 'data:image/png;base64,BBB', name: 'shot-b.png' },
   ];
 
-  it('renders the selected image at full size', () => {
+  it('opens the selected image fitted to the preview', () => {
     render(<ImageLightbox images={images} index={1} onClose={() => {}} />);
     const imgEl = screen.getByRole('img') as HTMLImageElement;
     expect(imgEl.src).toContain('BBB');
     expect(screen.getByText('shot-b.png (2/2)')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reset zoom' }).textContent).toBe('100%');
+  });
+
+  it('consumes the wheel at fit and resets zoom on navigation', () => {
+    const { container } = render(<ImageLightbox images={images} index={0} onClose={() => {}} />);
+    const picture = screen.getByRole('img');
+    const viewport = container.querySelector('.image-lightbox-viewport')!;
+    vi.spyOn(viewport, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 600));
+    Object.defineProperty(picture, 'naturalWidth', { value: 800 });
+    Object.assign(picture.style, { width: '800px', height: '600px' });
+    fireEvent.load(picture);
+    const reset = screen.getByRole('button', { name: 'Reset zoom' });
+    const zoomOut = screen.getByRole('button', { name: 'Zoom out' });
+    const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100 });
+    fireEvent(picture, wheel);
+    expect(wheel.defaultPrevented).toBe(true);
+    expect(reset.textContent).toBe('100%');
+    expect(zoomOut.getAttribute('aria-disabled')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(reset.textContent).toBe('125%');
+    expect(zoomOut.getAttribute('aria-disabled')).toBe('false');
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(reset.textContent).toBe('100%');
+    expect(screen.getByRole('img', { name: 'shot-b.png' })).toBeTruthy();
   });
 
   it('navigates with arrow keys and closes on Escape', () => {
@@ -80,12 +105,14 @@ describe('ImageLightbox', () => {
     expect(document.activeElement).toBe(close);
     await user.tab();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Previous image' }));
-    await user.tab();
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Next image' }));
+    for (const name of ['Next image', 'Zoom out', 'Reset zoom', 'Zoom in']) {
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name }));
+    }
     await user.tab();
     expect(document.activeElement).toBe(close);
     await user.tab({ shift: true });
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Next image' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Zoom in' }));
     view.unmount();
     expect(document.activeElement).toBe(trigger);
   });

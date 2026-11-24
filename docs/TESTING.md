@@ -131,7 +131,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 npm run dist:dir -- --publish never && HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.update.test.ts
 ```
 
-`npm run test:e2e:ci` runs twenty-seven no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
+`npm run test:e2e:ci` runs twenty-eight no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
 seeded `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
@@ -150,7 +150,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 
 | You changed | Offline checks, E2E to maintain, and applicable opt-ins |
 | --- | --- |
-| Transcript link destinations and file mentions, the source editor drawer (`FilePreviewPane.tsx`, `FileSourceEditor.tsx`), Files tab, workspace file resolution and saves | `tests/transcript-link-kinds.test.tsx`, `tests/file-refs.test.ts`, `tests/file-links.test.tsx`, `tests/file-editor-language.test.ts`, `tests/markdown-cache.test.ts`, `tests/workspace-files.test.ts`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.files` (computed link and syntax colors, line jumps, real saves) |
+| Transcript link destinations and file mentions, the source editor drawer (`FilePreviewPane.tsx`, `FileSourceEditor.tsx`), Files tab, workspace file resolution and saves | `tests/transcript-link-kinds.test.tsx`, `tests/file-refs.test.ts`, `tests/file-links.test.tsx`, `tests/file-editor-language.test.ts`, `tests/markdown-cache.test.ts`, `tests/workspace-files.test.ts`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.files` (computed link, syntax, and gutter colors, line jumps, real saves) |
 | Sidebar, New Session dialog, session lifecycle | `e2e.terminal` (no key) + `e2e.electron` (live) |
 | `/housekeep` review, recent-session protection and checked worktree removal | `tests/housekeep*.test.ts(x)`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.session-view` (real temporary Git worktrees and saved settings, no provider) |
 | Keep computer awake (`keep-awake.ts`, desktop owner IPC, composer switch) | `tests/keep-awake.test.ts`, `tests/keep-awake-ui.test.tsx`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + `e2e.session-view` (Windows-capable, loopback streaming, real quit/relaunch; both power API methods stubbed before app startup) |
@@ -160,7 +160,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Sidebar PR labels (`SessionManager`, `branchGitState`) | `tests/session-pr-refresh.test.ts`, `tests/git-branch-state.test.ts`, `tests/startup-perf.test.ts`, PR refresh block in `tests/unit.test.ts` + `e2e.git` (latest mentioned PR merges, with fake `gh` and the Git panel closed) |
 | GitHub PR links in transcripts (`Transcript.tsx`, `git:pullRequest`) | `tests/pr.test.ts`, `tests/git-panel-pr-dialog.test.tsx`, `tests/handler-registry.test.ts` + `e2e.git` (opening the linked PR in Standard and Zen) |
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
-| Copy image from the Files drawer or transcript lightbox | `tests/image-lightbox.test.tsx`, `tests/file-links.test.tsx` + `e2e.files` (real Electron image encoding; intercepts the clipboard write so it leaves the system clipboard alone) |
+| Transcript image lightbox zoom/pan, and copy image from the Files drawer or lightbox | `tests/image-lightbox.test.tsx`, `tests/file-links.test.tsx` + `e2e.files` (real wheel and drag gestures; native image encoding with the clipboard write intercepted) |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |
 | Harness-native slash commands (adapter reporting, `/` popover, `//name` route) | `tests/harness-commands.test.ts`, `tests/composer-harness-commands.test.tsx`, `tests/claude-goal-commands.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/acp-turn-state.test.ts`, `tests/codex-skills.test.ts` + `e2e.harness-commands` |

@@ -176,11 +176,16 @@ export function Dropdown({
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      const menu = menuRef.current;
       if (e.key === 'Escape') {
+        const dialogs = document.querySelectorAll('.modal[role="dialog"]');
+        const top = dialogs[dialogs.length - 1];
+        if (!menu || (top && !top.contains(menu))) return;
+        // Closing can remove the menu before the dialog's document listener runs.
+        e.preventDefault();
         restoreTrigger();
         return;
       }
-      const menu = menuRef.current;
       // A dialog opened by a menu item (e.g. Fast mode confirmation) owns its own keys.
       if (!menu?.contains(document.activeElement)) return;
       const items = Array.from(menu.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR));
@@ -241,7 +246,7 @@ export function Dropdown({
 
 export function MenuItem({ children, onClick, active, checked, danger, hint, disabled, trailing }: {
   children: React.ReactNode;
-  onClick?: () => void;
+  onClick?: React.MouseEventHandler<HTMLButtonElement>;
   active?: boolean;
   /** Supplying a checked state makes this a menu radio item inside a Dropdown. */
   checked?: boolean;
@@ -341,6 +346,7 @@ export function Modal({ title, onClose, children, width = 720, footer, anchor }:
       if (e.key === 'Escape') {
         // An open menu inside the dialog (a Dropdown) closes first; the next Escape closes the dialog.
         if (dialog.querySelector('[role="menu"]')) return;
+        e.preventDefault();
         e.stopPropagation();
         onClose();
         return;
