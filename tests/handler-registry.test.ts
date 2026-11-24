@@ -112,7 +112,7 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
       resolve: () => null
     } as unknown as RuntimeResolver,
     analytics: { summary: async () => ({ totals: ZERO_USAGE, speed: null, days: [] }), noteHarnessVersion: () => undefined } as unknown as AnalyticsStore,
-    search: { search: async () => ({ items: [], total: 0 }) } as unknown as SearchIndex,
+    search: { search: () => ({ available: true, results: [] }) } as unknown as SearchIndex,
     log: (level, message) => logs.push([level, message]),
     push: (channel, payload) => pushes.push([channel, payload]),
     desktop: bridge,
@@ -922,10 +922,13 @@ describe('handler registry', () => {
     expect(order).toEqual(['setArchived:s_test,false,undefined,undefined']);
   });
 
-  it('routes deep search through the search index', async () => {
-    const { registry } = stubDeps();
-    const res = (await registry.invoke('sessions:search', { q: 'needle' })) as { total: number };
-    expect(res.total).toBe(0);
+  it('passes the chosen search category and archive filter through to the index', async () => {
+    const response = { available: true, results: [] };
+    const search = vi.fn<SearchIndex['search']>(() => response);
+    const { registry } = stubDeps({ search: { search } as unknown as SearchIndex });
+    const request = { q: 'needle', filters: { category: 'transcript', archived: true } };
+    expect(await registry.invoke('sessions:search', request)).toEqual(response);
+    expect(search).toHaveBeenCalledExactlyOnceWith(request);
   });
 
   it('caches harness availability across full-list calls', async () => {
