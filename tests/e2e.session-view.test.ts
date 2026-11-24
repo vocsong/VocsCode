@@ -879,6 +879,9 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
       const electric = box.locator(':scope > svg.fast-mode-electric');
       const flow = electric.locator('.fast-mode-electric-flow');
+      const trace = electric.locator('.fast-mode-electric-trace');
+      const arcPaths = electric.locator('.fast-mode-electric-flow, .fast-mode-electric-trace');
+      const playingPaths = () => arcPaths.evaluateAll((paths) => paths.filter((el) => el.getAnimations().some((animation) => animation.playState === 'running')).length);
       await box.evaluate((el) => {
         if (el.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
       });
@@ -887,40 +890,93 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       await win.emulateMedia({ reducedMotion: 'no-preference' });
       await electric.waitFor({ state: 'visible' });
       expect(await electric.evaluate((el) => getComputedStyle(el).pointerEvents)).toBe('none');
-      const samples = await flow.evaluate(async (el) => {
-        const samples = [];
-        for (let i = 0; i < 4; i++) {
-          const style = getComputedStyle(el);
-          samples.push({ now: performance.now(), offset: Number.parseFloat(style.strokeDashoffset), lengths: style.strokeDasharray.split(',').map(Number.parseFloat).filter((_, index) => index % 2 === 0) });
-          if (i < 3) await new Promise((resolve) => setTimeout(resolve, 180));
+      await expect.poll(() => flow.count()).toBe(3);
+      await expect.poll(() => trace.count()).toBe(3);
+      await expect.poll(playingPaths).toBe(6);
+
+      // Seek the actual animations and read computed SVG styles; no wait for a random discharge.
+      const discharges = await arcPaths.evaluateAll((paths) => paths.map((el) => {
+        const [animation] = el.getAnimations();
+        if (!(animation?.effect instanceof KeyframeEffect)) throw new Error(`Missing Fast animation on ${el.getAttribute('class')}`);
+        const effect = animation.effect;
+        const { delay = 0, duration } = effect.getTiming();
+        if (typeof duration !== 'number' || duration <= 0) throw new Error('Fast discharge has no positive duration');
+        const originalTime = animation.currentTime;
+        const birth = Number(animation.startTime) + delay;
+        animation.pause();
+        try {
+          const samples = effect.getKeyframes().map(({ computedOffset }) => {
+            // Stay inside the effect at its last keyframe, without triggering a new discharge.
+            animation.currentTime = delay + Math.min(computedOffset, 0.999999) * duration;
+            const style = getComputedStyle(el);
+            return {
+              opacity: Number(style.opacity),
+              dashes: style.strokeDasharray.split(/[,\s]+/).map(Number.parseFloat),
+              position: Number.parseFloat(style.strokeDashoffset),
+              width: Number.parseFloat(style.strokeWidth)
+            };
+          });
+          return { isMask: el.classList.contains('fast-mode-electric-flow'), birth, death: birth + duration, samples };
+        } finally {
+          animation.currentTime = originalTime;
+          animation.play();
         }
-        return samples;
+      }));
+      const masks = discharges.filter(({ isMask }) => isMask);
+      const peakLengths = masks.map(({ samples }, i) => {
+        const label = `${theme}: arc ${i + 1}`;
+        expect(samples[0].opacity, `${label} starts dark`).toBeLessThan(0.01);
+        expect(samples.at(-1)!.opacity, `${label} fades out`).toBeLessThan(0.01);
+        const lit = samples.filter(({ opacity }) => opacity > 0.2);
+        expect(lit.length, `${label} lights up`).toBeGreaterThan(1);
+        expect(lit.every(({ dashes }) => dashes.length === 2 && dashes[0] > 0 && dashes[0] < 100 && dashes[1] > 0), `${label} reveals one segment`).toBe(true);
+        const lengths = lit.map(({ dashes }) => dashes[0]);
+        expect(new Set(lengths).size, `${label} changes length while lit`).toBeGreaterThan(1);
+        expect(new Set(lit.map(({ position }) => position)).size, `${label} travels while lit`).toBeGreaterThan(1);
+        return Math.max(...lengths);
       });
-      for (let i = 1; i < samples.length; i++) {
-        const advance = (samples[i - 1].offset - samples[i].offset + 100) % 100;
-        const rate = advance / (samples[i].now - samples[i - 1].now) * 1000;
-        expect(rate, `${theme}: steady clockwise travel in laps per second × 100`).toBeGreaterThan(5);
-        expect(rate).toBeLessThan(26);
+      expect(new Set(masks.map(({ birth }) => birth)).size, `${theme}: staggered arc births`).toBeGreaterThan(1);
+      expect(new Set(masks.map(({ death }) => death)).size, `${theme}: staggered arc deaths`).toBeGreaterThan(1);
+      expect(new Set(peakLengths).size, `${theme}: different peak arc lengths`).toBeGreaterThan(1);
+      for (const { samples } of discharges.filter(({ isMask }) => !isMask)) {
+        const widths = samples.map(({ width }) => width);
+        expect(Math.min(...widths)).toBeGreaterThanOrEqual(0.4);
+        expect(Math.max(...widths)).toBeLessThanOrEqual(1.25);
+        expect(Math.max(...widths) - Math.min(...widths), `${theme}: the trace fluctuates in width`).toBeGreaterThan(0.1);
       }
-      expect(samples.every(({ lengths }) => lengths.length === 3 && Math.min(...lengths) >= 10 && new Set(lengths).size > 1)).toBe(true);
-      expect(new Set(samples.map(({ lengths }) => lengths.join(','))).size).toBeGreaterThan(1);
 
       await win.emulateMedia({ reducedMotion: 'reduce' });
-      await expect.poll(() => flow.evaluate((el) => el.getAnimations().length)).toBe(0);
-      const trace = electric.locator('.fast-mode-electric-trace');
-      const still = await trace.evaluate((el) => {
+      await expect.poll(() => electric.evaluate((el) => el.getAnimations({ subtree: true }).length)).toBe(0);
+      const stillMasks = await flow.evaluateAll((els) => els.map((el) => {
+        const path = el as SVGPathElement;
+        const style = getComputedStyle(path);
+        const dashes = style.strokeDasharray.split(/[,\s]+/).map(Number.parseFloat);
+        return {
+          id: path.closest('mask')?.id,
+          revealsTrace: Number(path.getAttribute('pathLength')) === 100 && path.getTotalLength() > 0 &&
+            style.stroke === 'rgb(255, 255, 255)' && style.visibility === 'visible' && Number(style.opacity) > 0 &&
+            Number(style.strokeOpacity) > 0 && Number.parseFloat(style.strokeWidth) > 0 &&
+            dashes.length === 2 && dashes[0] > 0 && dashes[0] < 100 && dashes[1] > 0
+        };
+      }));
+      expect(stillMasks.map(({ revealsTrace }) => revealsTrace)).toEqual([true, true, true]);
+      const still = await trace.evaluateAll((els) => els.map((el) => {
         const path = el as SVGPathElement;
         const { width, height } = path.ownerSVGElement!.viewBox.baseVal;
         const bounds = path.getBBox();
         const style = getComputedStyle(path);
         return {
+          mask: path.closest('[mask]')?.getAttribute('mask'),
           coversRim: bounds.x < 5 && bounds.y < 5 && bounds.x + bounds.width > width - 5 && bounds.y + bounds.height > height - 5,
           hairline: Number.parseFloat(style.strokeWidth) > 0 && Number.parseFloat(style.strokeWidth) < 1,
-          visible: style.stroke !== 'none' && style.mask !== 'none' && path.checkVisibility({ opacityProperty: true, visibilityProperty: true })
+          visible: style.stroke !== 'none' && path.checkVisibility({ opacityProperty: true, visibilityProperty: true })
         };
-      });
-      expect(still).toEqual({ coversRim: true, hairline: true, visible: true });
+      }));
+      expect(new Set(stillMasks.map(({ id }) => id)).size).toBe(3);
+      expect(still).toEqual(stillMasks.map(({ id }) => ({ mask: `url(#${id})`, coversRim: true, hairline: true, visible: true })));
+      expect(await electric.locator('.fast-mode-electric-fork').count()).toBeGreaterThan(0);
       await win.emulateMedia({ reducedMotion: 'no-preference' });
+      await expect.poll(playingPaths).toBe(6);
       const permission = footer.getByRole('button', { name: 'Permission mode: Full', exact: true });
       await permission.waitFor();
 
@@ -1012,8 +1068,9 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     }, zen);
     await expect.poll(() => footer.locator('.pill[title="Model"]').evaluate((el) => Number(getComputedStyle(el.closest('.dropdown')!).opacity))).toBe(0);
     const zenElectric = box.locator(':scope > svg.fast-mode-electric');
-    expect(await zenElectric.locator('.fast-mode-electric-trace').evaluate((el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }))).toBe(true);
-    await expect.poll(() => zenElectric.locator('.fast-mode-electric-flow').evaluate((el) => el.getAnimations().some((animation) => animation.playState === 'running'))).toBe(true);
+    expect(await box.evaluate((el) => el.matches(':focus-within'))).toBe(false);
+    expect(await zenElectric.locator('.fast-mode-electric-trace').first().evaluate((el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }))).toBe(true);
+    await expect.poll(() => zenElectric.locator('.fast-mode-electric-flow').first().evaluate((el) => el.getAnimations().some((animation) => animation.playState === 'running'))).toBe(true);
     await box.screenshot({ path: path.join(shots, 'session-view-fast-unfocused-zen.png') });
 
     const saved = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));

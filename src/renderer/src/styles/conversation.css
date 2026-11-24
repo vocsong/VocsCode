@@ -238,25 +238,11 @@
   stroke-width: 0.5;
   opacity: 0.72;
 }
-/* The mask carries the current; it reveals the fine trace without flashing it on or off. */
+/* Each mask reveals one discharge on its own clock; the actual strokes stay fine. */
 .fast-mode-electric-flow {
   stroke: white;
   stroke-width: 8;
   stroke-linecap: butt;
-  stroke-dasharray: var(--fast-dashes);
-}
-@media (prefers-reduced-motion: no-preference) {
-  .fast-mode-electric-flow {
-    animation: fast-current-lap 7s linear infinite, fast-current-length 3.8s ease-in-out infinite alternate;
-  }
-  @keyframes fast-current-lap {
-    from { stroke-dashoffset: 0; }
-    to { stroke-dashoffset: -100; }
-  }
-  @keyframes fast-current-length {
-    from { stroke-dasharray: var(--fast-dashes); }
-    to { stroke-dasharray: var(--fast-dashes-expanded); }
-  }
 }
 /* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */
 .pill-effort {
