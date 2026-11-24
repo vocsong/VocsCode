@@ -238,10 +238,10 @@
   stroke-width: 0.5;
   opacity: 0.72;
 }
-/* Each mask reveals one discharge on its own clock; the actual strokes stay fine. */
+/* Wide enough to reveal the thickest flare and its fine branches. */
 .fast-mode-electric-flow {
   stroke: white;
-  stroke-width: 8;
+  stroke-width: 10;
   stroke-linecap: butt;
 }
 /* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */

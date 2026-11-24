@@ -3,16 +3,40 @@ import { useUiMode } from '../ui-mode';
 
 const randomBetween = (min: number, max: number) => min + Math.random() * (max - min);
 const point = (x: number, y: number) => `${x.toFixed(1)} ${y.toFixed(1)}`;
-const inset = 2.5;
+const inset = 3.5;
 
-const stillArcs = [[12, 4], [20, 34], [15, 70]] as const;
-const dash = (length: number) => `${length}px ${100 - length}px`;
+const stillArcs = [[12, 4], [9, 24], [13, 40], [8, 66], [11, 84]] as const;
+const rimLength = 100;
+const clearance = 2.5;
+const maxSpan = 17;
+const dash = (length: number) => `${length}px ${rimLength - length}px`;
 
-function discharge(flow: SVGPathElement, trace: SVGPathElement, birthDelay: number) {
-  const duration = randomBetween(1050, 2250);
-  const start = randomBetween(0, 100);
-  const drift = duration / randomBetween(6500, 10000) * 100;
-  const length = randomBetween(7, 24);
+type RimSpan = { start: number; extent: number };
+
+// Reserve the whole swept span, not just the visible dash at the start. Including the gap
+// across zero keeps the arcs apart even when they cross the seam of the closed path.
+function reserveSpan(occupied: RimSpan[]): RimSpan {
+  const desired = randomBetween(8, maxSpan);
+  if (!occupied.length) return { start: randomBetween(0, rimLength), extent: desired };
+  const sorted = occupied.sort((a, b) => a.start - b.start);
+  const gaps = sorted.map(({ start, extent }, i) => {
+    const nextStart = sorted[i + 1]?.start ?? sorted[0].start + rimLength;
+    return { start: start + extent + clearance, extent: nextStart - (start + extent) - 2 * clearance };
+  });
+  const fits = gaps.filter((gap) => gap.extent >= desired);
+  // At most four other spans of 17 leave a gap of at least 8, enough for clearance and a spark.
+  const gap = fits[Math.floor(Math.random() * fits.length)] ?? gaps.reduce((best, other) => other.extent > best.extent ? other : best);
+  const extent = Math.min(desired, gap.extent);
+  return { start: (gap.start + randomBetween(0, gap.extent - extent)) % rimLength, extent };
+}
+
+function discharge(flow: SVGPathElement, trace: SVGPathElement, birthDelay: number, span: RimSpan) {
+  const duration = randomBetween(410, 890);
+  const { start, extent } = span;
+  const drift = extent * randomBetween(0.2, 0.35);
+  const length = extent - drift;
+  const peak = randomBetween(2.25, 3.55);
+  const tip = randomBetween(0.45, 0.65);
   const timing: KeyframeAnimationOptions = { duration, delay: birthDelay, fill: 'both' };
   const current = flow.animate([
     { offset: 0, opacity: 0, length: length * 0.48 },
@@ -22,13 +46,13 @@ function discharge(flow: SVGPathElement, trace: SVGPathElement, birthDelay: numb
     { offset: 1, opacity: 0, length: length * 0.54 },
   ].map(({ offset, opacity, length }) => ({ offset, opacity, strokeDasharray: dash(length), strokeDashoffset: `${-(start + drift * offset)}px` })), timing);
   const thickness = trace.animate([
-    { offset: 0, strokeWidth: '0.48px' },
-    { offset: randomBetween(0.16, 0.3), strokeWidth: `${randomBetween(0.84, 1.15)}px` },
-    { offset: randomBetween(0.35, 0.55), strokeWidth: `${randomBetween(0.48, 0.68)}px` },
-    { offset: randomBetween(0.62, 0.82), strokeWidth: `${randomBetween(0.77, 1.07)}px` },
-    { offset: 1, strokeWidth: '0.48px' },
-  ], timing);
-  return { current, thickness };
+    { offset: 0, width: tip },
+    { offset: randomBetween(0.21, 0.35), width: peak },
+    { offset: randomBetween(0.45, 0.56), width: peak * randomBetween(0.35, 0.58) },
+    { offset: randomBetween(0.62, 0.75), width: peak * randomBetween(0.68, 0.92) },
+    { offset: 1, width: tip },
+  ].map(({ offset, width }) => ({ offset, strokeWidth: `${width}px` })), timing);
+  return { current, thickness, span };
 }
 
 function traceRim(rim: SVGRectElement, perimeter: number) {
@@ -102,25 +126,33 @@ export function FastModeElectric() {
     const flows = svg.querySelectorAll<SVGPathElement>('.fast-mode-electric-flow');
     const traces = svg.querySelectorAll<SVGPathElement>('.fast-mode-electric-trace');
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const active: ReturnType<typeof discharge>[] = [];
+    const active = new Map<number, ReturnType<typeof discharge>>();
     const cancel = (arc: ReturnType<typeof discharge>) => {
       arc.current.onfinish = null;
       arc.current.cancel();
       arc.thickness.cancel();
     };
-    const stop = () => active.splice(0).forEach(cancel);
+    const stop = () => {
+      active.forEach(cancel);
+      active.clear();
+    };
     const start = () => {
       stop();
       if (motion.matches || document.hidden) return;
       flows.forEach((flow, i) => {
-        // Each arc has its own clock. Reroll only once it's gone, so nothing jumps while visible.
+        // Reroll only after the previous arc goes dark. Delayed bursts reserve space too.
         const next = (delay: number) => {
-          if (active[i]) cancel(active[i]);
-          const arc = discharge(flow, traces[i], delay);
-          active[i] = arc;
-          arc.current.onfinish = () => next(randomBetween(180, 950));
+          const span = reserveSpan(Array.from(active.values(), (arc) => arc.span));
+          const arc = discharge(flow, traces[i], delay, span);
+          active.set(i, arc);
+          arc.current.onfinish = () => {
+            if (active.get(i) !== arc) return;
+            cancel(arc);
+            active.delete(i);
+            next(randomBetween(60, 235));
+          };
         };
-        next(i * randomBetween(100, 230));
+        next(i * randomBetween(40, 75));
       });
     };
     start();
