@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, SessionMeta } from '../../../shared/types';
 import { nativeGoalCommands } from '../../../shared/goal-driver';
+import { runningSubagentCount } from '../../../shared/ongoing';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke, invokeErrorMessage } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
@@ -77,6 +78,8 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
   const opened = useStore((s) => s.panelBottomOpened);
   // Left-behind processes are flagged on the tab itself: the point is that they cannot go unnoticed.
   const orphanedProcesses = useStore((s) => s.processSummary?.orphaned ?? 0);
+  const sessionProcesses = useStore((s) => s.processSummary?.bySession?.[session.id]?.length ?? 0);
+  const runningSubagents = runningSubagentCount(session);
   // Until one of its tabs is opened the lower half is only its tab strip, so the workspace view
   // above gets the whole height instead of sitting over an empty pane.
   const bottomIdle = opened.length === 0;
@@ -112,11 +115,20 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
     setTab(id);
   };
   const bottomTabs = BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents');
-  const processCount = orphanedProcesses > 0 && (
+  const processCount = orphanedProcesses > 0 ? (
     <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} running on ${orphanedProcesses === 1 ? 'its' : 'their'} own: nothing in Vocs Code will stop ${orphanedProcesses === 1 ? 'it' : 'them'}`}>
       {orphanedProcesses}
     </span>
-  );
+  ) : sessionProcesses > 0 ? (
+    <span className="panel-tab-count" data-testid="processes-session-count" title={`${sessionProcesses} background process${sessionProcesses === 1 ? '' : 'es'} running in this session`}>
+      {sessionProcesses}
+    </span>
+  ) : null;
+  const subagentCount = runningSubagents > 0 ? (
+    <span className="panel-tab-count live" data-testid="subagents-running-count" title={`${runningSubagents} subagent${runningSubagents === 1 ? '' : 's'} running in this session`}>
+      {runningSubagents}
+    </span>
+  ) : null;
   const currentTop = TABS.find((t) => t.id === tab);
   const currentLabel = focus === 'bottom' ? BOTTOM_TABS.find((t) => t.id === bottomTab)?.label : currentTop && topLabel(currentTop.id, currentTop.label);
   return (
@@ -148,6 +160,7 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
             return (
               <button key={t.id} type="button" className={`panel-tab ${active ? 'active' : ''}`} title={t.label} aria-label={t.label} aria-current={active ? 'true' : undefined} data-testid={`panel-bottom-${t.id}`} onClick={() => openBottom(t.id)}>
                 <Icon name={t.icon} size={13} />
+                {t.id === 'subagents' && subagentCount}
                 {t.id === 'processes' && processCount}
               </button>
             );
@@ -190,6 +203,7 @@ export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; g
             {bottomTabs.map((t) => (
               <button key={t.id} type="button" className={`panel-tab ${!bottomIdle && bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
                 <Icon name={t.icon} size={13} /> {t.label}
+                {t.id === 'subagents' && subagentCount}
                 {t.id === 'processes' && processCount}
               </button>
             ))}

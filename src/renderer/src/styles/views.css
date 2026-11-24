@@ -2238,6 +2238,10 @@
   background: var(--amber-soft);
   color: var(--amber);
 }
+.panel-tab-count.live {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
 .processes {
   display: flex;
   flex-direction: column;

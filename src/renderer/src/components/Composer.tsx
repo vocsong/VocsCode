@@ -6,6 +6,7 @@ import { HARNESS_BY_ID, SLASH_COMMANDS, effortOptionsFor } from '../../../shared
 import { harnessRoutedText, slashEntries, type HarnessCommand, type SlashEntry } from '../../../shared/harness-commands';
 import { harnessCommandNote, useHarnessCommandList } from '../harness-commands';
 import { MAX_HOUSEKEEP_RECENT_DAYS } from '../../../shared/housekeep';
+import { hasOngoingWork } from '../../../shared/ongoing';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
 import { canInvoke, invoke } from '../api';
 import { FileAttachmentChips, readAttachments } from '../attachments';
@@ -40,6 +41,11 @@ const NO_HARNESS_COMMANDS: HarnessCommand[] = [];
 const IDLE_PLACEHOLDER = {
   standard: 'Message the agent… @ files · / commands · ! shell',
   zen: 'Ask anything…'
+} as const;
+
+const ONGOING_PLACEHOLDER = {
+  standard: 'Background work running… send a message anytime',
+  zen: 'Background work running…'
 } as const;
 
 export function Composer({ session, attachRef }: { session: SessionMeta; attachRef?: AttachFilesRef }) {
@@ -725,7 +731,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now; send menu to queue)' : 'Queue a follow-up… (sent after this turn)') : IDLE_PLACEHOLDER[uiMode]}
+          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now; send menu to queue)' : 'Queue a follow-up… (sent after this turn)') : hasOngoingWork(session) ? ONGOING_PLACEHOLDER[uiMode] : IDLE_PLACEHOLDER[uiMode]}
           rows={1}
           spellCheck
         />

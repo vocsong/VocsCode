@@ -473,7 +473,8 @@
   background: var(--bg-hover);
 }
 .session-status.status-running,
-.session-status.status-starting {
+.session-status.status-starting,
+.session-status.status-ongoing {
   color: var(--blue);
   background: var(--blue-soft);
   animation: status-fade 1.2s ease-in-out infinite;
