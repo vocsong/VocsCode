@@ -40,7 +40,8 @@ export class DashboardLoader {
   constructor(private readonly deps: DashboardLoaderDeps = {}) {}
 
   async load(): Promise<DashboardData> {
-    const hosts = await (this.deps.overview ?? analyticsOverview)();
+    // A stable order, by name: the relay lists computers in storage order.
+    const hosts = (await (this.deps.overview ?? analyticsOverview)()).sort((a, b) => a.name.localeCompare(b.name) || a.hostId.localeCompare(b.hostId));
     const computers = await Promise.all(hosts.map((host) => this.loadComputer(host)));
     // Drop parts no manifest names any more, so the cache never outgrows the account's data.
     const live = new Set(hosts.flatMap((h) => (h.manifest?.parts ?? []).map((p) => `${h.hostId}:${p.id}:${p.hash}`)));

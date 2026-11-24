@@ -231,9 +231,10 @@ describe.runIf(enabled)('web dashboard in a real browser', () => {
     await page.getByTestId('dashboard').waitFor({ timeout: 30_000 });
     await expect.poll(() => page.getByTestId('computer-card').count(), { timeout: 30_000 }).toBe(2);
     const cards = page.getByTestId('computer-card');
-    expect(await cards.allInnerTexts()).toEqual([expect.stringContaining('Vocs PC'), expect.stringContaining('Vocs Macmini')]);
+    // Ordered by name, whatever order the relay stores them in.
+    expect(await cards.allInnerTexts()).toEqual([expect.stringContaining('Vocs Macmini'), expect.stringContaining('Vocs PC')]);
     expect((await page.getByTestId('computer-sync').allInnerTexts()).every((t) => t.startsWith('Synced'))).toBe(true);
-    expect(await page.getByTestId('computer-spend').allInnerTexts()).toEqual(['$3.00', '$4.00']);
+    expect(await page.getByTestId('computer-spend').allInnerTexts()).toEqual(['$4.00', '$3.00']);
     await page.getByTestId('by-computer').waitFor();
     expect(await page.getByText('$7.00').count()).toBeGreaterThan(0);
 
@@ -255,7 +256,7 @@ describe.runIf(enabled)('web dashboard in a real browser', () => {
     mac.computer.setSharing(false);
     expect(await mac.computer.sync.sharingChanged()).toBe('cleared');
     await page.getByRole('button', { name: 'Refresh' }).click();
-    await expect.poll(() => page.getByTestId('computer-sync').allInnerTexts(), { timeout: 30_000 }).toEqual([expect.stringMatching(/^Synced/), 'Not sharing analytics yet']);
+    await expect.poll(() => page.getByTestId('computer-sync').allInnerTexts(), { timeout: 30_000 }).toEqual(['Not sharing analytics yet', expect.stringMatching(/^Synced/)]);
     // The selection falls back to all computers, which is now just the PC.
     await expect.poll(() => page.getByTestId('computer-spend').allInnerTexts()).toEqual(['$3.00']);
 

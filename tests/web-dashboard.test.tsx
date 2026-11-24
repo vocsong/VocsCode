@@ -103,8 +103,9 @@ describe('dashboard loader', () => {
     const key = [...relay.parts.keys()].find((k) => k.startsWith('mac:days'))!;
     relay.parts.set(key, { ...relay.parts.get(key)!, hash: 'f'.repeat(64) });
     const data = await relay.loader().load();
-    expect(data.computers.map((c) => [c.host.name, !!c.snapshot])).toEqual([['Vocs PC', true], ['Vocs Macmini', false]]);
-    expect(data.computers[1].error).toMatch(/synced while loading/);
+    // Ordered by name, whatever order the relay lists them in.
+    expect(data.computers.map((c) => [c.host.name, !!c.snapshot])).toEqual([['Vocs Macmini', false], ['Vocs PC', true]]);
+    expect(data.computers[0].error).toMatch(/synced while loading/);
   });
 });
 
@@ -116,7 +117,7 @@ describe('dashboard view', () => {
     ]);
     render(<Dashboard loader={relay.loader()} />);
     await waitFor(() => expect(screen.getAllByTestId('computer-card')).toHaveLength(2));
-    expect(screen.getAllByTestId('computer-spend').map((n) => n.textContent)).toEqual(['$3.00', '$4.00']);
+    expect(screen.getAllByTestId('computer-spend').map((n) => n.textContent)).toEqual(['$4.00', '$3.00']);
     expect(screen.getByTestId('by-computer')).toBeTruthy();
     expect(document.querySelector('.kpi-value')?.textContent).toBe('$7.00');
 
@@ -127,7 +128,7 @@ describe('dashboard view', () => {
     expect(document.querySelectorAll('.slist-row.live, .slist-gone')).toHaveLength(0);
 
     fireEvent.click(screen.getByRole('tab', { name: 'Reliability' }));
-    expect(screen.getAllByTestId('per-computer-section').map((s) => s.querySelector('.w-per-computer-title')?.textContent)).toEqual(['Vocs PC', 'Vocs Macmini']);
+    expect(screen.getAllByTestId('per-computer-section').map((s) => s.querySelector('.w-per-computer-title')?.textContent)).toEqual(['Vocs Macmini', 'Vocs PC']);
   });
 
   it('shows one computer on its own from the switcher or its card', async () => {
@@ -144,7 +145,7 @@ describe('dashboard view', () => {
     expect(screen.queryAllByTestId('per-computer-section')).toHaveLength(0);
 
     // Clicking the selected card again goes back to all computers.
-    const macCard = screen.getAllByTestId('computer-card')[1];
+    const macCard = screen.getAllByTestId('computer-card')[0];
     expect(macCard.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(macCard);
     await waitFor(() => expect(screen.getAllByTestId('per-computer-section')).toHaveLength(2));
@@ -171,7 +172,7 @@ describe('dashboard view', () => {
     ]);
     render(<Dashboard loader={relay.loader()} />);
     await waitFor(() => expect(screen.getAllByTestId('computer-card')).toHaveLength(2));
-    const [pc, mac] = screen.getAllByTestId('computer-card');
+    const [mac, pc] = screen.getAllByTestId('computer-card');
     expect(pc.className).toContain('is-stale');
     expect(pc.textContent).toContain('stale');
     expect(mac.className).not.toContain('is-stale');
