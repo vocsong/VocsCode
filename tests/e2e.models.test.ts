@@ -464,8 +464,22 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await high.getAttribute('aria-checked')).toBe('false');
 
     await on.click();
-    await confirm.waitFor();
-    expect(await win.getByText(FAST_MODE_COST_WARNING, { exact: true }).isVisible()).toBe(true);
+    const warning = win.getByRole('dialog', { name: 'Enable Fast mode?' });
+    await warning.waitFor();
+    expect(await warning.getByText(FAST_MODE_COST_WARNING, { exact: true }).isVisible()).toBe(true);
+    const [option, dialog] = await Promise.all([on.boundingBox(), warning.boundingBox()]);
+    if (!option || !dialog) throw new Error('Expected the Fast Mode option and warning to be on screen');
+    // The composer menu is near the bottom; the warning may flip above the option to fit.
+    const gap = Math.max(option.y - dialog.y - dialog.height, dialog.y - option.y - option.height);
+    expect(gap).toBeGreaterThanOrEqual(0);
+    expect(gap).toBeLessThanOrEqual(10);
+    expect(dialog.x).toBeLessThan(option.x + option.width);
+    expect(dialog.x + dialog.width).toBeGreaterThan(option.x);
+    expect(dialog.x).toBeGreaterThanOrEqual(0);
+    expect(dialog.y).toBeGreaterThanOrEqual(0);
+    expect(dialog.x + dialog.width).toBeLessThanOrEqual(viewport.width);
+    expect(dialog.y + dialog.height).toBeLessThanOrEqual(viewport.height);
+    await win.screenshot({ path: path.join(shots, 'models-08-fast-confirm.png'), animations: 'disabled' });
     expect(await on.getAttribute('aria-checked')).toBe('false');
     expect((await saved())[0].config.fastMode).toBe(false);
     await confirm.click();

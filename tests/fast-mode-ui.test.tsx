@@ -223,9 +223,13 @@ describe('composer Fast mode request', () => {
     render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
     const on = fastOption('On');
-    fireEvent.click(on);
-    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    fireEvent.click(within(on).getByText('On'));
+    const dialog = await screen.findByRole('dialog', { name: 'Enable Fast mode?' });
+    const anchoredAtOn = on.hasAttribute('data-dialog-anchor');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(on.disabled).toBe(false));
+    expect(anchoredAtOn).toBe(true);
+    expect(on.hasAttribute('data-dialog-anchor')).toBe(false);
     expect(invoke).not.toHaveBeenCalledWith('sessions:setFastMode', expect.anything());
     fireEvent.click(on);
     fireEvent.click(await screen.findByRole('button', { name: 'Enable Fast mode' }));

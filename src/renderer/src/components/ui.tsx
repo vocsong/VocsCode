@@ -241,7 +241,7 @@ export function Dropdown({
 
 export function MenuItem({ children, onClick, active, checked, danger, hint, disabled, trailing }: {
   children: React.ReactNode;
-  onClick?: () => void;
+  onClick?: React.MouseEventHandler<HTMLButtonElement>;
   active?: boolean;
   /** Supplying a checked state makes this a menu radio item inside a Dropdown. */
   checked?: boolean;

@@ -24,12 +24,17 @@ export function FastModeOptions({ session }: { session: SessionMeta }) {
   const unavailable = !support.supported ? support.reason ?? 'Fast mode is not supported on this route.' : undefined;
   const reason = blocked ?? unavailable;
 
-  const change = async (enabled: boolean) => {
+  const change = async (enabled: boolean, anchor?: HTMLButtonElement) => {
     if (pending || blocked || enabled === requested || (enabled && unavailable)) return;
     setPending(true);
     setError(undefined);
     try {
-      if (enabled && !await askConfirm({ title: 'Enable Fast mode?', body: FAST_MODE_COST_WARNING, confirmLabel: 'Enable Fast mode' })) return;
+      if (enabled && !await askConfirm({
+        title: 'Enable Fast mode?',
+        body: FAST_MODE_COST_WARNING,
+        confirmLabel: 'Enable Fast mode',
+        anchor,
+      })) return;
       await setSessionFastMode(session.id, enabled);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -50,7 +55,7 @@ export function FastModeOptions({ session }: { session: SessionMeta }) {
           <span className="menu-item-hint" role="status" title={status?.detail}>{STATUS_LABELS[status?.state ?? 'requested']}</span>
         )}
       </div>
-      <MenuItem checked={requested} disabled={pending || !!reason} onClick={() => void change(true)}>On</MenuItem>
+      <MenuItem checked={requested} disabled={pending || !!reason} onClick={(e) => void change(true, e.currentTarget)}>On</MenuItem>
       <MenuItem checked={!requested} disabled={pending || !!blocked} onClick={() => void change(false)}>Off</MenuItem>
       {reason && <div className="run-more-note" id={reasonId}>{reason}</div>}
       {error && <div role="alert" className="run-more-note">Fast mode change failed: {error}</div>}
