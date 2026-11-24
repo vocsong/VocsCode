@@ -8,7 +8,7 @@ import { cacheHitRate, delta, fmtCompact, fmtPct, fmtTps, METRICS, plural, split
 import { SessionList } from './SessionsTab';
 import { Footnotes, KpiGrid, StatTile } from './tiles';
 
-export function OverviewTab({ scope, summary }: { scope: Scope; summary: AnalyticsSummary }) {
+export function OverviewTab({ scope, summary, afterStats }: { scope: Scope; summary: AnalyticsSummary; afterStats?: React.ReactNode }) {
   const t = scope.totals;
   const p = scope.previous;
   const days = scope.days;
@@ -27,6 +27,7 @@ export function OverviewTab({ scope, summary }: { scope: Scope; summary: Analyti
         <StatTile label="Active days" value={fmtCompact(scope.activeDays)} sub={days.length ? `of ${plural(days.length, 'day')}` : undefined} />
       </KpiGrid>
 
+      {afterStats}
       <ChartCard title="Spend per day" subtitle={`By model · ${scope.label}`} table={seriesTable(days.map((d) => d.date), spendSeries, fmtCost)} wide>
         <ColumnChart dates={days.map((d) => d.date)} series={spendSeries} format={fmtCost} axis={METRICS.cost.axis} ariaLabel="Spend per day by model" />
       </ChartCard>

@@ -4,40 +4,56 @@
 import { useState } from 'react';
 import { Dashboard } from '../dashboard/Dashboard';
 import { ConnectScreen } from '../screens/ConnectScreen';
+import { FocusStage } from './FocusStage';
+import { ProductSwitcher } from './ProductSwitcher';
 import type { AccountState } from './account';
 
 export function DashboardApp({ account, connectHash }: { account: AccountState; connectHash: string | null }) {
   const [connecting, setConnecting] = useState(connectHash);
 
-  if (account.status !== 'signed-in') {
-    return (
-      <section className="w-screen" data-testid="signed-out">
-        <div className="w-screen-inner">
-          <div className="w-card">
-            <p className="w-label">Vocs Code</p>
-            <h1>Sign in to see your dashboard</h1>
-            <p className="w-lead">Your Vocs Code computers report their analytics to your Vocs account.</p>
-            <div className="w-actions">
-              <a className="btn btn-primary" href="/login?next=%2Fdashboard">Sign in</a>
-            </div>
-          </div>
-        </div>
-      </section>
-    );
-  }
+  const login = account.status === 'signed-in' ? account.account.login : null;
+  const isDashboard = login !== null && connecting === null;
 
   return (
     <div className="w-app">
-      <header className="w-topbar">
-        <a className="w-brand" href="/dashboard">Vocs Code</a>
-        <span className="w-topbar-title">Dashboard</span>
-        <span className="w-topbar-spacer" />
-        <span className="w-account" data-testid="account-login">{account.account.login}</span>
-        <form method="post" action="/logout" className="account-signout">
-          <button type="submit" className="btn btn-ghost btn-sm">Sign out</button>
-        </form>
+      <a className="v-skip" href="#main">Skip to content</a>
+      <header className="v-topbar w-topbar">
+        <div className="v-wrap v-wrap-wide v-topbar-inner">
+          <a className="v-brand" href="/dashboard" aria-label="Vocs Code dashboard">
+            vocs<span className="v-brand-dot" aria-hidden="true">.</span><span className="v-brand-product">code</span>
+          </a>
+          {login !== null && (
+            <div className="v-topbar-actions">
+              {isDashboard && <ProductSwitcher />}
+              <div className="w-account" title={login}>
+                <span className="v-avatar" aria-hidden="true">{Array.from(login)[0]?.toLocaleUpperCase()}</span>
+                <span className="v-sr-only">Signed in as </span>
+                <span className="w-account-name" data-testid="account-login">{login}</span>
+              </div>
+              <form method="post" action="/logout" className="w-signout">
+                <button type="submit" className="v-btn v-btn-ghost v-btn-sm">Sign out</button>
+              </form>
+            </div>
+          )}
+        </div>
       </header>
-      <main className="w-main">{connecting ? <ConnectScreen nonceHash={connecting} onDone={() => setConnecting(null)} /> : <Dashboard />}</main>
+      <main id="main" className={isDashboard ? 'w-main v-wrap v-wrap-wide' : 'w-main'}>
+        {login === null ? (
+          <FocusStage testId="signed-out">
+            <div>
+              <p className="v-eyebrow v-eyebrow-sm">Vocs Code</p>
+              <h1 className="v-h1" id="focus-title">Sign in to see your dashboard</h1>
+              <p className="v-text w-focus-description">Your Vocs Code computers report their analytics to your Vocs account.</p>
+            </div>
+            <a className="v-btn v-btn-primary" href="/login?next=%2Fdashboard">Sign in</a>
+          </FocusStage>
+        ) : connecting ? <ConnectScreen nonceHash={connecting} onDone={() => setConnecting(null)} /> : <Dashboard />}
+      </main>
+      {isDashboard && (
+        <footer className="v-footer v-footer-slim">
+          <div className="v-wrap v-wrap-wide v-footer-base"><span>Vocs Code</span><span>Analytics dates are shown in UTC.</span></div>
+        </footer>
+      )}
     </div>
   );
 }

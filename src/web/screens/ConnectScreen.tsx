@@ -2,9 +2,9 @@
  *  computer to the signed-in account and wait for it to collect its credential. Its analytics then
  *  arrive on the dashboard on their own; no browser pairing is involved any more. */
 import { useState } from 'react';
-import { Button } from '@renderer/components/ui';
 import { connectCheckCode } from '@shared/pairing';
 import { addComputer, addedComputer } from '../owner-api';
+import { FocusStage } from '../shell/FocusStage';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -39,31 +39,25 @@ export function ConnectScreen({ nonceHash, onDone, poll = { attempts: 90, interv
   };
 
   return (
-    <section className="w-screen" data-testid="connect-screen">
-      <div className="w-screen-inner">
-        <div className="w-card">
-          <p className="w-label">Connect with Vocs</p>
-          <h1>{added ? 'Computer added' : 'Add this computer?'}</h1>
-          {!added && (
-            <>
-              <p className="w-lead">A computer running Vocs Code asked to join your account. Continue only if you just clicked <strong>Connect with Vocs</strong> on it and it shows this code:</p>
-              <p className="w-check-code" data-testid="connect-code">{connectCheckCode(nonceHash)}</p>
-            </>
-          )}
-          <div className="w-actions">
-            {added ? (
-              <Button variant="primary" onClick={onDone} data-testid="connect-done">Open the dashboard</Button>
-            ) : (
-              <>
-                <Button variant="primary" disabled={busy} onClick={() => void add()} data-testid="connect-add">Add this computer</Button>
-                <Button variant="ghost" disabled={busy} onClick={onDone}>Cancel</Button>
-              </>
-            )}
-          </div>
-          <p className="w-hint" role="status" aria-live="polite" data-testid="connect-status">{status}</p>
-          {error && <p className="w-error" role="alert">{error}</p>}
-        </div>
+    <FocusStage testId="connect-screen">
+      <div>
+        <p className="v-eyebrow v-eyebrow-sm">Connect with Vocs</p>
+        <h1 className="v-h1" id="focus-title">{added ? 'Computer added' : 'Add this computer?'}</h1>
+        {!added && <p className="v-text w-focus-description">A computer running Vocs Code asked to join your account. Continue only if you just clicked <strong>Connect with Vocs</strong> on it and it shows this code:</p>}
       </div>
-    </section>
+      {!added && <p className="w-check-code v-mono" data-testid="connect-code">{connectCheckCode(nonceHash)}</p>}
+      <div className="w-focus-actions">
+        {added ? (
+          <button type="button" className="v-btn v-btn-primary" onClick={onDone} data-testid="connect-done">Open the dashboard</button>
+        ) : (
+          <>
+            <button type="button" className="v-btn v-btn-primary" disabled={busy} onClick={() => void add()} data-testid="connect-add">Add this computer</button>
+            <button type="button" className="v-btn v-btn-ghost" disabled={busy} onClick={onDone}>Cancel</button>
+          </>
+        )}
+      </div>
+      <p className={`v-text w-focus-status${added ? ' v-note' : ''}`} role="status" data-testid="connect-status">{status}</p>
+      {error && <p className="v-note v-note-danger" role="alert">{error}</p>}
+    </FocusStage>
   );
 }
