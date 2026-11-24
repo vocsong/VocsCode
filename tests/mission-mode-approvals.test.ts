@@ -100,9 +100,12 @@ describe('Builder commands', () => {
     expect(await command(cmd)).toEqual(toUser(reason));
   });
 
-  it.skipIf(!isWin)('routes a Windows drive root delete to the user', async () => {
-    expect(await command('rd /s /q C:\\')).toEqual(toUser(ROUTE_REASONS.wipe));
-    expect(await command('del /s /q C:\\*')).toEqual(toUser(ROUTE_REASONS.wipe));
+  it('routes native recursive deletes of the filesystem root or its contents to the user', async () => {
+    const root = path.parse(lead).root;
+    const commands = isWin
+      ? [`rd /s /q ${root}`, `del /s /q ${root}*`]
+      : [`rm --recursive -- ${root}`, `rm --recursive -- ${root}*`];
+    for (const cmd of commands) expect(await command(cmd), cmd).toEqual(toUser(ROUTE_REASONS.wipe));
   });
 
   it('sends absolute paths, redirects and nested shell scripts that leave the mission to the user', async () => {
