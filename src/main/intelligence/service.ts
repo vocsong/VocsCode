@@ -385,6 +385,7 @@ export class IntelligenceService {
           const grant = record.collectionId ? grants.find((g) => g.collectionId === record.collectionId) : undefined;
           candidates.push({
             provider,
+            ...(record.origin === LOCAL_LEARNING_ORIGIN ? { localLearning: true } : {}),
             projectId: record.promotedFrom?.projectId ?? record.projectId ?? project.id,
             projectName: record.promotedFrom?.projectName ?? project.name,
             ref: record.id,
@@ -467,7 +468,7 @@ export class IntelligenceService {
     if (wants('memory')) {
       for (const { record, score } of this.passiveMatches(ctx, project, terms, limit, request.includeHistorical)) {
         candidates.push({
-          provider: 'memory', projectId: project.id, projectName: project.name, ref: record.id,
+          provider: 'memory', projectId: project.id, projectName: project.name, ref: record.id, localLearning: true,
           title: redactSecrets(record.title), text: redactSecrets(record.text), kind: record.kind,
           authority: 'history', historical: true, scope: 'project', score: score * 0.65,
           sources: record.sources, updatedAt: record.updatedAt,

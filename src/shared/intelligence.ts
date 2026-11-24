@@ -355,6 +355,8 @@ export function evidenceRung(authority: EvidenceAuthority): number {
 
 export interface IntelligenceEvidence {
   provider: EvidenceProvider;
+  /** A locally captured turn lesson, distinguished from other memory in local usage metrics. */
+  localLearning?: true;
   projectId: string;
   projectName: string;
   /** Provider-local id: a wiki page id, a memory record id, `session#item`, or a graph node id. */
