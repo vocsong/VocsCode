@@ -14,6 +14,7 @@ export type Json = Record<string, unknown>;
 
 import { enrollTokenContext, pairingDecisionPayload, pairingTokenContext, sealToKey, stable, tokenProofPayload, verify, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
 import { createDeviceId } from './account';
+import { clearAnalytics } from './analytics';
 
 /** Implemented by Durable Object storage (worker) and in-memory maps (tests). */
 export interface RelayStorage {
@@ -723,7 +724,7 @@ export async function deviceInfos(store: RelayStore, accountId: string, online: 
 /** Revokes a device and returns every device id that stopped existing. Revoking a desktop also
  *  revokes the browsers paired with it: they route to that host id alone, so their credentials
  *  would otherwise outlive the only thing they could reach (the lost-desktop case, §6.5). A
- *  revoked desktop's offline mirror goes too. */
+ *  revoked desktop's offline mirror and analytics snapshot go too. */
 export async function revokeDevice(store: RelayStore, accountId: string, deviceId: string): Promise<string[]> {
   const { victims, hosts } = await store.transaction(async (tx) => {
     const target = await tx.get<DeviceRecord>(deviceKey(accountId, deviceId));
@@ -736,13 +737,16 @@ export async function revokeDevice(store: RelayStore, accountId: string, deviceI
     for (const id of victims) await deleteDevice(tx, accountId, id);
     return { victims, hosts: target?.kind === 'host' ? [deviceId] : [] };
   });
-  for (const host of hosts) await clearMirror(store, accountId, host);
+  for (const host of hosts) {
+    await clearMirror(store, accountId, host);
+    await clearAnalytics(store, accountId, host);
+  }
   return victims;
 }
 
 /** The kill switch (§6.5): every device of the account except the desktop pulling it — each
  *  browser and every other computer — plus pending pairings, outstanding enrollment grants and the
- *  mirrors of revoked hosts. It raises the account's revocation epoch in the same commit, so an
+ *  mirrors and analytics snapshots of revoked hosts. It raises the account's revocation epoch in the same commit, so an
  *  approval or redemption already past its own checks cannot mint afterwards. The caller keeps its
  *  identity and its own mirror, which it re-keys. */
 export async function revokeAllExcept(store: RelayStore, accountId: string, keepDeviceId: string): Promise<string[]> {
@@ -764,7 +768,10 @@ export async function revokeAllExcept(store: RelayStore, accountId: string, keep
     await tx.put(epochKey(accountId), (await revocationEpoch(tx, accountId)) + 1);
     return { victims, hosts };
   });
-  for (const host of hosts) await clearMirror(store, accountId, host);
+  for (const host of hosts) {
+    await clearMirror(store, accountId, host);
+    await clearAnalytics(store, accountId, host);
+  }
   return victims;
 }
 
