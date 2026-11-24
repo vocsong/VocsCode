@@ -48,6 +48,9 @@ describe('shared ongoing helpers', () => {
     ])).toBe('2 ongoing');
     expect(ongoingStripHeadline([{ id: '1', kind: 'subagent', agent: 'Explore', label: 'Search', startedAt: 1 }])).toBe('Background Explore running');
     expect(ongoingStripHeadline([{ id: '1', kind: 'task', detail: 'local_bash', label: 'gh run watch', startedAt: 1 }])).toBe('Background command running');
+    expect(ongoingStripHeadline([{ id: '1', kind: 'task', detail: 'terminal', label: 'npm run dev', startedAt: 1 }])).toBe('Background command running');
+    expect(ongoingStripHeadline([{ id: '1', kind: 'task', detail: 'schedule', label: 'Check PR every 5m', startedAt: 1 }])).toBe('Scheduled task pending');
+    expect(ongoingStripHeadline([{ id: '1', kind: 'task', detail: 'timer', label: 'Wait 60s', startedAt: 1 }])).toBe('Timer running');
     expect(ongoingStripHeadline([{ id: '1', kind: 'hook', detail: 'Stop', label: 'verify', startedAt: 1 }])).toBe('Stop hook running');
     expect(runningSubagentCount({ ongoing: [{ id: '1', kind: 'subagent', label: 'A', startedAt: 1 }, { id: '2', kind: 'task', label: 'B', startedAt: 2 }] })).toBe(1);
   });
@@ -66,12 +69,25 @@ describe('classifySessionOngoingProcesses', () => {
       proc(210, 1, 'pwsh.exe', { sessionId: 's_pi', terminalId: 't1', label: 'PowerShell' }, { command: 'pwsh.exe' }),
       // Codex app-server root
       proc(300, 1, 'codex.exe', { sessionId: 's_codex' }, { command: 'codex.exe app-server' }),
-      // ACP root
-      proc(400, 1, 'agy.exe', { sessionId: 's_acp' }, { command: 'agy.exe acp' }),
+      // ACP root (including Windows cmd.exe shim launching agy.exe)
+      proc(400, 1, 'cmd.exe', { sessionId: 's_acp' }, { command: 'cmd.exe /c "C:\\Users\\vocs\\agy.exe acp"' }),
+      proc(401, 400, 'agy.exe', { sessionId: 's_acp' }, { command: 'agy.exe acp' }),
       // Earlier-run leftover (belongs in Left Behind, not live session activity)
       proc(900, 999, 'node.exe', { sessionId: 's_claude' }, { command: 'node stale.js', orphaned: true, previousRun: true })
     ];
     expect(classifySessionOngoingProcesses(idleList)).toEqual({});
+  });
+
+  it('descends through Windows cmd.exe shims and harness children to surface real tool subprocesses underneath', () => {
+    const list: TrackedProcess[] = [
+      proc(400, 1, 'cmd.exe', { sessionId: 's_shim' }, { command: 'cmd.exe /c "claude.exe --output-format stream-json"' }),
+      proc(401, 400, 'claude.exe', { sessionId: 's_shim' }, { command: 'claude.exe --output-format stream-json' }),
+      proc(402, 401, 'node.exe', { sessionId: 's_shim' }, { command: 'node scripts/watch-ci.mjs' })
+    ];
+    const bySession = classifySessionOngoingProcesses(list);
+    expect(bySession.s_shim?.map((p) => ({ pid: p.pid, label: p.label }))).toEqual([
+      { pid: 402, label: 'watch-ci.mjs' }
+    ]);
   });
 
   it('surfaces detached Job processes, running terminal commands, and active child commands once per subtree root', () => {

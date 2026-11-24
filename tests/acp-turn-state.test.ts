@@ -1009,4 +1009,153 @@ describe('acp adapter', () => {
       expect(turnItems(h.items).map((t) => t.status)).toEqual(['completed']);
     });
   });
+
+  describe('ongoing background tasks, child sessions, terminals, and schedules', () => {
+    const ongoingFor = (h: Harness, source: 'threads' | 'tasks') =>
+      h.events.filter((e): e is Extract<SessionEvent, { type: 'ongoing' }> => e.type === 'ongoing' && e.source === source);
+
+    it('isolates child session updates from parent transcript and tracks them as ongoing subagents', async () => {
+      const h = makeHarness({ harness: 'antigravity' });
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-parent', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      await h.adapter.start();
+
+      h.agent.notify('session/update', {
+        sessionId: 'sess-child-1',
+        update: { sessionUpdate: 'session_info_update', title: 'Audit CI failures' }
+      });
+      h.agent.notify('session/update', {
+        sessionId: 'sess-child-1',
+        update: { sessionUpdate: 'tool_call', toolCallId: 'child-tc-1', title: 'Read logs', status: 'in_progress' }
+      });
+      h.agent.notify('session/update', {
+        sessionId: 'sess-child-1',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'child text must not leak' } }
+      });
+
+      await vi.waitFor(() => expect(ongoingFor(h, 'threads').at(-1)?.items).toHaveLength(1));
+      expect(ongoingFor(h, 'threads').at(-1)?.items).toMatchObject([
+        { id: 'thread:sess-child-1', kind: 'subagent', label: 'Audit CI failures', toolUses: 1 }
+      ]);
+      // Parent transcript received neither the child's text nor its tool call.
+      expect([...h.items.values()]).toEqual([]);
+
+      // Child clears via v1 session_info_update _meta status or extension state_update.
+      h.agent.notify('_antigravity/state_update', { sessionId: 'sess-child-1', state: 'idle' });
+      await vi.waitFor(() => expect(ongoingFor(h, 'threads').at(-1)?.items).toEqual([]));
+
+      h.agent.notify('session/update', {
+        sessionId: 'sess-child-2',
+        update: { sessionUpdate: 'session_info_update', title: 'Review diff' }
+      });
+      await vi.waitFor(() => expect(ongoingFor(h, 'threads').at(-1)?.items).toMatchObject([{ id: 'thread:sess-child-2', label: 'Review diff' }]));
+      h.agent.notify('session/update', {
+        sessionId: 'sess-child-2',
+        update: { sessionUpdate: 'session_info_update', _meta: { status: 'completed' } }
+      });
+      await vi.waitFor(() => expect(ongoingFor(h, 'threads').at(-1)?.items).toEqual([]));
+    });
+
+    it('tracks live terminal_update, explicitly-backgrounded/out-of-turn tool calls, and extNotification tasks/schedules while ignoring unclosed foreground tools', async () => {
+      const h = makeHarness({ harness: 'antigravity' });
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      h.agent.on('session/prompt', () => {
+        // Normal foreground tool left unclosed at end_turn must NOT stick as ongoing.
+        h.agent.notify('session/update', {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'tool_call', toolCallId: 'fg-read', kind: 'read', title: 'Read package.json', status: 'in_progress' }
+        });
+        // Explicitly backgrounded tool call MUST surface immediately and survive end_turn until completed.
+        h.agent.notify('session/update', {
+          sessionId: 'sess-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'bg-cmd',
+            kind: 'execute',
+            title: 'Watch CI',
+            status: 'in_progress',
+            rawInput: { command: 'gh run watch 99', background: true }
+          }
+        });
+        // Live terminal (non-background) stays hidden during prompt, surfaces once turn ends.
+        h.agent.notify('_antigravity/terminal_update', {
+          sessionId: 'sess-1',
+          terminalId: 'term-1',
+          command: 'npm run dev',
+          exitStatus: null
+        });
+        return { stopReason: 'end_turn' };
+      });
+
+      await h.adapter.start();
+      await h.adapter.send({ text: 'start work' });
+      await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+
+      await vi.waitFor(() => {
+        const ids = ongoingFor(h, 'tasks').at(-1)?.items.map((i) => i.id) ?? [];
+        expect(ids).toEqual(['tool:bg-cmd', 'terminal:term-1']);
+      });
+      expect(ongoingFor(h, 'tasks').at(-1)?.items).toMatchObject([
+        { id: 'tool:bg-cmd', kind: 'task', detail: 'local_bash', label: 'gh run watch 99' },
+        { id: 'terminal:term-1', kind: 'task', detail: 'terminal', label: 'npm run dev' }
+      ]);
+
+      // Out-of-turn tool_call arriving while idle also surfaces until completed.
+      h.agent.notify('session/update', {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'tool_call', toolCallId: 'oot-1', kind: 'execute', title: 'Deploy hook', status: 'in_progress' }
+      });
+
+      // Vendor extension notification for a scheduled timer + background_tasks_changed snapshot.
+      h.agent.notify('_antigravity/schedule_update', {
+        sessionId: 'sess-1',
+        scheduleId: 'sched-1',
+        status: 'scheduled',
+        label: 'Re-check deploy in 5m'
+      });
+      h.agent.notify('_antigravity/background_tasks_changed', {
+        sessionId: 'sess-1',
+        tasks: [
+          { task_id: 'snap-1', task_type: 'subagent', description: 'Background verifier' },
+          { task_id: 'snap-amb', task_type: 'local_bash', description: 'ambient', ambient: true }
+        ]
+      });
+
+      await vi.waitFor(() => {
+        const items = ongoingFor(h, 'tasks').at(-1)?.items ?? [];
+        expect(items.map((i) => i.id)).toEqual(['task:snap-1', 'schedule:sched-1', 'tool:bg-cmd', 'tool:oot-1', 'terminal:term-1']);
+      });
+
+      // Completing each item clears it cleanly.
+      h.agent.notify('session/update', { sessionId: 'sess-1', update: { sessionUpdate: 'tool_call_update', toolCallId: 'bg-cmd', status: 'completed' } });
+      h.agent.notify('session/update', { sessionId: 'sess-1', update: { sessionUpdate: 'tool_call_update', toolCallId: 'oot-1', status: 'completed' } });
+      h.agent.notify('_antigravity/terminal_update', { sessionId: 'sess-1', terminalId: 'term-1', exitStatus: { exitCode: 0 } });
+      h.agent.notify('_antigravity/schedule_update', { sessionId: 'sess-1', scheduleId: 'sched-1', status: 'completed' });
+      h.agent.notify('_antigravity/background_tasks_changed', { sessionId: 'sess-1', tasks: [] });
+
+      await vi.waitFor(() => expect(ongoingFor(h, 'tasks').at(-1)?.items).toEqual([]));
+    });
+
+    it('clears all ACP ongoing items when the agent child process exits', async () => {
+      const h = makeHarness({ harness: 'antigravity' });
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      await h.adapter.start();
+
+      h.agent.notify('_antigravity/state_update', { sessionId: 'sess-child-2', state: 'running' });
+      h.agent.notify('_antigravity/terminal_update', { sessionId: 'sess-1', terminalId: 'term-2', command: 'sleep 60' });
+      await vi.waitFor(() => {
+        expect(ongoingFor(h, 'threads').at(-1)?.items).toHaveLength(1);
+        expect(ongoingFor(h, 'tasks').at(-1)?.items).toHaveLength(1);
+      });
+
+      h.child.emit('close', 0);
+      expect(ongoingFor(h, 'threads').at(-1)?.items).toEqual([]);
+      expect(ongoingFor(h, 'tasks').at(-1)?.items).toEqual([]);
+    });
+  });
 });
