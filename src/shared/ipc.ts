@@ -78,6 +78,7 @@ import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 import type { DictationLocalStatus, DictationResult, LocalModelId } from './dictation';
 import type { RemoteTerminalFrame, RemoteTerminalSnapshot } from './remote-terminal';
 import type { WorkspaceImage } from './image-files';
+import type { MissionView } from './mission-mode';
 import type { ProcessEndResult, ProcessList, ProcessSummary, ProcessTarget } from './processes';
 
 /** Paths are session/workspace-relative, with forward slashes. Incomplete scans cannot pick a file. */
@@ -289,6 +290,14 @@ export interface IpcContract {
   'sessions:import': [{ source: ChatImportSource; ids: string[]; repairOnly?: boolean }, { imported: SessionMeta[]; skipped: number }];
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
+  /** Mission mode, desktop owner only. Start: an empty session becomes the Lead; a session with
+   *  history hands its conversation to a new Lead. Returns the Lead the renderer should open. */
+  'mission:start': [{ sessionId: string; input: UserInput }, { leadId: string }];
+  /** The mission a Lead or Builder session belongs to, or null. */
+  'mission:get': [{ sessionId: string }, MissionView | null];
+  'mission:stop': [{ leadId: string }, MissionView];
+  /** Interrupted missions only: tells the Lead where each Builder stopped. Never automatic. */
+  'mission:resume': [{ leadId: string }, MissionView];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
   /** Tail-first window of a transcript for remote clients: items [start, end), newest by default.
    *  `seq` is the event floor the window reflects; absent on desktops that predate sequencing. */

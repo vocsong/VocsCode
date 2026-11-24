@@ -9,12 +9,16 @@ import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred }
 import { TurnUsageTracker } from '../util/turn-usage';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { codexProviderModels } from '../models/codex-catalog';
-import { toCodex } from '../mcp/effective';
+import { toCodex, type CodexMcpConfig } from '../mcp/effective';
+import { isBuiltinTrustedTool } from '../../shared/builtin-tools';
+import { VOCS_MISSION_SERVER_ID } from '../mcp/mission';
+import { isMissionToolFor } from '../mission-mode/tools';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { applyCodexMcpSuppression, getCodexMcpServers } from './codex-mcp-config';
 import { gateAction, OPTIONS_ALLOW_DENY, requiresPathApproval } from './permissions';
 import { questionAnswerWithNote } from './question-answers';
 import { spawnTool } from './spawn';
+import { missionPrompt } from './system-prompt';
 import { fastModePricing } from './native/fast-mode-pricing';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { reportHarnessCommands } from './commands';
@@ -72,8 +76,67 @@ type ThreadItem =
  * it Codex runs any command that stays inside the sandbox without asking, which would let a
  * dangerous command run silently in Auto. `never` is Full access.
  */
-function approvalPolicyFor(mode: PermissionMode): AskForApproval {
-  return mode === 'full-auto' ? 'never' : 'untrusted';
+function approvalPolicyFor(mode: PermissionMode, missionBuilder = false): AskForApproval {
+  // A Mission Builder hands publish/elevation commands to the user in every tier, so even its Full
+  // access keeps Codex asking; the gate then allows everything else at once.
+  return mode === 'full-auto' && !missionBuilder ? 'never' : 'untrusted';
+}
+
+/**
+ * Codex's per-server MCP tool approval mode (`AppToolApproval`, codex 0.153: auto | prompt | writes |
+ * approve). `approve` runs the server's tools without an approval request, which is what lets a
+ * Lead in Plan (read-only sandbox, `untrusted`) and a Builder below Full access use the Mission
+ * tools: other MCP approvals are declined (a Builder's go to the app). Checked against codex
+ * 0.153.4 with a scripted model: the mode alone runs an unannotated tool in a Plan thread, the
+ * tools' read-only hints alone do too, and the elicitation fallback below covers a runtime that
+ * asks anyway.
+ */
+const MISSION_TOOLS_APPROVAL_MODE = 'approve';
+
+/** Codex's `_meta.codex_approval_kind` on the elicitation it sends to approve an MCP tool call. */
+const MCP_TOOL_APPROVAL_KIND = 'mcp_tool_call';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** One MCP tool approval Codex asks for, as far as it can be read; undefined for any other elicitation. */
+interface McpToolApproval {
+  server: string;
+  /** Codex 0.153 names it only in the message: `Allow the <server> MCP server to run tool "<tool>"?`. */
+  tool?: string;
+  params?: unknown;
+  message?: string;
+}
+
+function mcpToolApproval(p: unknown): McpToolApproval | undefined {
+  const n = isRecord(p) ? p : undefined;
+  const meta = isRecord(n?._meta) ? n._meta : undefined;
+  if (typeof n?.serverName !== 'string' || meta?.codex_approval_kind !== MCP_TOOL_APPROVAL_KIND) return undefined;
+  const message = typeof n.message === 'string' ? n.message : undefined;
+  const tool = typeof meta.tool_name === 'string' ? meta.tool_name : message ? /\brun tool "([^"]+)"/.exec(message)?.[1] : undefined;
+  return { server: n.serverName, ...(tool ? { tool } : {}), ...(meta.tool_params !== undefined ? { params: meta.tool_params } : {}), ...(message ? { message } : {}) };
+}
+
+/**
+ * A Mission Builder's Codex asks before every MCP tool but the Mission server's, in every tier:
+ * Codex otherwise runs a tool its server annotates read-only (or that the user's config approves)
+ * without asking, and a third-party tool may publish. Covers the servers Codex loads from its own
+ * config as well as the injected ones; a server switched off stays off.
+ */
+async function promptOtherMcpServers(config: CodexMcpConfig['config'], read: () => Promise<unknown>): Promise<void> {
+  const inherited = await read();
+  if (!isRecord(inherited)) throw new Error('Unexpected Codex MCP configuration.');
+  for (const id of new Set([...Object.keys(config), ...Object.keys(inherited)])) {
+    if (id === VOCS_MISSION_SERVER_ID) continue;
+    const native = inherited[id];
+    if (config[id]?.enabled === false || (!config[id] && (!isRecord(native) || native.enabled === false))) continue;
+    const entry: Record<string, unknown> = (config[id] ??= {});
+    entry.default_tools_approval_mode = 'prompt';
+    // A per-tool approval mode in the user's config outranks the server's; prompt those too.
+    const tools = isRecord(native) && isRecord(native.tools) ? Object.keys(native.tools) : [];
+    if (tools.length) entry.tools = Object.fromEntries(tools.map((tool) => [tool, { approval_mode: 'prompt' }]));
+  }
 }
 
 /** Session grants are keyed per tool, never per command line: one for shell, one for patches. */
@@ -146,6 +209,41 @@ export class CodexAppServerAdapter implements HarnessAdapter {
 
   get busy(): boolean {
     return this._busy;
+  }
+
+  /** App built-in servers this thread was handed with the provenance the app set. */
+  private injectedBuiltins = new Set<string>();
+
+  private missionBuilder(): boolean {
+    return this.ctx.session().mission?.role === 'builder';
+  }
+
+  /**
+   * Codex asks to approve an MCP tool call through an elicitation (codex 0.153: `_meta` is
+   * `{ codex_approval_kind: 'mcp_tool_call', persist, tool_description, tool_params, … }`). An
+   * ordinary session and a Lead decline every one, as before, except a Mission tool of the session's
+   * own role from the Mission server (the gateway still refuses anything the token's role does not
+   * hold). A Builder, whose Codex asks before every other MCP tool (`promptOtherMcpServers`), runs a
+   * trusted tool of an app built-in at once and asks the app about everything else.
+   */
+  private async answerElicitation(p: unknown): Promise<boolean> {
+    const approval = mcpToolApproval(p);
+    const role = this.ctx.session().mission?.role;
+    if (!approval || !role) return false;
+    if (approval.server === VOCS_MISSION_SERVER_ID) return approval.tool === undefined || isMissionToolFor(role, approval.tool);
+    if (role !== 'builder') return false;
+    if (approval.tool && this.injectedBuiltins.has(approval.server) && isBuiltinTrustedTool(approval.server, approval.tool)) return true;
+    if (this.ctx.permissionMode() === 'plan') return false;
+    const name = approval.tool ? `${approval.server}.${approval.tool}` : approval.server;
+    const decision = await this.ctx.requestApproval({
+      kind: 'tool',
+      title: `Allow ${name}?`,
+      toolName: name,
+      input: approval.params,
+      description: approval.message,
+      options: OPTIONS_ALLOW_DENY
+    });
+    return decision.optionId === 'allow' || decision.optionId === 'allow_session';
   }
 
   /**
@@ -229,10 +327,14 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         modelProvider: this.modelProvider ?? null,
         serviceTier: fast ? this.fastServiceTier() : 'default',
         cwd: meta.cwd,
-        approvalPolicy: approvalPolicyFor(mode),
+        approvalPolicy: approvalPolicyFor(mode, this.missionBuilder()),
         sandbox: sandboxModeFor(mode)
       };
-      const config: Record<string, unknown> = { features: { fast_mode: true }, service_tier: fast ? this.fastServiceTier() : 'default' };
+      // A mission session delegates through its Builders, never Codex's own agents.
+      const config: Record<string, unknown> = { features: { fast_mode: true, ...(meta.mission ? { multi_agent: false } : {}) }, service_tier: fast ? this.fastServiceTier() : 'default' };
+      // The role prompt rides as developer instructions; Codex takes them only at thread start/resume.
+      const missionText = (await missionPrompt(this.ctx))?.trim();
+      if (missionText) common.developerInstructions = missionText;
       if (provider) {
         config.model_providers = {
           [provider.id]: { name: provider.name, base_url: provider.baseUrl, env_key: provider.envKey, wire_api: provider.wireApi }
@@ -244,7 +346,14 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         return [];
       });
       const mcpServers = toCodex(mcp, 'inline').config;
-      await applyCodexMcpSuppression(mcpServers, this.ctx.ownedMcpIds(), () => getCodexMcpServers(this.rpc!, meta.cwd));
+      // Only the definition the app built (by its provenance) gets the Mission tools' approval mode.
+      const mission = mcp.find(({ def }) => def.id === VOCS_MISSION_SERVER_ID && def.builtin === VOCS_MISSION_SERVER_ID);
+      if (meta.mission && mission && mcpServers[VOCS_MISSION_SERVER_ID]) mcpServers[VOCS_MISSION_SERVER_ID].default_tools_approval_mode = MISSION_TOOLS_APPROVAL_MODE;
+      this.injectedBuiltins = new Set(mcp.filter(({ def }) => def.builtin === def.id).map(({ def }) => def.id));
+      let inherited: Promise<unknown> | undefined;
+      const readInherited = () => inherited ??= getCodexMcpServers(this.rpc!, meta.cwd);
+      await applyCodexMcpSuppression(mcpServers, this.ctx.ownedMcpIds(), readInherited);
+      if (this.missionBuilder()) await promptOtherMcpServers(mcpServers, readInherited);
       if (Object.keys(mcpServers).length) config.mcp_servers = mcpServers;
       if (Object.keys(config).length) common.config = config;
       let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null; serviceTier?: string | null };
@@ -538,7 +647,9 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       }
       return { answers };
     });
-    rpc.onServerRequest('mcpServer/elicitation/request', async () => ({ action: 'decline', content: null, _meta: null }));
+    rpc.onServerRequest('mcpServer/elicitation/request', async (p) => await this.answerElicitation(p)
+      ? { action: 'accept', content: {}, _meta: null }
+      : { action: 'decline', content: null, _meta: null });
     rpc.onServerRequest('execCommandApproval', async (p) => {
       const n = p as { command?: string[] | string; cwd?: string; reason?: string | null };
       const verdict = await this.approveCommand({
@@ -578,7 +689,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     const mode = this.ctx.permissionMode();
     if (mode === 'plan') return { allowed: false, rejection: 'Plan mode' };
     const outsideWorkspace = mode !== 'full-auto' && (req.unsandboxed || (await this.leavesProject([req.cwd])));
-    const verdict = gateAction(mode, { mutating: true, isEdit: false, command: req.command, sessionAllowed: this.sessionGrants.has('command'), outsideWorkspace });
+    const verdict = gateAction(mode, { mutating: true, isEdit: false, command: req.command, sessionAllowed: this.sessionGrants.has('command'), outsideWorkspace, missionBuilder: this.missionBuilder() });
     if (verdict === 'allow') return { allowed: true, rejection: '' };
     if (verdict === 'deny') return { allowed: false, rejection: 'Denied by the permission mode' };
     const decision = await this.ctx.requestApproval({
@@ -812,7 +923,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       threadId: this.threadId,
       input: content,
       cwd: this.ctx.session().cwd,
-      approvalPolicy: approvalPolicyFor(mode),
+      approvalPolicy: approvalPolicyFor(mode, this.missionBuilder()),
       sandboxPolicy: sandboxPolicyFor(mode, this.ctx.session().cwd),
       model: this.model ?? null,
       effort: this.effort ?? null,

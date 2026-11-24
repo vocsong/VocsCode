@@ -43,6 +43,7 @@ import { clearWhichCache, clearRuntimeProbeCache, HARNESS_PACKAGES, runCapture, 
 import { assertHarnessId, openAntigravityUsage, openHarnessLogin, readHarnessSetup, withAppCredentials } from './harness-setup';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
+import type { MissionService } from './mission-mode/service';
 import { mcpServersSaveError, normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import { PiConfigStore, runPiCommand } from './pi-config';
@@ -138,6 +139,8 @@ export interface HandlerDeps {
   processes?: Pick<ProcessTracker, 'list' | 'end'>;
   /** Composer dictation; built from userData on first use when absent. */
   dictation?: DictationService;
+  /** Mission mode (desktop owner only); absent in hosts that do not run it. */
+  mission?: Pick<MissionService, 'start' | 'createLead' | 'get' | 'stop' | 'resume'>;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -161,6 +164,18 @@ const SLOW_HANDLER_MS = 1000;
 const HARNESS_BINARY: Partial<Record<HarnessId, ToolName>> = { claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi', antigravity: 'agy' };
 
 const sessionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/, 'Invalid session identifier');
+
+/** A New Session request that starts a Mission Lead; any truthy flag counts, so a forged one is refused too. */
+const isMissionCreate = (channel: string, req: unknown): boolean =>
+  channel === 'sessions:create' && !!req && typeof req === 'object' && 'mission' in req && (req as { mission?: unknown }).mission !== undefined && (req as { mission?: unknown }).mission !== false;
+
+/** The first message of a mission, as the composer sends it. */
+const missionInputSchema = z.strictObject({
+  text: z.string().max(200_000),
+  images: z.array(z.unknown()).max(20).optional(),
+  files: z.array(z.strictObject({ name: z.string().min(1).max(500), mimeType: z.string().max(200), data: z.string() })).max(20).optional(),
+  mode: z.enum(['now', 'steer', 'queue']).optional()
+});
 
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
@@ -275,6 +290,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
     if (channel.startsWith('subscriptions:') && actor !== 'desktop') throw new Error('Subscription usage requires the local desktop owner.');
     if (channel === 'fs:writeText' && actor !== 'desktop') throw new Error('Saving workspace text requires the local desktop owner.');
+    // Mission mode pushes a branch and opens a PR on the user's behalf: the desktop owner only.
+    if ((channel.startsWith('mission:') || isMissionCreate(channel, req)) && actor !== 'desktop') throw new Error('Mission mode requires the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
     if (!fn) {
       deps.log('warn', `ipc: unknown channel ${channel}`);
@@ -311,7 +328,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (channel === 'sessions:create') {
       const config = req.config && typeof req.config === 'object' ? req.config as Record<string, unknown> : {};
       if (config.harness === 'antigravity') throw new Error('Antigravity sessions are driven by direct user prompts.');
+      if (isMissionCreate(channel, req)) throw new Error('Mission mode requires the local desktop owner.');
     }
+    if (channel.startsWith('mission:')) throw new Error('Mission mode requires the local desktop owner.');
   }
 
   handle('app:info', () => ({ version: deps.desktop.appVersion(), platform: process.platform, userData: deps.desktop.userDataPath(), isPackaged: deps.desktop.isPackaged() }));
@@ -902,11 +921,28 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
     }
   });
+  const mission = () => {
+    if (!deps.mission) throw new Error('Mission mode is not available here.');
+    return deps.mission;
+  };
   handle('sessions:create', async (req) => {
-    const session = await sessions.create(req);
+    if (isMissionCreate('sessions:create', req) && req.mission !== true) throw new Error('Invalid mission flag.');
+    // A Lead is created without its prompt and adopted before its first runtime starts.
+    const session = req.mission === true ? await mission().createLead(req) : await sessions.create(req);
     scheduleGitnexus(session, 'session-start');
     return session;
   });
+  handle('mission:start', (input) => {
+    const { sessionId, input: message } = z.strictObject({ sessionId: sessionIdSchema, input: missionInputSchema }).parse(input);
+    const images = normalizeAgentImages(message.images);
+    return mission().start({ sessionId, input: { text: message.text, ...(images ? { images } : {}), ...(message.files?.length ? { files: message.files } : {}) } });
+  });
+  handle('mission:get', (input) => {
+    const { sessionId } = z.strictObject({ sessionId: sessionIdSchema }).parse(input);
+    return deps.mission?.get(sessionId) ?? null;
+  });
+  handle('mission:stop', (input) => mission().stop(z.strictObject({ leadId: sessionIdSchema }).parse(input).leadId));
+  handle('mission:resume', (input) => mission().resume(z.strictObject({ leadId: sessionIdSchema }).parse(input).leadId));
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
   handle('sessions:transcriptPage', async (req) => {

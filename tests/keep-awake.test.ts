@@ -197,3 +197,25 @@ it('catches power API failures without changing the session or acquiring a dupli
   expect(start.mock.calls).toEqual([['prevent-app-suspension'], ['prevent-app-suspension']]);
   expect(manager.get('s_work')?.status).toBe('running');
 });
+
+it('keeps the computer awake while a mission Lead or Builder works, without an opt-in', () => {
+  const { live, start, awake } = stubPower();
+  const row = (id: string, status: SessionMeta['status'], mission?: SessionMeta['mission'], archived?: boolean): SessionMeta => ({
+    id, title: id, createdAt: 1, updatedAt: 1, config: { harness: 'native', projectRoot: 'C:\repo', permissionMode: 'auto' },
+    cwd: 'C:\repo', status, harnessRef: {}, usage: emptyUsage(), ...(mission ? { mission } : {}), ...(archived ? { archived } : {})
+  });
+  const builder = { missionId: 'm1', role: 'builder' as const, leadId: 's_lead', builderIndex: 1 };
+  // An ordinary running session without an opt-in never holds the blocker.
+  awake.sync([row('s_plain', 'running')]);
+  expect(start).not.toHaveBeenCalled();
+  awake.sync([row('s_plain', 'running'), row('s_b1', 'running', builder)]);
+  expect(live.size).toBe(1);
+  // Still one blocker while the Lead works too, and released once every mission session is idle.
+  awake.sync([row('s_lead', 'running', { missionId: 'm1', role: 'lead', state: 'running' }), row('s_b1', 'running', builder)]);
+  expect(start).toHaveBeenCalledTimes(1);
+  awake.sync([row('s_lead', 'idle', { missionId: 'm1', role: 'lead', state: 'running' }), row('s_b1', 'idle', builder)]);
+  expect(live.size).toBe(0);
+  // An archived mission session never counts.
+  awake.sync([row('s_b1', 'running', builder, true)]);
+  expect(live.size).toBe(0);
+});

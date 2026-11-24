@@ -17,6 +17,7 @@ import type {
 import type { IntelligenceSettings } from './intelligence';
 import type { KnowledgeSettings } from './knowledge';
 import type { McpProjectState, McpServerDef } from './mcp-types';
+import type { MissionDefaults } from './mission-mode';
 import type { RemoteConfig } from './remote-types';
 import type { ShortcutCommand } from './shortcuts';
 import type { TerminalSettings } from './terminal';
@@ -157,6 +158,8 @@ export interface AppSettings {
    * its own (see shared/goal-driver.ts); with it off the app's engine answers everywhere.
    */
   goalDefaults: { autoContinue: boolean; maxIterations: number; preferHarness: boolean };
+  /** Mission mode: what Builders run on (Settings → Sessions). Absent on older settings means the defaults. */
+  missionDefaults?: MissionDefaults;
   terminal: TerminalSettings;
   /** Cheap model for background tasks (session titles, summaries). Unset until the user picks one. */
   utilityModel?: ModelRef;

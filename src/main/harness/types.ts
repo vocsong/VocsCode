@@ -35,6 +35,12 @@ export interface HarnessContext {
    * Absent in hosts that do not run the layer (tests, minimal embeddings).
    */
   appInstructions?(): Promise<string | undefined>;
+  /**
+   * Mission mode role prompt (the built-in Lead/Builder prompt, the user's `lead.md`/`builder.md`
+   * add-on, then the non-negotiable recap), appended after every other instruction layer so Mission
+   * rules win over project instructions. Absent, or resolving undefined, for ordinary sessions.
+   */
+  missionInstructions?(): Promise<string | undefined>;
   effort(): EffortLevel | undefined;
   getApiKey(providerId: string): Promise<string | undefined>;
   /**
@@ -138,4 +144,33 @@ export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
 
 export function isDangerousCommand(command: string): boolean {
   return DANGEROUS_COMMAND_PATTERNS.some((re) => re.test(command));
+}
+
+/**
+ * Commands a Mission Builder must hand to the user, whatever its tier and whatever its Lead says:
+ * anything that publishes (pushes, package/registry publishes, PR and release changes), elevation,
+ * and downloaded payloads piped into a shell. Best-effort like DANGEROUS_COMMAND_PATTERNS.
+ * Verbatim copy kept in resources/pi/subagent-gate.ts — keep the two in sync.
+ */
+export const MISSION_USER_COMMAND_PATTERNS: RegExp[] = [
+  // any push, allowing global git options before the subcommand
+  /\bgit(?:\s+-{1,2}\S+(?:\s+"[^"]*"|\s+\S+)?)*\s+push\b/i,
+  /\b(?:npm|pnpm|yarn|bun)\s+publish\b/i,
+  /\bgh\s+(?:pr\s+(?:create|merge|close|edit|ready|review)|release|repo\s+(?:create|delete|edit|rename|archive))\b/i,
+  /\b(?:docker|podman)\s+push\b/i,
+  /\bcargo\s+publish\b/i,
+  /\btwine\s+upload\b/i,
+  /\bdotnet\s+nuget\s+push\b/i,
+  // elevation
+  /\b(?:sudo|doas|pkexec|runas)\b/i,
+  /(?:^|[|;&]\s*)\bsu(?:\s+(?!--?(?:help|version|h)\b)\S+|\s*$)/i,
+  /-verb\s+runas\b/i,
+  // downloaded or decoded payloads piped into a shell
+  /\b(?:curl|wget|base64)\b[^|;&\r\n]*\|\s*(?:ba|z)?sh\b/i,
+  /\b(?:iex|invoke-expression)\s*(?:\(\s*)?(?:iwr|invoke-webrequest|irm|invoke-restmethod)\b/i,
+  /\b(?:iwr|invoke-webrequest|irm|invoke-restmethod|curl|wget)\b[^|;&\r\n]*\|\s*(?:iex|invoke-expression)\b/i
+];
+
+export function isMissionUserCommand(command: string): boolean {
+  return MISSION_USER_COMMAND_PATTERNS.some((re) => re.test(command));
 }

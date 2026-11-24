@@ -62,6 +62,11 @@ export class AppInstructions {
     return text || undefined;
   }
 
+  /** A Mission mode role's add-on (`lead.md` or `builder.md`); undefined when the file is empty. */
+  async mission(role: 'lead' | 'builder'): Promise<string | undefined> {
+    return (await this.readOne(role)).content.trim() || undefined;
+  }
+
   private fileFor(scope: AppInstructionScope): string {
     return path.join(this.root, `${scope}.md`);
   }

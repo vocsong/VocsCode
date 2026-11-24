@@ -19,6 +19,7 @@ import { DEFAULT_UI_MODE, isUiModeId } from '../shared/ui-modes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
 import { mcpIdIssues } from '../shared/mcp-ids';
+import { DEFAULT_MISSION_DEFAULTS, type MissionDefaults } from '../shared/mission-mode';
 import { readJson, writeJson } from './util/fs';
 
 export const BUILTIN_ACP_AGENTS: AcpAgentPreset[] = [
@@ -249,6 +250,7 @@ export function defaultSettings(): AppSettings {
     sidebarView: 'folders',
     customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25, preferHarness: true },
+    missionDefaults: structuredClone(DEFAULT_MISSION_DEFAULTS),
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] },
     agent: { enabled: true },
     gitSetupSkipped: []
@@ -258,6 +260,18 @@ export function defaultSettings(): AppSettings {
 function normalizeModelRef(stored: unknown): ModelRef | undefined {
   const m = stored as Partial<ModelRef> | undefined;
   return m && typeof m.provider === 'string' && typeof m.model === 'string' ? { provider: m.provider, model: m.model } : undefined;
+}
+
+/** Mission mode Builder defaults, field by field: an unknown harness, tier or effort falls back. */
+export function normalizeMissionDefaults(stored: unknown): MissionDefaults {
+  const raw = (stored && typeof stored === 'object' ? (stored as Partial<MissionDefaults>).builder : undefined) as Partial<MissionDefaults['builder']> | undefined;
+  const fallback = DEFAULT_MISSION_DEFAULTS.builder;
+  if (!raw || typeof raw !== 'object') return structuredClone(DEFAULT_MISSION_DEFAULTS);
+  const harness = raw.harness === 'same' || HARNESSES.some((h) => h.id === raw.harness) ? raw.harness! : fallback.harness;
+  const model = harness === 'same' ? undefined : normalizeModelRef(raw.model);
+  const effort = raw.effort === null ? null : isEffortLevel(raw.effort) ? raw.effort : undefined;
+  const permissionMode = typeof raw.permissionMode === 'string' && raw.permissionMode in PERMISSION_MODE_LABELS ? raw.permissionMode as PermissionMode : fallback.permissionMode;
+  return { builder: { harness, ...(model ? { model } : {}), ...(effort !== undefined ? { effort } : {}), permissionMode } };
 }
 
 /** A `provider/model` map keyed by harness; unknown harness keys and malformed refs are dropped. */
@@ -490,6 +504,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     codex: { ...d.codex, ...(stored.codex ?? {}) },
     pi: { ...d.pi, ...(stored.pi ?? {}) },
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
+    missionDefaults: normalizeMissionDefaults(stored.missionDefaults),
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
     folderSessionDefaults: normalizeFolderSessionDefaults(stored.folderSessionDefaults),

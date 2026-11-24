@@ -16,6 +16,10 @@ src/main
     acp.ts        Agent Client Protocol client (Google Antigravity and generic ACP agents)
     antigravity.ts  Antigravity CLI settings, account probe and quota decoding
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
+  mission-mode/   Mission mode (docs/MISSION-MODE.md): service (mission record, Lead/Builder lifecycle, inbox
+                  delivery, limits, restart), gateway + tools (loopback Mission tool server, role-bound tokens),
+                  approvals (Builder request classifier), git-ops (worktrees, ff landing, cleanup, push/PR),
+                  prompts and report; resources/mcp/vocs-mission.mjs is its stdio client
   legacy-mission.ts   removes the retired Mission feature's coordination data from userData on startup
   process-tracker.ts + process-snapshot.ts + process-context.ts   the Processes panel: every process
                   the app started (sampled tree under main, saved for the next run), who it works for, and ending it;
@@ -397,12 +401,53 @@ How each harness is driven (✓ exact, ≈ closest match, — not offered):
 | Antigravity | ✓ vendor `plan` + client policy | ✓ client policy, one-time grants | ✓ | ✓ | ✓ |
 | Generic ACP | ✓ client policy | ≈ the app only sees calls the agent asks about | ≈ | ≈ | ✓ one-time grants |
 
+**Mission mode is the one scoped exception to "the user answers every ask".** A Lead always runs
+Plan; the Mission coordination tools (`BUILTIN_MISSION_TOOLS`, trusted by app-set provenance only)
+run there because they never touch the workspace. A Builder's asks go to its Lead first, and the
+Lead may answer the ones that stay inside the mission's folders, dangerous-but-confined commands
+included. Every always-user class still reaches the user, with the Lead's recommendation attached
+and never as a Lead approval: real paths outside every mission root, any push or publish, elevation,
+downloads piped into a shell (`MISSION_USER_COMMAND_PATTERNS`, asked in every tier for a Builder,
+Full included, "Allow for session" ignored), MCP tools the app cannot vouch for, secrets, and
+anything the classifier cannot read (`src/main/mission-mode/approvals.ts`, fail closed). See
+[Mission mode](#mission-mode).
+
 Known gaps: under ACP the permission request does not name the MCP tool, so Plan cannot tell
 Vocs Code's read-only tools from others and rejects both. Cursor and Codex exec have no approval
 channel, so their Auto is the vendor sandbox, where a dangerous command that stays inside the
 sandbox runs without asking.
 
+## Mission mode
+
+[User guide](MISSION-MODE.md). One Lead session plans and coordinates; up to three Builder sessions
+implement. Both are ordinary sessions with a host-owned `SessionMeta.mission` identity, so every
+harness event, transcript, approval and usage row is the normal one; Mission mode adds no event type.
+
+- **Transport.** The Mission tools reach every supported harness the same way: the reserved built-in
+  `vocs-mission`, a stdio client (`resources/mcp/vocs-mission.mjs`) that forwards to a loopback
+  gateway (`src/main/mission-mode/gateway.ts`) with a per-session token bound to the mission and the
+  role. The gateway re-reads the session's identity on every call and lists and accepts only that
+  role's tools; tokens end with the session's runtime, the mission or the app. Claude relays it in
+  process, Pi on its ephemeral channel, Codex inline, native and ACP over stdio.
+- **Roles per harness** (`missionSupport`): Claude, Codex app-server, Pi and native can lead and
+  build; ACP agents can build; Codex exec, Cursor and Antigravity cannot take part (no MCP calls, no
+  injected MCP or approvals, and direct user prompts only, respectively).
+- **Rules over instructions.** The role prompt (built in, plus `lead.md`/`builder.md`, then a fixed
+  recap) is appended after every other layer, so Mission rules win over project instructions. Mission
+  sessions lose their harness's own subagent delegation and cannot run a goal loop.
+- **Delivery.** Tools never block a turn. Lead↔Builder messages wait in a durable inbox in the
+  mission record (`<sessionDir(lead)>/mission.json`) and arrive as one host message (`origin:
+  'mission'`, no user-input receipt) at the target's next idle boundary, never by steering.
+- **Git.** The Lead owns `mission/<slug>`; a Builder shares its worktree or gets `mission/<slug>-b<n>`
+  from the Lead branch, merges the Lead branch itself and lands with an app-run fast-forward, one at a
+  time per mission. Cleanup unlinks junctions before `git worktree remove --force` and keeps any branch
+  that is neither merged nor pushed. Finishing pushes the Lead branch once (never `--force`) and opens a
+  PR with the report as its body; the app never merges.
+- **Restart.** A running mission becomes `interrupted` and nothing is dispatched until the user
+  resumes it. A merged or closed PR ends the mission and frees its worktrees.
+
 ## Security notes
+
 
 - API keys are encrypted with Electron `safeStorage` and never leave the machine except to the provider you configured.
 - The renderer runs sandboxed with context isolation; all privileged work happens in the main process behind a typed IPC contract.

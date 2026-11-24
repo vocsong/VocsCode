@@ -13,6 +13,7 @@ import { sortSessionRows } from '../sessionOrder';
 import { toastError, useStore } from '../store';
 import { Composer } from './Composer';
 import { Header } from './Header';
+import { MissionStrip } from './MissionStrip';
 import { SessionTitle } from './SessionTitle';
 import { Transcript } from './Transcript';
 import { Button, StatusDot } from './ui';
@@ -144,6 +145,7 @@ function PaneView({ pane, active, split, size, empty }: { pane: SessionPane; act
       {session ? (
         <>
           <Header session={session} paneId={pane.id} />
+          {session.mission?.role === 'lead' && <MissionStrip session={session} />}
           <Transcript session={session} active={active} />
           <Composer key={session.id} session={session} attachRef={attach} />
         </>

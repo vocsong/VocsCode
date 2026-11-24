@@ -23,6 +23,7 @@ import { assertEndpointUrl } from '../../shared/endpoint-policy';
 import { hasClaudeAgentPins } from '../claude-agents';
 import { toClaude } from '../mcp/effective';
 import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, VOCS_MEMORY_SERVER_ID } from '../mcp/memory';
+import { MISSION_GATEWAY_TOKEN_ENV, MISSION_GATEWAY_URL_ENV, VOCS_MISSION_SERVER_ID } from '../mcp/mission';
 import { claudeSdkCatalog } from '../models/claude-catalog';
 import { resolveProviderApiKey } from '../models/providers';
 import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
@@ -36,10 +37,10 @@ import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { SUBAGENT_TOOLS, ClaudeSubagentRuns, type NestedAssistantLike, type TaskNotificationLike, type TaskProgressLike, type TaskStartedLike, type TaskUpdatedLike } from './claude-subagents';
 import { gateAction, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL, requiresPathApproval, type GateVerdict } from './permissions';
-import { isBuiltinReadOnlyMcpName } from '../../shared/builtin-tools';
+import { isBuiltinMissionMcpName, isBuiltinTrustedMcpName } from '../../shared/builtin-tools';
 import { projectInstructionBlock } from './project-instructions';
 import { questionAnswerWithNote } from './question-answers';
-import { sessionAppendPrompt } from './system-prompt';
+import { missionPrompt, sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { reportHarnessCommands } from './commands';
 import type { HarnessCommand } from '../../shared/harness-commands';
@@ -132,6 +133,26 @@ const READ_ONLY_TOOLS = new Set([
  * canUseTool to collect its answers, and what a subagent does is gated call by call in its own run.
  */
 const SESSION_CONTROL_TOOLS = new Set(['AskUserQuestion', 'Agent', 'Task', 'TaskOutput', 'TaskStop', 'KillShell', 'BashOutput', 'EnterPlanMode']);
+
+/** Claude Code's own delegation tools. A mission session delegates through its Builders instead. */
+const DELEGATION_TOOLS = ['Agent', 'Task'];
+
+/**
+ * The app's token-bearing stdio servers. The SDK flattens process MCP configs (stdio env included)
+ * into `--mcp-config` argv, so these are run by this host and relayed to Claude in-process, where
+ * Claude reports them with the source `sdk`.
+ */
+const GATEWAY_BRIDGES = [
+  { id: VOCS_MEMORY_SERVER_ID, urlEnv: MEMORY_GATEWAY_URL_ENV, tokenEnv: MEMORY_GATEWAY_TOKEN_ENV, label: 'memory', title: 'Memory' },
+  { id: VOCS_MISSION_SERVER_ID, urlEnv: MISSION_GATEWAY_URL_ENV, tokenEnv: MISSION_GATEWAY_TOKEN_ENV, label: 'mission', title: 'Mission' }
+] as const;
+type GatewayBridge = (typeof GATEWAY_BRIDGES)[number];
+
+function gatewayBridgeFor(def: McpServerDef): GatewayBridge | undefined {
+  return GATEWAY_BRIDGES.find((kind) => def.id === kind.id && (def.env?.[kind.urlEnv] !== undefined || def.env?.[kind.tokenEnv] !== undefined));
+}
+
+const GATEWAY_ENV_NAMES = new Set<string>(GATEWAY_BRIDGES.flatMap((kind) => [kind.urlEnv, kind.tokenEnv]));
 
 /**
  * The CLI's command rows as the composer offers them. Rows can share a name; `/name` runs the
@@ -251,7 +272,8 @@ export class ClaudeAdapter implements HarnessAdapter {
   private readonly activeHooks = new Map<string, LiveHookRun>();
   /** Depth of Vocs Code's own SDK hook callbacks (`preToolUse` / `postToolUse`), never surfaced as user hooks. */
   private internalHookDepth = 0;
-  private closeMemoryMcp: (() => Promise<void>) | undefined;
+  /** One closer per in-process gateway bridge (memory, Mission) this launch opened. */
+  private gatewayClosers: (() => Promise<void>)[] = [];
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
@@ -279,7 +301,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     // The engine reads the project's own CLAUDE.md through `settingSources`; everything it does not
     // read is appended here, so every harness starts from the same instruction files.
     const project = s.claude.settingSources.includes('project') ? await claudeProjectInstructions(meta.cwd) : undefined;
-    const append = [project, sessionAppendPrompt(meta, await this.ctx.appInstructions?.())].filter(Boolean).join('\n\n') || undefined;
+    const append = [project, sessionAppendPrompt(meta, await this.ctx.appInstructions?.(), await missionPrompt(this.ctx))].filter(Boolean).join('\n\n') || undefined;
     const mode = this.ctx.permissionMode();
     const bin = this.ctx.runtime.resolve('claude');
     // Windows cannot launch a batch shim through the SDK's shell-free spawn. If the resolver
@@ -290,8 +312,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     for (const k of Object.keys(env)) {
       if (k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_CODE_USE_BEDROCK' && k !== 'CLAUDE_CODE_USE_VERTEX' && k !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[k];
       const name = process.platform === 'win32' ? k.toUpperCase() : k;
-      if (name === MEMORY_GATEWAY_URL_ENV || name === MEMORY_GATEWAY_TOKEN_ENV
-        || name === 'VOCS_CODE_MCP_EPHEMERAL') delete env[k];
+      if (GATEWAY_ENV_NAMES.has(name) || name === 'VOCS_CODE_MCP_EPHEMERAL') delete env[k];
     }
     delete env.CLAUDECODE;
     // After the scrub, which would otherwise drop it with every other CLAUDE_CODE_* variable. The
@@ -325,6 +346,8 @@ export class ClaudeAdapter implements HarnessAdapter {
         PostToolUse: [{ hooks: [this.postToolUse] }]
       }
     };
+    // A mission session hands work to Builders, never to Claude Code's own subagents.
+    if (meta.mission) options.disallowedTools = [...DELEGATION_TOOLS];
     const effort = this.ctx.effort();
     if (effort && effort !== 'minimal') options.effort = effort;
     if (bin) options.pathToClaudeCodeExecutable = bin.path;
@@ -357,11 +380,10 @@ export class ClaudeAdapter implements HarnessAdapter {
       return [];
     })).map(({ def }) => def);
     // The SDK serializes process MCP configs (including stdio env) into --mcp-config argv.
-    const gatewayMemory = mcp.filter((def) => def.id === VOCS_MEMORY_SERVER_ID
-      && (def.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || def.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined));
-    const processServers = mcp.filter((def) => !gatewayMemory.includes(def));
+    const gatewayDefs = mcp.filter((def) => gatewayBridgeFor(def));
+    const processServers = mcp.filter((def) => !gatewayDefs.includes(def));
     // Built-in servers this process hands Claude, keyed to the source Claude reports for them:
-    // `dynamic` for --mcp-config; the in-process memory gateway bridge below registers as `sdk`.
+    // `dynamic` for --mcp-config; the in-process gateway bridges below register as `sdk`.
     this.builtinServers = new Map(processServers.filter((def) => def.builtin === def.id).map((def) => [def.id, 'dynamic' as const]));
     if (processServers.length) options.mcpServers = toClaude(processServers);
     const s = this.ctx.settings();
@@ -376,19 +398,21 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
     options.env = { ...(options.env ?? {}), ...(await this.subagentModelEnv(options.model)) };
     this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
-    if (gatewayMemory.length) {
-      const bridge = gatewayMemory.length === 1 ? await this.memoryMcpBridge(gatewayMemory[0], meta.cwd) : undefined;
+    for (const kind of GATEWAY_BRIDGES) {
+      const defs = gatewayDefs.filter((def) => def.id === kind.id);
+      if (!defs.length) continue;
+      const bridge = defs.length === 1 ? await this.gatewayMcpBridge(defs[0]!, kind, meta.cwd) : undefined;
       this.abort.signal.throwIfAborted();
       if (bridge) {
-        options.mcpServers = { ...options.mcpServers, [VOCS_MEMORY_SERVER_ID]: bridge };
-        if (gatewayMemory[0]!.builtin === VOCS_MEMORY_SERVER_ID) this.builtinServers.set(VOCS_MEMORY_SERVER_ID, 'sdk');
+        options.mcpServers = { ...options.mcpServers, [kind.id]: bridge };
+        if (defs[0]!.builtin === kind.id) this.builtinServers.set(kind.id, 'sdk');
       }
-      else this.ctx.log('warn', '[claude] memory gateway MCP unavailable; skipping it for this launch');
+      else this.ctx.log('warn', `[claude] ${kind.label} gateway MCP unavailable; skipping it for this launch`);
     }
     try {
       this.q = query({ prompt: this.input, options });
     } catch (error) {
-      if (this.closeMemoryMcp) await this.closeMemoryMcp();
+      await this.closeGatewayBridges();
       throw error;
     }
     // This CLI counts the tokens and dollars of the process that is starting, not of the session:
@@ -405,14 +429,19 @@ export class ClaudeAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'error', message: `Claude harness stopped: ${errorMessage(e)}`, fatal: true });
       this.ctx.emit({ type: 'status', status: 'error', detail: errorMessage(e) });
     });
-    if (this.closeMemoryMcp) this.pump = this.pump.finally(this.closeMemoryMcp);
+    if (this.gatewayClosers.length) this.pump = this.pump.finally(() => this.closeGatewayBridges());
     this.ctx.emit({ type: 'status', status: 'idle' });
   }
 
-  /** Run the app-owned stdio child from the SDK host, not from Claude Code. */
-  private async memoryMcpBridge(def: McpServerDef, cwd: string): Promise<McpSdkServerConfigWithInstance | undefined> {
-    if (def.builtin !== VOCS_MEMORY_SERVER_ID || def.transport !== 'stdio' || !def.command
-      || !def.env?.[MEMORY_GATEWAY_URL_ENV] || !def.env?.[MEMORY_GATEWAY_TOKEN_ENV]) return;
+  private async closeGatewayBridges(): Promise<void> {
+    await Promise.all(this.gatewayClosers.splice(0).map((close) => close()));
+  }
+
+  /** Run an app-owned, token-bearing stdio child (memory, Mission) from the SDK host, not from Claude Code. */
+  private async gatewayMcpBridge(def: McpServerDef, kind: GatewayBridge, cwd: string): Promise<McpSdkServerConfigWithInstance | undefined> {
+    if (def.builtin !== kind.id || def.transport !== 'stdio' || !def.command
+      || !def.env?.[kind.urlEnv] || !def.env?.[kind.tokenEnv]) return;
+    let close: (() => Promise<void>) | undefined;
     try {
       const [{ Client }, { StdioClientTransport }, { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode }] = await Promise.all([
         import('@modelcontextprotocol/sdk/client/index.js'),
@@ -424,11 +453,13 @@ export class ClaudeAdapter implements HarnessAdapter {
       // Ignore child stderr: a failed handshake can otherwise surface snippets of launch secrets.
       const transport = new StdioClientTransport({ command: def.command, args: def.args, env: def.env, cwd, stderr: 'ignore' });
       let closing: Promise<void> | undefined;
-      this.closeMemoryMcp = () => closing ??= client.close().catch(() => undefined);
+      const closer = () => closing ??= client.close().catch(() => undefined);
+      close = closer;
+      this.gatewayClosers.push(closer);
       await client.connect(transport, { signal: this.abort.signal, timeout: 10_000 });
       const timeout = def.timeoutMs && def.timeoutMs >= 1000 ? def.timeoutMs : undefined;
       const bridge = createSdkMcpServer({
-        name: VOCS_MEMORY_SERVER_ID,
+        name: kind.id,
         version: client.getServerVersion()?.version,
         instructions: client.getInstructions(),
         timeout
@@ -438,17 +469,19 @@ export class ClaudeAdapter implements HarnessAdapter {
       bridge.instance.server.registerCapabilities({ tools: {} });
       bridge.instance.server.setRequestHandler(ListToolsRequestSchema, async ({ params }, { signal }) => {
         try { return await client.listTools(params, { signal, timeout: 10_000 }); }
-        catch { throw new McpError(ErrorCode.InternalError, 'Memory gateway MCP tool discovery failed.'); }
+        catch { throw new McpError(ErrorCode.InternalError, `${kind.title} gateway MCP tool discovery failed.`); }
       });
       bridge.instance.server.setRequestHandler(CallToolRequestSchema, async ({ params }, { signal }) => {
         // The gateway can take up to 90 seconds before local fallback starts.
         try { return await client.callTool(params, undefined, { signal, timeout: timeout ?? 120_000 }); }
-        catch { throw new McpError(ErrorCode.InternalError, 'Memory gateway MCP request failed.'); }
+        catch { throw new McpError(ErrorCode.InternalError, `${kind.title} gateway MCP request failed.`); }
       });
       return bridge;
     } catch {
-      if (this.closeMemoryMcp) await this.closeMemoryMcp();
-      this.closeMemoryMcp = undefined;
+      if (close) {
+        this.gatewayClosers = this.gatewayClosers.filter((entry) => entry !== close);
+        await close();
+      }
       // No inline fallback and no error detail from the credential-bearing child.
       return undefined;
     }
@@ -457,25 +490,33 @@ export class ClaudeAdapter implements HarnessAdapter {
   private canUseTool: CanUseTool = (toolName, input, { mcpServer }) => this.authorizeTool(toolName, input, mcpServer);
 
   /** A read-only tool of a built-in server this process was handed, reported by Claude with the
-   * source it was handed under (`dynamic` or `sdk`). A user or project server reusing a built-in
-   * name gets nothing. */
-  private builtinReadOnly(toolName: string, mcpServer?: { name: string; source: string }): boolean {
-    if (!isBuiltinReadOnlyMcpName(toolName)) return false;
+   * source it was handed under (`dynamic` or `sdk`), or a Mission tool of the in-process Mission
+   * bridge. A user or project server reusing a built-in name gets nothing. */
+  private builtinTrusted(toolName: string, mcpServer?: { name: string; source: string }): boolean {
+    if (!isBuiltinTrustedMcpName(toolName)) return false;
     const server = toolName.slice('mcp__'.length, toolName.indexOf('__', 'mcp__'.length));
     const source = this.builtinServers.get(server);
-    return !!source && (!mcpServer || mcpServer.name === server && mcpServer.source === source);
+    if (!source) return false;
+    // Only this host can register an `sdk` server, so that reported source is the provenance: a
+    // configured server under the same name (any other source), or no report at all, gets nothing.
+    if (isBuiltinMissionMcpName(toolName)) return source === 'sdk' && mcpServer?.name === server && mcpServer.source === 'sdk';
+    return !mcpServer || mcpServer.name === server && mcpServer.source === source;
   }
 
   /** The tier's verdict for one call, without asking anyone. */
   private async gateTool(toolName: string, input: Record<string, unknown>, mcpServer?: { name: string; source: string }): Promise<{ verdict: GateVerdict; isEdit: boolean; command?: string; outsideWorkspace: boolean }> {
     const mode = this.ctx.permissionMode();
     const isEdit = EDIT_TOOLS.has(toolName);
-    const mutating = !READ_ONLY_TOOLS.has(toolName) && !this.builtinReadOnly(toolName, mcpServer);
+    const trusted = this.builtinTrusted(toolName, mcpServer);
+    const mutating = !READ_ONLY_TOOLS.has(toolName) && !trusted;
     const command = typeof input.command === 'string' ? input.command : undefined;
     const editTarget = isEdit ? String(input.file_path ?? input.notebook_path ?? '') : '';
     // Real-path check: a symlink or junction inside the project that leads out of it counts as outside.
     const outsideWorkspace = !!editTarget && await requiresPathApproval(this.ctx.session().cwd, editTarget);
-    const verdict = gateAction(mode, { mutating, isEdit, command, sessionAllowed: this.sessionAllowed.has(toolName), outsideWorkspace });
+    const missionBuilder = this.ctx.session().mission?.role === 'builder';
+    let verdict = gateAction(mode, { mutating, isEdit, command, sessionAllowed: this.sessionAllowed.has(toolName), outsideWorkspace, missionBuilder });
+    // A Builder never runs an MCP tool the app cannot vouch for unasked, in any tier: it may publish.
+    if (missionBuilder && verdict === 'allow' && toolName.startsWith('mcp__') && !trusted) verdict = 'ask';
     return { verdict, isEdit, command, outsideWorkspace };
   }
 
@@ -1331,8 +1372,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       /* ignore */
     }
     this.q = null;
-    if (this.closeMemoryMcp) await this.closeMemoryMcp();
-    this.closeMemoryMcp = undefined;
+    await this.closeGatewayBridges();
     // A run still open when the process goes away has no end record and no owner left to write one,
     // so close it as interrupted rather than leaving it spinning as `running` in an open app.
     await this.subagents.settle();
