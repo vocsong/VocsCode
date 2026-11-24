@@ -291,21 +291,3 @@ button.mission-card-head:hover {
   color: var(--accent);
   font-weight: 600;
 }
-
-/* New Session: the Mission switch shares the permission field's control row. */
-.ns-permission-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-.ns-permission-row select {
-  flex: 1;
-  min-width: 0;
-}
-.ns-mission {
-  flex-shrink: 0;
-}
-.ns-mission .toggle {
-  margin: 0;
-}
