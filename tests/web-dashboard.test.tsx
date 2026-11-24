@@ -118,8 +118,9 @@ describe('dashboard view', () => {
     render(<Dashboard loader={relay.loader()} />);
     await waitFor(() => expect(screen.getAllByTestId('computer-card')).toHaveLength(2));
     expect(screen.getAllByTestId('computer-spend').map((n) => n.textContent)).toEqual(['$4.00', '$3.00']);
-    expect(screen.getByTestId('by-computer')).toBeTruthy();
-    expect(document.querySelector('.kpi-value')?.textContent).toBe('$7.00');
+    const spend = screen.getByText('$7.00');
+    expect(spend.className).toContain('kpi-value');
+    expect(spend.compareDocumentPosition(screen.getByTestId('by-computer')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     fireEvent.click(screen.getByRole('tab', { name: 'Sessions' }));
     await waitFor(() => expect(document.querySelectorAll('.slist-computer')).toHaveLength(2));
@@ -162,6 +163,7 @@ describe('dashboard view', () => {
     render(<Dashboard loader={waiting.loader()} />);
     await screen.findByTestId('dashboard-waiting');
     expect(screen.getByTestId('computer-sync').textContent).toBe('Not sharing analytics yet');
+    expect(screen.queryByRole('button', { name: /Vocs PC/ })).toBeNull();
     expect(screen.queryByRole('tablist')).toBeNull();
   });
 
@@ -175,7 +177,9 @@ describe('dashboard view', () => {
     const [mac, pc] = screen.getAllByTestId('computer-card');
     expect(pc.className).toContain('is-stale');
     expect(pc.textContent).toContain('stale');
+    expect(screen.getByRole('button', { name: /Vocs PC.*Online/ })).toBe(pc);
     expect(mac.className).not.toContain('is-stale');
+    expect(screen.getByRole('button', { name: /Vocs Macmini.*Offline/ })).toBe(mac);
   });
 });
 

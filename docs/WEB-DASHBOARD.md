@@ -1,11 +1,8 @@
 # Unified analytics dashboard on code.vocs.io
 
-Status: **in progress.** Agreed with the owner on 2026-11-24; steps 1–4 below are implemented on
-`develop` as they merge, the landing change (step 5) and the rollout are not. The web remote
-client at `code.vocs.io/app` is replaced by a signed-in analytics dashboard at
-`code.vocs.io/dashboard` that combines every Vocs Code computer on the account. The
-assistant chat that later replaces remote session control is a separate track (the MCP and Dots
-work); nothing here builds it.
+Status: **live since v0.12.0.** The signed-in dashboard at `code.vocs.io/dashboard` replaced the
+browser remote client and combines analytics from every Vocs Code computer on the account. The
+remaining desktop Remote panel cleanup and the assistant/control plane are separate work.
 
 ## 1. Decisions of record
 
@@ -23,13 +20,14 @@ work); nothing here builds it.
 
 ## 2. What the user sees
 
-- **Header:** account name and sign out. Under it, a computer switcher (**All computers** · each
-  computer that shares), the range picker, Refresh, and the tabs. The page refreshes itself every
+- **Header:** the same Vocs Code wordmark, frosted bar and product switcher as the public site, with
+  an account name and sign out. The workspace puts the computer scope (**All computers** or a
+  sharing computer), date range and Refresh above the reports. The page refreshes itself every
   minute while visible.
 - **Computers strip:** one card per computer on the account showing name, platform, online/offline
   (relay presence), app version, "Synced 4 min ago" or "Not sharing analytics yet", spend in the
   range, and a "stale" flag when an online computer has not synced for over 24 h. Clicking a card
-  selects that computer; clicking it again goes back to all.
+  with analytics selects that computer; clicking it again goes back to all.
 - **All computers:** totals add up across computers. Overview and Spend gain a **Spend by
   computer** chart, Tokens a tokens one and Activity a turns one (columns stacked by computer).
   Project rows merge by folder name.
@@ -133,6 +131,10 @@ New routes, added to both `relay/src/routes.ts` and the edge allowlist in `relay
   calls only same-origin owner routes (`src/web/owner-api.ts`); the screens, sheets, terminal,
   transport and browser vault of the remote client are deleted, and the bundle no longer includes
   `relay/src/web-client.ts`.
+- The shell and Connect with Vocs stage use the same
+  [Vocs UI assets as the signed-out landing](../src/web/design-system/VENDORED.md): the Code
+  palette, system light/dark themes, and same-origin Inter and Geist Mono. The web CSS bridges those
+  tokens to the shared charts and reports without changing the desktop appearance.
 - The tab strip and tab bodies are shared (`components/analytics/AnalyticsView.tsx`); the desktop
   wraps them with `invoke`, the web with the snapshot loader. An `AnalyticsEnv` context
   (`components/analytics/env.tsx`) turns off what only the desktop can do: the reliability
@@ -140,8 +142,9 @@ New routes, added to both `relay/src/routes.ts` and the edge allowlist in `relay
 - Move `summarize` and its helpers out of `src/main/analytics.ts` into `src/shared/analytics/`
   (browser-safe). The desktop keeps calling the same function.
 - Build: `vite.config.web.ts` `base: '/dashboard/'`, output `relay/public/dashboard`;
-  `relay/public/_headers` CSP moves with it and allows same-origin fetches only. The relay answers
-  `/app*` with a 301 to `/dashboard*`, query preserved (`relay/src/legacy-app.ts`), and its
+  `relay/public/_headers` allows same-origin fonts and fetches, without inline style or script
+  permission. The relay answers `/app*` with a 301 to `/dashboard*`, query preserved
+  (`relay/src/legacy-app.ts`), and its
   `run_worker_first` covers `/app*` so a stale build left in `relay/public/app` can never shadow
   the redirect.
 

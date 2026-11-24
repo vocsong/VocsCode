@@ -30,14 +30,23 @@ describe('web dashboard layout (/dashboard on the landing origin)', () => {
 
   it('ships a restrictive same-origin CSP, no-store for the shell and immutable hashed assets', async () => {
     const headers = await read('relay/public/_headers');
-    expect(headers).toMatch(/\/dashboard\/\*\s+Content-Security-Policy:/);
-    expect(headers).toContain("default-src 'none'");
-    expect(headers).toContain("script-src 'self'");
-    expect(headers).toContain("connect-src 'self';");
-    expect(headers).toContain("frame-ancestors 'none'");
-    expect(headers).toMatch(/\/dashboard\/\*[\s\S]*Cache-Control:\s*no-store/i);
+    const shell = /^\/dashboard\/\*[ \t]*\r?\n((?:[ \t]+[^\r\n]+(?:\r?\n|$))+)/m.exec(headers)?.[1];
+    const csp = shell?.match(/^[ \t]*Content-Security-Policy:[ \t]*([^\r\n]+)/im)?.[1];
+    // Self-hosted fonts are the only addition to the shell's existing policy.
+    expect(csp?.split(';').map((directive) => directive.trim().replace(/\s+/g, ' ')).filter(Boolean).sort()).toEqual([
+      "base-uri 'none'",
+      "connect-src 'self'",
+      "default-src 'none'",
+      "font-src 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "img-src 'self' data:",
+      "object-src 'none'",
+      "script-src 'self'",
+      "style-src 'self'",
+    ]);
+    expect(shell).toMatch(/^[ \t]*Cache-Control:\s*no-store\s*$/im);
     expect(headers).toMatch(/\/dashboard\/assets\/\*[\s\S]*!\s*Cache-Control[\s\S]*max-age=31536000, immutable/);
-    expect(headers).not.toMatch(/unsafe-inline|unsafe-eval|wss:/);
   });
 
   it('calls only same-origin owner routes, never a relay URL or a stored credential', async () => {

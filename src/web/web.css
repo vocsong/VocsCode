@@ -1,399 +1,252 @@
-/* The web dashboard's own chrome, layered over the renderer's styles.css (which brings the analytics
-   views and controls). Mobile-first: sized for a phone, widening on larger screens. No inline
-   styles anywhere: the /dashboard CSP has no style-src 'unsafe-inline'. */
+/* Code's dashboard uses the same Vocs UI as the landing. Reuse only the renderer's
+   analytics views and primitives, in a lower layer. Nothing here is imported by the desktop. */
+@import '@renderer/styles/tokens.css' layer(analytics-base);
+@import '@renderer/styles/reset.css' layer(analytics-base);
+@import '@renderer/styles/primitives.css' layer(analytics-base);
+@import '@renderer/styles/views.css' layer(analytics-base);
 
-/* --- Identity: the code.vocs.io palette ------------------------------------------------------
-   The landing's warm paper and ink, so the app and the page around it read as one product. Same
-   token names as the renderer's styles.css (loaded first), so the reused transcript, tool cards
-   and approvals pick it up unchanged; the dark block follows the system setting. */
-
-:root:not([data-theme]) {
-  --bg: #f6f5f0;
-  --bg-elev: #fdfcf8;
-  --bg-sunken: #edebe4;
-  --bg-hover: rgba(26, 26, 23, 0.05);
-  --bg-active: rgba(26, 26, 23, 0.09);
-  --fg: #1a1a17;
-  --fg-muted: #65635b;
-  --fg-faint: #9b988e;
-  --border: #e2dfd5;
-  --border-strong: #cdc9bd;
-  --accent: #1a1a17;
-  --accent-fg: #f6f5f0;
-  --green: #2e8b57;
-  --amber: #b7791f;
-  --red: #c8372d;
-  --blue: #2f6fed;
-  --user-bubble: #ebe8de;
-  --shadow: 0 12px 32px rgba(26, 26, 23, 0.1);
-  --w-live: #2e8b57;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-    --bg: #121210;
-    --bg-elev: #1a1a17;
-    --bg-sunken: #0c0c0b;
-    --bg-hover: rgba(236, 235, 228, 0.06);
-    --bg-active: rgba(236, 235, 228, 0.1);
-    --fg: #ecebe4;
-    --fg-muted: #a5a299;
-    --fg-faint: #6f6c63;
-    --border: #2a2925;
-    --border-strong: #3b3934;
-    --accent: #ecebe4;
-    --accent-fg: #121210;
-    --green: #4cc38a;
-    --amber: #e3ab4f;
-    --red: #ff6b6e;
-    --blue: #6ea0ff;
-    --user-bubble: #25241f;
-    --shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
-    --w-live: #4cc38a;
-  }
+:root[data-product='code'] {
+  --font: var(--v-font-sans);
+  --mono: var(--v-font-mono);
+  --bg: var(--v-bg);
+  --bg-elev: var(--v-surface);
+  --bg-sunken: var(--v-surface-2);
+  --bg-hover: var(--v-surface-2);
+  --bg-active: var(--v-hue-soft);
+  --fg: var(--v-fg);
+  --fg-muted: var(--v-fg-2);
+  --fg-faint: var(--v-fg-3);
+  --border: var(--v-line);
+  --border-strong: var(--v-line-2);
+  --accent: var(--v-hue);
+  --accent-fg: var(--v-hue-on);
+  --green: var(--v-live);
+  --amber: var(--v-warn);
+  --red: var(--v-danger);
+  --blue: var(--v-info);
+  --radius: var(--v-r-l);
+  --radius-sm: var(--v-r-s);
+  --shadow: var(--v-shadow-pop);
+  --shadow-sm: var(--v-shadow-1);
+  /* Keep the categorical slots distinct and consistent across the cards, charts and legends. */
+  --chart-1: var(--v-hue);
+  --chart-2: var(--v-blue);
+  --chart-3: var(--v-green);
+  --chart-4: var(--v-amber);
+  --chart-5: color-mix(in oklab, var(--v-glow-b) 72%, var(--v-fg));
+  --chart-6: color-mix(in oklab, var(--v-blue) 45%, var(--v-green));
+  --chart-7: color-mix(in oklab, var(--v-warn) 55%, var(--v-fg));
+  --chart-8: color-mix(in oklab, var(--v-green) 50%, var(--v-amber));
+  --chart-unattributed: var(--v-fg-2);
+  --w-header-height: calc(var(--v-header-h) + env(safe-area-inset-top));
 }
 
 html,
-body,
+body.v-root,
 #root {
-  height: 100%;
+  height: auto;
 }
 
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--font);
-  -webkit-text-size-adjust: 100%;
-}
-
-input,
-textarea,
-select,
-button {
-  font-family: inherit;
-}
-
-/* 16px keeps iOS from zooming a field on focus; the .w-app scope outranks the reused
-   transcript/approval styles, which set smaller mono sizes. */
-.w-app input,
-.w-app textarea,
-.w-app select {
-  font-size: 16px;
+body.v-root {
+  overflow: visible;
 }
 
 .w-app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  height: 100dvh;
-  padding-bottom: calc(var(--w-keyboard, 0px) + env(safe-area-inset-bottom));
-  padding-left: env(safe-area-inset-left);
-  padding-right: env(safe-area-inset-right);
-  overflow: hidden;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
-/* --- Pairing and connect screens ------------------------------------------------ */
-
-.w-screen {
-  flex: 1;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 24px 16px;
-  overflow-y: auto;
+.w-app .v-wrap {
+  padding-inline-start: max(var(--v-gutter), env(safe-area-inset-left));
+  padding-inline-end: max(var(--v-gutter), env(safe-area-inset-right));
 }
 
-.w-card {
-  width: min(480px, 100%);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 24px 22px;
-  box-shadow: var(--shadow);
-  box-sizing: border-box;
-}
-
-/* The wordmark, as on the landing: "VOCS CODE." */
-.w-brand {
-  font-weight: 700;
-  font-size: 15px;
-  letter-spacing: 0.01em;
-  text-transform: uppercase;
-  color: var(--fg);
-  white-space: nowrap;
-}
-
-.w-brand::after {
-  content: '.';
-}
-
-.w-screen-brand {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: min(480px, 100%);
-  margin: 0 auto 18px;
-}
-
-.w-screen-inner {
-  width: min(480px, 100%);
-  margin: 0 auto;
-}
-
-.w-lead {
-  color: var(--fg-muted);
-  font-size: 15px;
-  line-height: 1.5;
-  margin: 0 0 4px;
-}
-
-.w-pair-code input {
-  font-family: var(--mono);
-  font-size: 22px !important;
-  letter-spacing: 0.24em;
-  text-transform: uppercase;
-  text-align: center;
-}
-
-.w-block {
-  width: 100%;
-  justify-content: center;
-}
-
-.w-divider {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 18px 0 6px;
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--fg-faint);
-}
-
-.w-divider::before,
-.w-divider::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: var(--border);
-}
-
-.w-help summary {
-  cursor: pointer;
-  color: var(--fg-muted);
-  font-size: 14px;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
+.w-topbar {
+  height: var(--w-header-height);
+  padding-top: env(safe-area-inset-top);
 }
 
 .w-account {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  min-width: 0;
   gap: 8px;
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-  font-size: 13px;
-  color: var(--fg-muted);
+  color: var(--v-fg-2);
+  font-size: 0.8125rem;
+  margin-inline: 6px;
 }
 
-.w-account form {
+.w-account-name {
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-signout {
   margin: 0;
-}
-
-.w-wait {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 10px;
-}
-
-.w-wait-ring {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  border: 3px solid var(--border);
-  border-top-color: var(--fg);
-  animation: w-spin 0.9s linear infinite;
-  margin: 6px 0 4px;
-}
-
-@keyframes w-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .w-wait-ring { animation: none; }
-}
-
-.w-card h1 {
-  margin: 0 0 8px;
-  font-size: 26px;
-  line-height: 1.15;
-  letter-spacing: -0.02em;
-  font-weight: 600;
-}
-
-/* The landing's small mono caps: section labels, eyebrows, field labels. */
-.w-label,
-.w-section h2,
-.w-card h2,
-.w-app .field > span:first-child,
-.w-app .field-label {
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--fg-muted);
-}
-
-.w-app .btn {
-  border-radius: 10px;
-}
-
-.w-app .btn-primary {
-  background: var(--accent);
-  color: var(--accent-fg);
-  border-color: var(--accent);
-}
-
-.w-card h2 {
-  margin: 22px 0 8px;
-}
-
-.w-steps {
-  color: var(--fg-muted);
-  padding-left: 20px;
-  margin: 12px 0;
-  font-size: 14px;
-}
-
-.w-steps li {
-  margin: 6px 0;
-}
-
-.w-steps li.is-current {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.w-check-code {
-  font-family: var(--mono);
-  font-size: 28px;
-  letter-spacing: 4px;
-  text-align: center;
-  padding: 12px;
-  background: var(--bg-sunken);
-  border-radius: 12px;
-}
-
-.w-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-
-.w-hint {
-  color: var(--fg-muted);
-  font-size: 14px;
-}
-
-.w-error {
-  color: var(--red);
-  font-size: 14px;
-}
-
-.w-loading,
-.w-empty {
-  color: var(--fg-muted);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 32px 16px;
-  text-align: center;
-}
-
-.w-select {
-  width: 100%;
-  margin: 8px 0;
-  padding: 8px;
-}
-
-/* --- Top bar ----------------------------------------------------------------------- */
-
-.w-topbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 16px;
-  padding-top: calc(6px + env(safe-area-inset-top));
-  min-height: 56px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-
-.w-topbar .w-brand {
-  margin-right: 2px;
-  text-decoration: none;
-}
-
-.w-topbar-title {
-  color: var(--fg-muted);
-  font-size: 13px;
-}
-
-.w-topbar-spacer {
-  flex: 1;
-}
-
-.w-topbar .btn-ghost {
-  color: var(--fg);
+  flex: none;
 }
 
 .w-main {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
   min-width: 0;
-  overflow: auto;
 }
 
-/* --- Dashboard --------------------------------------------------------------------- */
-
-/* The renderer's .analytics view fills a window; on the web it scrolls inside the page. */
-.w-dashboard {
-  height: auto;
-  min-height: 0;
+/* The focus variant is the only place the dashboard uses the Vocs aura. */
+.w-focus-stage {
+  min-height: calc(100dvh - var(--w-header-height) - env(safe-area-inset-bottom));
 }
 
-.w-dashboard .analytics-top {
+.w-focus-card {
+  gap: 18px;
+}
+
+.w-focus-description {
+  margin-top: 12px;
+  font-size: 0.9375rem;
+}
+
+.w-check-code {
+  margin: 0;
+  padding: 12px;
+  border-radius: var(--v-r-m);
+  background: var(--v-surface-2);
+  color: var(--v-fg);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-align: center;
+}
+
+.w-focus-actions {
+  display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
+}
+
+.w-focus-card .v-btn {
+  min-height: 44px;
+}
+
+.w-focus-status {
+  font-size: 0.875rem;
+}
+
+.w-focus-status:empty {
+  position: absolute;
+}
+
+/* Dashboard chrome: the same page head, card rhythm and quiet controls as the signed-in products. */
+.w-dashboard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--v-gap);
+  min-width: 0;
+  padding-block: clamp(24px, 3.5vw, 48px) 64px;
+}
+
+.w-dashboard .w-page-head {
+  margin: 0;
+}
+
+.w-refresh {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .w-dashboard-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  gap: 12px 24px;
+  padding: 12px 16px;
+  background: var(--v-bg-subtle);
+  border: 1px solid var(--v-line);
+  border-radius: var(--v-r-m);
+  min-width: 0;
+}
+
+.w-filter {
+  display: flex;
+  align-items: center;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--v-fg-2);
+  font-size: 0.8125rem;
+  font-weight: 550;
+}
+
+.w-filter > span {
+  flex: none;
+}
+
+.w-dashboard .segmented {
+  flex-wrap: nowrap;
+  gap: 2px;
+  background: var(--v-surface-2);
+  border: 0;
+  padding: 3px;
+  border-radius: var(--v-r-pill);
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--v-line-2) transparent;
+}
+
+.w-dashboard .segment {
+  flex-shrink: 0;
+  max-width: 14rem;
+  min-height: 30px;
+  padding: 4px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 0;
+  border-radius: var(--v-r-pill);
+  font-size: 0.8125rem;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.w-dashboard .segment:hover {
+  color: var(--v-fg);
+}
+
+.w-dashboard .segment.active {
+  background: var(--v-surface);
+  color: var(--v-hue);
+  box-shadow: var(--v-shadow-1);
+}
+
+.w-device-section {
+  min-width: 0;
+}
+
+.w-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin: 0 0 10px;
 }
 
 .w-computers {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
-  padding: 12px 16px 4px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.w-computers > li {
+  min-width: 0;
 }
 
 .w-computer {
@@ -401,50 +254,56 @@ button {
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-elev);
-  color: var(--fg);
+  width: 100%;
+  min-height: 100%;
+  padding: 13px 16px;
+  color: var(--v-fg);
   text-align: left;
-  font: inherit;
+  font-size: 0.875rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+button.w-computer {
   cursor: pointer;
 }
 
-.w-computer:hover {
-  border-color: var(--border-strong);
+button.w-computer:hover {
+  border-color: var(--v-line-2);
 }
 
-.w-computer.is-selected {
-  border-color: var(--fg);
-  box-shadow: inset 0 0 0 1px var(--fg);
+button.w-computer[aria-pressed='true'] {
+  border-color: var(--v-hue);
+  box-shadow: 0 0 0 1px var(--v-hue), var(--v-shadow-1);
 }
 
 .w-computer.is-stale .w-computer-sync {
-  color: var(--amber);
+  color: var(--v-warn);
 }
 
 .w-computer-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   width: 100%;
 }
 
+.w-computer-head .v-badge {
+  padding: 3px 7px;
+  font-size: 0.6875rem;
+}
+
 .w-computer-name {
-  flex: 1;
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .w-computer-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
-  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
 }
 
 .w-computer-swatch[data-slot='1'] { background: var(--chart-1); }
@@ -454,57 +313,300 @@ button {
 .w-computer-swatch[data-slot='5'] { background: var(--chart-5); }
 .w-computer-swatch[data-slot='6'] { background: var(--chart-6); }
 
-.w-computer-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: none;
-  background: var(--fg-faint);
-}
-
-.w-computer-dot.is-online {
-  background: var(--w-live);
-}
-
 .w-computer-meta,
 .w-computer-sync {
+  font-size: 0.75rem;
+  color: var(--v-fg-3);
+  overflow-wrap: anywhere;
+}
+
+.w-computer-meta {
   display: flex;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--fg-muted);
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.w-computer-figure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 7px;
+  margin-top: auto;
+  padding-top: 6px;
 }
 
 .w-computer-spend {
-  font-family: var(--mono);
-  font-size: 18px;
+  font-size: 1.125rem;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.w-empty {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: clamp(24px, 5vw, 56px) 20px;
+  text-align: center;
+}
+
+.w-empty .v-text {
+  max-width: 48ch;
+}
+
+.w-loading {
+  grid-auto-flow: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--v-fg-2);
+}
+
+/* Shared report bodies, in the web theme. Only the tab strip and dense tables can scroll sideways. */
+.w-dashboard .analytics-tabs {
+  position: sticky;
+  top: var(--w-header-height);
+  z-index: 8;
+  gap: 4px;
+  padding: 6px;
+  background: var(--v-surface-2);
+  border: 1px solid var(--v-line);
+  border-radius: var(--v-r-m);
+  scrollbar-width: thin;
+  scrollbar-color: var(--v-line-2) transparent;
+  scrollbar-gutter: auto;
+}
+
+.w-dashboard .atab {
+  flex: none;
+  min-height: 38px;
+  margin: 0;
+  border: 0;
+  border-radius: var(--v-r-s);
+  padding: 6px 12px;
+  font-size: 0.875rem;
+  font-weight: 550;
+}
+
+.w-dashboard .atab:hover {
+  background: var(--v-surface-3);
+}
+
+.w-dashboard .atab.active {
+  background: var(--v-surface);
+  color: var(--v-hue);
+  box-shadow: var(--v-shadow-1);
+}
+
+.w-dashboard .analytics-body {
+  padding: 0;
+  overflow: visible;
+  gap: var(--v-gap);
+}
+
+.w-dashboard :is(.kpi, .acard) {
+  gap: 8px;
+  padding: clamp(14px, 1.5vw, 22px);
+  border-color: var(--v-card-line);
+  box-shadow: var(--v-shadow-1);
+}
+
+.w-dashboard .kpi-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  gap: 12px;
+}
+
+.w-dashboard .kpi-label,
+.w-dashboard .acard-sub {
+  font-size: 0.8125rem;
+}
+
+.w-dashboard .kpi-value {
+  font-family: var(--v-font-sans);
   font-variant-numeric: tabular-nums;
+  font-size: clamp(1.3rem, 2.5vw, 1.875rem);
+  font-weight: 650;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+}
+
+.w-dashboard .spark polyline {
+  stroke: var(--v-hue);
+  opacity: 0.6;
+}
+
+.w-dashboard .acard-title {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.w-dashboard .acard-head {
+  flex-wrap: wrap;
+}
+
+.w-dashboard .agrid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: var(--v-gap);
+}
+
+.w-dashboard .agrid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 25rem), 1fr));
+}
+
+.w-dashboard .btn {
+  border-radius: var(--v-r-pill);
+  min-height: 30px;
+}
+
+.w-dashboard .legend-item {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border-radius: var(--v-r-pill);
+}
+
+.w-dashboard .chart-tip {
+  max-width: min(300px, 100%);
+}
+
+.w-dashboard :is(.chart, .slist, .kpi-block) {
+  min-width: 0;
+}
+
+.w-dashboard .chart-axis {
+  font-family: var(--v-font-mono);
+}
+
+.w-dashboard .asearch {
+  max-width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--v-line-2);
+  border-radius: var(--v-r-m);
+  padding-inline: 11px;
+  background: var(--v-input-bg);
+  font-size: 1rem; /* Prevents iOS focus zoom. */
+}
+
+.w-dashboard .slist-title {
+  overflow-wrap: anywhere;
+}
+
+.w-dashboard .slist:not(.compact) {
+  overflow-x: auto;
+}
+
+.w-dashboard .slist:not(.compact) .slist-row {
+  min-width: 27rem;
+}
+
+.w-dashboard .slist.compact .slist-row {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .w-per-computer-note {
-  margin: 0 0 8px;
+  margin: 0;
 }
 
 .w-per-computer {
-  margin-bottom: 24px;
+  display: grid;
+  gap: var(--v-gap);
+  min-width: 0;
 }
 
 .w-per-computer-title {
-  margin: 12px 0 8px;
-  font-size: 15px;
+  margin: 4px 0 0;
+  font-size: 1.125rem;
   font-weight: 600;
 }
 
-/* Phones: the switcher and the range picker each take a full row and scroll sideways. */
-@media (max-width: 640px) {
-  .w-dashboard-controls .segmented {
-    max-width: 100%;
-    overflow-x: auto;
+@media (max-width: 760px) {
+  .w-topbar .v-topbar-inner {
+    gap: 12px;
   }
-  .w-computers {
-    grid-template-columns: 1fr 1fr;
-    padding: 10px 12px 4px;
+
+  .w-account-name {
+    /* Keep the name for assistive technology when there isn't room beside the avatar. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    clip-path: inset(50%);
   }
-  .w-topbar-title {
-    display: none;
+
+  .w-filter {
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .w-filter > span {
+    width: 100%;
+  }
+}
+
+@media (max-width: 600px) {
+  .w-topbar .v-switcher-panel {
+    top: calc(var(--w-header-height) + 6px);
+    max-height: calc(100dvh - var(--w-header-height) - 18px);
+    overflow-y: auto;
+  }
+
+  .w-account {
+    margin-inline: 0;
+  }
+
+  .w-topbar .v-topbar-actions {
+    gap: 4px;
+  }
+
+  .w-topbar .v-icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .w-topbar .v-btn,
+  .w-refresh .v-btn,
+  .w-dashboard :is(.atab, .segment, .btn, .afilter, button.legend-item) {
+    min-height: 44px;
+  }
+
+  .w-dashboard .w-page-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
+  .w-refresh {
+    flex-direction: column-reverse;
+    align-items: flex-end;
+    gap: 4px;
+  }
+
+  .w-refresh .analytics-updated {
+    font-size: 0.6875rem;
+  }
+
+  .w-dashboard-controls {
+    padding: 10px;
+  }
+
+  .w-computers,
+  .w-dashboard .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .w-computer,
+  .w-dashboard :is(.kpi, .acard) {
+    padding: 12px;
+  }
+
+  .w-computer-head {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .w-computer-head .v-badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .w-dashboard .hbar {
+    grid-template-columns: minmax(0, 1fr) minmax(1.5rem, 0.85fr) auto auto;
+    gap: 6px;
   }
 }
