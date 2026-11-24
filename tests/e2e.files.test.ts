@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
+import { crc32, deflateSync } from 'node:zlib';
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
@@ -60,6 +61,29 @@ async function copyPreviewImage(win: Page, image: Locator) {
   await menu.getByRole('menuitem', { name: 'Copy image', exact: true }).click({ timeout: 10_000 });
   await menu.waitFor({ state: 'hidden', timeout: 10_000 });
   await win.locator('.toast').getByText('Image copied', { exact: true }).waitFor({ timeout: 10_000 });
+}
+
+// Two vertical bands make the panned image recognizable without an external fixture.
+function widePreviewPng(width: number, height: number): Buffer {
+  const chunk = (name: string, data: Buffer = Buffer.alloc(0)) => {
+    const bytes = Buffer.concat([Buffer.from(name, 'ascii'), data]);
+    const length = Buffer.alloc(4);
+    const crc = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    crc.writeUInt32BE(crc32(bytes));
+    return Buffer.concat([length, bytes, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8; // 8-bit grayscale.
+  const row = Buffer.alloc(width + 1, 64);
+  row[0] = 0; // No row filter.
+  row.fill(192, 1 + Math.floor(width / 2));
+  return Buffer.concat([
+    Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
+    chunk('IDAT', deflateSync(Buffer.alloc(row.length * height, row))), chunk('IEND'),
+  ]);
 }
 
 describe.runIf(enabled)('workspace file previews and editing', () => {
@@ -210,6 +234,125 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     expect(await win.locator('.file-preview').count()).toBe(0);
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'files-03-inline-images.png') });
+  }, 120_000);
+
+  it('zooms the image lightbox with the wheel and bounds click-drag panning', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-image-zoom-'));
+    onTestFinished(() => fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+    const userData = path.join(tmp, 'profile');
+    const project = path.join(tmp, 'project');
+    const sid = 's_image_zoom';
+    const sessionDir = path.join(userData, 'sessions', sid);
+    const naturalWidth = 2560;
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.mkdir(project);
+    await fs.writeFile(path.join(project, 'wide.png'), widePreviewPng(naturalWidth, 512));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const session: SessionMeta = {
+      id: sid, title: 'Image zoom', createdAt: 1, updatedAt: 1,
+      config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
+      cwd: project, status: 'idle', harnessRef: {}, queued: 0,
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+    };
+    const item: TranscriptItem = { id: 'reply', kind: 'assistant', ts: 1, text: '![Wide screenshot](wide.png)' };
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+    await fs.writeFile(path.join(sessionDir, 'transcript.jsonl'), JSON.stringify(item) + '\n');
+    const packaged = process.env.HARNESS_E2E_EXE;
+    app = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      args: [...(packaged ? [] : [path.join(root, 'out', 'main', 'index.js')]), `--user-data-dir=${userData}`],
+      env: isolatedEnv(userData), timeout: 60_000,
+    });
+    const win = await app.firstWindow();
+    await win.setViewportSize({ width: 1280, height: 800 });
+    await win.emulateMedia({ reducedMotion: 'reduce' });
+    await win.getByRole('button', { name: 'Preview Wide screenshot', exact: true }).click({ timeout: 15_000 });
+
+    const dialog = win.getByRole('dialog', { name: 'Image preview', exact: true });
+    const viewport = dialog.locator('.image-lightbox-viewport');
+    const image = dialog.getByRole('img', { name: 'Wide screenshot', exact: true });
+    const zoomButton = (name: string) => dialog.getByRole('button', { name, exact: true });
+    const reset = zoomButton('Reset zoom');
+    await zoomButton('Close image preview').waitFor({ state: 'visible', timeout: 10_000 });
+    await reset.waitFor({ state: 'visible', timeout: 10_000 });
+    await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 10_000 }).toBe(naturalWidth);
+    const box = async (locator: Locator) => {
+      const bounds = await locator.boundingBox({ timeout: 1_000 });
+      if (!bounds) throw new Error(`No rendered box for ${locator}`);
+      return bounds;
+    };
+    const imageBox = () => box(image);
+    const imageWidth = async () => (await imageBox()).width;
+    const percent = async () => (await reset.innerText({ timeout: 1_000 })).trim();
+    const stage = await box(viewport);
+    const stageRight = stage.x + stage.width;
+    const fit = await imageBox();
+    const tolerance = 3; // CSS pixels: tolerate subpixel layout and mouse coordinate rounding.
+    expect(fit.width).toBeLessThan(naturalWidth);
+    expect(fit.width).toBeLessThanOrEqual(stage.width + tolerance);
+    expect(await percent()).toBe('100%');
+
+    // Zoom off-center. An image point under the pointer should stay there instead of zooming around the middle.
+    const anchorX = Math.round(fit.x + fit.width * 0.65);
+    const centerY = Math.round(fit.y + fit.height / 2);
+    await win.mouse.move(anchorX, centerY);
+    await win.mouse.wheel(0, -120);
+    await expect.poll(imageWidth, { timeout: 5_000, message: 'wheel up widens the fitted image' }).toBeGreaterThan(stage.width + tolerance);
+    const enlarged = await imageBox();
+    const anchoredX = enlarged.x + (anchorX - fit.x) * enlarged.width / fit.width;
+    expect(Math.abs(anchoredX - anchorX), 'zoom keeps the same horizontal image point under the pointer').toBeLessThanOrEqual(tolerance);
+    expect(Number.parseFloat(await percent())).toBeGreaterThan(100);
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'files-06-image-zoom.png') });
+
+    // A smaller reverse wheel gesture shrinks the image but leaves room for a bounded horizontal pan.
+    await win.mouse.wheel(0, 60);
+    await expect.poll(imageWidth, { timeout: 5_000, message: 'wheel down shrinks the zoomed image' }).toBeLessThan(enlarged.width - tolerance);
+    const wheelOut = await imageWidth();
+    await zoomButton('Zoom in').click({ timeout: 5_000 });
+    await expect.poll(imageWidth, { timeout: 5_000 }).toBeGreaterThan(wheelOut + tolerance);
+    const buttonIn = await imageWidth();
+    await zoomButton('Zoom out').click({ timeout: 5_000 });
+    await expect.poll(imageWidth, { timeout: 5_000 }).toBeLessThan(buttonIn - tolerance);
+
+    const beforeDrag = await imageBox();
+    expect(beforeDrag.x).toBeLessThan(stage.x - tolerance);
+    expect(beforeDrag.x + beforeDrag.width).toBeGreaterThan(stageRight + tolerance);
+    expect(beforeDrag.y).toBeGreaterThan(stage.y + 2 * tolerance);
+    const blankY = (stage.y + beforeDrag.y) / 2;
+    const centerX = stage.x + stage.width / 2;
+    const leftX = stage.x + stage.width * 0.1;
+    const rightX = stage.x + stage.width * 0.9;
+    const expectPanLimit = (side: 'left' | 'right') => expect.poll(async () => {
+      const moved = await imageBox();
+      const gap = side === 'left' ? moved.x - stage.x : moved.x + moved.width - stageRight;
+      return Math.max(Math.abs(gap), Math.abs(moved.y - beforeDrag.y));
+    }, { timeout: 5_000, message: `drag reaches the ${side} viewport edge without vertical pan` }).toBeLessThanOrEqual(tolerance);
+
+    // Leave the image before moving horizontally, then overshoot both edges while over blank space.
+    await win.mouse.move(centerX, centerY);
+    await win.mouse.down();
+    try {
+      await win.mouse.move(centerX, blankY, { steps: 4 });
+      await win.mouse.move(rightX, blankY, { steps: 8 });
+      await expectPanLimit('left');
+      await win.mouse.move(leftX, blankY, { steps: 8 });
+      await expectPanLimit('right');
+    } finally {
+      await win.mouse.up();
+    }
+    expect(await dialog.isVisible(), 'releasing a drag over the backdrop does not close the lightbox').toBe(true);
+    await win.mouse.move(centerX, centerY);
+    await expectPanLimit('right');
+
+    await reset.click({ timeout: 5_000 });
+    await expect.poll(percent, { timeout: 5_000 }).toBe('100%');
+    await expect.poll(async () => {
+      const restored = await imageBox();
+      return Math.max(...(['x', 'y', 'width', 'height'] as const).map((key) => Math.abs(restored[key] - fit[key])));
+    }, { timeout: 5_000, message: 'reset restores the fitted image size and position' }).toBeLessThanOrEqual(tolerance);
+    await win.mouse.click(leftX, blankY);
+    await dialog.waitFor({ state: 'hidden', timeout: 10_000 });
   }, 120_000);
 
   it('resolves exact and shortened reply paths within the session checkout and previews the chosen file', async () => {
