@@ -98,6 +98,22 @@ describe('Usage panel', () => {
     expect(invoke).toHaveBeenCalledExactlyOnceWith('subscriptions:read', { provider: 'codex' });
   });
 
+  it.each(['codex', 'codex-exec'] as const)('shows real %s limits even when the boot-time login hint is stale', async (harness) => {
+    const invoke = vi.fn().mockResolvedValue(quotaReply);
+    vi.stubGlobal('harness', { invoke });
+    useStore.setState({ availability: { [harness]: { available: true, authenticated: false } } });
+    const current = session({ config: { ...session().config, harness } });
+    const { rerender } = render(<SessionUsage session={current} />);
+    expect(invoke).not.toHaveBeenCalled();
+    rerender(<SessionUsage session={current} readLimitsOnOpen />);
+
+    const codex = account('Codex · ChatGPT');
+    expect((await codex.findByRole('meter', { name: '5-hour limit' })).getAttribute('aria-valuenow')).toBe('73');
+    expect(codex.getByText('ChatGPT account')).toBeTruthy();
+    expect(codex.queryByText('Sign-in needed')).toBeNull();
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('subscriptions:read', { provider: 'codex' });
+  });
+
   it('shows an automatic read failure without inventing percentages or retrying in the background', async () => {
     const invoke = vi.fn().mockRejectedValueOnce(new Error("Error invoking remote method 'subscriptions:read': Error: Sign in with ChatGPT first."))
       .mockResolvedValueOnce(quotaReply);

@@ -22,7 +22,7 @@ import {
 import { BarList, Meter, Segmented, Sparkline, StackedBar, type BarRow, type Segment } from './analytics/charts';
 import { fmtPct } from './analytics/model';
 import { totalTokens } from '../../../shared/usage-rollup';
-import { SubscriptionUsage } from './SubscriptionUsage';
+import { SubscriptionUsage, SubscriptionUsageLinks } from './SubscriptionUsage';
 import { Icon } from './ui';
 
 /** Stable fallback so a zustand selector never returns a fresh array (React #185 infinite loop). */
@@ -101,6 +101,8 @@ export function SessionUsage({ session, items, readLimitsOnOpen = false }: {
         {costSpark.length > 1 && <Sparkline values={costSpark} width={104} height={34} />}
       </div>
 
+      <SubscriptionUsage session={session} readLimitsOnOpen={readLimitsOnOpen} />
+
       <div className="usage-kpis">
         <Kpi label="Tokens" value={fmtTokens(tokens)} sub={`${fmtTokens(u.inputTokens)} in · ${fmtTokens(u.outputTokens)} out`} title="Every token this session reported: input, output and cache traffic. Reasoning is counted inside output, the way the providers report it." />
         <Kpi label="Cache hit" value={fmtPct(cache)} sub={`${fmtTokens(u.cacheReadTokens)} reused`} title="Cache reads as a share of everything read into the model (cache reads + fresh input)." />
@@ -150,8 +152,6 @@ export function SessionUsage({ session, items, readLimitsOnOpen = false }: {
         </div>
       )}
 
-      <SubscriptionUsage session={session} readLimitsOnOpen={readLimitsOnOpen} />
-
       {tokens > 0 && (
         <section className="usage-block">
           <h5>Token mix</h5>
@@ -170,6 +170,8 @@ export function SessionUsage({ session, items, readLimitsOnOpen = false }: {
         {view === 'tools' && <ToolsDetail stats={stats} />}
         {view === 'errors' && <ErrorsDetail stats={stats} />}
       </div>
+
+      <SubscriptionUsageLinks session={session} />
     </div>
   );
 }
