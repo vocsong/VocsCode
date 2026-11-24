@@ -3,7 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { connectHashFromUrl, scrubParams } from './router';
 import { accountStateOf, resolveAccount } from './shell/account';
 import { DashboardApp } from './shell/DashboardApp';
-import '@renderer/styles.css';
+import './design-system/fonts.css';
+import './design-system/vocs-ui.css';
 import './web.css';
 
 // Read the one-time Connect with Vocs hash, then take it out of the address bar and history.
