@@ -35,9 +35,6 @@ export interface HarnessContext {
    * Absent in hosts that do not run the layer (tests, minimal embeddings).
    */
   appInstructions?(): Promise<string | undefined>;
-  /** An ordinary (non-Mission) runtime may contain its process tree in the bundled Windows Job only
-   * while this is true: Windows, Missions configured and a working helper. Absent means never. */
-  ordinaryProcessOwnership?(): boolean;
   effort(): EffortLevel | undefined;
   getApiKey(providerId: string): Promise<string | undefined>;
   /**
@@ -63,35 +60,15 @@ export interface HarnessContext {
   writeJson(name: string, data: unknown): Promise<void>;
 }
 
-/** Prompt-free runtime observations, not a catalog or a claim that a provider completed a turn. */
-export interface MissionReadiness {
-  ready: boolean;
-  tools: string[];
-  reason?: string;
-  model?: ModelRef;
-  effort?: EffortLevel;
-  /** The exact model/connection is available in this runtime; absent means unverified. */
-  modelAvailable?: boolean;
-  connectionAvailable?: boolean;
-  /** Model availability is not observable without a prompt. The adapter proves it from the first
-   * reply and stops the runtime (a fatal error) on a reply from any other model. */
-  modelAttestation?: 'first_response';
-}
-
 export interface HarnessAdapter {
   readonly id: HarnessId;
   /** True while a turn is in progress. */
   readonly busy: boolean;
-  /** Optional ordinary-runtime writer ownership beyond turns/tools (e.g. Pi native children and
-   * their OS descendants). Unknown blocks workspace baselines, not ordinary prompts or teardown. A
-   * resolved dispose alone must not clear it. `undefined` means this runtime does not track its
-   * writers at all (ordinary process ownership off, or its launch fell back): it is treated like an
-   * adapter without this method. Managed runtimes use their separate dispatch/teardown gate. */
+  /** Optional writer tracking beyond turns/tools. A resolved dispose alone must not clear it.
+   * `undefined` means the runtime does not track its writers; it is treated like an adapter without
+   * this method. */
   workspaceWriterState?(): 'active' | 'unknown' | 'quiescent' | undefined;
   start(): Promise<void>;
-  /** Observed managed startup, without a model turn. Never infer evidence from configured or
-   * persisted values; missing observations are unverified, not capability support. */
-  missionReadiness?(): MissionReadiness | Promise<MissionReadiness>;
   /** Submit user input. Resolves once accepted by the harness (not when the turn finishes). */
   send(input: UserInput): Promise<void>;
   interrupt(): Promise<void>;

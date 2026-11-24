@@ -4,7 +4,6 @@
  * offsets stay monotonic and the scrollbar does not jump around while the list streams.
  */
 import type { TranscriptItem } from '../../shared/types';
-import type { MissionRecord } from '../../shared/mission';
 
 /**
  * Rows the transcript renders. A run of shell commands collapses into one group chunk, and each
@@ -12,8 +11,6 @@ import type { MissionRecord } from '../../shared/mission';
  * assistant message included, renders alone.
  */
 export type RenderChunk =
-  /** Host projection, never a synthetic assistant item in a harness transcript. */
-  | { kind: 'mission-completion'; record: MissionRecord }
   | { kind: 'single'; item: TranscriptItem }
   | { kind: 'group'; id: string; entries: TranscriptItem[] }
   | {
@@ -26,7 +23,6 @@ export type RenderChunk =
 
 /** Stable row key: group and work chunks keep the id of their first entry. */
 export function chunkKey(chunk: RenderChunk): string {
-  if (chunk.kind === 'mission-completion') return `mission-completion:${chunk.record.id}`;
   if (chunk.kind === 'group') return `group:${chunk.id}`;
   if (chunk.kind === 'work') return `work:${chunk.id}`;
   return chunk.item.id;
@@ -34,7 +30,6 @@ export function chunkKey(chunk: RenderChunk): string {
 
 /** Rough row height for a chunk that has not been measured yet, including the 10px flex gap. */
 export function estimateChunkHeight(chunk: RenderChunk): number {
-  if (chunk.kind === 'mission-completion') return 900;
   if (chunk.kind === 'work') return 32;
   if (chunk.kind === 'group') return 60;
   switch (chunk.item.kind) {

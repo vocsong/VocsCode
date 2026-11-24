@@ -24,7 +24,6 @@ import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
 import { applyTheme, applyTypography, applyUiMode } from './theme';
-import { isTopLevelSession, pauseMissionSession } from './missions';
 import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
 import { activeComposer } from './panes';
 import { GitPanelCache } from './git-panel-cache';
@@ -139,7 +138,7 @@ export function App() {
           requestAnimationFrame(() => document.querySelector(`[data-session-id="${CSS.escape(target.sessionId)}"]`)?.scrollIntoView({ block: 'nearest' }));
         }
       } else if (mod && /^[1-9]$/.test(e.key)) {
-        const list = st.sessions.filter((s) => !s.archived && isTopLevelSession(s));
+        const list = st.sessions.filter((s) => !s.archived);
         const target = list[Number(e.key) - 1];
         if (target) {
           e.preventDefault();
@@ -174,7 +173,7 @@ export function App() {
         const targetId = st.activeId ?? st.layout.panes.find((p) => p.sessionId)?.sessionId;
         if (!targetId) return;
         const s = st.sessions.find((x) => x.id === targetId);
-        if (s && (s.status === 'running' || s.status === 'awaiting')) pauseMissionSession(s);
+        if (s && (s.status === 'running' || s.status === 'awaiting')) void invoke('sessions:interrupt', { id: s.id });
       }
     };
     window.addEventListener('keydown', onKey);

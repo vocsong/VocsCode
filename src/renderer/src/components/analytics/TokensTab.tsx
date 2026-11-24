@@ -129,7 +129,7 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
       <Footnotes scope={scope} summary={summary} extra={[
         'Input is provider-reported uncached context, not just typed text.',
         'User input (est.) tracks ordinary-session message text: original submitted text is counted once, including pasted text. It excludes attachments, system/context content, tool output and automated prompts (including automatic goal prompts).',
-        'Mission mailbox input, goal configuration fields and subagent-panel steering are not tracked. This rough estimate uses one token per four Unicode characters, not model-specific billing, and is separate from provider token totals and mixes.',
+        'Goal configuration fields and subagent-panel steering are not tracked. This rough estimate uses one token per four Unicode characters, not model-specific billing, and is separate from provider token totals and mixes.',
         'User input tracking starts with this update; legacy unmarked messages are not reconstructed.'
       ]} />
     </>

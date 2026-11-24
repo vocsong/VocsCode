@@ -1156,8 +1156,8 @@ export class RemoteHost {
     }
   }
 
-  /** A registry channel on behalf of a browser. Terminal writes are bounded and audited here: the
-   *  registry's own Mission terminal guards still decide whether they reach the shell. */
+  /** A registry channel on behalf of a browser. Terminal writes are bounded and audited here before
+   *  the registry's own handler passes them to the shell. */
   private async dispatch(from: string, channel: string, request: unknown): Promise<unknown> {
     if (channel === 'terminal:input') {
       const req = (request && typeof request === 'object' ? request : {}) as { terminalId?: unknown; data?: unknown };

@@ -76,8 +76,6 @@ import type { ClaudeAgentFileInfo } from './claude-agent-files';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 import type { DictationLocalStatus, DictationResult, LocalModelId } from './dictation';
 import type { RemoteTerminalFrame, RemoteTerminalSnapshot } from './remote-terminal';
-import type { CreateMissionRequest, MissionControlRequest, MissionRecord } from './mission';
-import type { MissionCommandRequest } from './mission-command';
 import type { WorkspaceImage } from './image-files';
 import type { ProcessEndResult, ProcessList, ProcessSummary, ProcessTarget } from './processes';
 
@@ -93,13 +91,6 @@ export const FILE_PREVIEW_MAX_BYTES = 200_000;
 
 /** Readable text exports fail explicitly rather than silently truncating a saved artifact. */
 export const TEXT_EXPORT_MAX_BYTES = 1024 * 1024;
-
-export interface MissionCommandResponse {
-  kind: 'created' | 'updated' | 'status' | 'show';
-  mission?: MissionRecord;
-  sessionId?: string;
-  message?: string;
-}
 
 /**
  * What the Claude subagent rows are built from: the types the engine names, the project's own
@@ -291,16 +282,6 @@ export interface IpcContract {
   /** Ends each target and its whole subtree; only processes in the tracked set can be named. Desktop only. */
   'processes:end': [{ targets: ProcessTarget[] }, ProcessEndResult];
 
-  /** Mission control is user-only; model tools have a separate authenticated transport. */
-  'missions:list': [void, MissionRecord[]];
-  'missions:get': [{ missionId: string }, MissionRecord | null];
-  /** Read-only snapshot of the latest authoritative plan; Markdown is never an import API. */
-  'missions:exportPlan': [{ missionId: string }, { markdown: string; suggestedName: 'plan.md' }];
-  'missions:create': [CreateMissionRequest, MissionRecord];
-  'missions:control': [MissionControlRequest, MissionRecord];
-  /** Mixed read/write command routing is always a mutation for remote authorization. */
-  'missions:command': [MissionCommandRequest, MissionCommandResponse];
-
   'sessions:list': [void, SessionMeta[]];
   /** Desktop-only explicit discovery; the renderer never supplies filesystem paths. */
   'sessions:importList': [{ source: ChatImportSource }, ChatImportPreview];
@@ -351,7 +332,7 @@ export interface IpcContract {
   'sessions:pinOrder': [{ ids: string[] }, void];
   /** The desktop viewed this session: clears "done · not viewed". Local-only. */
   'sessions:markViewed': [{ id: string }, SessionMeta];
-  'sessions:send': [{ id: string; input: UserInput; idempotencyKey?: string }, void];
+  'sessions:send': [{ id: string; input: UserInput }, void];
   /** Replaces a sent message, discards its later transcript items, and runs it again. */
   'sessions:editAndResend': [{ id: string; userItemId: string; input: UserInput }, TranscriptItem[]];
   'sessions:interrupt': [{ id: string }, void];
@@ -423,8 +404,7 @@ export interface IpcContract {
   /** A worktree branch name for the intent of a first prompt: the background model's, or the offline one. */
   'git:suggestBranchName': [{ prompt: string; model?: ModelRef }, { name: string; source: 'model' | 'prompt' }];
   'git:summary': [{ sessionId: string }, GitSummary];
-  /** A lead defaults to the accepted Mission result; a workspace selector is read-only inspection. */
-  'git:diff': [{ sessionId: string; path?: string; staged?: boolean; missionWorkspaceId?: string }, { diff: string; error?: string }];
+  'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string; error?: string }];
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
@@ -469,18 +449,17 @@ export interface IpcContract {
   /** Pulls one pull request's conversation comments through gh, for the Git panel's PR preview. */
   'git:prComments': [{ sessionId: string; number: number }, GitCommentList];
 
-  /** Mission leads default to integration; tool-file reveals select the explicit lead workspace. */
-  'fs:list': [{ sessionId: string; relPath?: string; missionWorkspaceId?: string }, FsEntry[]];
-  'fs:search': [{ sessionId: string; query: string; limit?: number; missionWorkspaceId?: string }, string[]];
-  /** Exact file first, then a bounded component-suffix search within the selected workspace. */
-  'fs:resolve': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceFileResolution];
+  'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
+  'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
+  /** Exact file first, then a bounded component-suffix search within the session's workspace. */
+  'fs:resolve': [{ sessionId: string; path: string }, WorkspaceFileResolution];
   /** `binary` comes with empty content. `readOnly` excludes placeholders and protected files from editing. */
-  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean; binary?: boolean; readOnly?: boolean }];
+  'fs:read': [{ sessionId: string; path: string; maxBytes?: number }, { content: string; truncated: boolean; binary?: boolean; readOnly?: boolean }];
   /** Desktop Save: replace only existing workspace text that still matches the original read bytes.
    * Both strings are literal UTF-8 text, including any BOM and line endings. */
-  'fs:writeText': [{ sessionId: string; path: string; content: string; expectedContent: string; missionWorkspaceId?: string }, void];
+  'fs:writeText': [{ sessionId: string; path: string; content: string; expectedContent: string }, void];
   /** An image file as base64 for the Files panel preview; null outside the workspace or for a non-image path. */
-  'fs:readImage': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceImage | null];
+  'fs:readImage': [{ sessionId: string; path: string }, WorkspaceImage | null];
 
   /** Layer 2 project knowledge for one session's project: pages, proposals and review state. */
   'knowledge:view': [{ sessionId: string }, KnowledgeView];
@@ -569,7 +548,6 @@ export type IpcResponse<K extends IpcChannel> = IpcContract[K][1];
 export const PUSH_CHANNELS = {
   sessionEvent: 'push:sessionEvent',
   sessionsChanged: 'push:sessionsChanged',
-  missionsChanged: 'push:missionsChanged',
   settingsChanged: 'push:settingsChanged',
   focusSession: 'push:focusSession',
   terminalData: 'push:terminalData',
@@ -586,8 +564,6 @@ export const PUSH_CHANNELS = {
 export type PushPayloads = {
   'push:sessionEvent': SessionEventEnvelope;
   'push:sessionsChanged': SessionMeta[];
-  /** Public record only: no service handles, tool credentials, or resolved provider secrets. */
-  'push:missionsChanged': MissionRecord;
   'push:settingsChanged': AppSettings;
   'push:focusSession': { sessionId: string };
   /** Raw PTY output for one terminal; `seq` orders it against an attach snapshot. */

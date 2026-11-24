@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { isIntelligenceOwnerRequest } from '../shared/intelligence';
 import { KEEP_AWAKE_CHANNEL } from '../shared/keep-awake';
 import type { KeepAwake } from './keep-awake';
-import { createHandlerRegistry, type DesktopBridge, type HandlerDeps, type HandlerRegistry, type MissionHandlerService } from './handlers';
+import { createHandlerRegistry, type DesktopBridge, type HandlerDeps, type HandlerRegistry } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
 import type { IntelligenceService } from './intelligence/service';
@@ -28,8 +28,6 @@ export interface IpcDeps {
   secrets: SecretStore;
   sessions: SessionManager;
   keepAwake?: KeepAwake;
-  missions?: MissionHandlerService;
-  withWorkspaceWrite?: HandlerDeps['withWorkspaceWrite'];
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
@@ -138,8 +136,6 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     settings: deps.settings,
     secrets: deps.secrets,
     sessions: deps.sessions,
-    missions: deps.missions,
-    withWorkspaceWrite: deps.withWorkspaceWrite,
     terminals: deps.terminals,
     runtime: deps.runtime,
     analytics: deps.analytics,
@@ -197,7 +193,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
       }
       const { id, enabled } = request.parse(req);
       const session = deps.sessions.get(id);
-      if (!session || session.mission || session.archived) throw new Error('Keep awake requires an ordinary, unarchived session.');
+      if (!session || session.archived) throw new Error('Keep awake requires an ordinary, unarchived session.');
       return enabled === undefined ? keepAwake.enabled(id) : keepAwake.set(id, enabled, deps.sessions.list({ refreshGit: false }));
     });
   }

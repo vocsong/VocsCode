@@ -7,7 +7,6 @@ import { Transcript } from '../src/renderer/src/components/Transcript';
 import { renderMarkdown } from '../src/renderer/src/markdown';
 import { singlePaneLayout } from '../src/renderer/src/panes';
 import { useStore } from '../src/renderer/src/store';
-import type { MissionRecord } from '../src/shared/mission';
 import type { SessionMeta } from '../src/shared/types';
 
 const host = vi.hoisted(() => ({ web: false, invoke: vi.fn() }));
@@ -104,18 +103,6 @@ describe('transcript link destinations', () => {
     expect(host.invoke.mock.calls).toEqual([
       ['app:openExternal', { url: prUrl }], ['git:pullRequest', { sessionId: session.id, url: prUrl }], ['app:openExternal', { url: issueUrl }]
     ]);
-  });
-
-  it('uses the Mission file workspace without intercepting PRs from the active lead', async () => {
-    const lead: SessionMeta = { ...session, mission: { missionId: 'mission', role: 'lead', generation: 1, requestedTools: [], sourceAccess: 'assigned_workspace', reasoningDefault: true } };
-    const workspaces: MissionRecord['workspaces'] = [{ id: 'lead', role: 'lead', path: 'G:/mission/lead', ownerSessionId: lead.id, branch: 'lead', base: { baseCommitSha: 'base', contentHash: 'hash' } }];
-    useStore.setState({ missions: { mission: { workspaces } as MissionRecord } });
-    mount(`[Overview](${prUrl}) [Lead file](G:/mission/lead/index.ts) [Outside](G:/proj/a/index.ts)`, lead);
-    expect([link('Overview'), link('Lead file'), link('Outside')].map(kind)).toEqual(['external', 'file', 'explorer']);
-    fireEvent.click(link('Lead file'));
-    expect(useStore.getState().layout.filePreview).toMatchObject({ path: 'index.ts', missionWorkspaceId: 'lead' });
-    fireEvent.click(link('Overview'));
-    expect(host.invoke.mock.calls).toEqual([['app:openExternal', { url: prUrl }]]);
   });
 
   it('leaves web file refs and refused local actions uncolored and out of the tab order', async () => {

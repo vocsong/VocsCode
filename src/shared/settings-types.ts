@@ -17,7 +17,6 @@ import type {
 import type { IntelligenceSettings } from './intelligence';
 import type { KnowledgeSettings } from './knowledge';
 import type { McpProjectState, McpServerDef } from './mcp-types';
-import type { MissionConfig, MissionProjectOverride } from './mission-config';
 import type { RemoteConfig } from './remote-types';
 import type { ShortcutCommand } from './shortcuts';
 import type { TerminalSettings } from './terminal';
@@ -62,9 +61,6 @@ export interface FolderSessionDefaults {
 export type SidebarView = 'folders' | 'recent';
 
 export interface AppSettings {
-  /** User-approved execution presets. Missing on older settings means Mission is unconfigured. */
-  mission?: MissionConfig;
-  missionProjects?: Record<string, MissionProjectOverride>;
   version: 1;
   /**
    * Light/dark mode: System, Light or Dark (shared/themes.ts). Kept under the `theme` key so

@@ -59,7 +59,7 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Use your Antigravity quota.** Install the Antigravity CLI and open **Settings → Providers & keys → Harness logins → Google Antigravity** to sign in with Google or check your remaining quota. Select **Google Antigravity** in New Session, pick one of your account’s Gemini models, and send a prompt. [Setup instructions](docs/ONBOARDING.md#subscription-and-api-routes)
 
-**Choose permissions per session.** Each harness offers the modes it supports. Antigravity offers every mode for Gemini sessions you drive yourself; goal loops and Missions cannot prompt it.
+**Choose permissions per session.** Each harness offers the modes it supports. Antigravity offers every mode for Gemini sessions you drive yourself; goal loops cannot prompt it.
 
 **Nothing gets lost.** Threads grouped by project, isolated git worktrees per session, diff review with per-file revert and commit, steer a running turn or queue your next message, `/goal` with an iteration guard. Each project remembers how you start it — harness, model, permission mode and whether sessions isolate in a worktree.
 
@@ -97,7 +97,6 @@ PRs are squash-merged, and titles follow [Conventional Commits](https://www.conv
 | --- | --- |
 | [Architecture & harness reference](docs/ARCHITECTURE.md) | Source layout, harness engines, permission modes, security model |
 | [Terminal reference](docs/TERMINAL.md) | PTY handling, shells, tabs, shortcuts, packaging notes |
-| [Missions](docs/MISSIONS.md) | Principal engineer, approved presets, planning, workspaces, verification, delivery and support limits |
 | [Themes](docs/THEMES.md) | Light/dark mode, the twenty palettes and how they're built |
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Tool reliability](docs/TOOL-RELIABILITY.md) | Harness/tool analytics, Pi compatibility, native file safeguards and verification |

@@ -7,7 +7,6 @@ import { sessionTitleText } from '../../../shared/session-title';
 import { invoke, isMac, modKey } from '../api';
 import { basename, relTime } from '../format';
 import { archiveSession, removeFolder } from '../sessionActions';
-import { isTopLevelSession } from '../missions';
 import { activitySections } from '../activity';
 import { sortSessionRows } from '../sessionOrder';
 import { useStore, toastError } from '../store';
@@ -79,7 +78,7 @@ function recentNavModel(visible: SessionMeta[]): SidebarNavFolder[] {
  * view — one recency order across folders. Always reflects non-archived sessions, no search filter.
  */
 export function sidebarNavModel(sessions: SessionMeta[], settings: AppSettings | null): SidebarNavFolder[] {
-  const visible = sessions.filter((s) => !s.archived && isTopLevelSession(s));
+  const visible = sessions.filter((s) => !s.archived);
   if (sidebarViewOf(settings) === 'recent') return recentNavModel(visible);
   const byProject = new Map<string, SessionMeta[]>();
   for (const s of visible) byProject.set(s.config.projectRoot, [...(byProject.get(s.config.projectRoot) ?? []), s]);
@@ -147,7 +146,7 @@ export function Sidebar() {
   const sidebarView = sidebarViewOf(settings);
 
   const visible = useMemo(
-    () => sessions.filter((s) => isTopLevelSession(s) && (showArchived ? s.archived : !s.archived)),
+    () => sessions.filter((s) => (showArchived ? s.archived : !s.archived)),
     [sessions, showArchived]
   );
   // Recent view: one list across every folder, by the same comparator a folder's rows use.
@@ -274,7 +273,7 @@ export function Sidebar() {
     const dragged = dragId ? sessions.find((x) => x.id === dragId) : null;
     const target = sessions.find((x) => x.id === id);
     if (dragged?.pinned && target && target.pinned && target.id !== dragId && target.config.projectRoot === dragged.config.projectRoot) {
-      const section = sortSessionRows(sessions.filter((x) => x.config.projectRoot === target.config.projectRoot && !x.archived && isTopLevelSession(x)))
+      const section = sortSessionRows(sessions.filter((x) => x.config.projectRoot === target.config.projectRoot && !x.archived))
         .filter((x) => x.pinned)
         .map((x) => x.id);
       const rest = section.filter((sid) => sid !== dragId);
@@ -289,8 +288,8 @@ export function Sidebar() {
   };
   const dndHandlers = { start: onDragStartRow, end: onDragEndRow, over: onDragOverRow, leave: onDragLeaveRow, drop: onDropRow };
 
-  const awaiting = sessions.filter((s) => isTopLevelSession(s) && s.status === 'awaiting').length;
-  const running = sessions.filter((s) => isTopLevelSession(s) && !s.archived && (s.status === 'running' || s.status === 'starting' || (s.status !== 'awaiting' && hasOngoingWork(s)))).length;
+  const awaiting = sessions.filter((s) => s.status === 'awaiting').length;
+  const running = sessions.filter((s) => !s.archived && (s.status === 'running' || s.status === 'starting' || (s.status !== 'awaiting' && hasOngoingWork(s)))).length;
   const done = activitySections(sessions, null).done.length;
   const plural = (n: number) => `${n} ${n === 1 ? 'session' : 'sessions'}`;
   // Zen keeps only the icons of these links; their names move into tooltips.
@@ -613,7 +612,6 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
   // then, they open at the row.
   const rowRef = useRef<HTMLDivElement>(null);
   const deleteRow = async (anchor: HTMLElement | null) => {
-    if (s.mission) { toast('Archive the Mission to retain its artifacts. Use explicit managed cleanup after execution settles.', 'info'); return; }
     const ok = await askConfirm({
       title: `Delete session "${s.title}"?`,
       body: s.worktreeBranch ? `Its worktree and the branch ${s.worktreeBranch} are removed with it.` : 'Its transcript is removed. This cannot be undone.',
@@ -638,7 +636,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
   /** "Open to the side": a new pane beside the active one, while there is room for another. */
   const openToSide = (): ContextMenuItem[] => {
     const st = useStore.getState();
-    if (s.mission?.role === 'worker' || !canSplit(st.layout) || paneShowing(st.layout, s.id) || !st.activeId) return [];
+    if (!canSplit(st.layout) || paneShowing(st.layout, s.id) || !st.activeId) return [];
     return [{ label: 'Open to the side', icon: 'splitRight', hint: `${modKey}+click`, onSelect: () => onSelect('right') }];
   };
   /** Right-click menu for a session row; it mirrors the inline actions plus rename and delete. */
@@ -650,8 +648,8 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
     { separator: true },
     s.archived
       ? { label: 'Restore session', icon: 'restore', onSelect: () => void invoke('sessions:archive', { id: s.id, archived: false }) }
-      : { label: s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast, rowRef.current) },
-    { label: s.mission ? 'Mission deletion unavailable — archive retains work' : 'Delete session', icon: 'trash', danger: true, disabled: !!s.mission, onSelect: () => !s.mission && void deleteRow(rowRef.current) }
+      : { label: s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast, rowRef.current) },
+    { label: 'Delete session', icon: 'trash', danger: true, onSelect: () => void deleteRow(rowRef.current) }
   ];
 
   // Any live row drags into the workspace to open it in a pane; only pinned rows also reorder.
@@ -746,14 +744,14 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
                 <button type="button" className="row-act-btn" title="Restore session" aria-label="Restore session" onClick={() => void invoke('sessions:archive', { id: s.id, archived: false })}>
                   <Icon name="restore" size={15} />
                 </button>
-                <button type="button" className="row-act-btn danger" disabled={!!s.mission} title={s.mission ? 'Mission deletion unavailable; archive retains artifacts' : 'Delete session'} aria-label="Delete session" onClick={(e) => void deleteRow(e.currentTarget)}>
+                <button type="button" className="row-act-btn danger" title="Delete session" aria-label="Delete session" onClick={(e) => void deleteRow(e.currentTarget)}>
                   <Icon name="trash" size={15} />
                 </button>
               </>
             ) : (
               <>
                 <ForkIntoDropdown session={s} />
-                <button type="button" className="row-act-btn" title={s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={(e) => void archiveSession(s, toast, e.currentTarget)}>
+                <button type="button" className="row-act-btn" title={s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={(e) => void archiveSession(s, toast, e.currentTarget)}>
                   <Icon name="archive" size={15} />
                 </button>
               </>
@@ -761,7 +759,6 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
           </div>
         </div>
         <div className="session-meta">
-          {s.mission && <Badge tone="purple">Mission</Badge>}
           {s.activeModel && (
             <span className="session-model" title={modelRefName(s.activeModel)}>
               {modelRefName(s.activeModel)}

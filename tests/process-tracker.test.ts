@@ -326,34 +326,26 @@ describe('process tracker', () => {
     expect(byPid(list.processes, 3000)!.previousRun).toBeUndefined();
   });
 
-  it('puts a session\'s processes into its Job at spawn and when found, never app services, Mission sessions or Job-owned shells', async () => {
+  it('puts a session\'s processes and terminal shells into its Job at spawn and when found, never app services', async () => {
     const jobs = new JobSource([
       ...source.table,
       proc(2000, APP, T0 - 30_000, 'claude.exe'),
       proc(2001, 2000, T0 - 29_000, 'node.exe'),
       proc(2002, 2000, T0 - 29_000, 'conhost.exe'),
       proc(3000, APP, T0 - 40_000, 'cmd.exe'),
-      proc(4000, APP, T0 - 20_000, 'pi.exe'),
-      proc(4001, 4000, T0 - 19_000, 'node.exe'),
-      proc(7000, APP, T0 - 10_000, 'powershell.exe'),
-      proc(7001, 7000, T0 - 9_000, 'node.exe'),
+      proc(3001, 3000, T0 - 39_000, 'node.exe'),
       proc(7100, APP, T0 - 8_000, 'powershell.exe'),
       proc(7101, 7100, T0 - 7_000, 'node.exe')
     ]);
     const t = tracker({
       source: jobs,
-      adoptable: (owner) => owner.sessionId !== 's_mission',
-      terminalRoots: () => [
-        { pid: 7000, sessionId: 's2', terminalId: 't1', owned: true },
-        { pid: 7100, sessionId: 's2', terminalId: 't2' }
-      ]
+      terminalRoots: () => [{ pid: 7100, sessionId: 's2', terminalId: 't2' }]
     });
     // At spawn, before the harness can start anything: no creation time is known yet.
     t.claim(2000, { sessionId: 's1' });
     await expect.poll(() => jobs.calls.length).toBe(1);
     expect(jobs.calls[0]).toEqual(['s1', [{ pid: 2000, startedAt: 0 }]]);
     t.claim(3000, { label: 'GitNexus server' });
-    t.claim(4000, { sessionId: 's_mission' });
     expect(jobs.calls).toHaveLength(1);
 
     await t.list();

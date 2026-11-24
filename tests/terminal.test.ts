@@ -300,6 +300,39 @@ describe('TerminalManager (fake pty)', () => {
     await m.closeForSession('s1');
     expect(m.list()).toHaveLength(0);
   });
+
+  it('lists a shell in activity until it exits, even after a restart or close, and never signals it after exit', async () => {
+    const fakes = [fakePty(), fakePty()];
+    for (const fake of fakes) fake.kill = () => void fake.calls.push('kill'); // the process outlives the signal
+    const dir = await tmpDir();
+    const { m } = manager([...fakes], dir);
+    const info = m.create('s1');
+    expect(m.activity('s1')).toEqual([{ terminalId: info.id, sessionId: 's1', pid: 4242, state: 'live' }]);
+    await m.restart(info.id);
+    expect(m.activity('s1').map((a) => a.state)).toEqual(['closing', 'live']);
+    fakes[0].exit(1);
+    expect(m.activity('s1').map((a) => a.state)).toEqual(['live']);
+    expect(m.list()[0].exit).toBeUndefined(); // the predecessor's late exit does not touch the tab
+    await m.close(info.id);
+    expect(m.list()).toEqual([]);
+    expect(m.activity('s1').map((a) => a.state)).toEqual(['closing']);
+    fakes[1].exit(1);
+    expect(m.activity()).toEqual([]);
+    await m.shutdown();
+    expect(fakes.map((fake) => fake.calls.filter((c) => c === 'kill').length)).toEqual([1, 1]);
+    expect(await fs.readdir(dir)).toEqual([]); // a shell leaves no record on disk
+  });
+
+  it('removes process-ownership records an earlier build left beside the snapshots', async () => {
+    const dir = await tmpDir();
+    await fs.writeFile(path.join(dir, 't_old.p_1.owner'), '{}');
+    await fs.mkdir(path.join(dir, 'process-ownership', 's1'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'process-ownership', 's1', 'a.intent.json'), '{}');
+    const { m } = manager([], dir);
+    await m.load();
+    expect(await fs.readdir(dir)).toEqual([]);
+    expect(m.activity()).toEqual([]);
+  });
 });
 
 describe('TerminalManager (real pty)', () => {

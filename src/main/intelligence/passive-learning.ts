@@ -27,7 +27,7 @@ type Pending = {
 type SessionState = { lastTurnAt: number; pending?: Pending; ambiguous: boolean };
 
 function scopeOf(session: SessionMeta | undefined): IntelligenceContext | undefined {
-  if (!session?.config?.projectRoot || !session.cwd || session.archived || session.mission || session.controlCreation || session.config.permissionMode === 'plan') return undefined;
+  if (!session?.config?.projectRoot || !session.cwd || session.archived || session.controlCreation || session.config.permissionMode === 'plan') return undefined;
   return { sessionId: session.id, projectRoot: session.config.projectRoot, cwd: session.cwd, branch: session.worktreeBranch };
 }
 

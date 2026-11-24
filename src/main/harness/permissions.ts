@@ -3,16 +3,6 @@ import path from 'node:path';
 import type { ApprovalOption, FileChange, PermissionMode } from '../../shared/types';
 import type { ApprovalDraft } from './types';
 import { isDangerousCommand } from './types';
-import { isMissionCoordinationTool, MISSION_SERVER_ID } from '../../../resources/pi/vocs-code-mission';
-
-/** Only the exact reserved app-owned SDK bridge gets coordination authority. A lookalike MCP
- * name or a readOnly annotation from an arbitrary server grants nothing. These operations may
- * mutate Mission records in Plan; broker authorization still forbids source writes/user controls. */
-export function isTrustedMissionCoordination(toolName: string, server?: { name: string; source: string }): boolean {
-  const prefix = `mcp__${MISSION_SERVER_ID}__`;
-  return server?.name === MISSION_SERVER_ID && server.source === 'sdk' && toolName.startsWith(prefix) &&
-    isMissionCoordinationTool(server.name, toolName.slice(prefix.length));
-}
 
 /** Standard option sets for approval cards. */
 export const OPTIONS_ALLOW_DENY: ApprovalOption[] = [
@@ -34,9 +24,8 @@ export type GateVerdict = 'allow' | 'deny' | 'ask';
  */
 export function gateAction(
   mode: PermissionMode,
-  action: { mutating: boolean; isEdit: boolean; command?: string; sessionAllowed?: boolean; outsideWorkspace?: boolean; trustedCoordination?: boolean }
+  action: { mutating: boolean; isEdit: boolean; command?: string; sessionAllowed?: boolean; outsideWorkspace?: boolean }
 ): GateVerdict {
-  if (action.trustedCoordination) return 'allow';
   if (!action.mutating) return 'allow';
   if (mode === 'plan') return 'deny';
   if (mode === 'full-auto') return 'allow';

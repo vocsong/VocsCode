@@ -110,15 +110,6 @@
 .header[data-width='tiny'] .header-divider {
   display: none;
 }
-.header-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  min-width: 0;
-  padding-bottom: 8px;
-}
-
 .header-actions {
   display: flex;
   align-items: center;

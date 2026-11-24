@@ -443,7 +443,6 @@ describe('split restore at boot', () => {
       if (channel === 'sessions:list') return [A, B];
       if (channel === 'terminal:list') return [];
       if (channel === 'sessions:transcript') return payload?.id === 's_b' ? [user('u_b', 'beta question')] : [user('u_a', 'alpha question')];
-      if (channel === 'missions:list') return [];
       return null;
     });
   });

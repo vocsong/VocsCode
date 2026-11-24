@@ -11,7 +11,6 @@ import { DEFAULT_DICTATION, DICTATION_IDLE_MINUTES, localModel, type DictationSe
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
 import { DEFAULT_HOUSEKEEP_RECENT_DAYS, normalizeHousekeepRecentDays } from '../shared/housekeep';
 import { pruneModelOverrides } from '../shared/model-overrides';
-import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigError, validateMissionConfig, validateMissionProjectOverride, type MissionCapabilityResolver, type MissionProjectOverride } from '../shared/mission-config';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { DEFAULT_PALETTE, migrateTheme } from '../shared/themes';
@@ -20,7 +19,6 @@ import { DEFAULT_UI_MODE, isUiModeId } from '../shared/ui-modes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
 import { mcpIdIssues } from '../shared/mcp-ids';
-import { CODEX_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from './models/static-models';
 import { readJson, writeJson } from './util/fs';
 
 export const BUILTIN_ACP_AGENTS: AcpAgentPreset[] = [
@@ -210,8 +208,6 @@ export const BUILTIN_PROVIDERS: ProviderConfig[] = [
 export function defaultSettings(): AppSettings {
   return {
     version: 1,
-    mission: createDefaultMissionConfig(),
-    missionProjects: {},
     theme: 'system',
     palette: DEFAULT_PALETTE,
     typography: { ...DEFAULT_TYPOGRAPHY },
@@ -471,41 +467,6 @@ export function normalizeCuaSettings(stored: unknown): CuaSettings {
   return { enabled: raw.enabled !== false, mode, ...(manifest ? { manifestPath: manifest } : {}) };
 }
 
-/** Validate the complete pair: project pools reference this library and may only tighten ceilings. */
-function validateMissionSettings(stored: Partial<AppSettings>, capabilities?: MissionCapabilityResolver) {
-  const mission = stored.mission === undefined ? createDefaultMissionConfig() : validateMissionConfig(stored.mission, capabilities);
-  const raw = stored.missionProjects;
-  const missionProjects: Record<string, MissionProjectOverride> = {};
-  if (raw !== undefined) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)
-      || (Object.getPrototypeOf(raw) !== Object.prototype && Object.getPrototypeOf(raw) !== null)
-      || Reflect.ownKeys(raw).length > 1_000) {
-      throw new MissionConfigError('missionProjects', 'Expected a project override map with at most 1000 entries.');
-    }
-    for (const root of Reflect.ownKeys(raw)) {
-      if (typeof root !== 'string' || !root.trim() || ['__proto__', 'constructor', 'prototype'].includes(root)) {
-        throw new MissionConfigError('missionProjects', 'Expected project folder paths.');
-      }
-      const project = validateMissionProjectOverride(raw[root]);
-      applyMissionProjectOverride(mission, project);
-      missionProjects[root] = project;
-    }
-  }
-  return { mission, missionProjects };
-}
-
-/** Only cached catalog facts: no credential reads, network probes, or runtime activation on save. */
-function missionCatalog(settings: AppSettings): MissionCapabilityResolver {
-  return (preset) => {
-    const provider = settings.providers.find((p) => p.id === preset.model.provider);
-    const fallback = (preset.harnessId === 'codex' || preset.harnessId === 'codex-exec') && preset.model.provider === 'openai'
-      ? CODEX_STATIC_MODELS : STATIC_MODELS_BY_PROVIDER[preset.model.provider] ?? [];
-    const models = Array.isArray(provider?.models) && provider.models.length ? provider.models : fallback;
-    const model = models.find((m) => m.id === preset.model.model);
-    return { source: 'catalog', ...(model ? { modelInfo: { ...model, provider: preset.model.provider } } : {}) };
-  };
-}
-
 /** Merge stored settings over defaults, keeping builtin providers/agents present. */
 export function normalizeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
   const d = defaultSettings();
@@ -566,6 +527,9 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
   // Worktree isolation is remembered per folder now (FolderSessionDefaults); the app-wide answer
   // would only make a new folder inherit another project's choice.
   delete (merged as AppSettings & { defaultUseWorktree?: unknown }).defaultUseWorktree;
+  // The old Mission feature and its execution presets are retired; drop both keys on the next save.
+  delete (merged as AppSettings & { mission?: unknown }).mission;
+  delete (merged as AppSettings & { missionProjects?: unknown }).missionProjects;
   // Wrong-shaped arrays in settings.json must not break boot: coerce to arrays before use.
   const storedProviders = Array.isArray(stored.providers) ? stored.providers : [];
   for (const bp of BUILTIN_PROVIDERS) {
@@ -579,7 +543,6 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     merged.acpAgents.push(s ? { ...ba, ...s, builtin: true } : { ...ba });
   }
   for (const s of storedAgents) if (!BUILTIN_ACP_AGENTS.some((ba) => ba.id === s.id)) merged.acpAgents.push({ ...s, builtin: false });
-  Object.assign(merged, validateMissionSettings(stored));
   return merged;
 }
 
@@ -589,8 +552,6 @@ export class SettingsStore {
   private listeners = new Set<(s: AppSettings) => void>();
   private readonly log: Logger;
   private writes: Promise<unknown> = Promise.resolve();
-  /** Preserve unsupported data on disk during unrelated settings saves; never expose it as executable. */
-  private blockedMission: Pick<Partial<AppSettings>, 'mission' | 'missionProjects'> | undefined;
 
   constructor(userData: string, log: Logger = () => undefined) {
     this.file = path.join(userData, 'settings.json');
@@ -599,15 +560,7 @@ export class SettingsStore {
 
   async load(): Promise<AppSettings> {
     const stored = await readJson<Partial<AppSettings> | undefined>(this.file, undefined, { log: this.log });
-    this.blockedMission = undefined;
-    try {
-      this.settings = normalizeSettings(stored);
-    } catch (error) {
-      if (!(error instanceof MissionConfigError)) throw error;
-      this.blockedMission = { mission: stored?.mission, missionProjects: stored?.missionProjects };
-      this.log('error', `Mission settings disabled: ${error.message} Repair settings.json or explicitly replace both Mission configuration and project overrides in Settings.`);
-      this.settings = normalizeSettings({ ...stored, mission: undefined, missionProjects: undefined });
-    }
+    this.settings = normalizeSettings(stored);
     if (stored === undefined) this.log('info', 'no settings.json yet; using defaults');
     else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme} palette=${this.settings.palette}`);
     return this.settings;
@@ -622,10 +575,6 @@ export class SettingsStore {
     // rejected write must not leak into another caller's patch or become visible before commit.
     const input = structuredClone(patch);
     const run = this.writes.then(async () => {
-      const missionChanged = Object.hasOwn(input, 'mission') || Object.hasOwn(input, 'missionProjects');
-      if (this.blockedMission && missionChanged && !(Object.hasOwn(input, 'mission') && Object.hasOwn(input, 'missionProjects'))) {
-        throw new MissionConfigError('mission', 'Stored Mission settings are invalid. Replace both the configuration and project overrides explicitly.');
-      }
       if (Object.hasOwn(input, 'mcpServers')) {
         const refused = mcpServersSaveError(input.mcpServers, this.settings.mcpServers ?? []);
         if (refused) throw new Error(refused);
@@ -639,17 +588,8 @@ export class SettingsStore {
         }
       }
       const next = normalizeSettings({ ...this.settings, ...input });
-      if (missionChanged) {
-        Object.assign(next, validateMissionSettings(next, missionCatalog(next)));
-        for (const [root, project] of Object.entries(next.missionProjects!)) {
-          if (!next.folders.includes(root) && JSON.stringify(project) !== JSON.stringify(this.settings.missionProjects?.[root])) {
-            throw new MissionConfigError('missionProjects', 'Select a configured project folder.');
-          }
-        }
-      }
-      await writeJson(this.file, this.blockedMission && !missionChanged ? { ...next, ...this.blockedMission } : next);
+      await writeJson(this.file, next);
       this.settings = next;
-      if (missionChanged) this.blockedMission = undefined;
       for (const l of this.listeners) {
         // One listener throwing must not starve the rest, and the caller already has its new settings.
         try {

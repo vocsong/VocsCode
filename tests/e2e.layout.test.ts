@@ -129,7 +129,7 @@ describe.runIf(enabled)('shell layout', () => {
     };
     const groups = ['Workspace', 'Agent behavior', 'Connections', 'System'];
     const sections = [
-      'General', 'Appearance', 'Shortcuts', 'Terminal', 'Voice', 'Session defaults', 'Instructions', 'Mission',
+      'General', 'Appearance', 'Shortcuts', 'Terminal', 'Voice', 'Session defaults', 'Instructions',
       'Vesta & utility', 'Vocs account', 'Providers & keys', 'Harnesses', 'Pi', 'ACP agents', 'Import chats', 'Housekeep', 'Remote access', 'About & doctor'
     ];
     expect(await win.locator('.settings-nav-label').allTextContents()).toEqual(groups);
@@ -294,18 +294,7 @@ describe.runIf(enabled)('shell layout', () => {
         anchoredTopics++;
       }
     }
-    expect(anchoredTopics).toBe(31);
-
-    // A Mission budget result skips the tier cards and focuses the actual limits heading.
-    await search.fill('mission budget');
-    await win.getByRole('button', { name: /Mission limits & projects/ }).waitFor();
-    await search.press('Enter');
-    await win.getByRole('heading', { name: 'Mission', level: 1, exact: true }).waitFor();
-    await expect.poll(() => win.locator('h3#mission-limits:focus').textContent()).toBe('Concurrency and progress limits');
-    const limitsBox = await box(win, '#mission-limits');
-    const missionBody = await box(win, '.settings-body');
-    expect(limitsBox.y).toBeGreaterThanOrEqual(missionBody.y);
-    expect(limitsBox.y + limitsBox.height).toBeLessThanOrEqual(missionBody.y + missionBody.height);
+    expect(anchoredTopics).toBe(30);
 
     // Reproducible light/dark review frames for each major surface, using the real theme controls.
     for (const [theme, label] of [['light', 'Light'], ['dark', 'Dark']] as const) {

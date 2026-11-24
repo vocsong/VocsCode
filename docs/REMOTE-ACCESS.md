@@ -200,7 +200,7 @@ not the handler registry, because the answer depends on which browser asked
 - **Bounded snapshots.** History steps down (1000, 300, 100, 0 lines) until the JSON-encoded
   snapshot fits 600 KiB, inside the relay's 1 MiB frame once sealed.
 - **Input** is batched by the browser (16 ms) and sent in order through the registry's
-  `terminal:input`, so the Mission terminal guards apply exactly as to desktop keystrokes. The host
+  `terminal:input`, the same handler as desktop keystrokes. The host
   refuses anything over 64 KiB and audits a browser's first keystroke into a terminal per connection
   (`terminal-input`) and every terminal it opens (`terminal-create`).
 - **Rendering under the CSP.** The app's `style-src 'self'` rules out xterm's DOM renderer (it

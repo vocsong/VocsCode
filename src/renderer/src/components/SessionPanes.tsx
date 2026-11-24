@@ -8,7 +8,6 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { sessionTitleText } from '../../../shared/session-title';
-import { isTopLevelSession } from '../missions';
 import { MIN_PANE_PX, SESSION_DRAG_TYPE, dropZoneAt, visiblePaneSessions, type DropZone, type PaneLayout, type SessionPane } from '../panes';
 import { sortSessionRows } from '../sessionOrder';
 import { toastError, useStore } from '../store';
@@ -168,7 +167,7 @@ function PanePicker({ pane }: { pane: SessionPane }) {
   const sessions = useStore((s) => s.sessions);
   const layout = useStore((s) => s.layout);
   const shown = new Set(layout.panes.map((p) => p.sessionId));
-  const choices = sortSessionRows(sessions.filter((s) => !s.archived && isTopLevelSession(s) && !shown.has(s.id))).slice(0, 8);
+  const choices = sortSessionRows(sessions.filter((s) => !s.archived && !shown.has(s.id))).slice(0, 8);
   const open = (id: string) => void useStore.getState().setActive(id).catch(toastError);
   return (
     <div className="pane-picker">

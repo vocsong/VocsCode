@@ -16,7 +16,6 @@ import { Sidebar } from '../src/renderer/src/components/Sidebar';
 import { activitySections, RECENT_LIMIT } from '../src/renderer/src/activity';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta } from '../src/shared/types';
-import type { MissionOwnership } from '../src/shared/mission';
 
 const session = (id: string, patch: Partial<SessionMeta> = {}): SessionMeta => ({
   id,
@@ -31,7 +30,6 @@ const session = (id: string, patch: Partial<SessionMeta> = {}): SessionMeta => (
   ...patch
 });
 const ids = (list: SessionMeta[]) => list.map((s) => s.id);
-const worker: MissionOwnership = { missionId: 'm1', role: 'worker', generation: 1, sourceAccess: 'read_only', requestedTools: [], reasoningDefault: false };
 
 describe('activitySections', () => {
   it('sorts sessions into what needs you, what runs, what finished unviewed and what you viewed', () => {
@@ -66,10 +64,9 @@ describe('activitySections', () => {
     expect(ids(sections.recent)).toEqual(['v6', 'v5', 'v4', 'v3', 'v2']);
   });
 
-  it('leaves archived sessions and Mission workers out of every section', () => {
+  it('leaves archived sessions out of every section', () => {
     const sections = activitySections([
-      session('arch', { archived: true, status: 'running', unseenAt: 1, lastViewedAt: 1 }),
-      session('work', { mission: worker, status: 'awaiting', unseenAt: 1, lastViewedAt: 1 })
+      session('arch', { archived: true, status: 'running', unseenAt: 1, lastViewedAt: 1 })
     ], null);
     expect([...sections.needs, ...sections.running, ...sections.done, ...sections.recent]).toEqual([]);
   });
@@ -175,7 +172,7 @@ describe('the tray', () => {
   });
 
   it('says a running session is working rather than guessing when its turn began', () => {
-    // A goal or Mission turn can start hours after the last message the user sent.
+    // A goal turn can start hours after the last message the user sent.
     renderSidebar([session('r1', { status: 'running', lastUserMessageAt: Date.now() - 3 * 3_600_000 })]);
     fireEvent.click(screen.getByTestId('activity-trigger'));
     expect(screen.getByTestId('activity-row').querySelector('.activity-row-time')?.textContent).toBe('Working');
