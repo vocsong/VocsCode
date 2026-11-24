@@ -1,6 +1,6 @@
-/* The web shell's own chrome, layered over the renderer's styles.css (which brings the transcript,
-   tool cards, approvals and controls). Mobile-first: everything is sized for a phone and widens at
-   900px. No inline styles anywhere: the /app CSP has no style-src 'unsafe-inline'. */
+/* The web dashboard's own chrome, layered over the renderer's styles.css (which brings the analytics
+   views and controls). Mobile-first: sized for a phone, widening on larger screens. No inline
+   styles anywhere: the /dashboard CSP has no style-src 'unsafe-inline'. */
 
 /* --- Identity: the code.vocs.io palette ------------------------------------------------------
    The landing's warm paper and ink, so the app and the page around it read as one product. Same
@@ -329,34 +329,13 @@ button {
   padding: 8px;
 }
 
-/* --- Connection banner and top bar ---------------------------------------------- */
-
-.w-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 12px;
-  font-size: 13px;
-  background: var(--amber-soft);
-  color: var(--fg);
-}
-
-.w-banner-mirror,
-.w-banner-offline {
-  background: var(--bg-sunken);
-  color: var(--fg-muted);
-}
-
-.w-banner-revoked {
-  background: var(--red-soft);
-}
+/* --- Top bar ----------------------------------------------------------------------- */
 
 .w-topbar {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 12px;
+  padding: 6px 16px;
   padding-top: calc(6px + env(safe-area-inset-top));
   min-height: 56px;
   border-bottom: 1px solid var(--border);
@@ -365,6 +344,12 @@ button {
 
 .w-topbar .w-brand {
   margin-right: 2px;
+  text-decoration: none;
+}
+
+.w-topbar-title {
+  color: var(--fg-muted);
+  font-size: 13px;
 }
 
 .w-topbar-spacer {
@@ -375,831 +360,151 @@ button {
   color: var(--fg);
 }
 
-.w-sheet:focus {
-  outline: none;
+.w-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
 }
 
-.w-follow-row .toggle {
-  width: 100%;
-  justify-content: space-between;
-  flex-direction: row-reverse;
+/* --- Dashboard --------------------------------------------------------------------- */
+
+/* The renderer's .analytics view fills a window; on the web it scrolls inside the page. */
+.w-dashboard {
+  height: auto;
+  min-height: 0;
 }
 
-.w-menu-hint {
-  margin: -6px 0 6px;
-  font-size: 13px;
+.w-dashboard .analytics-top {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.w-dashboard-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.w-computers {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 12px 16px 4px;
 }
 
 .w-computer {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  min-width: 0;
-  padding: 0 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 10px;
   background: var(--bg-elev);
   color: var(--fg);
-  font-size: 14px;
-  font-weight: 600;
+  text-align: left;
+  font: inherit;
   cursor: pointer;
-}
-
-.w-computer-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .w-computer:hover {
   border-color: var(--border-strong);
 }
 
-.w-computer-off {
-  color: var(--fg-faint);
-  font-weight: 400;
-  font-size: 12px;
-}
-
-.w-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--fg-faint);
-  flex: none;
-}
-
-.w-dot.is-online {
-  background: var(--w-live);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--w-live) 22%, transparent);
-}
-
-.w-dot.is-connecting,
-.w-dot.is-restoring {
-  background: var(--amber);
-}
-
-.w-dot.is-offline,
-.w-dot.is-mirror,
-.w-dot.is-revoked {
-  background: var(--red);
-}
-
-.w-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 44px;
-  min-height: 44px;
-  border: 0;
-  background: none;
-  color: var(--fg);
-  cursor: pointer;
-}
-
-.w-back {
-  transform: rotate(90deg);
-}
-
-/* --- Sessions home -------------------------------------------------------------- */
-
-.w-home {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-}
-
-.w-home-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.w-home-head h1 {
-  font-size: 22px;
-  letter-spacing: -0.02em;
-  font-weight: 600;
-  margin: 4px 0;
-}
-
-.w-filter {
-  width: 100%;
-  box-sizing: border-box;
-  margin: 8px 0 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-elev);
-  color: var(--fg);
-}
-
-.w-sessions,
-.w-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.w-session-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 60px;
-  padding: 10px 12px;
-  margin-bottom: 6px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-
-.w-session-row:hover {
-  border-color: var(--border-strong);
-}
-
-.w-session-row.is-active {
+.w-computer.is-selected {
   border-color: var(--fg);
-  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--fg);
 }
 
-.w-session-row:focus-visible,
-.w-computer:focus-visible,
-.w-chip:focus-visible {
-  outline: 2px solid var(--fg);
-  outline-offset: 2px;
-}
-
-.w-session-row-main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.w-session-row-title {
-  font-weight: 600;
-}
-
-.w-session-row-meta {
-  color: var(--fg-muted);
-  font-size: 12px;
-}
-
-.w-status {
-  flex: none;
-}
-
-/* Touch targets: every control the shell itself renders is at least 44px tall, so a phone does not
-   need a steady thumb. (The reused transcript keeps its own compact controls.) */
-.w-app .btn,
-.w-app .w-chip,
-.w-app .w-icon-btn,
-.w-app .w-computer,
-.w-app input,
-.w-app textarea,
-.w-app select {
-  min-height: 44px;
-}
-
-/* --- Two panes (wide screens) ------------------------------------------------------ */
-
-.w-main {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-  min-width: 0;
-}
-
-/* Nothing selected on a wide screen: say what the empty pane is for. */
-.w-placeholder {
-  flex: 1;
-  display: none;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 32px;
-  text-align: center;
-  color: var(--fg-muted);
-}
-
-.w-placeholder h2 {
-  margin: 0;
-  color: var(--fg);
-  font-size: 20px;
-  letter-spacing: -0.02em;
-  font-weight: 600;
-}
-
-.w-placeholder p {
-  margin: 0;
-  max-width: 340px;
-  line-height: 1.5;
-}
-
-@media (max-width: 899px) {
-  .w-main[data-has-session] .w-home {
-    display: none;
-  }
-
-  .w-main:not([data-has-session]) .w-session {
-    display: none;
-  }
-}
-
-@media (min-width: 900px) {
-  .w-home {
-    max-width: 340px;
-    border-right: 1px solid var(--border);
-    flex: none;
-    width: 340px;
-    box-sizing: border-box;
-  }
-}
-
-/* --- Sessions home sections ------------------------------------------------------- */
-
-.w-section {
-  margin: 14px 0;
-}
-
-.w-section h2 {
-  margin: 0 0 8px;
-}
-
-.w-section details summary {
-  cursor: pointer;
-  color: var(--fg-muted);
-  font-size: 13px;
-  padding: 6px 0;
-}
-
-.w-continue-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--w-live);
-  background: var(--bg-elev);
-  border-radius: 12px;
-}
-
-.w-continue-main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.w-continue-title {
-  font-weight: 600;
-}
-
-.w-continue-meta {
-  color: var(--fg-muted);
-  font-size: 12px;
-}
-
-.w-row-detail {
+.w-computer.is-stale .w-computer-sync {
   color: var(--amber);
-  font-size: 12px;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-/* --- Session controls, approval banner, follow snackbar ---------------------------- */
-
-.w-controls {
-  display: flex;
-  gap: 6px;
-  padding: 6px 10px;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-
-.w-chip {
-  min-height: 44px;
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  font-size: 13px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.w-chip:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.w-approval-banner {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  width: 100%;
-  min-height: 44px;
-  border: 0;
-  border-bottom: 1px solid var(--amber);
-  background: var(--amber-soft);
-  color: var(--fg);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.w-snackbar {
-  position: fixed;
-  left: 12px;
-  right: 12px;
-  bottom: calc(12px + env(safe-area-inset-bottom));
-  z-index: 45;
+.w-computer-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
-  box-shadow: var(--shadow);
-  font-size: 14px;
+  width: 100%;
 }
 
-.w-snackbar-text {
+.w-computer-name {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
 }
 
-.w-snackbar .btn {
+.w-computer-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
   flex: none;
 }
 
-.w-field-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 44px;
-}
+.w-computer-swatch[data-slot='1'] { background: var(--chart-1); }
+.w-computer-swatch[data-slot='2'] { background: var(--chart-2); }
+.w-computer-swatch[data-slot='3'] { background: var(--chart-3); }
+.w-computer-swatch[data-slot='4'] { background: var(--chart-4); }
+.w-computer-swatch[data-slot='5'] { background: var(--chart-5); }
+.w-computer-swatch[data-slot='6'] { background: var(--chart-6); }
 
-/* --- One session ----------------------------------------------------------------- */
-
-.w-session {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  /* Without this a wide code block or table widens the whole page past a phone's screen. */
-  min-width: 0;
-}
-
-.w-session .transcript-wrap,
-.w-session .transcript {
-  min-width: 0;
-  max-width: 100%;
-}
-
-.w-session-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-elev);
-}
-
-.w-session-title {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.w-session-name {
-  font-weight: 600;
-}
-
-.w-session-path {
-  color: var(--fg-muted);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.w-session .transcript-wrap {
-  flex: 1;
-  min-height: 0;
-}
-
-/* --- Composer -------------------------------------------------------------------- */
-
-.w-composer {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-elev);
-}
-
-.w-composer-row {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  width: 100%;
-  min-width: 0;
-}
-
-.w-composer-picker { display: none; }
-
-.w-composer-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-width: 100%;
-}
-
-.w-composer-file {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px;
-}
-
-.w-composer-file span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.w-composer-file button {
-  flex: none;
-  min-width: 44px;
-  min-height: 44px;
-  border: 0;
-  background: transparent;
-  color: var(--fg);
-}
-
-.w-composer-error { color: var(--red); font-size: 12px; }
-
-.w-composer textarea {
-  min-width: 0;
-  width: 100%;
-  box-sizing: border-box;
-  resize: none;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--bg);
-  color: var(--fg);
-  line-height: 1.4;
-  max-height: 40vh;
-}
-
-.w-composer textarea:focus {
-  outline: none;
-  border-color: var(--fg);
-}
-
-.w-composer-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.w-composer-actions > :first-of-type {
-  margin-right: auto;
-}
-
-.w-composer-blocked {
-  color: var(--fg-muted);
-  font-size: 14px;
-  align-items: center;
-}
-
-/* --- Sheets ---------------------------------------------------------------------- */
-
-.w-sheet-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-}
-
-.w-sheet {
-  width: 100%;
-  max-height: 82vh;
-  overflow-y: auto;
-  background: var(--bg-elev);
-  border-radius: 16px 16px 0 0;
-  padding: 8px 16px calc(16px + env(safe-area-inset-bottom));
-  box-shadow: var(--shadow);
-}
-
-.w-sheet-head {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  min-height: 36px;
-}
-
-.w-sheet-head .w-icon-btn {
-  position: absolute;
-  right: 0;
-  top: 0;
-}
-
-.w-sheet-grab {
-  width: 40px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--border-strong);
-  margin: 6px auto 10px;
-}
-
-.w-sheet-title {
-  margin: 0 0 10px;
-  font-size: 16px;
-}
-
-.w-sheet-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.w-menu {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-}
-
-.w-list-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 2px;
-  border-bottom: 1px solid var(--border);
-}
-
-.w-list-row.is-active {
-  background: var(--accent-soft);
-  border-radius: 10px;
-}
-
-.w-list-main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-height: 44px;
-  justify-content: center;
-  border: 0;
-  background: none;
-  color: var(--fg);
-  text-align: left;
-}
-
-.w-list-name {
-  font-weight: 600;
-}
-
-.w-list-hint {
-  color: var(--fg-muted);
-  font-size: 12px;
-}
-
-/* --- Terminal (P3.5): drawn rows from a headless xterm; colors arrive as inline CSSOM styles --- */
-
-.w-term-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-}
-
-.w-term {
-  font-family: var(--mono);
-  line-height: 1.25;
-  border-radius: 10px;
-  padding: 10px;
-  height: 46vh;
-  overflow: auto;
-  white-space: pre;
-  outline: none;
-  -webkit-text-size-adjust: none;
-  text-size-adjust: none;
-}
-
-.w-term:focus-visible {
-  box-shadow: 0 0 0 2px var(--accent);
-}
-
-.w-term-row {
-  min-height: 1.25em;
-}
-
-.w-term-b { font-weight: 700; }
-.w-term-d { opacity: 0.6; }
-.w-term-i { font-style: italic; }
-.w-term-u { text-decoration: underline; }
-.w-term-s { text-decoration: line-through; }
-.w-term-u.w-term-s { text-decoration: underline line-through; }
-
-.w-term-cursor {
-  outline: 1px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 45%, transparent);
-}
-
-.w-term-tools {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  padding-bottom: 2px;
-}
-
-.w-term-key {
-  min-width: 44px;
-  font-family: var(--mono);
-}
-
-.w-term-line {
-  display: flex;
-  gap: 6px;
-}
-
-.w-term-line input {
-  flex: 1;
-  min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  font-family: var(--mono);
-  font-size: 16px; /* under 16px, iOS zooms the page on focus */
-}
-
-.w-term-head {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.w-term-head .w-select {
-  flex: 1;
-}
-
-/* --- Toasts ---------------------------------------------------------------------- */
-
-/* In the layout flow, under the top bar: a toast pushes content down for a few seconds instead of
-   covering the controls under it (it used to hide the session header and the composer actions). */
-.w-app > .w-toasts {
-  order: 1;
-}
-
-.w-app > .w-main {
-  order: 2;
-}
-
-.w-nudge {
-  order: 1;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 4px 0 12px;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--amber) 12%, var(--bg));
-}
-
-.w-nudge-main {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  min-width: 0;
-  border: 0;
-  background: none;
-  color: var(--fg);
-  font-size: 14px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.w-nudge-dot {
+.w-computer-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--amber);
   flex: none;
+  background: var(--fg-faint);
 }
 
-.w-nudge-text {
-  flex: 1;
+.w-computer-dot.is-online {
+  background: var(--w-live);
+}
+
+.w-computer-meta,
+.w-computer-sync {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-
-.w-nudge-title {
-  min-width: 0;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.w-nudge-message {
-  flex: none;
-}
-
-.w-nudge-cta {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  font-weight: 600;
-}
-
-.w-toasts {
-  position: relative;
-  padding: 6px 12px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  pointer-events: none;
-}
-
-.w-toast {
-  pointer-events: auto;
-  max-width: 520px;
-  align-self: center;
-  width: 100%;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
-  color: var(--fg);
-  box-shadow: var(--shadow);
-  text-align: left;
-  font-size: 14px;
+  font-size: 12px;
+  color: var(--fg-muted);
 }
 
-.w-toast-error {
-  border-color: var(--red);
+.w-computer-spend {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
 }
 
-/* --- Wide screens: a session list column beside the session ---------------------------------- */
+.w-per-computer-note {
+  margin: 0 0 8px;
+}
 
-@media (min-width: 900px) {
-  .w-main:not([data-has-session]) .w-placeholder {
-    display: flex;
+.w-per-computer {
+  margin-bottom: 24px;
+}
+
+.w-per-computer-title {
+  margin: 12px 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* Phones: the switcher and the range picker each take a full row and scroll sideways. */
+@media (max-width: 640px) {
+  .w-dashboard-controls .segmented {
+    max-width: 100%;
+    overflow-x: auto;
   }
-
-  .w-sheet-backdrop {
-    align-items: center;
+  .w-computers {
+    grid-template-columns: 1fr 1fr;
+    padding: 10px 12px 4px;
   }
-
-  .w-sheet {
-    width: min(520px, 92vw);
-    border-radius: 16px;
-  }
-
-  .w-session-head {
-    padding: 4px 12px;
+  .w-topbar-title {
+    display: none;
   }
 }

@@ -3,7 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
-import { CONTROL_REQUIRED_SCOPE, controlErrorCode, controlParams, type ControllerPrincipal, type ControlMethod } from '../../src/shared/control';
+import { CONTROL_HARNESSES, CONTROL_REQUIRED_SCOPE, CONTROL_VERSION, controlErrorCode, controlIdSchema, controlParams, type ControllerPrincipal, type ControlMethod } from '../../src/shared/control';
 import type { RelayStore } from './core';
 import type { HubSocket } from './hub';
 import { FixedWindowLimiter } from './rate';
@@ -21,7 +21,24 @@ const rpcSchema = z.strictObject({
 const toolCallSchema = z.strictObject({ name: z.string().max(100), arguments: z.unknown().optional(), _meta: z.record(z.string(), z.unknown()).optional() });
 const methods = Object.keys(controlParams) as ControlMethod[];
 export const CONTROL_TOOL_NAMES = ['computers_list', ...methods.map((method) => method.replaceAll('.', '_'))];
-const methodForTool = new Map(methods.map((method) => [method.replaceAll('.', '_'), method]));
+// Scope alone is not a read-only policy: it also authorizes windows.create in the legacy API.
+const discoveryMethods = ['capabilities', 'projects.list', 'sessions.list', 'sessions.get'] as const;
+const methodForTool = (allowed: readonly ControlMethod[]) => new Map(allowed.map((method) => [method.replaceAll('.', '_'), method]));
+const fullTools = methodForTool(methods);
+const discoveryTools = methodForTool(discoveryMethods);
+const discoverySession = z.object({ id: controlIdSchema, title: z.string().transform((v) => v.slice(0, 160)),
+  status: z.enum(['idle', 'starting', 'running', 'awaiting', 'error', 'stopped', 'pr', 'merged']), harness: z.enum(CONTROL_HARNESSES) });
+const nextOffset = z.number().int().safe().nonnegative().nullable();
+// Project/host selection is still desktop-owned. Rebuild the public discovery shape so adding
+// a field to the old controller or its desktop replies cannot expose it through this preview.
+const discoveryResults = {
+  capabilities: z.object({ version: z.literal(CONTROL_VERSION), instanceId: z.string().uuid(),
+    methods: z.array(z.string()).max(64).default([]).transform((list) => discoveryMethods.filter((m) => list.includes(m))) }),
+  'projects.list': z.object({ items: z.array(z.object({ id: controlIdSchema, name: z.string().transform((v) => v.slice(0, 256)) })).max(100), nextOffset }),
+  'sessions.list': z.object({ items: z.array(discoverySession).max(100), nextOffset }),
+  'sessions.get': discoverySession
+} satisfies Record<typeof discoveryMethods[number], z.ZodType>;
+type Channel = 'internal' | 'discovery';
 const toolSchema = (method: ControlMethod) => controlParams[method].extend({ hostId: hostIdSchema });
 const rpcError = (id: string | number | undefined, code: number, message: string) => controlJson({ jsonrpc: '2.0', id: id ?? null, error: { code, message } }, 400);
 
@@ -32,7 +49,8 @@ export class ControlMcpGateway<S extends HubSocket> {
 
   constructor(private readonly store: RelayStore, private readonly hosts: ControlHostBridge<S>) {}
 
-  async handle(request: Request, accountId: string, secret: string | undefined): Promise<Response> {
+  async handle(request: Request, accountId: string, secret: string | undefined, channel: Channel = 'internal'): Promise<Response> {
+    const allowed = channel === 'discovery' ? discoveryTools : fullTools;
     let controllerId: string | undefined;
     const lifetime = new AbortController();
     const abort = () => lifetime.abort();
@@ -40,7 +58,7 @@ export class ControlMcpGateway<S extends HubSocket> {
     if (request.signal.aborted) abort();
     try {
       const body = await readControlBytes(request);
-      const assertion = await verifyControllerAssertion(request, body, secret, true);
+      const assertion = await verifyControllerAssertion(request, body, secret, channel);
       if (!assertion || assertion.principal.accountId !== accountId) throw new ControlHttpError(401, 'invalid_controller_assertion');
       const count = this.controllers.get(assertion.principal.controllerId) ?? 0;
       if (this.active >= CONTROL_MAX_HTTP || count >= CONTROL_MAX_CONTROLLER_HTTP ||
@@ -62,13 +80,13 @@ export class ControlMcpGateway<S extends HubSocket> {
       if (method === 'tools/call') {
         const call = toolCallSchema.safeParse(params);
         if (!call.success) return rpcError(id, -32602, 'invalid_request');
-        const target = methodForTool.get(call.data.name);
+        const target = allowed.get(call.data.name);
         if (call.data.name !== 'computers_list' && !target) return rpcError(id, -32602, 'invalid_request');
         const schema = target ? toolSchema(target) : z.strictObject({});
         if (!schema.safeParse(call.data.arguments ?? {}).success) return rpcError(id, -32602, 'invalid_request');
         if (call.data.name === 'computers_list' && !this.rate.hit(`enumerate:${controllerId}`, 6, 60_000)) throw new ControlHttpError(429, 'busy');
       }
-      return await this.serve(request, rpc.data, assertion.principal, lifetime.signal);
+      return await this.serve(request, rpc.data, assertion.principal, lifetime.signal, allowed, channel);
     } catch (error) {
       return controlHttpError(error);
     } finally {
@@ -83,24 +101,31 @@ export class ControlMcpGateway<S extends HubSocket> {
     }
   }
 
-  private async serve(request: Request, parsedBody: unknown, principal: ControllerPrincipal, signal: AbortSignal): Promise<Response> {
-    const server = new McpServer({ name: 'vocs-control', version: '1.0.0' }, { capabilities: { tools: {} } });
+  private async serve(request: Request, parsedBody: unknown, principal: ControllerPrincipal, signal: AbortSignal,
+    allowed: ReadonlyMap<string, ControlMethod>, channel: Channel): Promise<Response> {
+    const server = new McpServer({ name: channel === 'discovery' ? 'vocs-code-discovery' : 'vocs-control', version: '1.0.0' }, { capabilities: { tools: {} } });
+    const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
     // SDK errors never enter cloud logs. Only stable error codes leave this boundary.
     server.server.onerror = () => undefined;
     const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value ?? null) }] });
     const failure = (error: unknown) => ({ ...result({ error: controlErrorCode(error) }), isError: true });
-    server.registerTool('computers_list', { description: 'List locally authorized, compatible online computers only.', inputSchema: z.strictObject({}) }, async () => {
+    server.registerTool('computers_list', { description: 'List locally authorized, compatible online computers only.',
+      inputSchema: z.strictObject({}), ...(channel === 'discovery' ? { annotations: readOnly } : {}) }, async () => {
       try { return result(await this.hosts.computers(principal, signal)); } catch (error) { return failure(error); }
     });
-    for (const method of methods) {
-      server.registerTool(method.replaceAll('.', '_'), {
+    for (const [name, method] of allowed) {
+      server.registerTool(name, {
         description: `${method} on the explicitly named computer. Requires ${CONTROL_REQUIRED_SCOPE[method]} and local delegation.`,
-        inputSchema: toolSchema(method)
+        inputSchema: toolSchema(method), ...(channel === 'discovery' ? { annotations: readOnly } : {})
       }, async (args: z.infer<ReturnType<typeof toolSchema>>) => {
         const { hostId, ...params } = args;
         try {
           const reply = await this.hosts.call(principal, hostId, { method, params }, signal);
-          return reply.ok ? result(reply.result) : { ...result({ error: reply.error ?? 'unknown' }), isError: true };
+          if (!reply.ok) return { ...result({ error: reply.error ?? 'unknown' }), isError: true };
+          if (channel !== 'discovery') return result(reply.result);
+          const schema = discoveryResults[method as keyof typeof discoveryResults];
+          const projected = schema?.safeParse(reply.result);
+          return projected?.success ? result(projected.data) : { ...result({ error: 'unavailable' }), isError: true };
         } catch (error) { return failure(error); }
       });
     }

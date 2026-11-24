@@ -11,6 +11,9 @@ export interface RemoteConfig {
   /** P4 offline mirror: upload sealed transcript snapshots so browsers can read history while
    *  this desktop is offline. Opt-in, off by default. */
   mirror?: boolean;
+  /** Upload this computer's analytics snapshot for the code.vocs.io dashboard
+   *  (docs/WEB-DASHBOARD.md). On unless set to false; turning it off deletes the relay copy. */
+  shareAnalytics?: boolean;
 }
 
 export interface DesktopFocus {

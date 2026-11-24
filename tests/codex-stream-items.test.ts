@@ -139,7 +139,8 @@ describe('codex streamed items reach the transcript once', () => {
     notify('turn/completed', { threadId: child, turn: { id: 'child-turn', ...completed } });
     notify('item/completed', { item: { id: 'parent-child-activity', type: 'subAgentActivity', kind: 'completed', agentThreadId: child, agentPath: '/root/helper' } });
 
-    expect(sidebarStatuses).toEqual(['running']);
+    expect(new Set(sidebarStatuses)).toEqual(new Set(['running']));
+    expect(session.ongoing).toBeUndefined();
     expect(await store.readTranscript(session.id)).toEqual([
       expect.objectContaining({ id: 'parent-reply' }),
       expect.objectContaining({ id: 'parent-child-activity', kind: 'tool', name: 'subagent', status: 'done' })
@@ -149,8 +150,12 @@ describe('codex streamed items reach the transcript once', () => {
     expect(sidebarStatuses.at(-1)).toBe('idle');
     const settledPushes = sidebarStatuses.length;
     notify('turn/started', { threadId: child, turn: { id: 'later-child-turn' } });
+    // Child threads surface as ongoing background work while keeping the parent's own status idle.
+    expect(session.ongoing).toMatchObject([{ id: `thread:${child}`, kind: 'subagent' }]);
+    expect(sidebarStatuses.slice(settledPushes).every((status) => status === 'idle')).toBe(true);
     notify('turn/completed', { threadId: child, turn: { id: 'later-child-turn', ...completed } });
-    expect(sidebarStatuses).toHaveLength(settledPushes);
+    expect(session.ongoing).toBeUndefined();
+    expect(sidebarStatuses.slice(settledPushes).every((status) => status === 'idle')).toBe(true);
 
     await manager.flushPendingPersists();
     const restored = new SessionStore(dataDir);

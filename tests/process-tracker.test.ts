@@ -134,7 +134,11 @@ describe('process tracker', () => {
     expect(byPid(list.processes, 3000)!.owner).toEqual({ label: 'GitNexus server' });
     expect(byPid(list.processes, 3001)!.owner).toEqual({});
     expect(list.processes.some((p) => p.orphaned)).toBe(false);
-    expect(summaries.at(-1)).toEqual({ count: 5, orphaned: 0 });
+    expect(summaries.at(-1)).toMatchObject({
+      count: 5,
+      orphaned: 0,
+      bySession: { s1: [expect.objectContaining({ pid: 2003, label: 'npm run dev' })] }
+    });
   });
 
   it('never follows a reused PID: a process older than its recorded parent is not that parent\'s child', async () => {
@@ -175,7 +179,11 @@ describe('process tracker', () => {
       expect(p.owner.sessionId).toBe('s1');
       expect(p.previousRun).toBeUndefined();
     }
-    expect(summaries.at(-1)).toEqual({ count: 2, orphaned: 2 });
+    expect(summaries.at(-1)).toMatchObject({
+      count: 2,
+      orphaned: 2,
+      bySession: { s1: [expect.objectContaining({ pid: 2002, detached: true })] }
+    });
   });
 
   it('claims a child a tracked process started just before it died, but not an older stranger with that parent PID', async () => {

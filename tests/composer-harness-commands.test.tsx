@@ -102,6 +102,51 @@ describe('composer harness commands', () => {
     expect(sent()).toEqual(['/pr draft it']);
   });
 
+  it('opens the Usage panel without sending a prompt or checking quota', async () => {
+    useStore.setState({ panelTab: 'changes', panelOpen: false });
+    const c = mount(session('s1', 'antigravity'));
+    c.type('/usa');
+    expect(c.rows()).toEqual(['app:/usage']);
+    c.key('Enter');
+    expect(c.ta.value).toBe('/usage ');
+    c.key('Enter');
+    await waitFor(() => expect(useStore.getState()).toMatchObject({ panelTab: 'usage', panelOpen: true }));
+    expect(c.ta.value).toBe('');
+    expect(sent()).toEqual([]);
+    expect(invokeMock.mock.calls.some(([channel]) => channel.startsWith('subscriptions:'))).toBe(false);
+  });
+
+  it.each(['/USAGE', '/Usage '])('keeps %j local instead of sending it as a prompt', (input) => {
+    useStore.setState({ panelTab: 'changes', panelOpen: false });
+    const c = mount(session('s1', 'antigravity'));
+    c.type(input);
+    c.key('Enter');
+    expect(useStore.getState()).toMatchObject({ panelTab: 'usage', panelOpen: true });
+    expect(c.ta.value).toBe('');
+    expect(sent()).toEqual([]);
+  });
+
+  it('only delegates /goal even if a saved session has different native-goal metadata', () => {
+    useStore.setState({ panelTab: 'changes', panelOpen: false });
+    const c = mount(session('s1', 'claude', { nativeGoal: 'usage' }));
+    c.type('/usage');
+    expect(c.rows()).toEqual(['app:/usage']);
+    c.key('Enter');
+    expect(useStore.getState()).toMatchObject({ panelTab: 'usage', panelOpen: true });
+    expect(sent()).toEqual([]);
+  });
+
+  it('keeps an advertised harness /usage reachable as //usage', async () => {
+    const c = mount(session('s1', 'claude', { harnessCommandList: [{ name: 'usage', kind: 'command' }] }));
+    c.type('/usage');
+    expect(c.rows()).toEqual(['app:/usage', 'harness://usage']);
+    c.key('ArrowDown');
+    c.key('Tab');
+    expect(c.ta.value).toBe('//usage ');
+    c.key('Enter');
+    await waitFor(() => expect(sent()).toEqual(['/usage']));
+  });
+
   it('borrows a same-project sibling’s list until its own harness has reported one', () => {
     useStore.setState({ sessions: [session('older', 'claude', { harnessCommandList: CLAUDE_COMMANDS, updatedAt: 5 }), session('other-harness', 'pi', { harnessCommandList: [{ name: 'skill:pdf', kind: 'skill' }], updatedAt: 9 })] });
     const c = mount(session('fresh', 'claude'));

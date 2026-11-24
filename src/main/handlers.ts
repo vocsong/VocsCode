@@ -28,6 +28,8 @@ import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
 import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, clearCuaVersionCache, cuaBaseDef, cuaDefState, cuaInstallCommand, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
 import { listHarnessModels } from './harness/registry';
+import { readCodexSubscriptionQuota } from './harness/codex-quota';
+import { INLINE_SUBSCRIPTION_PROVIDERS, SUBSCRIPTION_PROVIDERS, type SubscriptionLimits } from '../shared/subscription-usage';
 import { ModelCatalogCache } from './model-catalog-cache';
 import { assertProviderEndpoint, fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { assertEndpointUrl } from '../shared/endpoint-policy';
@@ -35,7 +37,7 @@ import { enrichModelsFromProviders } from './models/static-models';
 import type { RuntimeResolver, ToolName } from './runtime';
 import type { SearchIndex } from './search';
 import { clearWhichCache, clearRuntimeProbeCache, HARNESS_PACKAGES, runCapture, which } from './runtime';
-import { assertHarnessId, openHarnessLogin, readHarnessSetup, withAppCredentials } from './harness-setup';
+import { assertHarnessId, openAntigravityUsage, openHarnessLogin, readHarnessSetup, withAppCredentials } from './harness-setup';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import { mcpServersSaveError, normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
@@ -120,6 +122,8 @@ export interface HandlerDeps {
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
   remoteMirror?: { sync(): void; disable(): void };
+  /** The code.vocs.io dashboard's analytics uploader (src/main/remote/analytics-sync.ts). */
+  analyticsSync?: { sharingChanged(): Promise<unknown> };
   /** Base-pi global config (Settings → Pi); a default store is created when absent. */
   piConfig?: PiConfigStore;
   /** The app's own instruction layer (Settings → Instructions); created from userData when absent. */
@@ -265,7 +269,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (channel.startsWith('housekeep:') && actor !== 'desktop') throw new Error('Housekeep requires the local desktop owner.');
     if (isIntelligenceOwnerRequest(channel, req) && actor !== 'desktop') throw new Error('Intelligence settings and memory management require the local desktop owner.');
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
-    if (channel === 'harness:antigravityQuota' && actor !== 'desktop') throw new Error('Antigravity quota requires the local desktop owner.');
+    if (channel.startsWith('subscriptions:') && actor !== 'desktop') throw new Error('Subscription usage requires the local desktop owner.');
     if (channel === 'fs:writeText' && actor !== 'desktop') throw new Error('Saving workspace text requires the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
     if (!fn) {
@@ -614,7 +618,29 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await modelCatalog().clear(harness);
     return result;
   });
-  handle('harness:antigravityQuota', () => runtime.antigravityQuota());
+  let codexQuotaRead: Promise<SubscriptionLimits> | undefined;
+  handle('subscriptions:read', (input) => {
+    const parsed = z.strictObject({ provider: z.enum(INLINE_SUBSCRIPTION_PROVIDERS) }).safeParse(input);
+    if (!parsed.success) throw new Error('Unsupported subscription quota read.');
+    // One process per account check, even if the user closes and reopens the panel mid-read.
+    return codexQuotaRead ??= readCodexSubscriptionQuota(runtime).finally(() => { codexQuotaRead = undefined; });
+  });
+  handle('subscriptions:openUsage', async (input) => {
+    const parsed = z.strictObject({ provider: z.enum(SUBSCRIPTION_PROVIDERS) }).safeParse(input);
+    if (!parsed.success) throw new Error('Unsupported subscription usage action.');
+    const { provider } = parsed.data;
+    if (provider === 'antigravity') {
+      const result = await openAntigravityUsage(runtime);
+      if (!result.ok) throw new Error(result.error ?? 'Could not open the Antigravity CLI.');
+      return { kind: 'terminal' };
+    }
+    await deps.desktop.openExternal({
+      codex: 'https://chatgpt.com/codex/settings/usage',
+      claude: 'https://claude.ai/settings/usage',
+      cursor: 'https://cursor.com/dashboard/usage'
+    }[provider]);
+    return { kind: 'browser' };
+  });
   handle('harness:availability', async (req) => {
     if (req?.id !== undefined) assertHarnessId(req.id);
     if (req?.refresh) invalidateAvailability();
@@ -1140,6 +1166,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
         if (mirror === true) deps.remoteMirror?.sync();
         else await deps.remoteMirror?.disable();
       })();
+      return remote.state();
+    });
+    handle('remote:setShareAnalytics', async ({ share }) => {
+      await settings.update({ remote: { ...remoteConfig(), shareAnalytics: share === true } });
+      deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
+      // Off deletes the relay copy now; a clear that cannot reach the relay is retried.
+      void deps.analyticsSync?.sharingChanged();
       return remote.state();
     });
     handle('remote:clearAudit', () => {

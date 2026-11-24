@@ -1,6 +1,7 @@
 /** Session list grouped by project, with live status badges per harness. */
 import React, { useMemo, useRef, useState } from 'react';
 import type { AppSettings, FolderStyle, SessionMeta, SidebarView } from '../../../shared/types';
+import { hasOngoingWork, ongoingBadgeLabel } from '../../../shared/ongoing';
 import { modelRefName } from '../../../shared/model-names';
 import { sessionTitleText } from '../../../shared/session-title';
 import { invoke, isMac, modKey } from '../api';
@@ -288,7 +289,7 @@ export function Sidebar() {
   const dndHandlers = { start: onDragStartRow, end: onDragEndRow, over: onDragOverRow, leave: onDragLeaveRow, drop: onDropRow };
 
   const awaiting = sessions.filter((s) => s.status === 'awaiting').length;
-  const running = sessions.filter((s) => s.status === 'running').length;
+  const running = sessions.filter((s) => !s.archived && (s.status === 'running' || s.status === 'starting' || (s.status !== 'awaiting' && hasOngoingWork(s)))).length;
   const done = activitySections(sessions, null).done.length;
   const plural = (n: number) => `${n} ${n === 1 ? 'session' : 'sessions'}`;
   // Zen keeps only the icons of these links; their names move into tooltips.
@@ -662,6 +663,7 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
       data-testid="session-row"
       data-session-id={s.id}
       data-status={archiving ? 'archiving' : s.status}
+      data-ongoing={!archiving && hasOngoingWork(s) ? 'true' : undefined}
       data-harness={s.config.harness}
       data-pinned={s.pinned ? '' : undefined}
       title={minimal && !renaming ? sessionTitleText(s) : undefined}
@@ -774,7 +776,9 @@ function SessionRow({ session: s, folder, active, inPane = false, customLabels, 
           <span className="session-side" onClick={(e) => e.stopPropagation()}>
             <Dropdown align="right" width={200} trigger={() => archiving
               ? <span className="session-status status-archiving" title="Archiving…">Archiving</span>
-              : <StatusLabel status={s.status} label={s.statusLabel} />}>
+              : !s.statusLabel && s.status === 'idle' && hasOngoingWork(s)
+                ? <span className="session-status status-ongoing" data-testid="session-ongoing-status" title={s.ongoing!.map((i) => i.label).join(' · ')}>{ongoingBadgeLabel(s.ongoing!)}</span>
+                : <StatusLabel status={s.status} label={s.statusLabel} />}>
               {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
             </Dropdown>
           </span>

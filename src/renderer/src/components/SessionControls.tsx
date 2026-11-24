@@ -17,6 +17,7 @@ import { useStore } from '../store';
 import { useMinimalUi } from '../ui-mode';
 import { Dropdown, Icon, MenuItem } from './ui';
 import { ModelMenu } from './ModelMenu';
+import { FastModeElectric } from './FastModeElectric';
 
 export function SessionControls({ session }: { session: SessionMeta }) {
   const { models, loading: modelsLoading, error: modelsError } = useSessionModels(session);
@@ -110,21 +111,6 @@ export function SessionControls({ session }: { session: SessionMeta }) {
         <KeepAwakeSwitch key={session.id} id={session.id} bridge={window.keepAwake} />
       )}
     </div>
-  );
-}
-
-function FastModeElectric() {
-  return (
-    <svg className="fast-mode-electric" viewBox="0 0 160 28" preserveAspectRatio="none" aria-hidden="true" focusable="false">
-      <g className="fast-mode-electric-arc">
-        <path className="fast-mode-electric-trunk" pathLength={1} d="M3 17 5 12 4 10 9 7 13 2 24 3.5 35 1.5 43 3 52 1.5 65 3.5 77 1.5 88 3 103 1.5 115 3" />
-        <path d="M9 7 14 7.5 19 4.5 M43 3 48 6 55 4.5 M77 1.5 83 5 91 4" />
-      </g>
-      <g className="fast-mode-electric-arc">
-        <path className="fast-mode-electric-trunk" pathLength={1} d="M157 11 155 15 156 18 151 21 147 26 136 24.5 126 26.5 116 25 107 26.5 94 24.5 83 26.5 72 25 57 26.5 45 25" />
-        <path d="M151 21 146 20.5 141 23.5 M116 25 111 22 104 23.5 M83 26.5 77 23 69 24" />
-      </g>
-    </svg>
   );
 }
 

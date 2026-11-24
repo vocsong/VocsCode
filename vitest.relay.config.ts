@@ -9,7 +9,8 @@ export default defineConfig({
       bindings: {
         ENROLL_TOKEN: 'relay-do-test-enroll',
         ACCOUNT_ASSERTION_SECRET: 'relay-do-test-account-assertion-secret-32-bytes-min',
-        DEVICE_ROUTE_SECRET: 'relay-do-test-device-route-secret-32-bytes-min'
+        DEVICE_ROUTE_SECRET: 'relay-do-test-device-route-secret-32-bytes-min',
+        CONTROL_DISCOVERY_ENABLED: '1'
       }
     }
   })],

@@ -4,7 +4,7 @@ const { listeners, invoke, mainFrame, contents, ownerChannels, ownerDocument } =
   const ownerDocument = 'file:///C:/vocs-fixture/renderer/index.html';
   const mainFrame = { url: ownerDocument, detached: false };
   const ownerChannels = [
-    'harness:login', 'harness:antigravityQuota', 'control:grant', 'control:local:get', 'control:local:enable', 'control:local:disable',
+    'harness:login', 'subscriptions:read', 'subscriptions:openUsage', 'control:grant', 'control:local:get', 'control:local:enable', 'control:local:disable',
     'vocsAccount:get', 'vocsAccount:signIn', 'vocsAccount:cancel', 'vocsAccount:refresh', 'vocsAccount:signOut',
     'vocsAccount:hubConnect', 'vocsAccount:hubCancel', 'vocsAccount:hubDisconnect',
     'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText', 'intelligence:view', 'intelligence:promote', 'desktop:setFocus'
@@ -66,9 +66,15 @@ describe('local desktop setup authority', () => {
     await expect(handler(event, input)).resolves.toEqual({ ok: true });
     expect(invoke).toHaveBeenCalledExactlyOnceWith('control:local:enable', input, 'desktop');
   });
+  it.each(['subscriptions:read', 'subscriptions:openUsage'])('refuses stale main frames for %s', (channel) => {
+    mainFrame.detached = true;
+    expect(() => listeners.get(channel)!({ sender: contents, senderFrame: mainFrame }, { provider: 'codex' })).toThrow(/local desktop owner/);
+    expect(invoke).not.toHaveBeenCalled();
+  });
   it.each([
     { channel: 'harness:login', payload: { harness: 'antigravity' }, reply: { ok: true } },
-    { channel: 'harness:antigravityQuota', payload: undefined, reply: { groups: [{ name: 'Gemini', buckets: [{ name: 'Gemini Pro', remainingFraction: 0.73 }] }] } },
+    { channel: 'subscriptions:read', payload: { provider: 'codex' }, reply: { groups: [{ name: 'Codex', buckets: [{ name: '5-hour limit', remainingFraction: 0.73 }] }] } },
+    { channel: 'subscriptions:openUsage', payload: { provider: 'antigravity' }, reply: { kind: 'terminal' } },
     { channel: 'fs:writeText', payload: { sessionId: 's1', path: 'notes.txt', content: 'next', expectedContent: 'before' }, reply: undefined },
     { channel: 'desktop:setFocus', payload: { sessionId: 's1' }, reply: undefined }
   ])('passes $channel through the owner frame', async ({ channel, payload, reply }) => {

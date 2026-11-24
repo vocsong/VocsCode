@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, net, powerSaveBlocker, screen, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
+import { hasOngoingWork } from '../shared/ongoing';
 import { sessionTitleText } from '../shared/session-title';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { DEFAULT_PALETTE, chromeFor, themeSourceFor, type PaletteId } from '../shared/themes';
@@ -60,6 +61,7 @@ import { windowsLocalPipe } from './control/windows-pipe';
 import type { ControlResourceGuard } from './control/workspace';
 import { RemoteAudit } from './remote/audit';
 import { RemoteMirror } from './remote/mirror';
+import { AnalyticsSync } from './remote/analytics-sync';
 import { relayUrl } from './remote/relay-url';
 import { WebServer } from './web-server';
 
@@ -392,6 +394,8 @@ async function main(): Promise<void> {
   // Declared before the manager so the push callbacks can mirror transcripts; assigned once the
   // remote host exists (the callbacks only fire on real activity, long after boot).
   let remoteMirror: RemoteMirror | null = null;
+  let analyticsSync: AnalyticsSync | null = null;
+  let processesRef: ProcessTracker | null = null;
   sessions = new SessionManager({
     store,
     settings,
@@ -413,6 +417,9 @@ async function main(): Promise<void> {
     pushEvent: (env: SessionEventEnvelope) => {
       pushAll(PUSH_CHANNELS.sessionEvent, env);
       remoteMirror?.notify(env.sessionId);
+      if (env.event.type === 'status' && (env.event.status === 'idle' || env.event.status === 'stopped')) {
+        processesRef?.soon(300);
+      }
     },
     pushSessions: (list: SessionMeta[]) => {
       keepAwake.sync(list);
@@ -443,6 +450,7 @@ async function main(): Promise<void> {
       for (const id of reflectedStates.keys()) if (!liveIds.has(id)) reflectedStates.delete(id);
       for (const hook of sessionsChangedHooks) hook();
       remoteMirror?.notifyIndex();
+      analyticsSync?.notify();
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
     },
     notify: (sessionId, title, body) => {
@@ -508,6 +516,7 @@ async function main(): Promise<void> {
     onSummary: (summary) => pushAll(PUSH_CHANNELS.processSummary, summary),
     log
   });
+  processesRef = processes;
   processes.start();
 
   // In-app auto-update (issue #198): packaged builds only — never in dev, and opt-out for e2e runs.
@@ -516,7 +525,7 @@ async function main(): Promise<void> {
     updater = new UpdateService({
       facade: electronUpdaterFacade(logTo),
       isPackaged: true,
-      isAnySessionLive: () => !!sessionsRef.list().some((s) => s.status === 'starting' || s.status === 'running' || s.status === 'awaiting'),
+      isAnySessionLive: () => !!sessionsRef.list().some((s) => s.status === 'starting' || s.status === 'running' || s.status === 'awaiting' || hasOngoingWork(s)),
       push: (state) => pushAll(PUSH_CHANNELS.updateState, state),
       log
     });
@@ -533,7 +542,7 @@ async function main(): Promise<void> {
     cwdOf: (id) => sessionsRef.get(id)?.cwd,
     push: (channel, payload) => {
       pushAll(channel, payload);
-      // A new shell joins its session's process Job at the next sample; make that one soon.
+      // Sample soon when a terminal changes.
       if (channel === PUSH_CHANNELS.terminalsChanged) processes.soon();
     },
     log
@@ -571,6 +580,7 @@ async function main(): Promise<void> {
     viewOnly: () => settings.get().remote?.viewOnly === true,
     // A re-keyed mirror must be re-sealed: the relay copy under the old key was just dropped.
     onMirrorRotated: () => remoteMirror?.sync(),
+    onOnline: () => analyticsSync?.connected(),
     // P3.5: a paired browser streams a terminal it watches; it never attaches the desktop's view.
     terminals: () => terminals
   });
@@ -585,6 +595,16 @@ async function main(): Promise<void> {
     enabled: () => settings.get().remote?.mirror === true,
     log
   });
+
+  // The code.vocs.io dashboard (docs/WEB-DASHBOARD.md): a connected computer uploads its analytics
+  // snapshot unless sharing is off. Nothing is sent while remote access is off or unregistered.
+  analyticsSync = new AnalyticsSync({
+    snapshot: () => analytics.snapshot({ appVersion: app.getVersion(), platform: `${process.platform} ${process.arch}` }),
+    request: (requestPath, init) => remoteHost!.analyticsRequest(requestPath, init),
+    sharing: () => settings.get().remote?.shareAnalytics !== false,
+    log
+  });
+  analyticsSync.start();
 
   // Built here, not in the registry, because it needs the OS vault; restored after the window opens.
   const vocsAccount = createVocsAccount({ realm: vocsAccountRealm(), openExternal: (url) => shell.openExternal(url), vault: secrets, isOnline: () => net.isOnline(), hub: vocsHub });
@@ -609,6 +629,7 @@ async function main(): Promise<void> {
     localControlDocument,
     desktopFocus,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
+    analyticsSync,
     updater: updater ?? undefined,
     processes,
     broadcast: (channel, payload) => {
@@ -655,12 +676,11 @@ async function main(): Promise<void> {
       graphScheduler.settingsChanged();
     }
     currentPalette = s.palette ?? DEFAULT_PALETTE;
-    nativeTheme.themeSource = themeSourceFor(s.theme);
-    // A palette switch leaves themeSource as it was, so nativeTheme stays silent — repaint the
-    // caption from the palette directly.
-    applyChrome();
     currentUiScale = s.typography?.uiScale ?? 1;
+    nativeTheme.themeSource = themeSourceFor(s.theme);
     applyZoom();
+    // Palette and interface size changes don't emit nativeTheme's updated event.
+    applyChrome();
     terminals?.updateSettings(s.terminal);
   });
   currentPalette = settings.get().palette ?? DEFAULT_PALETTE;
@@ -919,10 +939,18 @@ async function reconcileForkInheritance(analytics: AnalyticsStore, store: Sessio
   );
 }
 
-/** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
-function chrome(): { color: string; symbolColor: string; height: number } {
-  // themeSource carries the mode, so shouldUseDarkColors is the scheme the renderer resolved too.
-  return { ...chromeFor(currentPalette, nativeTheme.shouldUseDarkColors ? 'dark' : 'light'), height: TITLEBAR_HEIGHT };
+/** Theme colors for the loading surface and the native caption glyphs. */
+function chrome() {
+  return chromeFor(currentPalette, nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
+}
+
+function titleBarOverlay({ color, symbolColor }: ReturnType<typeof chrome>): Electron.TitleBarOverlay {
+  if (process.platform === 'win32') {
+    // Let the renderer paint the whole bar, including Zen, animated themes and modal scrims.
+    // Electron measures the native hit area in DIPs, while the CSS bar also scales with page zoom.
+    return { color: '#00000000', symbolColor, height: Math.round(TITLEBAR_HEIGHT * currentUiScale) };
+  }
+  return { color, symbolColor, height: TITLEBAR_HEIGHT };
 }
 
 /** Settings → Appearance → Interface size, applied as the window's zoom factor. */
@@ -941,10 +969,11 @@ function applyZoom(): void {
 /** Repaints the window background and the OS-drawn caption buttons for the active theme. */
 function applyChrome(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.setBackgroundColor(chrome().color);
+  const colors = chrome();
+  mainWindow.setBackgroundColor(colors.color);
   if (process.platform === 'darwin') return;
   try {
-    mainWindow.setTitleBarOverlay(chrome());
+    mainWindow.setTitleBarOverlay(titleBarOverlay(colors));
   } catch {
     // Older/unsupported platforms simply keep the colors they were created with.
   }
@@ -954,19 +983,20 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
   const icon = appIconPath(appRoot);
+  const colors = chrome();
   const win = new BrowserWindow({
     ...bounds,
     minWidth: 960,
     minHeight: 600,
     title: APP_NAME,
     icon,
-    backgroundColor: chrome().color,
+    backgroundColor: colors.color,
     // Frameless with an in-app title bar (sidebar toggle, history, menu bar). On Windows/Linux the
     // overlay keeps the native caption buttons — and with them snap layouts and double-click maximize.
     titleBarStyle: 'hidden',
     ...(process.platform === 'darwin'
       ? { trafficLightPosition: { x: 12, y: (TITLEBAR_HEIGHT - 14) / 2 } }
-      : { titleBarOverlay: chrome() }),
+      : { titleBarOverlay: titleBarOverlay(colors) }),
     autoHideMenuBar: true,
     show: false,
     webPreferences: {

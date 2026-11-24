@@ -8,7 +8,6 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openHarnessLogin } from '../src/main/harness-setup';
-import { parseAntigravityQuota } from '../src/main/harness/antigravity';
 import { listHarnessModels } from '../src/main/harness/registry';
 import { RuntimeResolver, clearRuntimeProbeCache, clearWhichCache } from '../src/main/runtime';
 import { defaultSettings } from '../src/main/settings';
@@ -88,13 +87,6 @@ function antigravityCatalogProbe(methods: string[], signedOut = false) {
   });
   return child;
 }
-
-const antigravityQuotaReply = {
-  status: 'SUCCESS', num_turns: 0,
-  command: { name: 'usage', data: { groups: [{ name: 'Gemini', buckets: [
-    { name: 'Gemini Pro', remaining_fraction: 0.726, reset_time: '2026-11-21T17:00:00Z', extra: 'fixture-private-account-data' }
-  ] }] } }
-};
 
 async function resolver() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-setup-'));
@@ -176,32 +168,18 @@ describe('harness setup checks', () => {
     { state: 'unknown after a probe error', errorCode: -32603, authenticated: 'unknown' }
   ])('reports Antigravity sign-in as $state without starting an agent turn', async ({ errorCode, authenticated }) => {
     const { runtime } = await resolver();
-    const methods: string[] = [];
-    spawnTool.mockImplementation((_bin, args: string[]) => args[0] === '--version' ? answer('agy 1.5.12') : antigravityAccountProbe(methods, errorCode));
-    expect(await runtime.availability('antigravity')).toMatchObject({ available: true, version: '1.5.12', authenticated });
-    expect(methods).toEqual(['initialize', 'session/list']);
-    expect(spawnTool.mock.calls.map(([, args]) => args)).toEqual([['--version'], ['--settings', expect.any(String), 'acp']]);
-  });
-
-  it('reads Antigravity quota using only the vendor account and zero-turn usage command', async () => {
-    const { runtime } = await resolver();
     const credentialKeys = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AGY_ADC_AUTH', 'GOOGLE_APPLICATION_CREDENTIALS'];
     for (const key of credentialKeys) vi.stubEnv(key, 'fixture-credential');
     const methods: string[] = [];
-    spawnTool.mockImplementationOnce(() => answer('agy 1.5.12'))
-      .mockImplementationOnce(() => antigravityAccountProbe(methods))
-      .mockImplementationOnce(() => answer(JSON.stringify(antigravityQuotaReply)));
-    expect(await runtime.antigravityQuota()).toEqual({ groups: [{ name: 'Gemini', buckets: [
-      { name: 'Gemini Pro', remainingFraction: 0.726, resetAt: '2026-11-21T17:00:00Z' }
-    ] }] });
+    spawnTool.mockImplementation((_bin, args: string[]) => args[0] === '--version' ? answer('agy 1.5.12') : antigravityAccountProbe(methods, errorCode));
+    const status = await runtime.availability('antigravity');
+    expect(status).toMatchObject({ available: true, version: '1.5.12', authenticated });
+    if (authenticated === false) expect(status.detail).toMatch(/Sign in with Google/);
     expect(methods).toEqual(['initialize', 'session/list']);
-    expect(spawnTool.mock.calls.map(([, args]) => args)).toEqual([
-      ['--version'], ['--settings', expect.any(String), 'acp'], ['--settings', expect.any(String), '-p', '/usage', '--output-format', 'json']
-    ]);
-    for (const [, , options] of spawnTool.mock.calls.slice(1)) {
-      expect(options.cwd).toBe(runtime.runtimePaths.appRuntimeDir);
-      for (const key of credentialKeys) expect(options.env).not.toHaveProperty(key);
-    }
+    expect(spawnTool.mock.calls.map(([, args]) => args)).toEqual([['--version'], ['--settings', expect.any(String), 'acp']]);
+    const [, , options] = spawnTool.mock.calls[1]!;
+    expect(options.cwd).toBe(runtime.runtimePaths.appRuntimeDir);
+    for (const key of credentialKeys) expect(options.env).not.toHaveProperty(key);
   });
 
   it('lists the Google account’s Antigravity models before a session starts, without prompting a model', async () => {
@@ -236,31 +214,6 @@ describe('harness setup checks', () => {
     expect(result.models).toEqual([]);
     expect(result.error).toMatch(/Sign in with Google/);
     expect(methods).toEqual(['initialize', 'session/new']);
-  });
-
-  it('rejects Antigravity usage output when the vendor reports a model turn', () => {
-    expect(parseAntigravityQuota(JSON.stringify({ ...antigravityQuotaReply, num_turns: 1 }))).toBeUndefined();
-  });
-
-  it('keeps usable Gemini quota when other windows are disabled or report a credit amount', () => {
-    const reply = structuredClone(antigravityQuotaReply);
-    const { groups } = reply.command.data;
-    const buckets = [
-      ...groups[0].buckets,
-      { name: 'Five hours', disabled: true },
-      { name: 'AI credits', remaining_amount: 100 }
-    ];
-    const payload = { ...reply, command: { name: 'usage', data: { groups: [{ name: groups[0].name, buckets }] } } };
-    expect(parseAntigravityQuota(JSON.stringify(payload))).toEqual({
-      groups: [{ name: 'Gemini', buckets: [{ name: 'Gemini Pro', remainingFraction: 0.726, resetAt: '2026-11-21T17:00:00Z' }] }]
-    });
-  });
-
-  it('reports sign-in needed before running Antigravity usage for a signed-out account', async () => {
-    const { runtime } = await resolver();
-    spawnTool.mockImplementationOnce(() => answer('agy 1.5.12')).mockImplementationOnce(() => antigravityAccountProbe([], -32000));
-    await expect(runtime.antigravityQuota()).rejects.toThrow(/Sign in with Google/);
-    expect(spawnTool).toHaveBeenCalledTimes(2);
   });
 
   it('opens the resolved Antigravity CLI with its fixed Google sign-in command', async () => {

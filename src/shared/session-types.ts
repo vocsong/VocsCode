@@ -4,6 +4,7 @@
  */
 import type { EffortLevel, FastModeStatus, HarnessId, HarnessRef, ModelInfo, ModelRef, PermissionMode } from './harness-types';
 import type { HarnessCommand } from './harness-commands';
+import type { OngoingItem, OngoingSource } from './ongoing';
 import type { ApprovalDecision, ApprovalRequest, FileAttachment, ImageAttachment, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem } from './transcript-types';
 import type { UsageTotals } from './usage-types';
 
@@ -147,6 +148,11 @@ export interface SessionMeta {
   archived?: boolean;
   /** Number of queued (steer/follow-up) messages waiting. */
   queued?: number;
+  /**
+   * Ephemeral live autonomous background work (subagents, background harness tasks, hooks) that
+   * can remain active after the parent turn returns to idle. Never persisted across restarts.
+   */
+  ongoing?: OngoingItem[];
 }
 
 export type SessionEvent =
@@ -165,6 +171,8 @@ export type SessionEvent =
   | { type: 'subagent'; completion: SubagentCompletion }
   /** Live subagent run state for the panel; the durable record is the run file on disk. */
   | { type: 'subagent.run'; run: SubagentRunUpdate }
+  /** Live autonomous background work per producer channel (replace semantics per source). */
+  | { type: 'ongoing'; source: OngoingSource; items: OngoingItem[] }
   | { type: 'meta'; patch: Partial<SessionMeta> }
   | { type: 'error'; message: string; fatal?: boolean }
   | { type: 'models'; models: ModelInfo[] }
@@ -183,8 +191,11 @@ export interface SessionEventEnvelope {
   seq?: number;
 }
 
-/** Filters narrowing a session search to a subset of sessions. */
+export type SearchCategory = 'all' | 'title' | 'goal' | 'transcript' | 'tool';
+
+/** Filters narrowing a session search by content and session scope. */
 export interface SearchFilters {
+  category?: SearchCategory;
   archived?: boolean;
   harness?: HarnessId;
   projectRoot?: string;

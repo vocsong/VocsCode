@@ -207,6 +207,15 @@ describe('remote access settings (P4)', () => {
     fireEvent.click(screen.getByText('Let paired browsers read history while this computer is off'));
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setMirror', { mirror: true }));
   });
+
+  it('shares analytics with code.vocs.io by default, and turns it off through remote:setShareAnalytics', async () => {
+    renderRemote();
+    await screen.findByText('Analytics dashboard');
+    const toggle = screen.getByLabelText('Share analytics with code.vocs.io') as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    fireEvent.click(screen.getByText('Share analytics with code.vocs.io'));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setShareAnalytics', { share: false }));
+  });
 });
 
 describe('Connect with Vocs in remote access settings', () => {

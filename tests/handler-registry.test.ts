@@ -23,7 +23,9 @@ import { signInProbe } from '../src/main/remote/relay-url';
 import { SettingsStore } from '../src/main/settings';
 import { PiConfigStore } from '../src/main/pi-config';
 import { AppInstructions } from '../src/main/app-instructions';
-import { openHarnessLogin, readHarnessSetup } from '../src/main/harness-setup';
+import { openAntigravityUsage, openHarnessLogin, readHarnessSetup } from '../src/main/harness-setup';
+import { readCodexSubscriptionQuota } from '../src/main/harness/codex-quota';
+import type { SubscriptionLimits } from '../src/shared/subscription-usage';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 import { discoverChatImports } from '../src/main/chat-import';
@@ -32,7 +34,8 @@ import type { ChatImportPreview } from '../src/shared/chat-import';
 
 vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
 vi.mock('../src/main/harness/registry', async (original) => ({ ...await original<typeof import('../src/main/harness/registry')>(), listHarnessModels: vi.fn() }));
-vi.mock('../src/main/harness-setup', async (original) => ({ ...await original<typeof import('../src/main/harness-setup')>(), openHarnessLogin: vi.fn(), readHarnessSetup: vi.fn() }));
+vi.mock('../src/main/harness-setup', async (original) => ({ ...await original<typeof import('../src/main/harness-setup')>(), openAntigravityUsage: vi.fn(), openHarnessLogin: vi.fn(), readHarnessSetup: vi.fn() }));
+vi.mock('../src/main/harness/codex-quota', () => ({ readCodexSubscriptionQuota: vi.fn() }));
 
 const dirs: string[] = [];
 let ws: string;
@@ -112,7 +115,7 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
       resolve: () => null
     } as unknown as RuntimeResolver,
     analytics: { summary: async () => ({ totals: ZERO_USAGE, speed: null, days: [] }), noteHarnessVersion: () => undefined } as unknown as AnalyticsStore,
-    search: { search: async () => ({ items: [], total: 0 }) } as unknown as SearchIndex,
+    search: { search: () => ({ available: true, results: [] }) } as unknown as SearchIndex,
     log: (level, message) => logs.push([level, message]),
     push: (channel, payload) => pushes.push([channel, payload]),
     desktop: bridge,
@@ -267,6 +270,61 @@ describe('handler registry', () => {
     expect(login.mock.calls[0]!.slice(1)).toEqual(['codex', true]);
     expect(isRemoteChannel('harness:login')).toBe(false);
     expect(agentChannels().includes('harness:login' as never)).toBe(false);
+  });
+
+  it('keeps subscription actions desktop-only and rejects config and non-listed providers before dispatch', async () => {
+    const { registry, calls } = stubDeps();
+    const read = vi.mocked(readCodexSubscriptionQuota).mockReset();
+    const launch = vi.mocked(openAntigravityUsage).mockReset();
+    for (const channel of ['subscriptions:read', 'subscriptions:openUsage'] as const) {
+      expect(registry.channels()).toContain(channel);
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels().includes(channel as never)).toBe(false);
+      for (const actor of ['user', 'agent'] as const) {
+        await expect(registry.invoke(channel, { provider: 'codex' }, actor)).rejects.toThrow(/desktop owner/);
+      }
+      for (const input of [undefined, { provider: 'pi' }, { provider: '__proto__' }, { provider: 'antigravity', args: ['-p', '/usage'] }, { provider: 'claude', url: 'https://example.test' }, { provider: 'codex', cwd: 'G:/repo' }]) {
+        await expect(registry.invoke(channel, input, 'desktop')).rejects.toThrow(/Unsupported subscription/);
+      }
+    }
+    await expect(registry.invoke('subscriptions:read', { provider: 'antigravity' }, 'desktop')).rejects.toThrow(/Unsupported/);
+    expect(read).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+  });
+
+  it('opens only fixed vendor sites or the interactive Antigravity CLI', async () => {
+    const { registry, deps, calls } = stubDeps();
+    const launch = vi.mocked(openAntigravityUsage).mockReset().mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: false, error: 'No terminal' });
+    await expect(registry.invoke('subscriptions:openUsage', { provider: 'antigravity' }, 'desktop')).resolves.toEqual({ kind: 'terminal' });
+    expect(launch).toHaveBeenCalledExactlyOnceWith(deps.runtime);
+    await expect(registry.invoke('subscriptions:openUsage', { provider: 'antigravity' }, 'desktop')).rejects.toThrow('No terminal');
+    for (const provider of ['claude', 'codex', 'cursor']) {
+      await expect(registry.invoke('subscriptions:openUsage', { provider }, 'desktop')).resolves.toEqual({ kind: 'browser' });
+    }
+    expect(calls).toEqual([
+      'openExternal:https://claude.ai/settings/usage',
+      'openExternal:https://chatgpt.com/codex/settings/usage',
+      'openExternal:https://cursor.com/dashboard/usage'
+    ]);
+  });
+
+  it('shares an in-flight Codex limit read but never caches the completed account snapshot', async () => {
+    const { registry, deps, pushes } = stubDeps();
+    const output: SubscriptionLimits = { groups: [{ name: 'Codex', buckets: [{ name: '5-hour limit', remainingFraction: 0.42 }] }] };
+    let finish!: (result: SubscriptionLimits) => void;
+    const read = vi.mocked(readCodexSubscriptionQuota).mockReset()
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+      .mockResolvedValueOnce(output);
+    const check = () => registry.invoke('subscriptions:read', { provider: 'codex' }, 'desktop');
+    const a = check();
+    const b = check();
+    expect(read).toHaveBeenCalledExactlyOnceWith(deps.runtime);
+    finish(output);
+    await expect(Promise.all([a, b])).resolves.toEqual([output, output]);
+    await expect(check()).resolves.toEqual(output);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(pushes).toEqual([]);
   });
 
   it('rejects invalid setup and install ids before their privileged dependencies', async () => {
@@ -922,10 +980,13 @@ describe('handler registry', () => {
     expect(order).toEqual(['setArchived:s_test,false,undefined,undefined']);
   });
 
-  it('routes deep search through the search index', async () => {
-    const { registry } = stubDeps();
-    const res = (await registry.invoke('sessions:search', { q: 'needle' })) as { total: number };
-    expect(res.total).toBe(0);
+  it('passes the chosen search category and archive filter through to the index', async () => {
+    const response = { available: true, results: [] };
+    const search = vi.fn<SearchIndex['search']>(() => response);
+    const { registry } = stubDeps({ search: { search } as unknown as SearchIndex });
+    const request = { q: 'needle', filters: { category: 'transcript', archived: true } };
+    expect(await registry.invoke('sessions:search', request)).toEqual(response);
+    expect(search).toHaveBeenCalledExactlyOnceWith(request);
   });
 
   it('caches harness availability across full-list calls', async () => {
@@ -1178,6 +1239,20 @@ describe('remote handlers', () => {
     } as unknown as SecretStore;
     return { enabled, saved, ...stubDeps({ remote, secrets }) };
   }
+
+  it('persists analytics sharing and tells the uploader, keeping the rest of the remote config', async () => {
+    const changed: Array<boolean | undefined> = [];
+    const { registry, deps, pushes } = remoteRig();
+    deps.analyticsSync = { sharingChanged: async () => void changed.push(deps.settings.get().remote?.shareAnalytics) };
+    await deps.settings.update({ remote: { enabled: true, viewOnly: true } });
+    await registry.invoke('remote:setShareAnalytics', { share: false });
+    expect(deps.settings.get().remote).toEqual({ enabled: true, viewOnly: true, shareAnalytics: false });
+    await registry.invoke('remote:setShareAnalytics', { share: true });
+    expect(deps.settings.get().remote?.shareAnalytics).toBe(true);
+    // The uploader runs after the setting is saved, so it reads the new value.
+    expect(changed).toEqual([false, true]);
+    expect(pushes.filter(([channel]) => channel === 'push:settingsChanged')).toHaveLength(2);
+  });
 
   it('refuses an insecure relay override before settings, secret writes, or host dispatch', async () => {
     vi.stubEnv('VOCS_CODE_RELAY_URL', 'http://user:password@192.168.1.2/?token=hidden');

@@ -16,6 +16,8 @@ import type {
   HarnessRef,
   ModelInfo,
   ModelRef,
+  OngoingItem,
+  OngoingSource,
   PermissionMode,
   SessionEvent,
   SessionEventEnvelope,
@@ -30,6 +32,7 @@ import { nativeGoalCommand } from '../shared/goal-driver';
 import { fastModeSupport } from '../shared/fast-mode';
 import { HARNESS_BY_ID, assertPermissionModeOffered, closestPermissionMode } from '../shared/harness-meta';
 import { modelName } from '../shared/model-names';
+import { hasOngoingWork, sameOngoingItems } from '../shared/ongoing';
 import { validateQuestionResponse } from '../shared/question-response';
 import { skillInstalled } from './skills';
 import { createAdapter } from './harness/registry';
@@ -159,7 +162,15 @@ interface ActiveSession {
   tearingDown: boolean;
   uncertain: boolean;
   disposal: Promise<void> | null;
-  nativeChildren: Map<string, { startedAt: number; running: boolean }>;
+  nativeChildren: Map<string, { startedAt: number; running: boolean; agent?: string; description?: string; mode?: 'foreground' | 'background'; turns?: number; toolUses?: number }>;
+  /** Live ongoing items pushed per producer channel (`tasks`, `hooks`, `wakeup`, `threads`). */
+  ongoingBySource: Map<OngoingSource, OngoingItem[]>;
+  /** Parent turn finished while autonomous background work was still active; notify once it settles. */
+  deferredTurnNotice: { ts: number; status: 'completed' | 'failed'; error?: string } | null;
+  /** App-driven goal continuation deferred while autonomous background work is still active. */
+  deferredGoalContinuation: { goal: GoalState } | null;
+  /** Short grace timer after ongoing work clears so an immediate parent wakeup turn goes first. */
+  ongoingSettleTimer: NodeJS.Timeout | null;
   approvals: Map<string, Deferred<ApprovalDecision>>;
   liveItems: Map<string, TranscriptItem>;
   /** Model active when each running tool call began, retained until its terminal upsert. */
@@ -1177,6 +1188,10 @@ export class SessionManager {
       uncertain: false,
       disposal: null,
       nativeChildren: new Map(),
+      ongoingBySource: new Map(),
+      deferredTurnNotice: null,
+      deferredGoalContinuation: null,
+      ongoingSettleTimer: null,
       approvals: new Map(),
       liveItems: new Map(),
       toolModels: new Map(),
@@ -1727,7 +1742,14 @@ export class SessionManager {
     active.tearingDown = true;
     if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
     if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
+    if (active.ongoingSettleTimer) clearTimeout(active.ongoingSettleTimer);
+    active.ongoingSettleTimer = null;
     active.pendingGoalKickoff = null;
+    active.deferredTurnNotice = null;
+    active.deferredGoalContinuation = null;
+    active.ongoingBySource?.clear();
+    const metaClearing = this.get(id);
+    if (metaClearing && this.active.get(id) === active) metaClearing.ongoing = undefined;
     if (this.active.get(id) === active) this.active.delete(id);
     const retiring = this.retiring.get(id) ?? new Set<ActiveSession>();
     retiring.add(active);
@@ -2255,6 +2277,27 @@ export class SessionManager {
           if (event.status === 'starting' || event.status === 'running' || event.status === 'awaiting' || event.status === 'error') {
             this.cancelGitStateCheck(sessionId);
           }
+          if (event.status === 'running' && active) {
+            if (active.ongoingSettleTimer) {
+              clearTimeout(active.ongoingSettleTimer);
+              active.ongoingSettleTimer = null;
+            }
+            active.deferredTurnNotice = null;
+            active.deferredGoalContinuation = null;
+          }
+          if ((event.status === 'stopped' || event.status === 'error') && active) {
+            if (active.ongoingSettleTimer) {
+              clearTimeout(active.ongoingSettleTimer);
+              active.ongoingSettleTimer = null;
+            }
+            active.deferredTurnNotice = null;
+            active.deferredGoalContinuation = null;
+            active.ongoingBySource?.clear();
+            for (const [childId, child] of active.nativeChildren ?? []) {
+              if (child.running) active.nativeChildren.set(childId, { ...child, running: false });
+            }
+            meta.ongoing = undefined;
+          }
           // The harness process exiting says nothing about the branch's git state: a session
           // parked on pr/merged keeps its git-derived status instead of flipping to stopped.
           const gitParked = event.status === 'stopped' && (meta.status === 'pr' || meta.status === 'merged');
@@ -2320,9 +2363,28 @@ export class SessionManager {
         }
         break;
       case 'subagent.run': {
-        const previous = active?.nativeChildren.get(event.run.runId);
-        if (active && (!previous || previous.startedAt === event.run.startedAt && previous.running)) {
-          active.nativeChildren.set(event.run.runId, { startedAt: event.run.startedAt, running: event.run.status === 'running' });
+        const children = active ? (active.nativeChildren ??= new Map()) : undefined;
+        const previous = children?.get(event.run.runId);
+        if (active && children && (!previous || previous.startedAt === event.run.startedAt && previous.running)) {
+          children.set(event.run.runId, {
+            startedAt: event.run.startedAt,
+            running: event.run.status === 'running',
+            agent: event.run.agent,
+            description: event.run.description,
+            mode: event.run.mode,
+            turns: event.run.turns,
+            toolUses: event.run.toolUses
+          });
+          this.syncOngoing(sessionId, active);
+        }
+        break;
+      }
+      case 'ongoing': {
+        if (active) {
+          const sources = (active.ongoingBySource ??= new Map());
+          if (event.items.length) sources.set(event.source, event.items);
+          else sources.delete(event.source);
+          this.syncOngoing(sessionId, active);
         }
         break;
       }
@@ -2451,6 +2513,118 @@ export class SessionManager {
     active.checkpoints?.clear();
   }
 
+  /**
+   * Recomputes the session's live `meta.ongoing` list from running `nativeChildren` (`subagent.run`)
+   * plus per-source `ongoing` events (`tasks`, `hooks`, `wakeup`, `threads`). Deduplicates subagents
+   * reported on both channels by `runId` (preferring the richer `subagent.run` metadata), pushes
+   * immediately when changed (without persisting to disk), and schedules the post-settlement check
+   * when all autonomous background work finishes.
+   */
+  private syncOngoing(sessionId: string, active: ActiveSession): void {
+    if (this.active.get(sessionId) !== active || active.tearingDown) return;
+    const meta = this.get(sessionId);
+    if (!meta) return;
+    const canStopSubagent = subagentSupport(meta.config.harness).control;
+    const items: OngoingItem[] = [];
+    const seenRunIds = new Set<string>();
+    const seenIds = new Set<string>();
+    for (const [runId, child] of active.nativeChildren ?? []) {
+      if (!child.running) continue;
+      seenRunIds.add(runId);
+      const id = `subagent:${runId}`;
+      seenIds.add(id);
+      items.push({
+        id,
+        kind: 'subagent',
+        label: child.description?.trim() || child.agent || 'Subagent',
+        ...(child.agent ? { agent: child.agent } : {}),
+        runId,
+        ...(child.turns !== undefined ? { turns: child.turns } : {}),
+        ...(child.toolUses !== undefined ? { toolUses: child.toolUses } : {}),
+        startedAt: child.startedAt,
+        canStop: canStopSubagent
+      });
+    }
+    for (const sourceItems of active.ongoingBySource?.values() ?? []) {
+      for (const item of sourceItems) {
+        if (item.runId && seenRunIds.has(item.runId)) continue;
+        if (seenIds.has(item.id)) continue;
+        seenIds.add(item.id);
+        items.push(item);
+      }
+    }
+    items.sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+    const prev = meta.ongoing;
+    const prevHadOngoing = !!prev?.length;
+    const next = items.length ? items : undefined;
+    if (!sameOngoingItems(prev, next)) {
+      meta.ongoing = next;
+      this.pushSessions();
+    }
+    if (next && active.ongoingSettleTimer) {
+      clearTimeout(active.ongoingSettleTimer);
+      active.ongoingSettleTimer = null;
+    } else if (prevHadOngoing && !next && (active.deferredTurnNotice || active.deferredGoalContinuation)) {
+      if (active.ongoingSettleTimer) clearTimeout(active.ongoingSettleTimer);
+      active.ongoingSettleTimer = setTimeout(() => {
+        active.ongoingSettleTimer = null;
+        this.onOngoingSettled(sessionId, active);
+      }, 150);
+      active.ongoingSettleTimer.unref?.();
+    }
+  }
+
+  /**
+   * Fires after autonomous background work empties and no new parent turn took over within the brief
+   * handoff window: delivers the deferred "done · not viewed" mark / OS notification and resumes any
+   * deferred app-driven `/goal` continuation.
+   */
+  private onOngoingSettled(sessionId: string, active: ActiveSession): void {
+    if (this.active.get(sessionId) !== active || active.tearingDown) return;
+    const meta = this.get(sessionId);
+    if (!meta || hasOngoingWork(meta) || meta.status !== 'idle' || active.adapter.busy) return;
+    const notice = active.deferredTurnNotice;
+    active.deferredTurnNotice = null;
+    if (notice) {
+      if (!meta.archived && !this.deps.isViewing?.(meta.id)) {
+        meta.unseenAt = Date.now();
+        if (notice.status === 'failed') meta.unseenFailed = true;
+        else delete meta.unseenFailed;
+        this.schedulePersist(meta);
+        this.pushSessions();
+      }
+      if (this.settings().notifications) {
+        this.deps.notify(meta.id, meta.title, notice.status === 'completed' ? 'Background work finished' : `Turn ${notice.status}${notice.error ? `: ${notice.error}` : ''}`);
+      }
+    }
+    const deferredGoal = active.deferredGoalContinuation;
+    active.deferredGoalContinuation = null;
+    if (deferredGoal && !this.controlled.has(meta.id) && meta.goal === deferredGoal.goal && meta.goal.status === 'active' && meta.goal.autoContinue) {
+      this.advanceGoalContinuation(meta, active);
+    }
+  }
+
+  private advanceGoalContinuation(meta: SessionMeta, active: ActiveSession): void {
+    const goal = meta.goal;
+    if (!goal || goal.status !== 'active' || !goal.autoContinue) return;
+    if (goal.iterations >= goal.maxIterations) {
+      goal.status = 'paused';
+      goal.updatedAt = Date.now();
+      this.deps.log('info', `[${meta.id}] goal paused at the ${goal.maxIterations}-iteration guard`);
+      this.schedulePersist(meta);
+      this.pushSessions();
+      this.emit(meta.id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: `Goal paused: reached the ${goal.maxIterations}-iteration guard. Resume it from the Goal panel.` } });
+      return;
+    }
+    goal.iterations += 1;
+    goal.updatedAt = Date.now();
+    this.deps.log('info', `[${meta.id}] goal continuation ${goal.iterations}/${goal.maxIterations} scheduled`);
+    this.schedulePersist(meta);
+    const prompt = `Goal check-in ${goal.iterations}/${goal.maxIterations}.\n\n<goal>\n${goal.objective}\n</goal>\n\n<execution_instructions>\nContinue executing the goal above. Use prior results as context and avoid repeating completed work; prioritize concrete progress.\nOnly when the goal is fully achieved and verified, provide a brief completion audit and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. Otherwise keep working without asking for permission to continue.\n</execution_instructions>`;
+    void active;
+    this.scheduleGoalContinuation(meta.id, prompt);
+  }
+
   private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
     this.deps.analytics.recordTurn(meta, turn);
     // One line per turn is the timeline a slow or expensive session is diagnosed from.
@@ -2458,18 +2632,26 @@ export class SessionManager {
       turn.status === 'failed' ? 'warn' : 'info',
       `[${meta.id}] turn ${turn.status}${turn.durationMs !== undefined ? ` in ${(turn.durationMs / 1000).toFixed(1)}s` : ''}${turn.usage ? ` (${turn.usage.inputTokens} in / ${turn.usage.outputTokens} out)` : ''}${turn.costUsd ? ` $${turn.costUsd.toFixed(4)}` : ''}${turn.error ? `: ${turn.error}` : ''}`
     );
-    // A turn that ends with nobody looking stays "done · not viewed" until the session is viewed.
-    // An interrupt is the user's own doing.
-    if (turn.status !== 'interrupted' && !meta.archived && !this.deps.isViewing?.(meta.id)) {
-      meta.unseenAt = turn.ts;
-      if (turn.status === 'failed') meta.unseenFailed = true;
-      else delete meta.unseenFailed;
-      this.schedulePersist(meta);
-      this.pushSessions();
-    }
     const active = this.active.get(meta.id);
-    if (this.settings().notifications && turn.status !== 'interrupted') {
-      this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
+    const ongoingActive = !!active && hasOngoingWork(meta);
+    // If autonomous background work (subagents, background tasks, hooks) is still running when this
+    // parent turn finishes, defer the "done · not viewed" badge and desktop notification until that
+    // background work settles (or is superseded by its follow-up parent turn).
+    if (turn.status !== 'interrupted' && ongoingActive) {
+      active.deferredTurnNotice = { ts: turn.ts, status: turn.status, ...(turn.error ? { error: turn.error } : {}) };
+    } else {
+      // A turn that ends with nobody looking stays "done · not viewed" until the session is viewed.
+      // An interrupt is the user's own doing.
+      if (turn.status !== 'interrupted' && !meta.archived && !this.deps.isViewing?.(meta.id)) {
+        meta.unseenAt = turn.ts;
+        if (turn.status === 'failed') meta.unseenFailed = true;
+        else delete meta.unseenFailed;
+        this.schedulePersist(meta);
+        this.pushSessions();
+      }
+      if (this.settings().notifications && turn.status !== 'interrupted') {
+        this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
+      }
     }
     // An answer belongs to one turn only. In particular, a pre-goal answer must not be
     // mistaken for the next kickoff's answer if that turn produces no assistant text.
@@ -2494,21 +2676,14 @@ export class SessionManager {
       return;
     }
     if (!goal.autoContinue) return;
-    if (goal.iterations >= goal.maxIterations) {
-      goal.status = 'paused';
-      goal.updatedAt = Date.now();
-      this.deps.log('info', `[${meta.id}] goal paused at the ${goal.maxIterations}-iteration guard`);
-      this.schedulePersist(meta);
-      this.pushSessions();
-      this.emit(meta.id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: `Goal paused: reached the ${goal.maxIterations}-iteration guard. Resume it from the Goal panel.` } });
+    // While autonomous background subagents/tasks are still running, wait for them to report back
+    // rather than burning a goal iteration with a redundant check-in.
+    if (ongoingActive) {
+      active.deferredGoalContinuation = { goal };
+      this.deps.log('info', `[${meta.id}] goal continuation deferred while ${meta.ongoing!.length} background item(s) are running`);
       return;
     }
-    goal.iterations += 1;
-    goal.updatedAt = Date.now();
-    this.deps.log('info', `[${meta.id}] goal continuation ${goal.iterations}/${goal.maxIterations} scheduled`);
-    this.schedulePersist(meta);
-    const prompt = `Goal check-in ${goal.iterations}/${goal.maxIterations}.\n\n<goal>\n${goal.objective}\n</goal>\n\n<execution_instructions>\nContinue executing the goal above. Use prior results as context and avoid repeating completed work; prioritize concrete progress.\nOnly when the goal is fully achieved and verified, provide a brief completion audit and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. Otherwise keep working without asking for permission to continue.\n</execution_instructions>`;
-    this.scheduleGoalContinuation(meta.id, prompt);
+    this.advanceGoalContinuation(meta, active);
   }
 
   /**
@@ -2534,6 +2709,12 @@ export class SessionManager {
       // A normal continuation belongs to the turn behind an approval. A new goal's kickoff,
       // however, must survive that turn, even if it pauses for approval in the meantime.
       if (meta.status === 'awaiting' && !pending) return;
+      if (!pending && hasOngoingWork(meta)) {
+        // Active background work can legitimately run longer than the busy retry window; wait
+        // without burning attempts.
+        this.scheduleGoalContinuation(id, prompt, Math.max(1, attempt), pending);
+        return;
+      }
       if (meta.status === 'running' || meta.status === 'starting' || meta.status === 'awaiting' || active.adapter.busy) {
         if (attempt + 1 >= GOAL_CONTINUATION_MAX_ATTEMPTS) {
           this.deps.log('warn', `[${id}] goal continuation gave up after ${attempt + 1} attempts with the session busy`);
@@ -2564,6 +2745,7 @@ export class SessionManager {
       if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
       active.goalContinuationTimer = null;
       active.pendingGoalKickoff = null;
+      active.deferredGoalContinuation = null;
     }
     this.deps.log('info', `[${id}] goal ${action}${opts.maxIterations !== undefined ? ` maxIterations=${opts.maxIterations}` : ''}${opts.autoContinue !== undefined ? ` autoContinue=${opts.autoContinue}` : ''}`);
     switch (action) {

@@ -12,6 +12,7 @@ export type * from './cua-types';
 export type * from './skills-types';
 export type * from './pi-config-types';
 export type * from './usage-types';
+export type * from './ongoing';
 export type * from './transcript-types';
 export type * from './session-types';
 export type * from './git-types';

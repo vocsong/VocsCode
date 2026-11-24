@@ -19,6 +19,7 @@ import { ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { HarnessPill } from './SessionTitle';
 import { TranscriptFind } from './TranscriptFind';
 import { askConfirm, Badge, Button, Icon, Spinner } from './ui';
+import { OngoingActivityStrip } from './OngoingActivityStrip';
 import './transcript-links.css';
 
 interface ImageLightboxState {
@@ -226,7 +227,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
     if (stick && !findOpen && !jumpHere && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, stick, findOpen, jumpHere, measureVersion]);
+  }, [items, session.ongoing, stick, findOpen, jumpHere, measureVersion]);
 
   // Prepending older items must not move what the reader is looking at: restore the distance from
   // the bottom captured before the prepend. Only runs `some` when the head actually changed.
@@ -439,6 +440,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
             <Spinner size={12} /> {session.status === 'starting' ? session.statusDetail ?? 'Starting…' : 'Working…'}
           </div>
         )}
+        <OngoingActivityStrip session={session} />
       </div>
       {lightbox && (
         <ImageLightbox

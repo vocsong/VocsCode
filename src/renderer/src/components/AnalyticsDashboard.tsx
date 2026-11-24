@@ -3,21 +3,14 @@
  * that all read the same date range. Data comes from the main-process analytics store and refreshes
  * live while the view is open.
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AnalyticsSummary } from '../../../shared/types';
 import { invoke, on } from '../api';
 import { relTime } from '../format';
-import { useStore, type AnalyticsTab } from '../store';
-import { ActivityTab } from './analytics/ActivityTab';
+import { useStore } from '../store';
+import { AnalyticsTabBody, AnalyticsTabs } from './analytics/AnalyticsView';
 import { Segmented } from './analytics/charts';
-import { CodeTab } from './analytics/CodeTab';
-import { buildScope, RANGES, TABS } from './analytics/model';
-import { OverviewTab } from './analytics/OverviewTab';
-import { ReliabilityTab } from './analytics/ReliabilityTab';
-import { SessionsTab } from './analytics/SessionsTab';
-import { SpendTab } from './analytics/SpendTab';
-import { TokensTab } from './analytics/TokensTab';
-import { ToolsTab } from './analytics/ToolsTab';
+import { buildScope, RANGES } from './analytics/model';
 import { Button, Icon, Spinner } from './ui';
 
 export function AnalyticsDashboard() {
@@ -29,7 +22,6 @@ export function AnalyticsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
-  const tablist = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -67,19 +59,6 @@ export function AnalyticsDashboard() {
 
   const scope = useMemo(() => (summary ? buildScope(summary, range) : null), [summary, range]);
 
-  const onTabKey = (e: React.KeyboardEvent) => {
-    const i = TABS.findIndex((t) => t.id === tab);
-    let next: AnalyticsTab | undefined;
-    if (e.key === 'ArrowRight') next = TABS[(i + 1) % TABS.length].id;
-    else if (e.key === 'ArrowLeft') next = TABS[(i - 1 + TABS.length) % TABS.length].id;
-    else if (e.key === 'Home') next = TABS[0].id;
-    else if (e.key === 'End') next = TABS[TABS.length - 1].id;
-    if (!next) return;
-    e.preventDefault();
-    setAnalyticsView({ tab: next });
-    tablist.current?.querySelector<HTMLButtonElement>(`[data-tab='${next}']`)?.focus();
-  };
-
   return (
     <div className="analytics">
       <div className="analytics-top">
@@ -99,13 +78,7 @@ export function AnalyticsDashboard() {
           </Button>
         </div>
       </div>
-      <div className="analytics-tabs" role="tablist" aria-label="Analytics sections" ref={tablist} onKeyDown={onTabKey}>
-        {TABS.map((t) => (
-          <button key={t.id} type="button" role="tab" data-tab={t.id} aria-selected={tab === t.id} tabIndex={tab === t.id ? 0 : -1} className={`atab ${tab === t.id ? 'active' : ''}`} onClick={() => setAnalyticsView({ tab: t.id })}>
-            <Icon name={t.icon} size={14} /> {t.label}
-          </button>
-        ))}
-      </div>
+      <AnalyticsTabs tab={tab} onTab={(next) => setAnalyticsView({ tab: next })} />
       <div className={`analytics-body ${loading && summary ? 'refetching' : ''}`} role="tabpanel">
         {error && <div className="callout warn">{error}</div>}
         {!summary && !error && (
@@ -113,18 +86,7 @@ export function AnalyticsDashboard() {
             <Spinner size={20} /> Loading usage data…
           </div>
         )}
-        {summary && scope && (
-          <>
-            {tab === 'overview' && <OverviewTab scope={scope} summary={summary} />}
-            {tab === 'spend' && <SpendTab scope={scope} summary={summary} />}
-            {tab === 'tokens' && <TokensTab scope={scope} summary={summary} />}
-            {tab === 'activity' && <ActivityTab scope={scope} summary={summary} />}
-            {tab === 'tools' && <ToolsTab scope={scope} summary={summary} />}
-            {tab === 'code' && <CodeTab scope={scope} summary={summary} />}
-            {tab === 'reliability' && <ReliabilityTab scope={scope} summary={summary} />}
-            {tab === 'sessions' && <SessionsTab scope={scope} summary={summary} />}
-          </>
-        )}
+        {summary && scope && <AnalyticsTabBody tab={tab} scope={scope} summary={summary} />}
       </div>
     </div>
   );

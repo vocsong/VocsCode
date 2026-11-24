@@ -6,6 +6,8 @@
  *  Cloudflare-free (no DurableObjectState, no WebSocketPair), so the whole surface is exercised in
  *  plain Node (tests/relay-routes.test.ts). */
 import type { PublicIdentity } from '../../src/shared/crypto';
+import type { AnalyticsHost } from '../../src/shared/analytics/snapshot-wire';
+import { AnalyticsError, clearAnalytics, commitAnalyticsManifest, getAnalyticsManifest, getAnalyticsPart, parseManifest, parsePartBody, putAnalyticsPart } from './analytics';
 import {
   claimPairing,
   clearMirror,
@@ -130,6 +132,12 @@ export const ROUTES: Route[] = [
   { method: 'GET', path: '/mirror/', prefix: true, auth: 'device', run: mirrorGetSession },
   { method: 'PUT', path: '/mirror/', prefix: true, auth: 'host', run: mirrorPutSession },
   { method: 'DELETE', path: '/mirror/', prefix: true, auth: 'host', run: mirrorDeleteSession },
+  // Analytics for the code.vocs.io dashboard (docs/WEB-DASHBOARD.md): a desktop uploads parts, then
+  // commits the manifest that lists them; it reads its own manifest back to skip unchanged parts.
+  { method: 'GET', path: '/analytics', auth: 'host', run: analyticsOwnManifest },
+  { method: 'PUT', path: '/analytics/part', auth: 'host', run: analyticsPutPart },
+  { method: 'PUT', path: '/analytics/manifest', auth: 'host', rate: { bucket: 'analytics-manifest', limit: 30, windowMs: 60_000 }, run: analyticsCommit },
+  { method: 'DELETE', path: '/analytics', auth: 'host', run: analyticsClear },
   // Owner actions: add a computer that clicked Connect with Vocs, list this account's computers,
   // and ask one to pair a browser. Both the verified account assertion and landing service credential
   // are required. The desktop still approves each pairing.
@@ -137,6 +145,9 @@ export const ROUTES: Route[] = [
   { method: 'GET', path: '/owner/enroll-grant', auth: 'owner', run: ownerEnrollStatus },
   { method: 'GET', path: '/owner/hosts', auth: 'owner', run: ownerHosts },
   { method: 'POST', path: '/owner/pair-request', auth: 'owner', rate: { bucket: 'pair-request', limit: 10, windowMs: 60_000 }, run: ownerPairRequest },
+  // The signed-in dashboard: every computer with its committed analytics manifest, then the parts.
+  { method: 'GET', path: '/owner/analytics', auth: 'owner', run: ownerAnalytics },
+  { method: 'GET', path: '/owner/analytics/part', auth: 'owner', run: ownerAnalyticsPart },
   // A desktop redeems the owner's grant with its one-time secret, polling while the owner signs in.
   { method: 'POST', path: '/enroll/redeem', auth: 'public', rate: { bucket: 'enroll-redeem', limit: 120, windowMs: 60_000 }, run: enrollRedeem }
 ];
@@ -450,6 +461,45 @@ async function mirrorDeleteSession({ ctx, rest, device }: Call): Promise<Respons
   return json({ ok: true });
 }
 
+async function analyticsOwnManifest({ ctx, device }: Call): Promise<Response> {
+  const record = await getAnalyticsManifest(ctx.store, ctx.accountId, actor(device).deviceId);
+  return json({ manifest: record?.manifest ?? null, receivedAt: record?.receivedAt ?? null }, 200, { 'cache-control': 'no-store' });
+}
+
+async function analyticsPutPart({ ctx, request, url, device }: Call): Promise<Response> {
+  const part = parsePartBody(url.searchParams.get('id'), await request.json());
+  await putAnalyticsPart(ctx.store, { accountId: ctx.accountId, hostId: actor(device).deviceId, ...part }, ctx.now);
+  return json({ ok: true });
+}
+
+async function analyticsCommit({ ctx, request, device }: Call): Promise<Response> {
+  const manifest = parseManifest(await request.json());
+  await commitAnalyticsManifest(ctx.store, { accountId: ctx.accountId, hostId: actor(device).deviceId, manifest }, ctx.now);
+  return json({ ok: true });
+}
+
+async function analyticsClear({ ctx, device }: Call): Promise<Response> {
+  await clearAnalytics(ctx.store, ctx.accountId, actor(device).deviceId);
+  return json({ ok: true });
+}
+
+async function ownerAnalytics({ ctx }: Call): Promise<Response> {
+  const infos = (await deviceInfos(ctx.store, ctx.accountId, (d) => d.kind === 'host' && ctx.sockets(`host:${d.deviceId}`).length > 0)).filter((d) => d.kind === 'host');
+  const hosts: AnalyticsHost[] = [];
+  for (const d of infos) {
+    const record = await getAnalyticsManifest(ctx.store, ctx.accountId, d.deviceId);
+    hosts.push({ hostId: d.deviceId, name: d.name, platform: d.platform, online: d.online, lastSeen: d.lastSeen, manifest: record?.manifest ?? null, receivedAt: record?.receivedAt ?? null });
+  }
+  return json({ hosts }, 200, { 'cache-control': 'no-store' });
+}
+
+async function ownerAnalyticsPart({ ctx, url }: Call): Promise<Response> {
+  const part = await getAnalyticsPart(ctx.store, ctx.accountId, url.searchParams.get('host') ?? '', url.searchParams.get('id') ?? '');
+  if (!part) throw new HttpError('not found', 404);
+  // Content-addressed by the hash the manifest names, so a browser may keep it.
+  return json(part, 200, { 'cache-control': 'private, max-age=31536000, immutable' });
+}
+
 // --- helpers ---
 
 /** An HTTP failure a handler wants surfaced verbatim; everything else is auth being absent. */
@@ -462,6 +512,10 @@ export class HttpError extends Error {
 function errorResponse(e: unknown): Response {
   if (e instanceof HttpError) return json({ error: e.message }, e.status);
   if (e instanceof MirrorError) return json({ error: e.code }, e.code === 'too-large' ? 413 : 400);
+  if (e instanceof AnalyticsError) {
+    const status = e.code === 'too-large' ? 413 : e.code === 'invalid' ? 400 : 409;
+    return json(e.detail ? { error: e.code, parts: e.detail } : { error: e.code }, status);
+  }
   // The account is full: a conflict the user resolves by revoking a device, not an auth failure.
   if (e instanceof PairError && e.code === 'limit') return json({ error: 'device-limit' }, 409);
   // An unverifiable device token is an auth failure, not a server error — and the code in the

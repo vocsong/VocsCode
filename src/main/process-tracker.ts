@@ -19,7 +19,7 @@
  * A PID alone is never trusted: every comparison also matches the creation time.
  */
 import type { ProcessEndResult, ProcessList, ProcessOwner, ProcessSummary, ProcessTarget, TrackedProcess } from '../shared/processes';
-import { processKey } from '../shared/processes';
+import { classifySessionOngoingProcesses, processKey } from '../shared/processes';
 import { readJson, writeJson } from './util/fs';
 import { JOB_OWNER, type ProcessSource, type RawProcess } from './process-snapshot';
 import { observeOwnedSpawns } from './process-context';
@@ -314,7 +314,13 @@ export class ProcessTracker {
     this.latest = { list, tracked, raw };
     this.save(processes);
     // Sent every sample, not only on change, so a window that reloaded gets its badge back.
-    this.opts.onSummary?.({ count: processes.length, orphaned: processes.filter((p) => p.orphaned).length });
+    const bySession = classifySessionOngoingProcesses(processes);
+    const hasBySession = Object.keys(bySession).length > 0;
+    this.opts.onSummary?.({
+      count: processes.length,
+      orphaned: processes.filter((p) => p.orphaned).length,
+      ...(hasBySession ? { bySession } : {})
+    });
     return list;
   }
 

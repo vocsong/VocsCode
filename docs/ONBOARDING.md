@@ -45,9 +45,11 @@ visits to Import within the guide; dismissing the guide does not persist those d
   requires Node.js 22.19+ and npm. Its provider/model availability depends on that installation.
 - **Google Antigravity.** Install Antigravity CLI (`agy`) 1.5.12 or newer. Open **Sign in with
   Google** to run `agy acp --login` in the vendor's terminal flow, then select **Recheck setup**.
-  A saved CLI login is detected automatically. **Check Antigravity quota** shows the account's
-  reported remaining quota and reset times. Choose **Google Antigravity** in New Session, send your
-  first prompt on the default Gemini model, then pick from the account's advertised models.
+  A saved CLI login is detected automatically. Select **Open Antigravity usage**, then type `/usage`
+  in the interactive CLI to see Google's remaining quota and reset times. The same action is
+  available under **Usage → Subscriptions** from any desktop session. Choose **Google Antigravity**
+  in New Session, send your first prompt on the default Gemini model, then pick from the account's
+  advertised models.
   If the app cannot find an installed CLI, set its executable under **Settings → Harnesses →
   Runtime configuration**. [Google's install guide](https://antigravity.google/docs/getting-started?tab=cli)
 - **Native/local:** Choose a configured API provider or local server. Local servers do not require
@@ -92,9 +94,15 @@ directory. Windows quoting uses encoded PowerShell; macOS uses a quoted, self-re
 Linux passes separate executable/argument entries to a terminal.
 
 Antigravity keeps Google credentials in its own login store. The app checks the active account with
-an ACP session-list request. On demand, `harness:antigravityQuota` runs the CLI's read-only `/usage`
-command and returns model groups, remaining fractions and reset times to the desktop owner's main
-frame. Setup and quota checks send zero model prompts.
+an ACP session-list request. ACP does not report Google account quota. The **Open Antigravity usage**
+button opens Google's interactive CLI; Vocs Code does not type `/usage`, scrape the result, or
+check quota in headless mode. Setup and usage actions do not submit model prompts.
+
+From any desktop session, `/usage` opens the right-hand **Usage** panel. Choose **Subscriptions**
+for account limits, separate from the **Session** view. **Check limits** reads the Codex CLI's
+ChatGPT account, not the API-key usage of the current session. Claude and Cursor link to their own
+usage pages; check the account shown in your browser. Pi and custom ACP agents can use other
+accounts or API keys, and Vocs Code cannot infer those limits from the session's model.
 
 Rechecks invalidate PATH/probe caches. Runtime, main availability, renderer availability and
 catalog request ordering prevent discarded in-flight results from reviving stale setup failures.

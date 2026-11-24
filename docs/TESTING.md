@@ -76,10 +76,10 @@ seconds — starts the whole relay Worker locally in workerd (`tests/support/loc
 programmatic dev server with a throwaway secret) and runs the full smoke flow against it over real
 sockets: pairing, the sealed credential, proof-of-possession tokens, handshake, invoke, mirror key,
 revocation. It is what found a refused request's unread body ending a `wrangler dev` session and a
-revocation answering 500, which no fake could. `e2e.remote-web` (in `test:e2e:ci`) loads the web
-app in Electron's Chromium from that local relay: the native WebSocket, IndexedDB keys across a
-reload, the static CSP, the pairing link, the computer switcher, a streamed terminal typed into and
-unpair;
+revocation answering 500, which no fake could. `e2e.web-dashboard` (in `test:e2e:ci`) loads the
+web dashboard in Electron's Chromium from that local relay: two desktops join through its Connect
+with Vocs page (one through the retired `/app` link), upload their analytics, and the page shows
+them combined and apart under the static CSP;
 and, through `tests/support/test-landing.ts` (a stand-in for the landing that signs per-account
 assertions, gates owner routes and isolates accounts), Connect with Vocs, account switching and
 pairing from the signed-in computer list. `e2e.remote` drives the desktop side of the same flow in
@@ -111,9 +111,9 @@ checkout and pass all changed no-provider suites in one guarded invocation. For 
 ```bash
 npm run build && node scripts/e2e-guard.mjs tests/e2e.themes.test.ts tests/e2e.ui-modes.test.ts
 # Standalone web-only check builds its own web output (no desktop bundle needed):
-node scripts/e2e-guard.mjs tests/e2e.remote-web.test.ts
+node scripts/e2e-guard.mjs tests/e2e.web-dashboard.test.ts
 # If npm run build just passed in the same checkout and sources haven't changed, reuse its web output:
-VOCS_CODE_E2E_WEB_PREBUILT=1 node scripts/e2e-guard.mjs tests/e2e.remote-web.test.ts
+VOCS_CODE_E2E_WEB_PREBUILT=1 node scripts/e2e-guard.mjs tests/e2e.web-dashboard.test.ts
 # Reproduce the full release E2E job when diagnosing release CI:
 npm run build && VOCS_CODE_E2E_WEB_PREBUILT=1 npm run test:e2e:ci
 ```
@@ -129,7 +129,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 npm run dist:dir -- --publish never && HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.update.test.ts
 ```
 
-`npm run test:e2e:ci` runs twenty-eight no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
+`npm run test:e2e:ci` runs twenty-seven no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
 seeded `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
@@ -162,9 +162,10 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |
 | Harness-native slash commands (adapter reporting, `/` popover, `//name` route) | `tests/harness-commands.test.ts`, `tests/composer-harness-commands.test.tsx`, `tests/claude-goal-commands.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/acp-turn-state.test.ts`, `tests/codex-skills.test.ts` + `e2e.harness-commands` |
-| Usage panel, `src/renderer/src/session-usage.ts` | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx` + `e2e.usage` |
+| Usage panel, `/usage` shortcut, and desktop subscription limits | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx`, `tests/composer-harness-commands.test.tsx`, `tests/codex-quota.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + `e2e.usage` (mocked Codex limits and vendor launches, no harness prompt) |
 | Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
 | Settings navigation/search, `settings-catalog.ts`, `SettingsPrimitives.tsx`, `components/settings.css` | `tests/settings-navigation.test.tsx`, `tests/branch-prefix-settings-ui.test.tsx`, `tests/context-ui.test.tsx` + `e2e.layout`; update and run the affected section’s E2E below. The layout suite captures isolated light/dark review screenshots in `tests/artifacts/settings-redesign-*.png`; see [Settings UX](SETTINGS.md). |
+| Session search (`SearchModal.tsx`, `src/main/search.ts`) | `tests/search.test.ts`, `tests/search-modal.test.tsx`, `tests/handler-registry.test.ts` + `e2e.files` (switch categories with the same query and jump to a historical transcript match) |
 | Themes, `styles.css`, terminal colours | `e2e.themes`, `e2e.ui-modes` (Zen restyles the standard tree, so a `styles.css` change can move it) |
 | Text & fonts — `shared/typography.ts`, `TypographySettings.tsx`, `applyTypography` (`theme.ts`), the interface-size zoom in `src/main/index.ts`, the `--content-*` / `--code-size` / `data-width` rules | `tests/typography.test.ts` + `e2e.typography` |
 | Interface modes — `shared/ui-modes.ts`, `ui-zen.css`, `ui-mode.ts`, `applyUiMode` (`theme.ts`), Appearance → Interface, Zen's one-button title-bar menu, the CSS hooks on session rows and work chips (`data-status`, `data-tone`, `data-pinned`, `data-short`) | `tests/ui-modes.test.tsx`, `tests/ui-modes-settings.test.ts`, `tests/zen-panel-rail.test.tsx` (Zen's side-panel rail, peek and pins) + `e2e.ui-modes` (review screenshots `tests/artifacts/ui-modes-*.png`). A change to a component either mode restyles (sidebar, header, transcript, composer, side panel, settings) needs a look in Zen too |
@@ -172,7 +173,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Which permission tiers a harness may run (`closestPermissionMode`, create/switch/fork/remote create) | `tests/permission-tiers.test.ts`, `tests/control-service.test.ts`, `tests/cursor-harness.test.ts` |
 | Approval cards and structured questions, `harness/permissions.ts` | `tests/approval-card.test.tsx`, `tests/pi-questions.test.ts`, `tests/claude-questions.test.ts`, `tests/codex-approvals.test.ts` + `e2e.transcript` (seeded question layout/state only), `e2e.pi-tools` (real question answer/context → Pi, Skip, and restart), `e2e.approval` (live). Pi question transport also requires `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-questions.integration.test.ts` (scripted provider, cancellation/stale reply recovery). |
 | First-time onboarding and setup recovery (`harness-setup.ts`, `OnboardingWizard`, `HarnessSetup`, `OnboardingProvider`, Home/Settings/New Session entry points) | `tests/harness-readiness.test.ts`, `tests/runtime.test.ts`, `tests/harness-setup.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/onboarding-ui.test.tsx`, `tests/handler-registry.test.ts`, `tests/review-fixes.test.ts` + `e2e.models`, `e2e.vision`, `e2e.instructions`, `e2e.session-view`. Retain draft/save failure recovery, unknown sign-in, catalog fallback, stale-response, owner-main-frame dispatch and restart coverage. Use isolated, existing vendor homes and APPDATA directories; no live OAuth or paid prompts in these suites. See [Onboarding](ONBOARDING.md). |
-| Google Antigravity CLI, account quota and ACP session dispatch | `tests/acp-turn-state.test.ts`, `tests/session-resume.test.ts`, `tests/harness-readiness.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.models`, `e2e.antigravity-turn` + live `HARNESS_SMOKE_ONLY=antigravity HARNESS_SMOKE_RESUME=1`. Verify every permission mode at dispatch (Plan denials, one-time grants only), stalled-prompt recovery, and a resumed signed-in Gemini session. |
+| Google Antigravity CLI, interactive usage launcher and ACP session dispatch | `tests/acp-turn-state.test.ts`, `tests/session-resume.test.ts`, `tests/harness-readiness.test.ts`, `tests/harness-setup.test.ts`, `tests/harness-setup-ipc.test.ts` + `e2e.models`, `e2e.antigravity-turn` + live `HARNESS_SMOKE_ONLY=antigravity HARNESS_SMOKE_RESUME=1`. Verify every permission mode at dispatch (Plan denials, one-time grants only), stalled-prompt recovery, and a resumed signed-in Gemini session. The quota launcher is tested offline; it does not send `/usage` to the CLI for the user. |
 | Harness CLI update check (`runtime.ts` `checkUpdates`, Harness logins card) | `tests/harness-updates.test.ts`, `tests/harness-update-ui.test.tsx` + `e2e.vision` |
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |
 | Updater, `main/updater*.ts`, sidebar update button, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
@@ -186,11 +187,13 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Vocs MCP Hub connections (`main/vocs-hub.ts`, the `keepRefreshToken` option in `mcp/oauth.ts`, the `vocs-hub:*` ids, `vocs-openrouter` injection, the Hub controls in `VocsAccountSettings.tsx`) | `tests/vocs-hub.test.ts` (fake Hub on a local HTTP server: real SDK OAuth, keychain record, the loopback proxy through the app's own MCP client, renewal/rotation order, 401 retry, `invalid_grant`, restore, revocation, account lifecycle, session injection), `tests/mcp-oauth.test.ts`, `tests/vocs-account.test.ts`, `tests/vocs-account-settings.test.tsx`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/codex-mcp-config.test.ts`, `tests/pi-mcp-builtin-trust.test.ts` + `e2e.vocs-account` (keychain-sealed restore, Disconnect revocation through an in-main fetch interceptor, restart). Keep the Hub token out of every harness-visible value, the vault write before first use, and no request at launch; no suite contacts mcp.vocs.io. |
 | MCP layer (`src/main/mcp/**`), built-in servers, computer use (`mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`) | `tests/mcp.test.ts`, `tests/mcp-gitnexus.test.ts`, `tests/mcp-client.test.ts`, `tests/mcp-client-http.test.ts`, `tests/mcp-oauth.test.ts`, `tests/mcp-oauth-transport-race.test.ts`, `tests/cua.test.ts`, `tests/cua-preview.test.ts`, `tests/cua-card.test.tsx`, `tests/desktop-tab.test.tsx`, `tests/right-panel-bottom.test.tsx` |
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy, the pairing QR (`shared/qr.ts`, `PairingQr.tsx`) | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/remote-host-lifecycle.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-client.test.ts`, `tests/remote-ui.test.tsx`, `tests/qr.test.ts` |
-| Remote controller MCP (`shared/control.ts`, `main/control/**`, controlled SessionManager turns, `relay/src/control-*.ts`, `ControlSettings.tsx`) | `tests/control-service.test.ts`, `tests/control-turns.test.ts`, `tests/control-relay.test.ts`, `tests/control-relay-workerd.test.ts`, `tests/handler-registry.test.ts`, `tests/remote-ui.test.tsx` + `e2e.remote`; retain the affected lifecycle and relay rows below. The separate landing repository owns its OAuth/consent tests; actual Dots and two-host qualification are a rollout gate, not implied by offline success. |
+| Remote controller MCP (`shared/control.ts`, `main/control/**`, controlled SessionManager turns, `relay/src/control-*.ts`, `relay/src/entry.ts`, `ControlSettings.tsx`) | `tests/control-service.test.ts`, `tests/control-turns.test.ts`, `tests/control-relay.test.ts`, `tests/control-relay-workerd.test.ts`, `tests/handler-registry.test.ts`, `tests/remote-ui.test.tsx` + `e2e.remote`. `test:relay-do` exercises discovery over the named binding, with two authenticated simulated hosts, denial before dispatch and nonce replay across restart. Retain the affected lifecycle and relay rows below. The separate gateway repos own their OAuth/consent tests; actual Dots/Muse and two real computers are rollout gates, not implied by offline success. |
 | Windows local CLI/stdio discovery (`scripts/vocs-code.mjs`, `main/control/local.ts`, `windows-pipe.*`, `LocalControlSettings.tsx`) | `tests/local-control.test.ts`, `tests/local-control-cli.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + on Windows `tests/local-control-windows.test.ts` (native ACL, restricted-token denial, peer identity, frame limits and owner death) and `e2e.remote` (owner grant, CLI and SDK stdio, exact profile and revocation). See [LOCAL-CONTROL.md](LOCAL-CONTROL.md#verification). |
-| Remote terminal (P3.5): `src/main/remote/terminal-streams.ts`, `TerminalManager.watch/snapshot`, `shared/remote-terminal.ts`, `src/web/terminal/**`, `src/web/sheets/TerminalSheet.tsx` | `tests/remote-terminal-streams.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-terminal.test.ts`, `tests/web-terminal-sheet.test.tsx`, `tests/terminal.test.ts` + `e2e.remote-web` |
+| Remote terminal (P3.5): `src/main/remote/terminal-streams.ts`, `TerminalManager.watch/snapshot`, `shared/remote-terminal.ts` | `tests/remote-terminal-streams.test.ts`, `tests/remote-e2e.test.ts`, `tests/terminal.test.ts` |
 | Relay routing, accounts, auth, tokens or rate limiting (`relay/src/{account,core,routes,edge,rate}.ts`) | `tests/relay-account.test.ts`, `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-e2e.test.ts`, `tests/remote-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
-| Web shell, relay web client and the account-partitioned browser vault (`src/web/**`, `vite.config.web.ts`, `relay/src/web-client.ts`, `relay/public/_headers`) | `tests/web-transport.test.ts`, `tests/web-router.test.ts`, `tests/web-shell.test.tsx`, `tests/web-bundle.test.ts`, `tests/web-client.test.ts`, `tests/browser-socket.test.ts`, `tests/relay-page-layout.test.ts` (reads `_headers`) + `e2e.remote-web` (real browser, CSP and account switching). Also cover desktop flows that use the changed renderer core. |
+| Web dashboard (`src/web/**`, `vite.config.web.ts`, `relay/public/_headers`, `relay/src/legacy-app.ts`) and the shared analytics view it reuses (`components/analytics/{AnalyticsView,env}.tsx`) | `tests/web-dashboard.test.tsx`, `tests/web-router.test.ts`, `tests/web-account.test.ts`, `tests/web-bundle.test.ts`, `tests/relay-page-layout.test.ts` (reads `_headers` and the `/app` redirect), `tests/analytics-dashboard.test.tsx` + `e2e.web-dashboard` (real browser, CSP, Connect with Vocs). |
+| Analytics snapshot, its relay storage and the desktop uploader (`shared/analytics/{snapshot,snapshot-codec,snapshot-wire,combine,usage-summary}.ts`, `relay/src/analytics.ts`, `main/remote/analytics-sync.ts`) | `tests/analytics-snapshot.test.ts`, `tests/relay-analytics.test.ts`, `tests/analytics-sync.test.ts`, `tests/analytics.test.ts`, `tests/relay-edge.test.ts` + `e2e.web-dashboard` |
+| Relay browser client used by the pairing suites (`relay/src/web-client.ts`) | `tests/web-client.test.ts`, `tests/browser-socket.test.ts`, `tests/remote-workerd.test.ts`, `e2e.remote` |
 | Relay Durable Object and frame routing (`relay/src/{worker,hub}.ts`, socket lifecycle/tags/queues) | `test:relay-do`, `tests/remote-workerd.test.ts` + `test:remote-live` against the deployed origin after deploy |
 | CI workflows and test runners (`.github/workflows/`, `scripts/test-*.mjs`, `scripts/e2e-guard*.mjs`, `scripts/pr-test-files.json`) | `tests/ci-workflow.test.ts` and the affected runner tests: `tests/test-changed.test.ts`, `tests/e2e-guard.test.ts`, `tests/test-metrics.test.ts`, `tests/test-inventory.test.ts`. `vitest.relay.config.ts` or relay test config changes also need `npm run test:relay-do`. |
 | Split view — panes, the active pane, the divider, drag-to-split, layout restore (`panes.ts`, `components/SessionPanes.tsx`, the `layout`/`activeId` pair in `store.ts`) | `tests/session-panes.test.ts`, `tests/split-view.test.tsx` + `e2e.split`; `e2e.files` checks the editor drawer does not resize the split |
@@ -205,12 +208,11 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 in `scripts/pr-test-files.json` and runs with two isolated Vitest workers. Missing, uncollected, or
 skipped tests still fail the check. This worker override does not apply to the full offline or
 Electron runs. Full offline Vitest, no-provider Electron E2E, Windows ownership/recovery and
-packaged-app smoke run on pull requests to `master`, pushes to `master`, and manual runs. The
-Windows job preflights ConPTY ownership before the long real-Git suite; the preflight does not replace
-the full no-skip run. This release gate preserves broad coverage while keeping routine develop PRs
+packaged-app smoke run on pull requests to `master`, pushes to `master`, and manual runs.
+This release gate preserves broad coverage while keeping routine develop PRs
 shorter. CI prints slow files/cases and uploads sanitized timing reports; raw Vitest JSON stays in
 runner temp because failure messages could contain sensitive data. The Windows E2E job sets
-`VOCS_CODE_E2E_WEB_PREBUILT=1` only after `npm run build`, so `e2e.remote-web` consumes the
+`VOCS_CODE_E2E_WEB_PREBUILT=1` only after `npm run build`, so `e2e.web-dashboard` consumes the
 validated prebuilt web bundle instead of building it again. Standalone runs still build it.
 Paid/live tiers remain manual.
 
@@ -236,6 +238,15 @@ Electron suite asserts default-on indexing, committed paths in Evidence, and pro
 A dev run without a staged worker checks fallback instead. There are no provider keys or live model calls.
 The path-filtered `graphify-bundle.yml` runs the packaged worker natively on Linux x64 and both Mac
 architectures, and verifies Mac signatures. It does not publish assets or run the full release suite.
+
+### Knowledge benchmark
+
+Run `node scripts/benchmark-knowledge.mjs` after staging Graphify and building as above. It measures
+first index, unchanged restart, a commit refresh and ranked Evidence retrieval on pinned Vocs Code,
+plus transcript-index reuse and Local versus Off recall on synthetic sessions. It takes several
+minutes, starts no real model, and prints the paths to `desktop.json` and `history.json`. Use
+`--history-only` to run the latter without a desktop build. This is opt-in measurement, not a CI
+latency gate. See the [reference report and methodology](KNOWLEDGE-BENCHMARK.md).
 
 ## Coverage rules for high-risk paths
 

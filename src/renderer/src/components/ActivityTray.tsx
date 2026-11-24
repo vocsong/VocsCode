@@ -3,6 +3,7 @@
  *  short pause and leaving closes it; a click pins it open until Escape, a click outside, or a row. */
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { SessionMeta } from '../../../shared/types';
+import { hasOngoingWork, ongoingBadgeLabel } from '../../../shared/ongoing';
 import { activitySections } from '../activity';
 import { invoke } from '../api';
 import { relTime } from '../format';
@@ -131,7 +132,7 @@ function ActivityTray({ onClose }: { onClose: () => void }) {
         {list.map((s) => (
           <button key={s.id} type="button" className="activity-row" data-testid="activity-row" onClick={() => void openSession(s)}>
             {/* A failed turn has usually returned the session to idle; the dot says how it ended. */}
-            <StatusDot status={s.unseenAt !== undefined && s.unseenFailed ? 'error' : s.status} />
+            <StatusDot status={s.unseenAt !== undefined && s.unseenFailed ? 'error' : s.status === 'idle' && hasOngoingWork(s) ? 'ongoing' : s.status} />
             <SessionTitle session={s} className="activity-row-title" />
             <span className="activity-row-time">{time(s)}</span>
           </button>
@@ -144,7 +145,7 @@ function ActivityTray({ onClose }: { onClose: () => void }) {
     <div ref={ref} className="activity-tray" role="dialog" aria-label="Session activity" data-testid="activity-tray" onKeyDown={onKeyDown}>
       {section('Needs you', needs, () => 'Pending')}
       {/* No turn-start time exists, and the last user message can be hours before a goal's turn. */}
-      {section('Running', running, () => 'Working')}
+      {section('Running', running, (s) => (s.status === 'running' || s.status === 'starting' ? 'Working' : ongoingBadgeLabel(s.ongoing ?? []) || 'Background'))}
       {section('Done · not viewed', done, (s) => relTime(s.unseenAt!))}
       {section('Recent', recent, (s) => relTime(s.lastViewedAt!))}
       {empty && <div className="activity-empty">Nothing running and no recent sessions yet.</div>}
