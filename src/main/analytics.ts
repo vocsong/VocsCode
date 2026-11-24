@@ -12,61 +12,62 @@ import type {
   TranscriptItem,
   UsageCounters,
   UsageDay,
-  UsageDayDimensions,
   UsageSessionRecord,
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
 import { modelKeyLabel, UNKNOWN_MODEL_KEY } from '../shared/model-names';
-import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, emptySlice, harnessModelKey, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
+import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, emptySlice, harnessModelKey } from '../shared/usage-rollup';
 import { addSpeed, addTotals, dayKey, emptySpeed, summarize, type UsageSummary } from '../shared/analytics/usage-summary';
 import { buildAnalyticsSnapshot, SNAPSHOT_RANGES, type AnalyticsSnapshot, type AnalyticsSnapshotMeta, type SnapshotReports } from '../shared/analytics/snapshot';
 import { codeOutputReport, type CodeOutputReport } from '../shared/analytics/code-output';
 import type { ExecutionRecord } from '../shared/analytics/records';
 import { reliabilityReport, type ReliabilityReport } from '../shared/analytics/reliability';
 import { ExecutionLog, type ExecutionContext, type ExecutionQuery } from './analytics-executions';
-import { modelsForProvider } from './models/static-models';
-import { LEDGER_FIELDS, pricedModelOf, repricingOf, type ForkInheritance, type LedgerField } from './util/usage-repair';
+import {
+  apportion,
+  attribute,
+  estimateDaySlices,
+  estimateLegacyDays,
+  migrateClaudeFallbackSpend,
+  migrateCodexCachedInput,
+  reconcileForkInheritedSpend,
+  recoverHarnessModelDays,
+  usageDelta,
+  type AnalyticsFile,
+  type Attribution
+} from './analytics-migrations';
+import type { ForkInheritance } from './util/usage-repair';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
 export { addTotals, dayKey, emptySpeed, summarize, type UsageSummary };
 export { EXECUTION_RETENTION } from './analytics-executions';
+export {
+  apportion,
+  attribute,
+  estimateDaySlices,
+  migrateClaudeFallbackSpend,
+  migrateCodexCachedInput,
+  reconcileForkInheritedSpend,
+  usageDelta,
+  type AnalyticsFile
+};
 
-interface AnalyticsFile {
-  /**
-   * 1 → the codex cached-input double count; 2 → the Claude fallback-rate repricing; 3 → fork
-   * inheritance taken back. The fork sweep is the only one that reads every transcript, so it is
-   * the only gate that has to hold across a restart: the file says 2 until the sweep finishes,
-   * which is what makes an interrupted sweep retry on the next boot instead of leaving the rest of
-   * history uncorrected.
-   */
-  version: 2 | 3;
-  /** UTC day -> aggregated usage. */
-  days: Record<string, UsageDay>;
-  /** Last recorded cumulative totals per session, for delta computation. */
-  recorded: Record<string, UsageTotals>;
-  /** Last known session snapshot; kept after deletion so history survives. */
-  sessions: Record<string, UsageSessionRecord>;
-  /** Completed tool calls per tool name. */
-  tools: Record<string, ToolUsage>;
-  /** Completed tool calls per tool name, keyed by model (`provider/model`). */
-  modelTools: Record<string, Record<string, ToolUsage>>;
-  /** Live tool outcomes by known session harness; never reconstructed from legacy aggregates. */
-  harnessTools: Record<string, Record<string, ToolUsage>>;
-  /** Bounded recent-call replay protection, persisted atomically with the counters. */
-  recordedTools: string[];
-  /** User-submission receipt ids, persisted atomically with their day counters (no prompt text). */
-  recordedUserInputs: string[];
-  /** Completed tool calls per tool name, keyed by harness and model (`harness|provider/model`). */
-  harnessModelTools: Record<string, Record<string, ToolUsage>>;
-  /** File-change counts per path, aggregated from tool results. */
-  files: Record<string, FileUsage>;
-  /** Last `--version` each harness reported, stamped on execution records. */
-  harnessVersions?: Record<string, string>;
-}
-
-const EMPTY_FILE: AnalyticsFile = { version: 2, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], recordedUserInputs: [], files: {} };
+const EMPTY_FILE: AnalyticsFile = {
+  version: 2,
+  days: {},
+  recorded: {},
+  sessions: {},
+  tools: {},
+  modelTools: {},
+  harnessModelTools: {},
+  harnessTools: {},
+  recordedTools: [],
+  recordedUserInputs: [],
+  scannedTranscripts: {},
+  files: {}
+};
 
 /** Older calls remain deduped in memory; only this recent window survives restart. */
 const RECENT_TOOL_LIMIT = 10_000;
@@ -104,122 +105,8 @@ export function addDay(day: UsageDay, delta: Partial<UsageDay>): void {
   addCounters(day, delta);
 }
 
-/**
- * Delta between two cumulative totals, clamped at zero: a harness that resets its counters
- * (resume, compaction) must never subtract from already-recorded history.
- */
-export function usageDelta(prev: UsageTotals, next: UsageTotals): Partial<UsageDay> {
-  const d: Partial<UsageDay> = {};
-  for (const f of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns'] as const) {
-    d[f] = Math.max(0, (next[f] ?? 0) - (prev[f] ?? 0));
-  }
-  return d;
-}
-
-/** The three attribution dimensions of a usage record; sessions carry all of them. */
-interface Attribution {
-  id: string;
-  harness: string;
-  provider?: string;
-  model?: string;
-  projectRoot: string;
-}
-
 function attributionOf(meta: SessionMeta): Attribution {
   return { id: meta.id, harness: meta.config.harness, provider: meta.activeModel?.provider, model: meta.activeModel?.model, projectRoot: meta.config.projectRoot };
-}
-
-/** Adds `delta` to the day's harness, model, harness × model and project slices for the session that produced it. */
-export function attribute(day: UsageDay, who: Attribution, delta: Partial<UsageCounters>): void {
-  const by = (day.by ??= emptyDimensions());
-  addSlice(by.harness, who.harness, who.harness, delta, who.id);
-  // The slice is named from the key it is filed under: usage recorded before per-model provider
-  // tracking has none, so it keeps the bare id rather than showing a leading slash.
-  if (who.model) {
-    const key = `${who.provider ?? ''}/${who.model}`;
-    const label = modelKeyLabel(key);
-    addSlice(by.model, key, label, delta, who.id);
-    addSlice(by.harnessModel, harnessModelKey(who.harness, key), label, delta, who.id);
-  }
-  addSlice(by.project, who.projectRoot, who.projectRoot, delta, who.id);
-}
-
-/**
- * Splits `total` across `weights` proportionally. Integer splits use largest-remainder rounding so
- * the parts add up to the total exactly; all-zero weights fall back to an even split.
- */
-export function apportion(total: number, weights: number[], integer: boolean): number[] {
-  if (weights.length === 0 || !(total > 0)) return weights.map(() => 0);
-  const sum = weights.reduce((a, w) => a + Math.max(0, w), 0);
-  const w = sum > 0 ? weights.map((x) => Math.max(0, x) / sum) : weights.map(() => 1 / weights.length);
-  if (!integer) return w.map((x) => total * x);
-  const raw = w.map((x) => total * x);
-  const parts = raw.map(Math.floor);
-  let left = Math.round(total) - parts.reduce((a, b) => a + b, 0);
-  const order = raw.map((v, i) => [v - Math.floor(v), i] as const).sort((a, b) => b[0] - a[0]);
-  for (let k = 0; left > 0 && k < order.length; k++, left--) parts[order[k][1]] += 1;
-  return parts;
-}
-
-const INTEGER_FIELDS = new Set<keyof UsageCounters>(['userInputTokens', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'turns', 'toolCalls']);
-
-/** Each session's own total of a counter, the weight used to share a legacy day's total between them. */
-function sessionWeight(s: UsageSessionRecord, f: keyof UsageCounters): number {
-  switch (f) {
-    // User text is only known from host receipts, never inferred from provider/session totals.
-    case 'userInputTokens':
-      return 0;
-    case 'toolCalls':
-      return s.toolCalls;
-    case 'speedTokens':
-      return s.speed?.tokens ?? 0;
-    case 'speedMs':
-      return s.speed?.ms ?? 0;
-    case 'durationMs':
-      return s.durationMs ?? 0;
-    default:
-      return s.usage[f];
-  }
-}
-
-/**
- * Estimates the slices of a day recorded before slice tracking from the sessions last active that
- * day: every counter is shared between them in proportion to their own totals of it (falling back
- * to spend, then an even split). The original backfill put a whole session on its last active day,
- * so for sessions that lived within one day this reproduces exactly what live tracking would have.
- */
-export function estimateDaySlices(day: UsageDay, sessions: UsageSessionRecord[]): boolean {
-  const active = sessions.filter((s) => s.usage.costUsd > 0 || s.usage.turns > 0 || s.toolCalls > 0 || totalTokens(s.usage) > 0);
-  if (day.by || active.length === 0) return false;
-  const shares: Partial<UsageCounters>[] = active.map(() => ({}));
-  for (const f of COUNTER_FIELDS) {
-    if (!(day[f] > 0)) continue;
-    let weights = active.map((s) => sessionWeight(s, f));
-    if (!weights.some((w) => w > 0)) weights = active.map((s) => s.usage.costUsd);
-    apportion(day[f], weights, INTEGER_FIELDS.has(f)).forEach((v, i) => (shares[i][f] = v));
-  }
-  day.by = { ...emptyDimensions(), estimated: true };
-  active.forEach((s, i) => attribute(day, { id: s.id, harness: s.harness, provider: s.provider, model: s.model, projectRoot: s.projectRoot }, shares[i]));
-  return true;
-}
-
-/**
- * The one model every one of `sessions` was filed under within the day, or undefined when they
- * disagree or one of them is in no model slice at all. Day slices record the model that was active
- * at the time, so this is evidence about the day itself rather than about the sessions' last model.
- */
-function dayModelCovering(by: UsageDayDimensions, sessions: string[]): string | undefined {
-  if (sessions.length === 0) return undefined;
-  const owners = new Set(sessions);
-  let found: string | undefined;
-  for (const [modelKey, slice] of Object.entries(by.model)) {
-    if (!slice.sessions.some((id) => owners.has(id))) continue;
-    if (found !== undefined && found !== modelKey) return undefined;
-    found = modelKey;
-  }
-  if (found === undefined) return undefined;
-  const covering = new Set(by.model[found].sessions);
-  return sessions.every((id) => covering.has(id)) ? found : undefined;
 }
 
 function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSessionRecord {
@@ -254,188 +141,6 @@ export function toolCallFromItem(item: Extract<TranscriptItem, { kind: 'tool' }>
   return { usage, changes };
 }
 
-/**
- * One-time repair for stores written before the Codex adapters subtracted cached input from their
- * input token count. Codex reports the cached subset inside its input tokens, so pre-fix records
- * carried every cached token twice — once inside inputTokens, once as cacheReadTokens — which
- * roughly halved the cache hit rate and over-billed input cost for codex-sourced usage. Removes
- * the cached part from each codex slice (day total, harness slice, session snapshots and delta
- * baselines) and spreads it across that day's model and project slices weighted by their own
- * cache reads — exact where codex ran a single model, proportional where it did not. Runs when
- * the first build with the fix loads a version-1 store: everything on disk then predates it.
- * Returns the number of days repaired.
- */
-export function migrateCodexCachedInput(data: AnalyticsFile, sessions: SessionMeta[]): number {
-  const byId = new Map(sessions.map((s) => [s.id, s]));
-  let fixed = 0;
-  for (const day of Object.values(data.days)) {
-    const codex = day.by?.harness?.codex;
-    if (!codex) continue;
-    const removed = Math.min(codex.inputTokens, codex.cacheReadTokens);
-    if (!(removed > 0)) continue;
-    codex.inputTokens -= removed;
-    day.inputTokens = Math.max(0, day.inputTokens - removed);
-    const active = (codex.sessions ?? []).map((id) => byId.get(id)).filter((s): s is SessionMeta => s !== undefined);
-    const spread = (dim: 'model' | 'project') => {
-      const slices = day.by?.[dim];
-      if (!slices) return;
-      const keys = [...new Set(active.flatMap((s) => (dim === 'model' ? (s.activeModel?.model ? [`${s.activeModel.provider ?? ''}/${s.activeModel.model}`] : []) : [s.config.projectRoot])))].filter((k) => slices[k]);
-      if (!keys.length) return;
-      const parts = apportion(removed, keys.map((k) => slices[k].cacheReadTokens), true);
-      keys.forEach((k, i) => (slices[k].inputTokens = Math.max(0, slices[k].inputTokens - parts[i])));
-    };
-    spread('model');
-    spread('project');
-    fixed++;
-  }
-  const repair = (u: UsageTotals): void => {
-    u.inputTokens = Math.max(0, u.inputTokens - u.cacheReadTokens);
-  };
-  for (const [id, s] of Object.entries(data.sessions)) {
-    if (s.harness !== 'codex') continue;
-    repair(s.usage);
-    const recorded = data.recorded[id];
-    if (recorded) repair(recorded);
-  }
-  // Live sessions resume from their meta usage; correcting it in place keeps the next cumulative
-  // sample from the (fixed) adapter continuous instead of re-counting the old cached tokens.
-  for (const m of sessions) {
-    if (m.config.harness === 'codex') repair(m.usage);
-  }
-  return fixed;
-}
-
-/**
- * One-time repair for spend the Claude adapter recorded at the Claude CLI's fallback rates, which
- * overstated a third-party model by two orders of magnitude — see `util/usage-repair` for why the
- * record looks the way it does and how one is recognised.
- *
- * Every copy of the figure moves together, because each is read on its own:
- *   - the session meta, which also seeds the adapter's next cumulative sample — a repaired session
- *     whose meta kept the old dollars would report a spend that can never grow;
- *   - the analytics snapshot the dashboard's session rows and totals are built from;
- *   - `recorded`, the same delta baseline, which is why the codex repair moves it too;
- *   - the day slices the usage was attributed to, so the day, harness, model, harness × model and
- *     project breakdowns all lose the phantom dollars rather than only the top line.
- *
- * Unlike the codex repair this runs on every load instead of behind a version gate: the recognition
- * test is self-limiting, since a record that has been repriced no longer matches it. Sessions whose
- * per-day share cannot be recovered (one resumed across midnight, so its usage sits on more than
- * one day) have the dollars split evenly between those days — the session total is exact either
- * way, only the day it is charted under is approximate.
- */
-export function migrateClaudeFallbackSpend(data: AnalyticsFile, sessions: SessionMeta[], providers: ProviderConfig[] = []): { ids: string[]; usd: number } {
-  const ids: string[] = [];
-  let usd = 0;
-  const cut = (slice: { costUsd: number } | undefined, by: number): void => {
-    if (slice) slice.costUsd = Math.max(0, slice.costUsd - by);
-  };
-  for (const meta of sessions) {
-    if (meta.config.harness !== 'claude') continue;
-    const ref = pricedModelOf(meta);
-    const repricing = repricingOf(ref, meta.usage, modelsForProvider(providers, ref?.provider));
-    if (!ref || !repricing) continue;
-    const delta = repricing.from - repricing.to;
-    const snapshot = data.sessions[meta.id];
-    const recorded = data.recorded[meta.id];
-    meta.usage.costUsd = repricing.to;
-    if (snapshot) snapshot.usage.costUsd = repricing.to;
-    if (recorded) recorded.costUsd = repricing.to;
-    const modelKey = `${ref.provider}/${ref.model}`;
-    const targets = carrierDaysOf(data, meta);
-    const shares = apportion(delta, targets.map(() => 1), false);
-    targets.forEach((key, i) => {
-      const day = data.days[key];
-      day.costUsd = Math.max(0, day.costUsd - shares[i]);
-      const by = day.by;
-      if (!by) return;
-      cut(by.harness?.claude, shares[i]);
-      cut(by.model?.[modelKey], shares[i]);
-      cut(by.harnessModel?.[harnessModelKey('claude', modelKey)], shares[i]);
-      cut(by.project?.[meta.config.projectRoot], shares[i]);
-    });
-    ids.push(meta.id);
-    usd += delta;
-  }
-  return { ids, usd };
-}
-
-/**
- * The day buckets a session's usage was attributed to: every day that already names it, or — for a
- * session the store has a record of but no day slice names — its last active day, which is where
- * the backfill would have put it. Empty when the session is on no day at all, so a correction with
- * nothing to take back leaves the day totals alone.
- */
-function carrierDaysOf(data: AnalyticsFile, meta: SessionMeta): string[] {
-  const carriers = Object.keys(data.days).filter((key) => data.days[key].by?.harness?.[meta.config.harness]?.sessions.includes(meta.id));
-  if (carriers.length) return carriers;
-  const lastDay = dayKey(meta.updatedAt);
-  return (data.recorded[meta.id] || data.sessions[meta.id]) && data.days[lastDay] ? [lastDay] : [];
-}
-
-/** Takes `part` off every counter of a slice, floored at zero: slices mirror the day above them. */
-function takeCounters(slice: Partial<Record<LedgerField, number>> | undefined, part: Partial<Record<LedgerField, number>>): void {
-  if (!slice) return;
-  for (const field of LEDGER_FIELDS) slice[field] = Math.max(0, (slice[field] ?? 0) - (part[field] ?? 0));
-}
-
-/**
- * One-time correction for the spend, tokens and turns a fork inherited from the session it was
- * forked from — see `util/usage-repair` for how the split is drawn and why `createdAt` is the cut.
- *
- * Every copy of the figure moves together, for the same reason the two repairs above move theirs:
- * the session meta (which the adapter seeds its next cumulative sample from), the analytics
- * snapshot the dashboard's rows are built from, `recorded`, and the day slices the usage was
- * attributed to, so the day, harness, model, harness × model and project breakdowns all lose the
- * inherited share rather than only the top line. The amount removed from a day is its counter
- * delta, taken off each field in turn; a session spanning several days has it split evenly between
- * them, so the session total is exact either way and only the day it is charted under is
- * approximate.
- *
- * `inheritances` is keyed by session id and holds what `inheritedUsageOf` read off each transcript.
- * Only sessions whose totals actually move are returned; a fork whose harness already reset its
- * counters has nothing taken from it, its copied rows are still handed over by the caller.
- */
-export function reconcileForkInheritedSpend(data: AnalyticsFile, sessions: SessionMeta[], inheritances: Map<string, ForkInheritance>): { ids: string[]; usd: number } {
-  const ids: string[] = [];
-  let usd = 0;
-  for (const meta of sessions) {
-    const found = inheritances.get(meta.id);
-    if (!found) continue;
-    const before = { ...meta.usage };
-    for (const field of LEDGER_FIELDS) meta.usage[field] = Math.max(0, (meta.usage[field] ?? 0) - (found.inherited[field] ?? 0));
-    // The part taken back, field by field: `usageDelta` is the same clamp the day write uses, read
-    // the other way round (how much the totals dropped, never how much they grew).
-    const drop = usageDelta(meta.usage, before);
-    const snapshot = data.sessions[meta.id];
-    const recorded = data.recorded[meta.id];
-    if (snapshot) takeCounters(snapshot.usage, drop);
-    if (recorded) takeCounters(recorded, drop);
-    const targets = carrierDaysOf(data, meta);
-    const share = targets.length ? 1 / targets.length : 0;
-    targets.forEach((key) => {
-      const day = data.days[key];
-      const part: Partial<UsageCounters> = {};
-      for (const field of LEDGER_FIELDS) part[field] = (drop[field] ?? 0) * share;
-      takeCounters(day, part);
-      const by = day.by;
-      if (!by) return;
-      takeCounters(by.harness?.[meta.config.harness], part);
-      takeCounters(by.project?.[meta.config.projectRoot], part);
-      const ref = pricedModelOf(meta);
-      if (!ref) return;
-      const modelKey = `${ref.provider}/${ref.model}`;
-      takeCounters(by.model?.[modelKey], part);
-      takeCounters(by.harnessModel?.[harnessModelKey(meta.config.harness, modelKey)], part);
-    });
-    const moved = LEDGER_FIELDS.some((field) => (drop[field] ?? 0) > 0);
-    if (!moved) continue;
-    ids.push(meta.id);
-    usd += drop.costUsd ?? 0;
-  }
-  return { ids, usd };
-}
-
 export interface AnalyticsDeps {
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Test hooks for the execution log's environment stamp and retention. */
@@ -445,8 +150,33 @@ export interface AnalyticsDeps {
 /** Reads back a session's transcript so sessions predating the store can be backfilled. */
 export type TranscriptReader = (sessionId: string) => Promise<TranscriptItem[]>;
 
+/** Returns a file-level revision stamp for a session's transcript, or `null` when unavailable. */
+export type TranscriptStampReader = (sessionId: string) => Promise<string | null>;
+
+export interface AnalyticsLoadOptions {
+  /**
+   * Optional transcript-file stat stamp reader (`size:mtimeMs:ctimeMs`). When supplied, startup
+   * replay skips re-reading already-backfilled transcripts whose on-disk file has not changed
+   * since the last persisted scan.
+   */
+  transcriptStamp?: TranscriptStampReader;
+}
+
 export class AnalyticsStore {
-  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], recordedUserInputs: [], files: {} };
+  private data: AnalyticsFile = {
+    ...EMPTY_FILE,
+    days: {},
+    recorded: {},
+    sessions: {},
+    tools: {},
+    modelTools: {},
+    harnessModelTools: {},
+    harnessTools: {},
+    recordedTools: [],
+    recordedUserInputs: [],
+    scannedTranscripts: {},
+    files: {}
+  };
   private readonly file: string;
   private writeTimer: NodeJS.Timeout | null = null;
   private writeQueue: Promise<void> = Promise.resolve();
@@ -479,13 +209,24 @@ export class AnalyticsStore {
    * Loads the store and backfills sessions that predate it: usage totals are attributed to each
    * session's last active day, and per-tool/per-file stats are rebuilt from its transcript.
    */
-  async load(existing: SessionMeta[], readTranscript?: (id: string) => Promise<TranscriptItem[]>, providers: ProviderConfig[] = []): Promise<void> {
+  async load(
+    existing: SessionMeta[],
+    readTranscript?: TranscriptReader,
+    providers: ProviderConfig[] = [],
+    options?: AnalyticsLoadOptions
+  ): Promise<void> {
     const stored = await readJson<Partial<AnalyticsFile> | undefined>(this.file, undefined, { log: this.deps.log });
     const storedVersion = stored?.version ?? 1;
     const fromV1 = storedVersion < 2;
     // Stays at 2 until the sweep reports back, so a run interrupted partway retries rather than
     // leaving the sessions it never reached charged for someone else's work.
     this.forkSweepPending = storedVersion < 3;
+    const scannedTranscripts: Record<string, string> = {};
+    if (stored?.scannedTranscripts && typeof stored.scannedTranscripts === 'object') {
+      for (const [id, stamp] of Object.entries(stored.scannedTranscripts)) {
+        if (typeof stamp === 'string' && stamp) scannedTranscripts[id] = stamp;
+      }
+    }
     this.data = {
       version: this.forkSweepPending ? 2 : 3,
       days: stored?.days && typeof stored.days === 'object' ? stored.days : {},
@@ -496,6 +237,7 @@ export class AnalyticsStore {
       harnessTools: stored?.harnessTools && typeof stored.harnessTools === 'object' ? stored.harnessTools : {},
       recordedTools: Array.isArray(stored?.recordedTools) ? stored.recordedTools.filter((key) => typeof key === 'string').slice(-RECENT_TOOL_LIMIT) : [],
       recordedUserInputs: Array.isArray(stored?.recordedUserInputs) ? stored.recordedUserInputs.filter((key) => typeof key === 'string') : [],
+      scannedTranscripts,
       harnessModelTools: stored?.harnessModelTools && typeof stored.harnessModelTools === 'object' ? stored.harnessModelTools : {},
       files: stored?.files && typeof stored.files === 'object' ? stored.files : {},
       harnessVersions: stored?.harnessVersions && typeof stored.harnessVersions === 'object' ? stored.harnessVersions : {}
@@ -521,9 +263,9 @@ export class AnalyticsStore {
     if (repriced.ids.length) {
       this.deps.log('info', `analytics: repriced ${repriced.ids.length} claude session(s) recorded at the CLI's fallback rates, removing $${repriced.usd.toFixed(2)}`);
     }
-    const estimated = this.estimateLegacyDays();
+    const estimated = estimateLegacyDays(this.data);
     if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
-    const recovered = this.recoverHarnessModelDays();
+    const recovered = recoverHarnessModelDays(this.data);
     if (recovered) this.deps.log('info', `analytics: recovered the harness × model split for ${recovered} day(s) recorded before that dimension existed`);
     let backfilled = 0;
     for (const meta of existing) {
@@ -556,7 +298,7 @@ export class AnalyticsStore {
     if (backfilled) this.deps.log('info', `analytics: backfilled ${backfilled} existing session(s)`);
     await this.flush();
     // Transcript replay into the execution log runs after load returns so startup never waits on it.
-    if (readTranscript) this.backfill = this.backfillExecutions(existing, readTranscript);
+    if (readTranscript) this.backfill = this.backfillExecutions(existing, readTranscript, options?.transcriptStamp);
   }
 
   /** Resolves once historical transcripts have been replayed into the execution log (tests, shutdown). */
@@ -590,18 +332,39 @@ export class AnalyticsStore {
   }
 
   /**
-   * Replays each known session's transcript into the execution log once. Records are marked
-   * `backfill`; items without output or exit code become `legacy_unclassified`, never guessed.
-   * Host user-input receipts are checked every boot: a crash can persist a transcript without
-   * updating session metadata or analytics, so updatedAt is not a safe replay watermark.
+   * Replays each known session's transcript into the execution log once and recovers any
+   * host user-input receipts that survived a crash before `analytics.json` flushed.
+   *
+   * When `transcriptStamp` is provided, already-backfilled transcripts whose on-disk file stamp
+   * (`size:mtimeMs:ctimeMs`) matches the last atomically persisted scan are skipped — avoiding an
+   * unbounded full-history parse on every boot while preserving crash recovery (because any
+   * persisted append changes the transcript file itself, independent of `meta.updatedAt`).
    */
-  private async backfillExecutions(existing: SessionMeta[], readTranscript: TranscriptReader): Promise<void> {
+  private async backfillExecutions(
+    existing: SessionMeta[],
+    readTranscript: TranscriptReader,
+    transcriptStamp?: TranscriptStampReader
+  ): Promise<void> {
     let sessions = 0;
     let records = 0;
     const started = Date.now();
-    let scannedInputs = false;
+    let dirty = false;
+    const scanned = (this.data.scannedTranscripts ??= {});
+    if (transcriptStamp) {
+      const liveIds = new Set(existing.map((meta) => meta.id));
+      for (const id of Object.keys(scanned)) {
+        if (!liveIds.has(id)) {
+          delete scanned[id];
+          dirty = true;
+        }
+      }
+    }
     for (const meta of existing) {
       const replayExecutions = !this.executions.isBackfilled(meta.id);
+      const stampBefore = transcriptStamp ? await transcriptStamp(meta.id).catch(() => null) : null;
+      if (!replayExecutions && stampBefore !== null && scanned[meta.id] === stampBefore) {
+        continue;
+      }
       let items: TranscriptItem[];
       try {
         items = await readTranscript(meta.id);
@@ -609,18 +372,25 @@ export class AnalyticsStore {
         this.deps.log('warn', `analytics: could not read transcript of ${meta.id} for replay`);
         continue;
       }
-      this.recordUserInputs(meta, items);
-      scannedInputs = true;
+      if (this.recordUserInputs(meta, items) > 0) dirty = true;
       if (replayExecutions) {
         const count = this.executions.backfillTranscript(meta.id, items, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel));
         await this.executions.markBackfilled(meta.id, count);
         sessions++;
         records += count;
       }
+      if (transcriptStamp && stampBefore !== null) {
+        const stampAfter = await transcriptStamp(meta.id).catch(() => null);
+        // Only commit the stamp if the transcript did not change while we were reading it.
+        if (stampAfter === stampBefore && scanned[meta.id] !== stampBefore) {
+          scanned[meta.id] = stampBefore;
+          dirty = true;
+        }
+      }
       // Yield between sessions so a large history never starves the event loop.
       await new Promise((r) => setImmediate(r));
     }
-    if (scannedInputs) await this.flush();
+    if (dirty) await this.flush();
     if (sessions) {
       await this.executions.flush();
       this.deps.log('info', `analytics: replayed ${records} execution(s) from ${sessions} transcript(s) into the execution log in ${Date.now() - started}ms`);
@@ -648,16 +418,20 @@ export class AnalyticsStore {
   }
 
   /** Receipt-only recovery, also used before a transcript is cleared, deleted or rewound. */
-  recordUserInputs(meta: SessionMeta, items: TranscriptItem[]): void {
-    for (const item of items) if (item.kind === 'user') this.collectUserInput(meta, item);
+  recordUserInputs(meta: SessionMeta, items: TranscriptItem[]): number {
+    let added = 0;
+    for (const item of items) {
+      if (item.kind === 'user' && this.collectUserInput(meta, item)) added++;
+    }
+    return added;
   }
 
-  private collectUserInput(meta: SessionMeta, item: Extract<TranscriptItem, { kind: 'user' }>): void {
+  private collectUserInput(meta: SessionMeta, item: Extract<TranscriptItem, { kind: 'user' }>): boolean {
     const receipt = item.userInput;
-    if (!receipt || receipt.sessionId !== meta.id || typeof receipt.id !== 'string' || !receipt.id) return;
-    if (!Number.isSafeInteger(receipt.tokens) || receipt.tokens <= 0 || !Number.isFinite(receipt.ts) || !Number.isFinite(new Date(receipt.ts).getTime())) return;
+    if (!receipt || receipt.sessionId !== meta.id || typeof receipt.id !== 'string' || !receipt.id) return false;
+    if (!Number.isSafeInteger(receipt.tokens) || receipt.tokens <= 0 || !Number.isFinite(receipt.ts) || !Number.isFinite(new Date(receipt.ts).getTime())) return false;
     const key = JSON.stringify([meta.id, receipt.id]);
-    if (this.recordedUserInputs.has(key)) return;
+    if (this.recordedUserInputs.has(key)) return false;
     this.recordedUserInputs.add(key);
     this.data.recordedUserInputs.push(key);
     const day = this.dayFor(dayKey(receipt.ts));
@@ -665,6 +439,7 @@ export class AnalyticsStore {
     addDay(day, delta);
     attribute(day, attributionOf(meta), delta);
     this.scheduleWrite();
+    return true;
   }
 
   /** Representative executions for a dashboard drill-down. */
@@ -672,79 +447,8 @@ export class AnalyticsStore {
     return this.executions.query(query, now);
   }
 
-  /**
-   * One-time reconstruction of days written before slice tracking (see estimateDaySlices), using
-   * only the sessions already in the file. Their per-tool and per-file counts are the all-time maps
-   * minus whatever later days recorded live, shared between the legacy days by call volume. Runs
-   * before the session backfill, so newly seen sessions are attributed exactly on top.
-   */
-  private estimateLegacyDays(): number {
-    const legacy = Object.entries(this.data.days).filter(([, d]) => !d.by);
-    if (legacy.length === 0) return 0;
-    const byDay = new Map<string, UsageSessionRecord[]>();
-    for (const s of Object.values(this.data.sessions)) {
-      const key = dayKey(s.updatedAt);
-      byDay.set(key, [...(byDay.get(key) ?? []), s]);
-    }
-    const estimated = legacy.filter(([date, day]) => estimateDaySlices(day, byDay.get(date) ?? [])).map(([, day]) => day);
-    const weights = estimated.map((d) => d.toolCalls);
-    if (estimated.length > 0 && weights.some((w) => w > 0)) {
-      const knownTools: Record<string, ToolUsage> = {};
-      const knownFiles: Record<string, FileUsage> = {};
-      for (const d of Object.values(this.data.days)) {
-        if (!d.by || d.by.estimated) continue;
-        for (const [name, t] of Object.entries(d.by.tool)) addToolUsage((knownTools[toolNameKey(name)] ??= emptyToolUsage()), t);
-        for (const [p, f] of Object.entries(d.by.file)) addFileUsage((knownFiles[p] ??= emptyFileUsage()), f);
-      }
-      for (const t of toolUsageRows(this.data.tools)) {
-        const name = t.name;
-        const k = knownTools[toolNameKey(name)] ?? emptyToolUsage();
-        const parts = (['calls', 'errors', 'declined', 'durationMs'] as const).map((f) => apportion(Math.max(0, t[f] - k[f]), weights, f !== 'durationMs'));
-        estimated.forEach((d, i) => {
-          const share: ToolUsage = { calls: parts[0][i], errors: parts[1][i], declined: parts[2][i], durationMs: parts[3][i] };
-          if (share.calls > 0 || share.errors > 0 || share.declined > 0) d.by!.tool[name] = share;
-        });
-      }
-      for (const [p, f] of Object.entries(this.data.files)) {
-        const k = knownFiles[p] ?? emptyFileUsage();
-        const parts = (['adds', 'updates', 'deletes', 'renames'] as const).map((field) => apportion(Math.max(0, f[field] - k[field]), weights, true));
-        estimated.forEach((d, i) => {
-          const share: FileUsage = { adds: parts[0][i], updates: parts[1][i], deletes: parts[2][i], renames: parts[3][i] };
-          if (share.adds + share.updates + share.deletes + share.renames > 0) d.by!.file[p] = share;
-        });
-      }
-    }
-    return estimated.length;
-  }
-
-  /**
-   * Fills the harness × model dimension on days recorded before it existed, but only where the
-   * day's own slices already prove the answer: a harness whose sessions were all filed under one
-   * model used that model for everything it recorded that day, so its slice copies over exactly.
-   * A harness that spread across several models that day is left alone — a rate split by guesswork
-   * is worse than a gap. Days whose slices were estimated already have the dimension. Returns the
-   * number of harness/day pairs recovered.
-   */
-  private recoverHarnessModelDays(): number {
-    let recovered = 0;
-    for (const day of Object.values(this.data.days)) {
-      const by = day.by;
-      if (!by) continue;
-      for (const [harness, slice] of Object.entries(by.harness)) {
-        const modelKey = dayModelCovering(by, slice.sessions ?? []);
-        if (!modelKey) continue;
-        const key = harnessModelKey(harness, modelKey);
-        if (by.harnessModel[key]) continue;
-        // Same shape `attribute` writes: the counters of the harness, labelled by the model.
-        by.harnessModel[key] = { ...slice, label: modelKeyLabel(modelKey), sessions: [...slice.sessions] };
-        recovered++;
-      }
-    }
-    return recovered;
-  }
-
   /** Aggregates completed tool calls from an old transcript into the store, one-time per session. */
-  private async backfillTranscript(sessionId: string, dayTs: number, readTranscript: (id: string) => Promise<TranscriptItem[]>): Promise<void> {
+  private async backfillTranscript(sessionId: string, dayTs: number, readTranscript: TranscriptReader): Promise<void> {
     let items: TranscriptItem[];
     try {
       items = await readTranscript(sessionId);

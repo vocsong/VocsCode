@@ -291,6 +291,22 @@ export class RemoteHost {
     this.push();
   }
 
+  /** App-quit teardown: closes sockets and cancels timers without recording a user disable event or pushing state. */
+  close(): void {
+    this.generation++;
+    this.ws?.close();
+    this.ws = null;
+    this.sessions.clear();
+    this.forgetAllClients();
+    this.incoming.clear();
+    this.status = 'off';
+    this.detail = undefined;
+    this.pairingAttempt++;
+    this.clearPairing();
+    this.signingIn = undefined;
+    this.cancelMirrorClearRetry();
+  }
+
   /** Loads or creates this computer's identity for `relayUrl`, without connecting. */
   private async prepare(relayUrl: string, enrollToken: string): Promise<void> {
     const endpoint = assertEndpointUrl(relayUrl);
