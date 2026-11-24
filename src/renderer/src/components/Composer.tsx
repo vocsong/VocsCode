@@ -193,6 +193,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
 
   const reportedCommands = useHarnessCommandList(session);
   const harnessCommands = reportedCommands ?? NO_HARNESS_COMMANDS;
+  const nativeGoal = session.nativeGoal?.toLowerCase() === 'goal' ? 'goal' : undefined;
   const slashMatches: SlashEntry[] = slash
     ? slashEntries({
         query: slash.query,
@@ -200,7 +201,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
         harness: harnessCommands,
         // The app's /compact already asks the harness to compact; a second row would do the same.
         delegated: ['compact'],
-        nativeGoal: session.nativeGoal
+        nativeGoal
       })
     : [];
   const harnessNote = harnessCommandNote(harness, reportedCommands);
@@ -238,7 +239,9 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
       setSlash(null);
       setHistIdx(-1);
     };
-    const typedCommand = t.startsWith('/') ? t.slice(1).split(/\s+/)[0] : '';
+    const [command, ...args] = t.startsWith('/') ? t.slice(1).split(/\s+/) : [''];
+    // The popover matches /usage case-insensitively; make sure alternate casing stays local too.
+    const typedCommand = command.toLowerCase() === 'usage' ? 'usage' : command;
     if (typedCommand === 'housekeep') {
       if (images.length || files.length) { toast('Housekeep cannot include attachments.', 'error'); return; }
       const arg = t.slice('/housekeep'.length).trim().toLowerCase();
@@ -301,7 +304,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
     // A command the harness owns itself is prompt text, not an app command: `/goal` on a session whose
     // harness has its own goal goes to the harness verbatim (see shared/goal-driver.ts). The rest of
     // the send path is unchanged, so history and draft handling stay correct for free.
-    if (typedCommand && typedCommand === session.nativeGoal?.toLowerCase()) {
+    if (nativeGoal && typedCommand === nativeGoal) {
       toast(`${harness.name} answers /${typedCommand} itself — sent to the harness.`, 'info');
       useStore.getState().setPanelTab('goal');
     } else if (typedCommand && SLASH_COMMANDS.some((c) => c.name === typedCommand)) {
@@ -309,7 +312,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
       // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
       // composer looking frozen; their progress and outcome appear as info lines in the transcript.
       clearDraft();
-      void runSlash(t).catch((e) => toast(String((e as Error).message ?? e), 'error'));
+      void runSlash(typedCommand, args).catch((e) => toast(String((e as Error).message ?? e), 'error'));
       return;
     }
     if (t.startsWith('!')) {
@@ -338,14 +341,13 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
     }
   };
 
-  const runSlash = async (line: string): Promise<boolean> => {
-    const [cmd, ...rest] = line.slice(1).split(/\s+/);
+  const runSlash = async (cmd: string, rest: string[]): Promise<boolean> => {
     const arg = rest.join(' ').trim();
     const store = useStore.getState();
     switch (cmd) {
       case 'help': {
         // A transcript note, not a toast: with a harness's skills listed it runs to many lines.
-        const own = slashEntries({ query: '', app: SLASH_COMMANDS, harness: harnessCommands, delegated: ['compact'], nativeGoal: session.nativeGoal }).filter((c) => c.source === 'harness');
+        const own = slashEntries({ query: '', app: SLASH_COMMANDS, harness: harnessCommands, delegated: ['compact'], nativeGoal }).filter((c) => c.source === 'harness');
         const lines = [
           `Vocs Code: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')}`,
           own.length ? `${harness.name}: ${own.map((c) => '/' + c.insert).join(' ')}` : harnessNote ?? '',

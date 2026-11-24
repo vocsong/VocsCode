@@ -52,7 +52,12 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const project = path.join(tmp, 'project');
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { uiMode: 'standard', sidebarWidth: 280, panelWidth: 420 }));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      uiMode: 'standard', sidebarWidth: 280, panelWidth: 420,
+      // The composer may discover models at startup, before any IPC stub is installed.
+      // Pin a missing CLI so even a developer's signed-in install is never probed.
+      binaries: { agy: path.join(tmp, 'missing-agy') }
+    }));
 
     const session: SessionMeta = {
       id: SID,
@@ -141,7 +146,7 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
 
     await win.setViewportSize(wideViewport);
     const prompt = composer.locator('textarea');
-    await prompt.fill('/usage');
+    await prompt.fill('/USAGE');
     await prompt.press('Enter');
     await panel.waitFor({ timeout: 10_000 });
     expect(await vendorCalls()).toEqual({ quota: 0, prompts: 0 });
