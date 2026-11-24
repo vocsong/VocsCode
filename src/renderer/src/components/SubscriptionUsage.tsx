@@ -24,44 +24,65 @@ function subscriptionStatus(availability: HarnessAvailability | undefined) {
     : { label: 'Sign-in detected', tone: 'green' as const };
 }
 
+function canShowSubscriptions() {
+  return !isWeb && !!window.harness && canInvoke('subscriptions:openUsage');
+}
+
+function inlineProviders(session: SessionMeta): readonly SubscriptionProvider[] {
+  return session.config.harness === 'claude' && canInvoke('subscriptions:claudeObserved')
+    ? ['claude', ...INLINE_SUBSCRIPTION_PROVIDERS]
+    : INLINE_SUBSCRIPTION_PROVIDERS;
+}
+
 export function SubscriptionUsage({ session, readLimitsOnOpen }: { session: SessionMeta; readLimitsOnOpen: boolean }) {
-  if (isWeb || !window.harness || !canInvoke('subscriptions:openUsage')) return null;
-  const harness = session.config.harness;
-  const preferred = harness === 'codex-exec' ? 'codex' : harness;
-  const providers = [...SUBSCRIPTION_PROVIDERS].sort((a, b) => Number(b === preferred) - Number(a === preferred));
+  if (!canShowSubscriptions()) return null;
+  const codexSession = session.config.harness === 'codex' || session.config.harness === 'codex-exec';
   return (
     <section className="usage-block" aria-label="Subscription limits">
       <h5>Subscription limits</h5>
-      <p className="usage-note">These are account limits, not this session’s usage. Supported limits load when you open Usage and don’t poll in the background.</p>
-      {providers.map((provider) => (
-        <SubscriptionRow key={provider} provider={provider} readLimitsOnOpen={readLimitsOnOpen}>
-          {provider === 'claude' && harness === 'claude' && canInvoke('subscriptions:claudeObserved') && (
-            <ClaudeObservedLimits key={session.id} session={session} visible={readLimitsOnOpen} />
-          )}
+      {inlineProviders(session).map((provider) => (
+        <SubscriptionRow key={provider} provider={provider} readLimitsOnOpen={readLimitsOnOpen} activeCodex={provider === 'codex' && codexSession}>
+          {provider === 'claude' && <ClaudeObservedLimits key={session.id} session={session} visible={readLimitsOnOpen} />}
         </SubscriptionRow>
       ))}
-      <p className="usage-note">Pi, generic ACP and API-key sessions use their own providers’ plans or billing. Vocs Code can’t match those logins to these accounts or infer their limits from session tokens.</p>
     </section>
   );
 }
 
-function SubscriptionRow({ provider, readLimitsOnOpen, children }: {
+export function SubscriptionUsageLinks({ session }: { session: SessionMeta }) {
+  if (!canShowSubscriptions()) return null;
+  const inline = inlineProviders(session);
+  return (
+    <section className="usage-block" aria-label="Provider usage links">
+      <h5>Provider usage links</h5>
+      {SUBSCRIPTION_PROVIDERS.filter((provider) => !inline.includes(provider)).map((provider) => (
+        <SubscriptionRow key={provider} provider={provider} readLimitsOnOpen={false} />
+      ))}
+    </section>
+  );
+}
+
+function SubscriptionRow({ provider, readLimitsOnOpen, activeCodex = false, children }: {
   provider: SubscriptionProvider;
   readLimitsOnOpen: boolean;
+  activeCodex?: boolean;
   children?: React.ReactNode;
 }) {
   const { name, detail } = PROVIDERS[provider];
   const availability = useStore((s) => s.availability[provider] ?? (provider === 'codex' ? s.availability['codex-exec'] : undefined));
-  const signIn = subscriptionStatus(availability);
   const reader = INLINE_SUBSCRIPTION_PROVIDERS.find((id) => id === provider);
   const canRead = !!reader && canInvoke('subscriptions:read');
-  const signedIn = availability?.available === true && availability.authenticated === true && availability.authMethod === 'subscription';
+  const autoRead = availability?.available === true && (
+    (availability.authMethod === 'subscription' && availability.authenticated === true) ||
+    (activeCodex && availability.authMethod !== 'api-key')
+  );
   const readAttempted = useRef(false);
   const pending = useRef(false);
   const [action, setAction] = useState<'read' | 'open' | null>(null);
   const [snapshot, setSnapshot] = useState<{ limits: SubscriptionLimits; checkedAt: Date } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const signIn = snapshot ? { label: 'ChatGPT account', tone: 'green' as const } : subscriptionStatus(availability);
 
   const run = useCallback(async (next: 'read' | 'open') => {
     if (pending.current || (next === 'read' && !canRead)) return;
@@ -87,11 +108,11 @@ function SubscriptionRow({ provider, readLimitsOnOpen, children }: {
     }
   }, [canRead, provider, reader]);
 
-  // Availability may finish loading after the panel opens. Use the existing sign-in hint;
-  // neither transcript updates nor a layout change should trigger another account read.
+  // A login outside the app can make the boot-time sign-in hint stale. In a Codex session
+  // let the existing account preflight verify the saved login before it requests any limits.
   useEffect(() => {
-    if (readLimitsOnOpen && signedIn && canRead && !action && !readAttempted.current) void run('read');
-  }, [action, canRead, readLimitsOnOpen, run, signedIn]);
+    if (readLimitsOnOpen && autoRead && canRead && !action && !readAttempted.current) void run('read');
+  }, [action, autoRead, canRead, readLimitsOnOpen, run]);
 
   return (
     <section className="usage-block usage-quota" aria-label={name}>
@@ -99,19 +120,6 @@ function SubscriptionRow({ provider, readLimitsOnOpen, children }: {
         <h5>{name}</h5>
         {signIn && <Badge tone={signIn.tone}>{signIn.label}</Badge>}
       </div>
-      <p className="usage-note">{detail}</p>
-      <div className="usage-quota-actions">
-        {canRead && (
-          <Button size="sm" variant="subtle" icon="refresh" disabled={action !== null} onClick={() => void run('read')}>
-            {snapshot ? 'Refresh limits' : 'Check limits'}
-          </Button>
-        )}
-        <Button size="sm" variant={reader ? 'ghost' : 'subtle'} icon={provider === 'antigravity' ? 'terminal' : 'external'} disabled={action !== null} onClick={() => void run('open')}>
-          {provider === 'antigravity' ? 'Open CLI' : 'Open usage page'}
-        </Button>
-      </div>
-      {error && <div className="callout warn" role="alert">{error}</div>}
-      {(action || notice) && <p className="usage-note" role="status">{action === 'read' ? 'Checking account limits…' : action === 'open' ? 'Opening provider usage…' : notice}</p>}
       {children}
       {snapshot && <div className="usage-quota-results" aria-live="polite">
         <p className="usage-note">Quota remaining · Checked <time dateTime={snapshot.checkedAt.toISOString()}>{snapshot.checkedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></p>
@@ -128,6 +136,19 @@ function SubscriptionRow({ provider, readLimitsOnOpen, children }: {
           </div>
         ))}
       </div>}
+      {error && <div className="callout warn" role="alert">{error}</div>}
+      {(action || notice) && <p className="usage-note" role="status">{action === 'read' ? 'Checking account limits…' : action === 'open' ? 'Opening provider usage…' : notice}</p>}
+      <p className="usage-note">{detail}</p>
+      <div className="usage-quota-actions">
+        {canRead && (
+          <Button size="sm" variant={snapshot ? 'ghost' : 'subtle'} icon="refresh" disabled={action !== null} onClick={() => void run('read')}>
+            {snapshot ? 'Refresh limits' : 'Check limits'}
+          </Button>
+        )}
+        <Button size="sm" variant={reader ? 'ghost' : 'subtle'} icon={provider === 'antigravity' ? 'terminal' : 'external'} disabled={action !== null} onClick={() => void run('open')}>
+          {provider === 'antigravity' ? 'Open CLI' : 'Open usage page'}
+        </Button>
+      </div>
     </section>
   );
 }

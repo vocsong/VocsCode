@@ -145,6 +145,8 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const accounts = panel.getByRole('region', { name: 'Subscription limits', exact: true, includeHidden: true });
     const codex = accounts.getByRole('region', { name: 'Codex · ChatGPT', exact: true, includeHidden: true });
     const shortWindow = codex.getByRole('meter', { name: '5-hour limit', exact: true });
+    const weeklyWindow = codex.getByRole('meter', { name: 'Weekly limit', exact: true });
+    const providerLinks = panel.getByRole('region', { name: 'Provider usage links' });
     const contextWindow = panel.getByRole('meter', { name: 'Context window' });
     const usageTab = rightPanel.getByRole('button', { name: 'Usage', exact: true });
     const composer = win.locator('.composer');
@@ -161,10 +163,20 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     };
     const expectLimits = async () => {
       expect(await shortWindow.getAttribute('aria-valuenow')).toBe('73');
-      expect(await codex.getByRole('meter', { name: 'Weekly limit', exact: true }).getAttribute('aria-valuenow')).toBe('16');
+      expect(await weeklyWindow.getAttribute('aria-valuenow')).toBe('16');
       const reset = await win.evaluate((iso) => new Date(iso).toLocaleString(), resetAt);
       expect(await codex.getByText(/^Resets /).innerText()).toBe(`Resets ${reset}`);
     };
+    // A DOM-present meter can still be clipped by the sidebar scroller. Check the visible value
+    // (label, percentage and reset time) without scrolling or focusing a quota action first.
+    const inUsageViewport = (target: ReturnType<Page['locator']>) => target.evaluate((element) => {
+      const meter = element.closest('.meter');
+      const body = element.closest('.panel-body');
+      if (!meter || !body) return false;
+      const value = meter.getBoundingClientRect();
+      const clip = body.getBoundingClientRect();
+      return value.top >= clip.top && value.bottom <= Math.min(clip.bottom, window.innerHeight);
+    });
     expect(await meter.innerText({ timeout: 30_000 })).toBe('60%');
     await expectCalls(0);
 
@@ -196,6 +208,8 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     await win.setViewportSize({ width: 1080, height: 760 });
     await meter.click();
     await expectVisit(4);
+    await expect.poll(() => inUsageViewport(shortWindow)).toBe(true);
+    await expect.poll(() => inUsageViewport(weeklyWindow)).toBe(true);
     expect(await composer.locator('.composer-box').evaluate((el) => el.clientWidth)).toBeLessThanOrEqual(440);
     await meter.waitFor({ timeout: 10_000 });
     expect(await meter.innerText()).toBe('60%');
@@ -213,13 +227,13 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     await win.screenshot({ path: path.join(shots, 'usage-00-summary.png') });
 
     // Only the user's fallback clicks launch the Antigravity CLI and the official Claude page.
-    const google = accounts.getByRole('region', { name: 'Google Antigravity', exact: true });
+    const google = providerLinks.getByRole('region', { name: 'Google Antigravity', exact: true });
     await google.getByRole('button', { name: 'Open CLI', exact: true }).click();
     await google.getByText('In the terminal, type /usage and press Enter.').waitFor();
     await expectCalls(5, ['antigravity']);
-    const claude = accounts.getByRole('region', { name: 'Claude', exact: true });
-    await claude.getByRole('button', { name: 'Open usage page', exact: true }).click();
-    await claude.getByText('Usage page opened in your browser.').waitFor();
+    const claudeLink = providerLinks.getByRole('region', { name: 'Claude', exact: true });
+    await claudeLink.getByRole('button', { name: 'Open usage page', exact: true }).click();
+    await claudeLink.getByText('Usage page opened in your browser.').waitFor();
     const explicitLaunches = ['antigravity', 'claude'];
     await expectCalls(5, explicitLaunches);
     await win.screenshot({ path: path.join(shots, 'usage-00-subscriptions.png') });
@@ -319,7 +333,8 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     await expectVisit(6, explicitLaunches);
     await expectLimits();
     expect(await contextWindow.getAttribute('aria-valuenow')).toBe('60');
-    await shortWindow.scrollIntoViewIfNeeded();
+    await expect.poll(() => inUsageViewport(shortWindow)).toBe(true);
+    await expect.poll(() => inUsageViewport(weeklyWindow)).toBe(true);
     await win.screenshot({ path: path.join(shots, 'usage-00-subscriptions-zen.png'), animations: 'disabled' });
     await expectCalls(6, explicitLaunches);
 
@@ -327,8 +342,10 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     await win.keyboard.press('ControlOrMeta+2');
     await expect.poll(() => panel.locator('.usage-hero-value').innerText()).toBe('$0.00');
     await openUsage('/usage');
+    const claude = accounts.getByRole('region', { name: 'Claude', exact: true });
     const observed = claude.getByRole('meter', { name: 'Weekly limit' });
     await expect.poll(() => observed.getAttribute('aria-valuenow', { timeout: 2_000 })).toBe('63');
+    await expect.poll(() => inUsageViewport(observed)).toBe(true);
     expect(await claude.getByText(/Last reported by Claude/).count()).toBe(1);
     await expectCalls(6, explicitLaunches, [claudeSession.id]);
   }, 180_000);

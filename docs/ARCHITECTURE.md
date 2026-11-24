@@ -276,12 +276,14 @@ latest list from a same-harness session in the same project. Harnesses that cann
 so in the popover instead of looking empty; the list is kept off remote frames.
 
 The app-owned `/usage` opens the right-hand Usage tab without sending a prompt. An advertised
-harness command of the same name still runs via `//usage`. **Subscription limits** appear inline,
-separate from session tokens, spend and context. `subscriptions:*` actions are desktop-owner-only.
-Opening Usage with a detected ChatGPT sign-in reads Codex’s documented app-server account windows
-once per panel visit, not on a timer or session switch. That short-lived stdio process never starts
-a thread or turn. It uses the saved CLI login, isolated app-server state, no ambient auth or endpoint
-overrides, and disabled Remote Control. Both Codex modes share that account read.
+harness command of the same name still runs via `//usage`. **Subscription limits** appear near the
+top, before session token and context metrics and separate from provider links.
+`subscriptions:*` actions are desktop-owner-only. The panel tries the Codex read once per visit when
+it has a ChatGPT sign-in hint, or in a Codex session with an available runtime and no API-key hint.
+The app-server preflight verifies the saved login before requesting any rate-limit windows, so a
+stale sign-in hint doesn’t hide a newly connected account. That short-lived stdio process never
+starts a thread or turn. It uses isolated app-server state, no ambient auth or endpoint overrides,
+and disabled Remote Control. Both Codex modes share that account read.
 
 Claude’s `rate_limit_event` can report subscription windows during a normal turn. The running
 adapter keeps only recent observations for its own session; `subscriptions:claudeObserved` reads
