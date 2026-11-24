@@ -865,4 +865,148 @@ describe('acp adapter', () => {
       await expect(fs.stat(path.join(elsewhere, 'out.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
     });
   });
+
+  describe('ACP form elicitation (structured questions)', () => {
+    const askQuestionParams = {
+      sessionId: 'sess-1',
+      toolCallId: 'call-ask-1',
+      mode: 'form',
+      message: 'The agent has 2 questions.',
+      requestedSchema: {
+        type: 'object',
+        properties: {
+          q1: {
+            type: 'string',
+            title: 'Which window?',
+            oneOf: [
+              { const: '1', title: '09:30–10:00 ET' },
+              { const: '2', title: '10:00–10:30 ET' }
+            ]
+          },
+          q1_other: { type: 'string', title: 'Other', description: 'Optional free-form answer' },
+          q2: {
+            type: 'array',
+            title: 'Which models?',
+            items: {
+              anyOf: [
+                { const: '1', title: 'LightGBM' },
+                { const: '2', title: 'SideGuard' }
+              ]
+            }
+          },
+          q2_other: { type: 'string', title: 'Other', description: 'Optional free-form answer' }
+        }
+      }
+    };
+
+    it('advertises form elicitation capability on initialize', async () => {
+      const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask' });
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      await h.adapter.start();
+      const init = h.agent.requests.find((r) => r.method === 'initialize');
+      expect(init?.params.clientCapabilities.elicitation).toEqual({ form: {} });
+    });
+
+    it.each(['plan', 'ask', 'full-auto'] as const)('surfaces Antigravity ask_question options as a question card even in %s mode', async (mode) => {
+      const h = makeHarness({ harness: 'antigravity', permissionMode: mode });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({
+        optionId: 'allow',
+        answers: { q1: '10:00–10:30 ET' },
+        multiAnswers: { q2: ['LightGBM', 'SideGuard'] },
+        note: 'Start with 2025.'
+      }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      let elicitationResult: unknown;
+      h.agent.on('session/prompt', async () => {
+        const res = await h.agent.serverRequest('elicitation/create', askQuestionParams);
+        elicitationResult = res.result;
+        h.agent.notify('session/update', { sessionId: 'sess-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Got your choices.' } } });
+        return { stopReason: 'end_turn' };
+      });
+
+      await h.adapter.start();
+      await h.adapter.send({ text: 'Ask me before running.' });
+      await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+
+      expect(decide).toHaveBeenCalledTimes(1);
+      expect(decide.mock.calls[0][0]).toMatchObject({
+        kind: 'question',
+        title: 'Antigravity has 2 questions',
+        toolItemId: 'call-ask-1',
+        supportsQuestionComment: true,
+        questions: [
+          { id: 'q1', question: 'Which window?', options: [{ label: '09:30–10:00 ET' }, { label: '10:00–10:30 ET' }], allowOther: true },
+          { id: 'q2', question: 'Which models?', options: [{ label: 'LightGBM' }, { label: 'SideGuard' }], allowOther: true, multiSelect: true }
+        ]
+      });
+      expect(elicitationResult).toEqual({
+        action: 'accept',
+        content: { q1: '2', q2: ['1', '2'], q2_other: 'Additional context: Start with 2025.' }
+      });
+    });
+
+    it('declines on Skip, cancels on interrupted approval or mismatched session, and declines non-form modes', async () => {
+      const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask' });
+      const decide = vi.fn<HarnessContext['requestApproval']>();
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      await h.adapter.start();
+
+      // Skip -> decline.
+      decide.mockResolvedValueOnce({ optionId: 'deny', answers: { q1: '09:30–10:00 ET' } });
+      const declined = await h.agent.serverRequest('elicitation/create', askQuestionParams);
+      expect(declined.result).toEqual({ action: 'decline' });
+
+      // Host approval rejection (e.g. session stopped) -> cancel.
+      decide.mockRejectedValueOnce(new Error('Session stopped'));
+      const cancelled = await h.agent.serverRequest('elicitation/create', askQuestionParams);
+      expect(cancelled.result).toEqual({ action: 'cancel' });
+
+      // Mismatched sessionId -> cancel without prompting.
+      const wrongSession = await h.agent.serverRequest('elicitation/create', { ...askQuestionParams, sessionId: 'other-session' });
+      expect(wrongSession.result).toEqual({ action: 'cancel' });
+
+      // Unsupported URL mode -> decline without prompting.
+      const urlMode = await h.agent.serverRequest('elicitation/create', {
+        sessionId: 'sess-1', mode: 'url', elicitationId: 'u1', url: 'https://example.com', message: 'Sign in'
+      });
+      expect(urlMode.result).toEqual({ action: 'decline' });
+      expect(decide).toHaveBeenCalledTimes(2);
+    });
+
+    it('pauses the Antigravity quiet-prompt recovery timer while a question card is awaiting user input', async () => {
+      vi.useFakeTimers();
+      const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask' });
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      const finish = deferred<{ stopReason: string }>();
+      h.agent.on('session/prompt', () => finish.promise);
+      const approval = deferred<{ optionId: string; answers?: Record<string, string> }>();
+      h.ctx.requestApproval = vi.fn(() => approval.promise);
+
+      await h.adapter.start();
+      await h.adapter.send({ text: 'Ask me a question' });
+      h.agent.notify('session/update', { sessionId: 'sess-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Before asking' } } });
+      const req = h.agent.serverRequest('elicitation/create', askQuestionParams);
+      await vi.advanceTimersByTimeAsync(ANTIGRAVITY_PROMPT_QUIET_MS * 2);
+
+      expect(h.ctx.requestApproval).toHaveBeenCalledOnce();
+      expect(h.adapter.busy).toBe(true);
+      expect(turnItems(h.items)).toEqual([]);
+
+      approval.resolve({ optionId: 'allow', answers: { q1: '09:30–10:00 ET' } });
+      expect(await req).toMatchObject({ result: { action: 'accept', content: { q1: '1' } } });
+      finish.resolve({ stopReason: 'end_turn' });
+      await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+      expect(turnItems(h.items).map((t) => t.status)).toEqual(['completed']);
+    });
+  });
 });

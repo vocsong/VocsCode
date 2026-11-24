@@ -1728,9 +1728,20 @@
 .approval-answer {
   overflow-wrap: anywhere;
 }
+.approval-qhint {
+  margin-top: -2px;
+}
 .approval-answer {
   color: var(--accent);
   white-space: pre-wrap;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.approval-answer-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 /* Diff */
