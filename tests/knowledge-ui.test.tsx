@@ -1,6 +1,6 @@
 /**
- * The Project knowledge panel: auto-ingested pages render with their labels, provenance and
- * relation graph, and the only edits are rejecting (a tombstone) or deleting a page.
+ * The Project knowledge panel renders auto-ingested pages with provenance and a relation graph,
+ * and lets a person review, reject or delete a page or an individually queued draft.
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -83,6 +83,23 @@ function pageDetail(id: string, over: Partial<KnowledgePageDetail> = {}): Knowle
   };
 }
 
+const proposalId = 'auto-draft/branch-0123456789abcdef0123456789abcdef/abcdef0123456789abcdef0123456789';
+const finalPageId = 'gotcha/memory-note';
+const draftClaim = 'Keep checked evidence separate.';
+const draft = summary({
+  id: proposalId, title: 'Memory note', claim: draftClaim, kind: 'gotcha', status: 'draft', scope: 'branch', branch: 'topic/memory',
+  path: `_proposals/_${proposalId}.md`, labels: ['memory'], updatedBy: 'auto:evidence-draft', authority: 5
+});
+const draftSession = () => ({ ...session(), worktreeBranch: draft.branch });
+const draftDetail = (): KnowledgePageDetail => ({
+  page: {
+    meta: { ...draft, sources: [], anchors: [], related: [], supersedes: [], contradicts: [] },
+    path: draft.path,
+    body: 'Check **the original evidence** before accepting.'
+  },
+  related: [], anchors: [], stale: false, staleReasons: []
+});
+
 const graph: KnowledgeGraph = {
   builtAt: '2026-01-01T00:00:00.000Z',
   nodes: [
@@ -111,7 +128,7 @@ describe('Project knowledge panel', () => {
       render(<KnowledgeTab session={session()} />);
     });
     expect(screen.getByTestId('knowledge-tab').textContent).toContain('Project knowledge');
-    // Ingestion is automatic: there is no queue to accept from.
+    // Normal ingestion is automatic and an empty draft queue stays hidden.
     expect(screen.getByTestId('knowledge-auto-note')).toBeTruthy();
     expect(screen.queryByTestId('knowledge-proposals')).toBeNull();
     expect(screen.queryByTestId('knowledge-accept-all')).toBeNull();
@@ -127,6 +144,90 @@ describe('Project knowledge panel', () => {
     });
     expect(invoke).toHaveBeenCalledWith('knowledge:read', { sessionId: 's1', id: 'conventions/harness-lifecycle' });
     expect(screen.getByTestId('knowledge-detail').textContent).toContain('A harness belongs to exactly one session.');
+  });
+
+  it('keeps a review-only Markdown draft out of Publish and shows the accepted page under its final id', async () => {
+    const legacy = summary({ id: 'legacy', title: 'Legacy proposal', status: 'draft' });
+    const initial = view({ proposals: [legacy, draft], branch: draft.branch });
+    const accepted = summary({ ...draft, id: finalPageId, path: `${finalPageId}.md`, status: 'current', authority: 2 });
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return initial;
+      if (channel === 'knowledge:read') return draftDetail();
+      if (channel === 'knowledge:publish') return { ok: true, written: ['docs/wiki/conventions/harness-lifecycle.md'] };
+      if (channel === 'knowledge:review') return view({ pages: [summary(), accepted], branch: draft.branch });
+      return undefined;
+    });
+    await act(async () => { render(<KnowledgeTab session={draftSession()} />); });
+
+    const drafts = screen.getByRole('region', { name: 'Drafts awaiting review' });
+    expect(drafts).toBe(screen.getByTestId('knowledge-proposals'));
+    expect(drafts.textContent).toMatch(/stay out of.*digest.*publish/i);
+    expect(drafts.textContent).not.toContain(legacy.title);
+    expect(screen.queryByTestId(`knowledge-page-${accepted.id}`)).toBeNull();
+    expect(screen.queryByTestId('knowledge-accept-all')).toBeNull();
+    expect(invoke.mock.calls).toEqual([['knowledge:view', { sessionId: 's1' }]]);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Publish' })); });
+    expect(invoke).toHaveBeenCalledWith('knowledge:publish', { sessionId: 's1', ids: [summary().id] });
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /review draft: memory note.*topic\/memory/i })); });
+    expect(invoke).toHaveBeenCalledWith('knowledge:read', { sessionId: 's1', id: draft.id });
+    const detail = screen.getByTestId('knowledge-detail');
+    expect(detail.textContent).toContain('Review-only draft');
+    expect(detail.textContent).toContain('Branch: topic/memory');
+    expect(detail.querySelector('strong')?.textContent).toBe('the original evidence');
+    expect((screen.getByTestId('knowledge-promote') as HTMLButtonElement).disabled).toBe(true);
+    const accept = screen.getByRole('button', { name: 'Accept draft' });
+    expect(accept).toBe(screen.getByTestId('knowledge-mark-reviewed'));
+    await act(async () => { fireEvent.click(accept); });
+    expect(invoke.mock.calls.filter(([channel]) => channel.startsWith('knowledge:review'))).toEqual([
+      ['knowledge:review', { sessionId: 's1', id: draft.id, action: 'accept' }]
+    ]);
+    expect(screen.queryByTestId('knowledge-proposals')).toBeNull();
+    expect(screen.queryByTestId('knowledge-detail')).toBeNull();
+    expect(screen.getByRole('status').textContent).toMatch(/accepted.*memory note.*topic\/memory/i);
+    expect(screen.getByTestId(`knowledge-page-${accepted.id}`).textContent).toContain('human-reviewed');
+  });
+
+  it.each(['reject', 'delete'] as const)('%ss just the selected draft by proposal id without changing an existing page', async (action) => {
+    const existing = summary({ id: finalPageId, title: 'Existing memory page' });
+    const initial = view({ pages: [existing], proposals: [draft], branch: draft.branch });
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return initial;
+      if (channel === 'knowledge:read') return draftDetail();
+      if (channel === (action === 'reject' ? 'knowledge:review' : 'knowledge:delete')) {
+        return view({ pages: [existing], branch: draft.branch, rejectedClaims: action === 'reject' ? [draftClaim] : [] });
+      }
+      return undefined;
+    });
+    await act(async () => { render(<KnowledgeTab session={draftSession()} />); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /review draft: memory note/i })); });
+    await act(async () => { fireEvent.click(screen.getByTestId(`knowledge-page-${action}`)); });
+    if (action === 'reject') {
+      expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: draft.id, action });
+      expect(screen.getByTestId('knowledge-rejected').textContent).toContain(draftClaim);
+    } else {
+      expect(invoke).toHaveBeenCalledWith('knowledge:delete', { sessionId: 's1', id: draft.id });
+      expect(screen.queryByTestId('knowledge-rejected')).toBeNull();
+    }
+    expect(screen.queryByTestId('knowledge-detail')).toBeNull();
+    expect(screen.queryByTestId('knowledge-proposals')).toBeNull();
+    expect(screen.getByTestId(`knowledge-page-${existing.id}`).textContent).toContain(existing.title);
+  });
+
+  it('shows a draft even before the wiki has any current pages and keeps it open when review fails', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view({ pages: [], proposals: [draft], status: { hasWiki: false, pages: 0, needsReview: 0, proposals: 1, stale: 0 } });
+      if (channel === 'knowledge:read') return draftDetail();
+      if (channel === 'knowledge:review') throw new Error('The existing page must be reviewed separately.');
+      return undefined;
+    });
+    await act(async () => { render(<KnowledgeTab session={draftSession()} />); });
+    expect(screen.queryByText('No project wiki yet')).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /review draft: memory note/i })); });
+    await act(async () => { fireEvent.click(screen.getByTestId('knowledge-mark-reviewed')); });
+    expect(screen.getByTestId('knowledge-detail').textContent).toContain('Review-only draft');
+    expect(screen.getByRole('alert').textContent).toBe('The existing page must be reviewed separately.');
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it('renders a search excerpt as text and marks only the matched text', async () => {

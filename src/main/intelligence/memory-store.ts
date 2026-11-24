@@ -81,14 +81,16 @@ export interface MemoryVisibility {
   collectionProjects?: Record<string, string[]>;
   /** Personal records are served only when the user turned that on. */
   personal: boolean;
-  /** Tool callers cannot read passive excerpts until the owner verifies them. */
-  hideUnreviewedLocal?: boolean;
+  /** Generic tool reads must not enumerate passive transcript excerpts. */
+  excludeLocalLearning?: boolean;
 }
 
 export interface MemoryFilter {
   states?: MemoryState[];
   types?: MemoryType[];
   scopes?: MemoryScope[];
+  /** Only passive notes from these already-authorized sessions; searches require all terms. */
+  localLearningFrom?: readonly string[];
   /** Include records whose `expiresAt` has passed. Off by default: expired is history. */
   includeExpired?: boolean;
   limit?: number;
@@ -332,8 +334,8 @@ export class MemoryStore {
       if (v.collectionProjects) args.push(JSON.stringify(v.collectionProjects));
     }
     if (v.personal) parts.push(`(${c}scope = 'personal')`);
-    const review = v.hideUnreviewedLocal ? ` AND (${c}origin <> '${LOCAL_LEARNING_ORIGIN}' OR ${c}state = 'verified')` : '';
-    return { sql: `(${parts.join(' OR ')})${review}`, args };
+    const local = v.excludeLocalLearning ? ` AND ${c}origin <> '${LOCAL_LEARNING_ORIGIN}'` : '';
+    return { sql: `(${parts.join(' OR ')})${local}`, args };
   }
 
   private filterSql(filter: MemoryFilter, alias = ''): { sql: string; args: Array<string | number> } {
@@ -348,6 +350,10 @@ export class MemoryStore {
     inList('state', filter.states);
     inList('type', filter.types);
     inList('scope', filter.scopes);
+    if (filter.localLearningFrom) {
+      parts.push(`${c}origin = '${LOCAL_LEARNING_ORIGIN}' AND ${c}sessionId IN (SELECT value FROM json_each(?))`);
+      args.push(JSON.stringify(filter.localLearningFrom));
+    }
     if (!filter.includeExpired) {
       parts.push(`(${c}expiresAt IS NULL OR ${c}expiresAt > ?)`);
       args.push(new Date(this.now()).toISOString());
@@ -394,6 +400,8 @@ export class MemoryStore {
     const run = (mode: 'all' | 'any'): Array<Row & { rank: number; snip: string }> => {
       const match = memoryMatchQuery(terms, mode);
       if (!match) return [];
+      // Passive titles have a generated “Lesson/Outcome” prefix, not topical evidence.
+      const query = filter.localLearningFrom ? `text : (${match})` : match;
       return db
         .prepare(
           `SELECT r.*, bm25(records_fts, 4.0, 1.0) AS rank, snippet(records_fts, 1, char(1), char(2), char(8230), 24) AS snip
@@ -401,11 +409,11 @@ export class MemoryStore {
            WHERE records_fts MATCH ? AND ${scope.sql}${extra.sql}
            ORDER BY rank LIMIT ?`
         )
-        .all(match, ...scope.args, ...extra.args, limit) as unknown as Array<Row & { rank: number; snip: string }>;
+        .all(query, ...scope.args, ...extra.args, limit) as unknown as Array<Row & { rank: number; snip: string }>;
     };
     let partial = false;
     let rows = run('all');
-    if (!rows.length && terms.length > 1) {
+    if (!rows.length && terms.length > 1 && !filter.localLearningFrom) {
       rows = run('any');
       partial = rows.length > 0;
     }

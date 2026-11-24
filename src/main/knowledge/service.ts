@@ -37,7 +37,7 @@ import {
 } from '../../shared/knowledge';
 import { errorMessage } from '../util/async';
 import { selectKnowledgeUtilityModel, type KnowledgeCompleter } from './llm';
-import { KnowledgeProtectedError, KnowledgeStore, writeFileAtomic, type StoredPage } from './store';
+import { isAutomaticDraftId, KnowledgeProtectedError, KnowledgeStore, writeFileAtomic, type KnowledgeDraftResult, type StoredPage } from './store';
 import { bootstrapKnowledge, distillKnowledge, type KnowledgeJobResult, type KnowledgeSynthDeps } from './synth';
 import type { AnchorResolver } from './anchors';
 
@@ -125,8 +125,16 @@ export class KnowledgeService {
   /* ------------------------------------------------------------------ */
 
   async status(scope: KnowledgeScope): Promise<KnowledgeStatusSummary> {
-    const pages = await this.store.load(scope);
-    const proposals = await this.store.proposals(scope);
+    const [pages, proposals] = await Promise.all([this.store.load(scope), this.pendingProposals(scope)]);
+    return this.summarizeStatus(scope, pages, proposals.length);
+  }
+
+  private async pendingProposals(scope: KnowledgeScope): Promise<KnowledgePage[]> {
+    const [legacy, drafts] = await Promise.all([this.store.proposals(scope), this.store.drafts(scope)]);
+    return [...legacy, ...drafts];
+  }
+
+  private async summarizeStatus(scope: KnowledgeScope, pages: KnowledgePage[], proposals: number): Promise<KnowledgeStatusSummary> {
     let stale = 0;
     for (const page of pages.slice(0, 100)) {
       try {
@@ -141,10 +149,9 @@ export class KnowledgeService {
     return {
       hasWiki: await this.store.hasWiki(scope),
       pages: pages.length,
-      // A deprecated or superseded page is history, not a pending decision. With ingestion
-      // automated, only pages still in the legacy queue are pending at all.
+      // Pending live pages are legacy; the separate proposal queue has its own count.
       needsReview: pages.filter((p) => isPendingStatus(p.meta.status)).length,
-      proposals: proposals.length,
+      proposals,
       stale,
       ...(updated ? { lastUpdated: updated } : {}),
       ...(running ? { generating: true } : {}),
@@ -153,8 +160,7 @@ export class KnowledgeService {
   }
 
   async view(scope: KnowledgeScope): Promise<KnowledgeView> {
-    // Opening the panel is a passive trigger, and anything left in the old review queue is accepted
-    // on sight: ingestion is automatic now.
+    // Opening the panel may seed the wiki but cannot accept automatic evidence drafts.
     void this.ensureSeeded(scope);
     return this.render(scope);
   }
@@ -171,9 +177,9 @@ export class KnowledgeService {
 
   private async render(scope: KnowledgeScope): Promise<KnowledgeView> {
     await this.autoAcceptLegacy(scope);
-    const [pages, proposals, rejectedClaims] = await Promise.all([this.store.load(scope), this.store.proposals(scope), this.store.rejectedClaims(scope)]);
+    const [pages, proposals, rejectedClaims] = await Promise.all([this.store.load(scope), this.pendingProposals(scope), this.store.rejectedClaims(scope)]);
     const summaries = pages.map((p) => this.summarize(p)).sort(byKindThenUpdated);
-    const status = await this.status(scope);
+    const status = await this.summarizeStatus(scope, pages, proposals.length);
     return {
       projectRoot: scope.projectRoot,
       cwd: scope.cwd,
@@ -192,7 +198,8 @@ export class KnowledgeService {
   }
 
   async detail(scope: KnowledgeScope, id: string): Promise<KnowledgePageDetail | null> {
-    const page = await this.store.read(scope, id);
+    const draft = isAutomaticDraftId(id);
+    const page = draft ? await this.store.readDraft(scope, id) : await this.store.read(scope, id);
     if (!page) return null;
     const all = await this.store.load(scope);
     const relatedIds = new Set(page.meta.related);
@@ -204,7 +211,7 @@ export class KnowledgeService {
     const related = all.filter((p) => relatedIds.has(p.meta.id) && p.meta.id !== id).map((p) => this.summarize(p));
     const { stale, reasons } = await this.store.staleness(scope, page);
     const anchors = this.deps.anchors ? await this.deps.anchors.resolve(scope, page.meta.anchors) : page.meta.anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'Anchor resolution is unavailable.' }));
-    return { page: toPage(page), related, anchors, stale, staleReasons: reasons };
+    return { page: { meta: page.meta, body: page.body, path: draft ? page.path : `${id}.md` }, related, anchors, stale, staleReasons: reasons };
   }
 
   /**
@@ -272,6 +279,18 @@ export class KnowledgeService {
   /* Writing                                                            */
   /* ------------------------------------------------------------------ */
 
+  /** Queue a live-evidence finding for explicit desktop review, without changing the live wiki. */
+  async draft(scope: KnowledgeScope, input: KnowledgeProposalInput, signal?: AbortSignal): Promise<KnowledgeDraftResult> {
+    signal?.throwIfAborted();
+    let projectId: string | undefined;
+    try {
+      projectId = await this.projectIdOf?.(scope);
+    } catch {
+      // Identity is provenance, not a prerequisite for an app-local draft.
+    }
+    return this.store.writeDraft(scope, { ...input, projectId }, signal);
+  }
+
   /**
    * Records durable knowledge. Ingestion is fully automated: the claim becomes a `current` page
    * immediately, ranked below anything human-reviewed by the authority ladder. An implicit id
@@ -326,6 +345,16 @@ export class KnowledgeService {
 
   /** Accept (human review) or reject a proposal or an unreviewed page. */
   async review(scope: KnowledgeScope, id: string, action: 'accept' | 'reject', opts: { by?: string; body?: string; title?: string; note?: string } = {}): Promise<KnowledgePageSummary | null> {
+    if (isAutomaticDraftId(id)) {
+      if (action === 'reject') {
+        if (await this.store.deleteDraft(scope, id, { by: opts.by })) this.deps.log('info', `knowledge: draft rejected (${id})`);
+        return null;
+      }
+      const page = await this.store.reviewDraft(scope, id, opts);
+      if (!page) return null;
+      this.deps.log('info', `knowledge: draft accepted (${id} → ${page.meta.id})`);
+      return this.summarize(page);
+    }
     const proposals = await this.store.proposals(scope);
     const proposal = proposals.find((p) => p.meta.id === id);
     if (proposal) return this.reviewProposal(scope, proposal, action, opts);
@@ -416,6 +445,9 @@ export class KnowledgeService {
       if (!isPendingStatus(page.meta.status)) continue;
       if (await this.reviewPage(scope, page.meta.id, 'accept', { by: opts.by })) accepted++;
     }
+    for (const draft of await this.store.drafts(scope)) {
+      if (await this.review(scope, draft.meta.id, 'accept', opts)) accepted++;
+    }
     this.deps.log('info', `knowledge: accepted ${accepted} item(s)`);
     return { accepted };
   }
@@ -504,9 +536,9 @@ export class KnowledgeService {
     return graph;
   }
 
-  /** Deletes one page without tombstoning its claim; a rejected claim is what stays refused. */
+  /** Deletes one page or draft without tombstoning its claim. */
   async remove(scope: KnowledgeScope, id: string): Promise<boolean> {
-    return this.store.deletePage(scope, id);
+    return isAutomaticDraftId(id) ? this.store.deleteDraft(scope, id) : this.store.deletePage(scope, id);
   }
 
   /**
@@ -540,7 +572,7 @@ export class KnowledgeService {
     void this.runJob(scope, mode, utility).catch((e) => this.deps.log('warn', `knowledge: automatic ${mode} failed: ${errorMessage(e)}`));
   }
 
-  /** Accepts any candidate left over from the old review queue, so nothing ever waits for a human. */
+  /** Preserve migration of the old queue, but do not read drafts from the new queue here. */
   private async autoAcceptLegacy(scope: KnowledgeScope): Promise<void> {
     for (const proposal of await this.store.proposals(scope)) {
       try {
@@ -556,7 +588,7 @@ export class KnowledgeService {
         };
         delete meta.targetPageId;
         delete meta.review;
-        await this.store.write(scope, meta, proposal.body);
+        await this.store.write(scope, meta, proposal.body, { preserveReview: true });
         await this.store.removeProposal(scope, proposal.meta.id);
       } catch (e) {
         this.deps.log('debug', `knowledge: could not auto-accept ${proposal.meta.id}: ${errorMessage(e)}`);
@@ -569,7 +601,7 @@ export class KnowledgeService {
         const meta: KnowledgePageMeta = { ...page.meta, status: 'current', updatedBy: 'auto:accept' };
         delete meta.targetPageId;
         delete meta.review;
-        await this.store.write(scope, meta, page.body);
+        await this.store.write(scope, meta, page.body, { preserveReview: true });
       } catch (e) {
         this.deps.log('debug', `knowledge: could not auto-accept ${page.meta.id}: ${errorMessage(e)}`);
       }
@@ -652,7 +684,7 @@ export class KnowledgeService {
       status: meta.status,
       scope: meta.scope,
       ...(meta.branch ? { branch: meta.branch } : {}),
-      path: `${meta.id}.md`,
+      path: isAutomaticDraftId(meta.id) ? page.path : `${meta.id}.md`,
       ...(meta.claim ? { claim: meta.claim } : {}),
       ...(meta.targetPageId ? { targetPageId: meta.targetPageId } : {}),
       keywords: meta.keywords,
@@ -672,10 +704,6 @@ export class KnowledgeService {
 /* ------------------------------------------------------------------ */
 /* Pure helpers                                                       */
 /* ------------------------------------------------------------------ */
-
-function toPage(page: StoredPage): KnowledgePage {
-  return { meta: page.meta, body: page.body, path: `${page.meta.id}.md` };
-}
 
 function byKindThenUpdated(a: KnowledgePageSummary, b: KnowledgePageSummary): number {
   const rank = (s: KnowledgePageSummary) => (s.status === 'proposed' || s.status === 'draft' ? 1 : 0);

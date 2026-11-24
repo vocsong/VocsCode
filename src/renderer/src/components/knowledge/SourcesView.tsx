@@ -2,7 +2,7 @@ import React, { useId, useLayoutEffect, useRef, useState } from 'react';
 import { resolveIntelligenceSettings, type GraphIndexStatus, type IntelligenceSettings, type ReflectionMode } from '../../../../shared/intelligence';
 import { invoke } from '../../api';
 import { Badge, Button, Spinner } from '../ui';
-import { InlineError, LOCAL_REFLECTION_NOTE, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
+import { InlineError, LOCAL_RECALL_NOTE, LOCAL_RECALL_PRIVACY_NOTICE, LOCAL_REFLECTION_NOTE, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
 import { readIntelligence, useScopeGuard, type IntelligenceSectionProps } from './useIntelligence';
 
 const GRAPH_POLL_MS = 3_000;
@@ -80,6 +80,8 @@ function SourceSwitch({ label, testId, checked, disabled, onChange }: {
 export function SourcesView({ sessionId, view, busy, run }: IntelligenceSectionProps) {
   const { project, gateway } = view;
   const localNote = useId();
+  const recallNote = useId();
+  const recallPrivacy = useId();
   const reflectionNote = useId();
   const settings = resolveIntelligenceSettings(view.settings);
   const { enabled, excludedProjects } = settings.graphify;
@@ -113,7 +115,7 @@ export function SourcesView({ sessionId, view, busy, run }: IntelligenceSectionP
       </section>
       <section className="intelligence-card">
         <label className="intelligence-field">Session reflection
-          <select data-testid="setting-reflection" aria-describedby={`${localNote} ${reflectionNote}`} value={settings.reflection} disabled={busy} onChange={(e) => void patch({ reflection: e.target.value as ReflectionMode })}>
+          <select data-testid="setting-reflection" aria-describedby={`${localNote} ${recallNote} ${recallPrivacy} ${reflectionNote}`} value={settings.reflection} disabled={busy} onChange={(e) => void patch({ reflection: e.target.value as ReflectionMode })}>
             <option value="off">Off</option>
             <option value="local">Local after completed turns (default)</option>
             <option value="manual">Manual (Reflect button only)</option>
@@ -121,6 +123,8 @@ export function SourcesView({ sessionId, view, busy, run }: IntelligenceSectionP
           </select>
         </label>
         <p id={localNote} className="muted small">{LOCAL_REFLECTION_NOTE}</p>
+        <p id={recallNote} className="muted small">{LOCAL_RECALL_NOTE}</p>
+        <p id={recallPrivacy} className="muted small">{LOCAL_RECALL_PRIVACY_NOTICE}</p>
         <p id={reflectionNote} className="intelligence-warning small">{REFLECTION_PRIVACY_NOTICE} Model-assisted automatic reflection can also do this when a session is archived or merged.</p>
         <SourceSwitch label="Collections search" testId="setting-collections" checked={settings.collections} disabled={busy} onChange={(collections) => void patch({ collections })} />
         <SourceSwitch label="Personal memory" testId="setting-personal" checked={settings.personalMemory} disabled={busy} onChange={(personalMemory) => void patch({ personalMemory })} />

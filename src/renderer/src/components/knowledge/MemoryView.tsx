@@ -5,10 +5,10 @@ import {
 } from '../../../../shared/intelligence';
 import { invoke, isWeb, on } from '../../api';
 import { Badge, Button } from '../ui';
-import { ConfirmAction, LOCAL_REFLECTION_NOTE, PromoteControl, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
+import { ConfirmAction, LOCAL_RECALL_NOTE, LOCAL_RECALL_PRIVACY_NOTICE, LOCAL_REFLECTION_NOTE, PromoteControl, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
 import { readIntelligence, useScopeGuard, type IntelligenceController, type IntelligenceSectionProps } from './useIntelligence';
 
-const FILTERS = [['all', 'All'], ['servable', 'Servable'], ['unverified', 'Unverified'], ['history', 'History']] as const;
+const FILTERS = [['all', 'All'], ['servable', 'Active or verified'], ['unverified', 'Unverified'], ['history', 'Inactive']] as const;
 type Filter = (typeof FILTERS)[number][0];
 const TRANSITIONS = [['verified', 'Verify'], ['active', 'Activate'], ['uncertain', 'Uncertain'], ['rejected', 'Reject'], ['expired', 'Expire'], ['revoked', 'Revoke']] as const;
 
@@ -75,7 +75,7 @@ function MemoryRow({ record, group, sessionId, view, busy, run, onApplied }: Int
       </ul>}
       {checked && <p className="small">{verificationText(checked)}</p>}
       {/* Keep history distinct from guidance even when a candidate carries old verification data. */}
-      {unverified && <p className="muted small">Not checked — recalled as history, not guidance</p>}
+      {unverified && <p className="muted small">Not checked — history, not guidance</p>}
       <div className="intelligence-actions">
         {group === 'project' ? (
           <>
@@ -213,6 +213,8 @@ export function MemoryView(props: IntelligenceSectionProps) {
   return (
     <div className="intelligence-view">
       {view.settings.reflection === 'local' && <p className="muted small">{LOCAL_REFLECTION_NOTE}</p>}
+      <p className="muted small">{LOCAL_RECALL_NOTE}</p>
+      <p className="muted small">{LOCAL_RECALL_PRIVACY_NOTICE}</p>
       <p id={reflectionNote} className="intelligence-warning small">{REFLECTION_PRIVACY_NOTICE}</p>
       <div className="intelligence-actions">
         <Button size="sm" data-testid="memory-reflect" aria-describedby={reflectionNote} disabled={busy || reflectionOff} title={reflectionOff ? 'Session reflection is off in Sources.' : undefined} onClick={() => void run(async (current) => {

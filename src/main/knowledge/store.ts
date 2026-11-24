@@ -3,7 +3,7 @@
  *
  * Layout, relative to a project root (`<project>/.vocs-code/wiki/`; the worktree keeps its own):
  *   any `name.md`          a page, one file per page, path = id
- *   _proposals/*.md       proposals waiting for a human decision
+ *   _proposals/           legacy proposals and a separate, desktop-only automatic draft queue
  *   _observations/*.jsonl durable outcomes (commit / PR / merge / session) awaiting distillation
  *   _rejected.json        claim tombstones, so an agent does not refile a rejected claim
  *   _evidence.json        how many independent sessions have seen a claim (the promotion rule)
@@ -13,6 +13,7 @@
  * temp-file + rename so a crash never leaves a half-written page, and the store never touches
  * anything outside its own wiki directory.
  */
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { knowledgeCollision, sameKnowledgeClaim, sameRejectedKnowledgeClaim, withKnowledgeWriteLock, writeKnowledgeFileAtomic } from '../../../resources/mcp/knowledge-write.mjs';
@@ -72,6 +73,36 @@ interface CacheEntry {
   mtimeMs: number;
   size: number;
   page: StoredPage | null;
+}
+
+export interface KnowledgeDraftResult {
+  id: string;
+  /** False when this claim is already queued, recorded in this slice, or rejected. */
+  saved: boolean;
+  rejected?: boolean;
+}
+
+const DRAFT_NAMESPACE = 'auto-draft';
+const DRAFT_ORIGIN = 'auto:evidence-draft';
+
+export function isAutomaticDraftId(id: unknown): boolean {
+  return typeof id === 'string' && (id === DRAFT_NAMESPACE || id.startsWith(`${DRAFT_NAMESPACE}/`));
+}
+
+function draftHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 32);
+}
+
+function draftSlice(branch?: string): string {
+  return `${DRAFT_NAMESPACE}/${branch ? `branch-${draftHash(branch)}` : 'repo'}`;
+}
+
+function draftId(claim: string, branch?: string): string {
+  return `${draftSlice(branch)}/${draftHash(claim.replace(/\s+/g, ' ').trim())}`;
+}
+
+function matchesRejection(rejected: RejectedEntry, claim: string): boolean {
+  return sameRejectedKnowledgeClaim(rejected.claim, claim) || sameKnowledgeClaim(rejected.claim, claim);
 }
 
 function isInside(parent: string, child: string): boolean {
@@ -224,19 +255,19 @@ export class KnowledgeStore {
         else delete kept.confidence;
         if (previous.meta.updatedBy) kept.updatedBy = previous.meta.updatedBy;
         else delete kept.updatedBy;
-        const page = await this.writeUnlocked(scope, kept, previous.body, undefined, signal);
+        const page = await this.writeUnlocked(scope, kept, previous.body, { signal });
         const evidenceCount = await this.recordEvidenceUnlocked(scope, input.claim, sessionId);
         return { page, evidenceCount, kept: true };
       }
-      const page = await this.writeUnlocked(scope, { ...meta, status: 'current', updatedBy: origin }, input.body, input.pageId ? undefined : input.claim, signal);
+      const page = await this.writeUnlocked(scope, { ...meta, status: 'current', updatedBy: origin }, input.body, { implicitClaim: input.pageId ? undefined : input.claim, signal });
       const evidenceCount = await this.recordEvidenceUnlocked(scope, input.claim, sessionId);
       return { page, evidenceCount };
     });
   }
 
   /** Writes a page into the scope it names, preserving `createdAt` on an update. */
-  async write(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string): Promise<StoredPage> {
-    return this.withWriteLock(scope, () => this.writeUnlocked(scope, meta, body));
+  async write(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string, opts?: { preserveReview?: boolean }): Promise<StoredPage> {
+    return this.withWriteLock(scope, () => this.writeUnlocked(scope, meta, body, opts));
   }
 
   /** Exact, uncached reads for write decisions; bounded retrieval scans are not identity checks. */
@@ -258,22 +289,27 @@ export class KnowledgeStore {
     return null;
   }
 
-  private async writeUnlocked(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string, implicitClaim?: string, signal?: AbortSignal): Promise<StoredPage> {
-    if (!isKnowledgeId(meta.id)) throw new Error('Invalid knowledge page id');
+  private async writeUnlocked(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string, opts: { implicitClaim?: string; signal?: AbortSignal; createOnly?: boolean; preserveReview?: boolean } = {}): Promise<StoredPage> {
+    if (!isKnowledgeId(meta.id) || isAutomaticDraftId(meta.id)) throw new Error('Invalid knowledge page id');
     const branch = meta.scope === 'branch' ? scope.branch : undefined;
     if (meta.scope === 'branch' && (!branch || (meta.branch && meta.branch !== branch))) throw new Error('A branch-scope page must belong to the active branch');
     const dir = branch ? this.branchDir(scope)! : this.repoDir(scope);
     const file = path.join(dir, `${meta.id}.md`);
     if (!isInside(dir, file) || !(await unlinkedWikiPath(scope, file))) throw new Error('Knowledge page path escapes the wiki or is a link');
-    signal?.throwIfAborted();
+    opts.signal?.throwIfAborted();
     await this.ensureIgnored(scope);
     // An unreadable or malformed destination is not an absent page and must never be replaced.
     let previous: KnowledgePage | null = null;
     try {
+      if (opts.createOnly) {
+        await fs.lstat(file);
+        throw new Error(`Knowledge page "${meta.id}" already exists; the draft cannot replace it.`);
+      }
       previous = parseKnowledgeDocument(await fs.readFile(file, 'utf8'), `${meta.id}.md`);
       if (!previous || previous.meta.id !== meta.id) throw new Error(`Cannot update invalid knowledge page "${meta.id}".`);
       if (!pageInSlice(previous.meta, branch)) throw new Error(`Cannot update out-of-scope knowledge page "${meta.id}".`);
-      if (implicitClaim !== undefined && !sameKnowledgeClaim(previous.meta.claim, implicitClaim)) throw knowledgeCollision(meta.id);
+      if (opts.preserveReview && isHumanAuthored(previous.meta)) throw new KnowledgeProtectedError(meta.id);
+      if (opts.implicitClaim !== undefined && !sameKnowledgeClaim(previous.meta.claim, opts.implicitClaim)) throw knowledgeCollision(meta.id);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -286,7 +322,7 @@ export class KnowledgeStore {
     };
     await ensureDir(path.dirname(file));
     // Do not start a durable write after the gateway call has been revoked while waiting for disk.
-    signal?.throwIfAborted();
+    opts.signal?.throwIfAborted();
     await writeFileAtomic(file, serializeKnowledgeDocument(next, body));
     const page: StoredPage = { meta: next, body, path: `${meta.id}.md`, abs: file, scopeDir: dir, mtimeMs: Date.now() };
     this.cache.delete(file);
@@ -332,13 +368,15 @@ export class KnowledgeStore {
     return false;
   }
 
+  /** The preexisting queue only. The desktop lists automatic drafts separately. */
   async proposals(scope: KnowledgeScope): Promise<KnowledgePage[]> {
     const dir = this.proposalsDir(scope);
+    if (!(await unlinkedWikiPath(scope, dir))) return [];
     const out: KnowledgePage[] = [];
     for (const abs of await this.mdFiles(dir)) {
       const rel = path.relative(dir, abs).replace(/\\/g, '/');
       const page = await this.readFile(abs);
-      if (page) out.push({ meta: page.meta, body: page.body, path: rel });
+      if (page && !isAutomaticDraftId(page.meta.id) && page.meta.updatedBy !== DRAFT_ORIGIN) out.push({ meta: page.meta, body: page.body, path: rel });
     }
     return out.sort((a, b) => (b.meta.updatedAt ?? b.meta.createdAt ?? '').localeCompare(a.meta.updatedAt ?? a.meta.createdAt ?? ''));
   }
@@ -346,26 +384,166 @@ export class KnowledgeStore {
   async writeProposal(scope: KnowledgeScope, record: { id: string; meta: KnowledgePageMeta; body: string }): Promise<KnowledgePage> {
     const dir = this.proposalsDir(scope);
     const file = path.join(dir, `${record.id}.md`);
-    if (!isKnowledgeId(record.id) || !isInside(dir, file)) throw new Error('Invalid proposal id');
+    if (!isKnowledgeId(record.id) || isAutomaticDraftId(record.id) || isAutomaticDraftId(record.meta.id) || record.meta.updatedBy === DRAFT_ORIGIN || !isInside(dir, file)) throw new Error('Invalid proposal id');
+    if (!(await unlinkedWikiPath(scope, file))) throw new Error('Refusing to write through a linked proposal path.');
     await this.ensureIgnored(scope);
-    await ensureDir(dir);
+    await ensureDir(path.dirname(file));
     await writeFileAtomic(file, serializeKnowledgeDocument(record.meta, record.body));
     return { meta: record.meta, body: record.body, path: `${record.id}.md` };
   }
 
   async removeProposal(scope: KnowledgeScope, id: string): Promise<void> {
-    if (!isKnowledgeId(id)) return;
-    const file = path.join(this.proposalsDir(scope), `${id}.md`);
-    if (isInside(this.proposalsDir(scope), file)) await fs.rm(file, { force: true });
+    if (!isKnowledgeId(id) || isAutomaticDraftId(id)) return;
+    const dir = this.proposalsDir(scope);
+    const file = path.join(dir, `${id}.md`);
+    if (isInside(dir, file) && await unlinkedWikiPath(scope, file)) await fs.rm(file, { force: true });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Automatic drafts: desktop review only                              */
+  /* ------------------------------------------------------------------ */
+
+  private draftDir(scope: KnowledgeScope, branch?: string): string {
+    // A reserved subdirectory is invisible both to the legacy recursive queue and the standalone
+    // MCP status tool, which counts top-level Markdown files in _proposals.
+    return path.join(this.proposalsDir(scope), `_${draftSlice(branch)}`);
+  }
+
+  private draftLocation(scope: KnowledgeScope, id: string): { file: string; branch?: string } | null {
+    const slash = id.lastIndexOf('/');
+    if (!/^[a-f0-9]{32}$/.test(id.slice(slash + 1))) return null;
+    const slice = id.slice(0, slash);
+    const branch = slice === draftSlice() ? undefined : scope.branch;
+    if (slice !== draftSlice(branch)) return null;
+    return { file: path.join(this.draftDir(scope, branch), `${id.slice(slash + 1)}.md`), branch };
+  }
+
+  async drafts(scope: KnowledgeScope): Promise<KnowledgePage[]> {
+    const out: KnowledgePage[] = [];
+    for (const branch of scope.branch ? [undefined, scope.branch] : [undefined]) {
+      const dir = this.draftDir(scope, branch);
+      if (!(await unlinkedWikiPath(scope, dir).catch(() => false))) continue;
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+        const draft = await this.readDraft(scope, `${draftSlice(branch)}/${entry.name.slice(0, -3)}`);
+        if (draft) out.push(draft);
+      }
+    }
+    return out;
+  }
+
+  async readDraft(scope: KnowledgeScope, id: string): Promise<KnowledgePage | null> {
+    return this.readDraftExact(scope, id).catch(() => null);
+  }
+
+  /** Mutations use a fresh read under the lock; invalid or linked draft files are not absent. */
+  private async readDraftExact(scope: KnowledgeScope, id: string): Promise<KnowledgePage | null> {
+    const location = this.draftLocation(scope, id);
+    if (!location) return null;
+    const { file, branch } = location;
+    if (!(await unlinkedWikiPath(scope, file))) throw new Error('Refusing to use a linked draft path.');
+    try {
+      const relative = path.relative(this.repoDir(scope), file).replace(/\\/g, '/');
+      const stat = await fs.lstat(file);
+      const page = stat.isFile() && stat.nlink === 1 ? parseKnowledgeDocument(await fs.readFile(file, 'utf8'), relative) : null;
+      if (!page || page.meta.id !== id || !page.meta.claim || draftId(page.meta.claim, branch) !== id ||
+          page.meta.updatedBy !== DRAFT_ORIGIN || page.meta.status !== 'draft' || page.meta.targetPageId ||
+          page.meta.branch !== branch || !pageInSlice(page.meta, branch) || isHumanAuthored(page.meta)) {
+        throw new Error(`Invalid or out-of-scope knowledge draft "${id}".`);
+      }
+      return page;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  private async hasClaimInDraftSlice(scope: KnowledgeScope, claim: string): Promise<boolean> {
+    const repo = this.repoDir(scope);
+    const dir = this.branchDir(scope) ?? repo;
+    if ((scope.branch && !isInside(path.join(repo, KNOWLEDGE_BRANCHES_DIR), dir)) || !(await unlinkedWikiPath(scope, dir))) {
+      throw new Error('Draft page path escapes its wiki scope or is a link.');
+    }
+    return (await this.walkDir(dir)).some((p) => pageInSlice(p.meta, scope.branch) && sameKnowledgeClaim(p.meta.claim, claim));
+  }
+
+  /** Save one pending claim per slice, keeping the first durable text and its cited evidence. */
+  async writeDraft(scope: KnowledgeScope, input: KnowledgeProposalInput & { projectId?: string }, signal?: AbortSignal): Promise<KnowledgeDraftResult> {
+    signal?.throwIfAborted();
+    if (input.pageId !== undefined) throw new Error('A draft cannot update a pageId.');
+    if (input.scope !== undefined && input.scope !== 'repo' && input.scope !== 'branch') throw new Error('Invalid draft scope.');
+    const title = input.title.trim();
+    const claim = input.claim.trim();
+    const body = input.body.trim();
+    if (!title || !claim || /[\r\n]/.test(claim) || !body) throw new Error('A draft needs a title, a one-line claim and a body.');
+    const branch = input.scope === 'branch' ? scope.branch : undefined;
+    if (input.scope === 'branch' && (!branch || branch.trim() !== branch)) throw new Error('A branch draft requires the active branch.');
+    const id = draftId(claim, branch);
+    return this.withWriteLock(scope, async () => {
+      signal?.throwIfAborted();
+      if (await this.isDraftRejected(scope, claim, branch)) return { id, saved: false, rejected: true };
+      const previous = await this.readDraftExact(scope, id);
+      if (previous && !sameKnowledgeClaim(previous.meta.claim, claim)) throw new Error(`Knowledge draft id collision: "${id}".`);
+      if (previous || await this.hasClaimInDraftSlice({ ...scope, branch }, claim)) return { id, saved: false };
+      const file = this.draftLocation(scope, id)!.file;
+      const meta = {
+        ...proposalMeta({ ...input, id, title, claim, scope: branch ? 'branch' : 'repo', branch, status: 'draft', targetPageId: undefined, supersedes: [], verification: undefined }),
+        updatedBy: DRAFT_ORIGIN
+      };
+      signal?.throwIfAborted();
+      await this.ensureIgnored(scope);
+      await ensureDir(path.dirname(file));
+      signal?.throwIfAborted();
+      await writeFileAtomic(file, serializeKnowledgeDocument(meta, body));
+      return { id, saved: true };
+    });
+  }
+
+  async reviewDraft(scope: KnowledgeScope, id: string, opts: { by?: string; body?: string; title?: string; note?: string }): Promise<StoredPage | null> {
+    const location = this.draftLocation(scope, id);
+    if (!location) return null;
+    return this.withWriteLock(scope, async () => {
+      const draft = await this.readDraftExact(scope, id);
+      if (!draft) return null;
+      const branch = location.branch;
+      const claim = draft.meta.claim!;
+      if (await this.isDraftRejected(scope, claim, branch)) throw new Error('This claim has been rejected; the draft cannot be accepted.');
+      const title = opts.title?.trim() || draft.meta.title;
+      const pageId = pathForProposal(draft.meta.kind, title).replace(/\.md$/, '');
+      const targetScope = { ...scope, branch };
+      if (await this.hasClaimInDraftSlice(targetScope, claim) || await this.readForWrite(targetScope, pageId)) {
+        throw new Error(`A wiki page already exists for this title or claim; draft "${id}" cannot replace it.`);
+      }
+      const page = await this.writeUnlocked(targetScope, {
+        ...draft.meta, id: pageId, title, status: 'current', supersedes: [], verification: undefined,
+        review: { state: 'reviewed', by: opts.by, at: new Date().toISOString(), note: opts.note }
+      }, opts.body?.trim() ? opts.body : draft.body, { createOnly: true });
+      await fs.unlink(location.file);
+      return page;
+    });
+  }
+
+  /** Rejection is durable; a plain delete is not. Both act only on the named visible draft. */
+  async deleteDraft(scope: KnowledgeScope, id: string, rejection?: { by?: string }): Promise<boolean> {
+    const location = this.draftLocation(scope, id);
+    if (!location) return false;
+    return this.withWriteLock(scope, async () => {
+      const draft = await this.readDraftExact(scope, id);
+      if (!draft) return false;
+      // Record rejection first: even if cleanup fails, a remaining draft cannot be promoted.
+      if (rejection) await this.rememberDraftRejectionUnlocked(scope, draft.meta.claim!, rejection.by, location.branch);
+      await fs.unlink(location.file);
+      return true;
+    });
   }
 
   /* ------------------------------------------------------------------ */
   /* Claim ledger: evidence + rejection memory                          */
   /* ------------------------------------------------------------------ */
 
-  private async ledgerFiles(scope: KnowledgeScope): Promise<{ evidence: string; rejected: string }> {
-    const dir = this.repoDir(scope);
-    return { evidence: path.join(dir, '_evidence.json'), rejected: path.join(dir, '_rejected.json') };
+  private evidenceFile(scope: KnowledgeScope): string {
+    return path.join(this.repoDir(scope), '_evidence.json');
   }
 
   /** Records one sighting of a claim; returns the number of distinct sessions that have seen it. */
@@ -374,7 +552,7 @@ export class KnowledgeStore {
   }
 
   private async recordEvidenceUnlocked(scope: KnowledgeScope, claim: string, sessionId?: string): Promise<number> {
-    const { evidence: file } = await this.ledgerFiles(scope);
+    const file = this.evidenceFile(scope);
     // Local fresh snapshots cannot be replaced by concurrent readers on this store instance.
     const evidence = await readJson<Record<string, EvidenceEntry>>(file, {});
     const key = claimKey(claim);
@@ -387,14 +565,46 @@ export class KnowledgeStore {
   }
 
   async evidenceFor(scope: KnowledgeScope, claim: string): Promise<number> {
-    const { evidence: file } = await this.ledgerFiles(scope);
-    const evidence = await readJson<Record<string, EvidenceEntry>>(file, {});
+    const evidence = await readJson<Record<string, EvidenceEntry>>(this.evidenceFile(scope), {});
     return evidence[claimKey(claim)]?.count ?? 0;
+  }
+
+  private rejectedFile(scope: KnowledgeScope, branch?: string): string {
+    // The repo ledger is also read by the standalone MCP writer. Branch draft decisions stay local.
+    return path.join(branch ? this.draftDir(scope, branch) : this.repoDir(scope), '_rejected.json');
+  }
+
+  private async readRejections(scope: KnowledgeScope, branch?: string): Promise<Record<string, RejectedEntry>> {
+    const file = this.rejectedFile(scope, branch);
+    if (!(await unlinkedWikiPath(scope, file))) throw new Error('Refusing to use a linked knowledge tombstone ledger.');
+    try {
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || stat.nlink !== 1) throw new Error('Invalid knowledge tombstone ledger.');
+      const entries = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, RejectedEntry>;
+      if (!entries || typeof entries !== 'object' || Array.isArray(entries) || Object.values(entries).some((entry) => typeof entry?.claim !== 'string')) {
+        throw new Error('Invalid knowledge tombstone ledger.');
+      }
+      return entries;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      throw error;
+    }
+  }
+
+  private async rememberDraftRejectionUnlocked(scope: KnowledgeScope, claim: string, by?: string, branch?: string): Promise<void> {
+    const rejected = await this.readRejections(scope, branch);
+    const key = claimKey(claim);
+    const previous = rejected[key];
+    // Keep the latest rejection at the slot standalone MCP reads. Drafts can also honor older
+    // entries displaced by this write if distinct claims collide on that legacy key.
+    if (previous && !matchesRejection(previous, claim)) rejected[`${key}-${draftHash(previous.claim)}`] = previous;
+    const next = { ...rejected, [key]: { claim, at: new Date().toISOString(), ...(by ? { by } : {}) } };
+    await writeFileAtomic(this.rejectedFile(scope, branch), JSON.stringify(next, null, 2));
   }
 
   async reject(scope: KnowledgeScope, claim: string, by?: string): Promise<void> {
     await this.withWriteLock(scope, async () => {
-      const { rejected: file } = await this.ledgerFiles(scope);
+      const file = this.rejectedFile(scope);
       const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
       const next = { ...rejected, [claimKey(claim)]: { claim, at: new Date().toISOString(), ...(by ? { by } : {}) } };
       await writeFileAtomic(file, JSON.stringify(next, null, 2));
@@ -402,15 +612,20 @@ export class KnowledgeStore {
   }
 
   async rejectedClaims(scope: KnowledgeScope): Promise<string[]> {
-    const { rejected: file } = await this.ledgerFiles(scope);
-    const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
-    return Object.values(rejected).map((r) => r.claim);
+    const repo = await this.readRejections(scope).catch(() => null);
+    const branch = scope.branch ? await this.readRejections(scope, scope.branch).catch(() => null) : null;
+    return [...new Set([...Object.values(repo ?? {}), ...Object.values(branch ?? {})].map((entry) => entry.claim))];
   }
 
   async isRejected(scope: KnowledgeScope, claim: string): Promise<boolean> {
-    const { rejected: file } = await this.ledgerFiles(scope);
-    const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
+    const rejected = await readJson<Record<string, RejectedEntry>>(this.rejectedFile(scope), {});
     return sameRejectedKnowledgeClaim(rejected[claimKey(claim)]?.claim, claim);
+  }
+
+  private async isDraftRejected(scope: KnowledgeScope, claim: string, branch?: string): Promise<boolean> {
+    const repo = await this.readRejections(scope);
+    if (Object.values(repo).some((entry) => matchesRejection(entry, claim))) return true;
+    return !!branch && Object.values(await this.readRejections(scope, branch)).some((entry) => matchesRejection(entry, claim));
   }
 
   /* ------------------------------------------------------------------ */

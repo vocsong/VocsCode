@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { callIntelligenceTool } from '../src/main/intelligence/gateway';
+import { callIntelligenceTool, type GatewaySession } from '../src/main/intelligence/gateway';
 import { MemoryStore } from '../src/main/intelligence/memory-store';
 import { PassiveLearning, type PassiveObservation } from '../src/main/intelligence/passive-learning';
 import { ProjectRegistry } from '../src/main/intelligence/registry';
@@ -29,6 +29,7 @@ async function fixture() {
   const data = path.join(temp, 'intelligence');
   const facts = vi.fn(async () => ({}));
   const transcript = vi.fn(async () => ['unexpected full transcript']);
+  const privateIds = new Set<string>();
   const complete = vi.fn(async () => null);
   const knowledge = new KnowledgeService({ log: noop, settings: () => settings, synth: { completer: { complete, label: () => 'test/model' } } });
   settings.utilityModel = { provider: 'test', model: 'model' };
@@ -37,7 +38,10 @@ async function fixture() {
     memory.init();
     expect(memory.available).toBe(true);
     const registry = new ProjectRegistry(data, { facts, log: noop });
-    const core = new IntelligenceService({ memory, registry, knowledge, settings: () => settings, sessions: () => [], transcript, completer: { complete, label: () => 'test/model' }, log: noop });
+    const core = new IntelligenceService({
+      memory, registry, knowledge, settings: () => settings, transcript, completer: { complete, label: () => 'test/model' }, log: noop,
+      sessions: () => store.list().map((s) => ({ id: s.id, title: s.title, projectRoot: s.config.projectRoot, archived: s.archived, private: privateIds.has(s.id) }))
+    });
     return { memory, registry, core };
   };
   const rig = open();
@@ -56,7 +60,7 @@ async function fixture() {
   const answer = (value = `Lesson learned: ${text}`, patch?: Partial<Extract<TranscriptItem, { kind: 'assistant' }>>): TranscriptItem => ({ id: 'a_1', ts: now++, kind: 'assistant', text: value, ...patch });
   const turn = (status: 'completed' | 'failed' | 'interrupted' = 'completed'): TranscriptItem => ({ id: `t_${now}`, ts: now++, kind: 'turn', status });
   const append = async (...items: TranscriptItem[]) => { for (const item of items) await store.appendTranscript(session.id, item); };
-  return { ...rig, knowledge, ctx, session, settings, capture, failed, transcript, complete, facts, store, learn, open, user, answer, turn, append };
+  return { ...rig, knowledge, ctx, session, settings, capture, failed, transcript, complete, facts, store, learn, open, user, answer, turn, append, privateIds };
 }
 
 function evidence(f: Awaited<ReturnType<typeof fixture>>, core = f.core) {
@@ -113,18 +117,59 @@ describe('default local learning from committed transcript items', () => {
     expect(f.memory.forSession(f.session.id)).toMatchObject([{ kind: 'episode', state: 'captured', text }]);
   });
 
-  it('keeps passive notes out of tool recall and compile until a person verifies them', async () => {
+  it('recalls a matching note without review, as cited history rather than guidance', async () => {
     const f = await fixture();
     await f.append(f.user(), f.answer(), f.turn());
     await expect.poll(() => f.memory.forSession(f.session.id).length).toBe(1);
     const [record] = f.memory.forSession(f.session.id);
-    const call = (name: string, args: Record<string, unknown>) => callIntelligenceTool({ intelligence: f.core, knowledge: f.knowledge }, { ...f.ctx, actions: ['read'] }, name, args);
-    const recall = async () => JSON.parse((await call('memory_recall', { include_unverified: true })).content[0].text);
+    const reader = { ...f.ctx, sessionId: 's_reader', actions: ['read'] } satisfies GatewaySession;
+    const call = (name: string, args: Record<string, unknown>, scope: GatewaySession = reader) => callIntelligenceTool({ intelligence: f.core, knowledge: f.knowledge }, scope, name, args);
+    const recall = async (args: Record<string, unknown>) => JSON.parse((await call('memory_recall', args)).content[0].text);
+    const query = 'quasar retry fence';
+    const cite = `${f.session.id}#a_1`;
+    expect(await recall({ query })).toMatchObject({ count: 1, records: [{ id: record.id, state: 'candidate', servable: false, historical: true, text, sources: [{ ref: cite }] }] });
+    expect(await recall({})).toMatchObject({ count: 0, records: [] });
+    expect(await recall({ query: 'lesson' })).toMatchObject({ count: 0 });
+    expect(await recall({ query: `${query} unrelated` })).toMatchObject({ count: 0 });
+    expect(await recall({ query, include_unverified: false })).toMatchObject({ count: 0 });
+    const result = JSON.parse((await call('intelligence_search', { query, sources: ['memory'] })).content[0].text);
+    expect(result.results).toMatchObject([{ ref: record.id, historical: true, authority: 'history', sources: [{ ref: cite }] }]);
+    const packet = (await call('context_compile', { query })).content[0].text;
+    expect(packet.split('## History')[1]).toContain(text);
+    expect(packet).toContain(cite);
+    expect(await f.knowledge.digest(f.ctx)).toBeNull();
+
+    const other = path.join(path.dirname(f.ctx.projectRoot), 'other');
+    await fs.mkdir(other);
+    const collection = await f.core.saveCollection({ name: 'Fixture collection', members: [
+      { projectId: (await f.core.project(f.ctx)).id, share: 'wiki' }, { projectId: (await f.core.project({ projectRoot: other })).id, share: 'wiki' }
+    ] });
+    expect(collection.members).toHaveLength(2);
+    const otherReader = { ...reader, projectRoot: other, cwd: other, allowCollections: true };
+    expect((await call('context_compile', { query, scope: 'collection' }, otherReader)).content[0].text).not.toContain(text);
+    expect((await call('memory_recall', { query }, { ...reader, restricted: true })).content[0].text).not.toContain(text);
+    f.privateIds.add(f.session.id);
+    expect(await recall({ query })).toMatchObject({ count: 0 });
+    f.privateIds.clear();
+    f.session.archived = true;
+    expect(await recall({ query })).toMatchObject({ count: 0 });
+    expect((await call('intelligence_search', { query, sources: ['memory'], include_historical: true })).content[0].text).toContain(cite);
+    f.session.archived = false;
+    f.settings.intelligence!.reflection = 'off';
+    expect(await recall({ query })).toMatchObject({ count: 0 });
     expect((await evidence(f)).results).toMatchObject([{ ref: record.id, historical: true }]);
-    expect(await recall()).toMatchObject({ count: 0, records: [] });
-    expect((await call('context_compile', { query: 'quasar retry fence' })).content[0].text).not.toContain(text);
-    await f.core.decide(f.ctx, record.id, 'verified');
-    expect(await recall()).toMatchObject({ count: 1, records: [{ id: record.id, state: 'verified', text }] });
+    expect(f.transcript).not.toHaveBeenCalled();
+    expect(f.complete).not.toHaveBeenCalled();
+  });
+
+  it('returns at most three passive notes for one topic', async () => {
+    const f = await fixture();
+    for (let i = 0; i < 5; i++) {
+      await f.append(f.user(`u_${i}`), f.answer(`Lesson: quasar retry fence for fact ${i} has a different documented reason.`, { id: `a_${i}` }), f.turn());
+    }
+    await expect.poll(() => f.memory.forSession(f.session.id).length).toBe(5);
+    const out = await callIntelligenceTool({ intelligence: f.core, knowledge: f.knowledge }, { ...f.ctx, actions: ['read'] }, 'memory_recall', { query: 'quasar retry fence', limit: 20 });
+    expect(JSON.parse(out.content[0].text)).toMatchObject({ count: 3 });
   });
 
   it('purges only unverified notes whose cited replies disappeared, and keeps their replay receipts', async () => {

@@ -64,6 +64,7 @@ import {
   isServable,
   type KnowledgeAnchor,
   type KnowledgeKind,
+  type KnowledgeProposalInput,
   type KnowledgeScope,
   type KnowledgeVerification
 } from '../../shared/knowledge';
@@ -74,9 +75,10 @@ import type { KnowledgeProtectedChange, KnowledgeService } from '../knowledge/se
 import type { StoredPage } from '../knowledge/store';
 import { errorMessage } from '../util/async';
 import { exists } from '../util/fs';
+import { checkDraftEvidence } from './draft-evidence';
 import { graphCheckoutStamp } from './graph-snapshot';
 import type { GraphifyProvider, GraphScope } from './graphify';
-import { LOCAL_LEARNING_ORIGIN, type MemoryStore, type MemoryVisibility } from './memory-store';
+import { LOCAL_LEARNING_ORIGIN, type MemorySearchHit, type MemoryStore, type MemoryVisibility } from './memory-store';
 import type { PassiveObservation } from './passive-learning';
 import { normalizeRoot, type ProjectRegistry } from './registry';
 
@@ -88,8 +90,8 @@ export interface IntelligenceContext {
   branch?: string;
   /** App-issued for Mission/child sessions: no collection, personal or transcript access. */
   restricted?: boolean;
-  /** Model-facing reads cannot see passive notes until human review. Host-only, not a tool argument. */
-  hideUnreviewedLocal?: boolean;
+  /** Set only by the host tool gateway; passive excerpts have a stricter policy than desktop reads. */
+  modelFacing?: boolean;
   /** Revoked on disconnect or grant/scope change. App-controlled, not a tool argument. */
   signal?: AbortSignal;
 }
@@ -139,6 +141,8 @@ export interface KnowledgeRecordInput {
   body?: string;
   /** `semantic` and `procedural` go to the project wiki; `episodic` to the memory ledger. */
   memoryType?: 'semantic' | 'procedural' | 'episodic';
+  /** Review-only submission, never an update to an existing page. */
+  draft?: boolean;
   kind?: string;
   scope?: 'project' | 'branch';
   pageId?: string;
@@ -185,6 +189,7 @@ export interface ReflectionResult {
 const INTENT_KINDS = new Set<KnowledgeKind>(['architecture', 'decision', 'convention', 'concept']);
 const MAX_FEDERATED_PROJECTS = 12;
 const MAX_REFLECTED_LESSONS = 3;
+const MAX_PASSIVE_RECALL = 3;
 const MAX_TRANSCRIPT_CHARS = 8_000;
 
 type PromotionSource = { pageId?: string; recordId?: string };
@@ -281,7 +286,7 @@ export class IntelligenceService {
         collectionIds: grants.map((g) => g.collectionId),
         collectionProjects: Object.fromEntries(grants.map((g) => [g.collectionId, [project.id, ...g.memberProjectIds]])),
         personal: !ctx.restricted && settings.personalMemory,
-        hideUnreviewedLocal: ctx.hideUnreviewedLocal
+        excludeLocalLearning: ctx.modelFacing || ctx.restricted
       },
       grants
     };
@@ -296,14 +301,18 @@ export class IntelligenceService {
     return graphify.enabled && !graphify.excludedProjects.includes(project.id);
   }
 
+  /** Only this project's live session addresses, never collection members. */
+  private historySessions(ctx: IntelligenceContext, project: ProjectIdentity, includeArchived?: boolean): SessionRef[] {
+    if (ctx.restricted) return [];
+    const roots = new Set(project.roots);
+    return this.deps.sessions().filter((s) => roots.has(normalizeRoot(s.projectRoot)) && (includeArchived || !s.archived) && (!s.private || s.id === ctx.sessionId));
+  }
+
   /** The allowlist is sent to the transcript index; collection members are never added to it. */
   private scopedHistory(ctx: IntelligenceContext, project: ProjectIdentity, query: string, limit: number, opts: { includeArchived?: boolean; strict?: boolean } = {}) {
     ctx.signal?.throwIfAborted();
     if (!this.deps.history || ctx.restricted) return { available: false, sessions: 0, partial: false, results: [] };
-    const roots = new Set(project.roots);
-    const sessions = new Map(this.deps.sessions()
-      .filter((s) => roots.has(normalizeRoot(s.projectRoot)) && (opts.includeArchived || !s.archived) && (!s.private || s.id === ctx.sessionId))
-      .map((s) => [s.id, s]));
+    const sessions = new Map(this.historySessions(ctx, project, opts.includeArchived).map((s) => [s.id, s]));
     if (!sessions.size) return { available: true, sessions: 0, partial: false, results: [] };
     const recall = this.deps.history(query, [...sessions.keys()], limit, { strict: opts.strict === true });
     return {
@@ -317,6 +326,18 @@ export class IntelligenceService {
         return [{ ...hit, title: redactSecrets(session.title), private: session.private === true, at: Number.isFinite(at.getTime()) ? at.toISOString() : null, snippet: redactSecrets(hit.snippet) }];
       })
     };
+  }
+
+  /** Topic-matched excerpts only, under the same session visibility rules as transcript history. */
+  private passiveMatches(ctx: IntelligenceContext, project: ProjectIdentity, terms: string[], limit: number, includeHistorical?: boolean): MemorySearchHit[] {
+    if (!ctx.modelFacing || ctx.restricted || !this.deps.memory.available || !terms.length || limit < 1 || this.settings().reflection !== 'local') return [];
+    const sessionIds = this.historySessions(ctx, project, includeHistorical).map((session) => session.id);
+    if (!sessionIds.length) return [];
+    return this.deps.memory.search(
+      { projectId: project.id, collectionIds: [], personal: false },
+      terms,
+      { localLearningFrom: sessionIds, states: ['captured', 'candidate', 'verified', 'uncertain'], limit: Math.min(MAX_PASSIVE_RECALL, limit) }
+    );
   }
 
   /* ------------------------------------------------------------------ */
@@ -442,6 +463,18 @@ export class IntelligenceService {
       candidates.push(...federated.filter((item) => item.collectionId && byId.get(item.collectionId)?.wikiProjectIds.includes(item.projectId)));
     }
     ctx.signal?.throwIfAborted();
+    // Check the live opt-out and source session visibility after all async providers are done.
+    if (wants('memory')) {
+      for (const { record, score } of this.passiveMatches(ctx, project, terms, limit, request.includeHistorical)) {
+        candidates.push({
+          provider: 'memory', projectId: project.id, projectName: project.name, ref: record.id,
+          title: redactSecrets(record.title), text: redactSecrets(record.text), kind: record.kind,
+          authority: 'history', historical: true, scope: 'project', score: score * 0.65,
+          sources: record.sources, updatedAt: record.updatedAt,
+          why: 'Matched a lesson or outcome from an earlier reply; check current evidence before using it.'
+        });
+      }
+    }
     if (!this.graphEnabled(project)) {
       for (let i = candidates.length - 1; i >= 0; i--) if (candidates[i].provider === 'graph') candidates.splice(i, 1);
     }
@@ -728,7 +761,13 @@ export class IntelligenceService {
         for (const record of this.deps.memory.list(visibility, filter)) records.push({ ...record, servable: isServableState(record.state) });
       }
     }
-    const history = terms.length ? (await this.historySearch(ctx, terms.join(' '), { limit: Math.min(limit, 8) })).results : [];
+    const rawHistory = terms.length ? this.scopedHistory(ctx, project, terms.join(' '), Math.min(limit, 8)).results : [];
+    const history = rawHistory.map(({ sessionId, title, kind, at, snippet }) => ({ sessionId, session: title, kind, at, snippet }));
+    if (includeUnverified && (!request.types?.length || request.types.includes('episodic'))) {
+      for (const { record } of this.passiveMatches(ctx, project, terms, limit - records.length)) {
+        records.push({ ...record, title: redactSecrets(record.title), text: redactSecrets(record.text), servable: false });
+      }
+    }
     const note = !this.deps.memory.available
       ? `Memory records are unavailable (${this.deps.memory.reason ?? 'the ledger is not open'}); only session history was searched.`
       : 'Memory is what happened and what was learned, not project truth. Records that are not servable are unverified recollection: confirm against the code before acting.';
@@ -762,6 +801,26 @@ export class IntelligenceService {
     return { sources: out, unresolved };
   }
 
+  private async recordDraft(ctx: IntelligenceContext, input: KnowledgeRecordInput, proposal: KnowledgeProposalInput): Promise<KnowledgeRecordResult> {
+    if (ctx.restricted || input.pageId || input.memoryType === 'episodic') throw new Error('Drafts only propose new project facts or procedures from an unrestricted session.');
+    const { title, claim, body } = proposal;
+    const text = [title, claim, body].join('\n');
+    if (!body || title.length > 160 || claim.length > 360 || /[\r\n]/.test(claim) || body.length > 2_000) {
+      throw new Error('A draft needs a title (up to 160 characters), a one-line claim (360), and a short body (2,000).');
+    }
+    if (/-----BEGIN|[\u0000-\u0008\u000b\u000c\u000e-\u001f]|:\/\/[^\s/@]+:[^\s/@]+@/i.test(text) || redactSecrets(text) !== text) {
+      throw new Error('A draft must not contain credential-like text.');
+    }
+    const sources = await checkDraftEvidence(ctx.cwd, input.sources, this.deps.git?.resolveCommit, ctx.signal);
+    ctx.signal?.throwIfAborted();
+    const result = await this.deps.knowledge.draft(this.scopeOf(ctx), { ...proposal, sources }, ctx.signal);
+    if (result.rejected) return { stored: 'none', id: '', state: 'rejected', authority: 'none', note: 'This claim was rejected before; nothing was written.' };
+    // A repeat or an existing wiki page is not a new draft and must not edit that page.
+    return { stored: result.saved ? 'wiki' : 'none', id: result.id, state: 'draft', authority: 'candidate', note: result.saved
+      ? 'Saved a local draft for review. It is not current guidance and is not published or shared.'
+      : 'Already recorded; nothing was changed.' };
+  }
+
   /**
    * Captures sourced knowledge from an agent. Durable facts and procedures go to the project wiki
    * through the same ingest path as every other writer; episodes go to the ledger as candidates.
@@ -776,6 +835,9 @@ export class IntelligenceService {
     const memoryType = input.memoryType ?? 'semantic';
     if (memoryType !== 'episodic' && memoryType !== 'semantic' && memoryType !== 'procedural') throw new Error('Agents can record episodes, project facts and procedures, not personal preferences.');
     if (input.scope === 'branch' && !ctx.branch) throw new Error('Branch knowledge needs a session on that branch.');
+    const kind = (KNOWLEDGE_KINDS as readonly string[]).includes(String(input.kind)) ? (input.kind as KnowledgeKind) : memoryType === 'procedural' ? 'convention' : 'concept';
+    const pageScope = input.scope === 'branch' ? 'branch' : 'repo';
+    if (input.draft) return this.recordDraft(ctx, input, { title, claim, body, kind, scope: pageScope, ...(memoryType !== 'episodic' ? { memoryType } : {}) });
     const checked = await this.checkSources(ctx, input.sources ?? []);
     const unresolvedNote = checked.unresolved.length ? ` ${checked.unresolved.length} cited source(s) could not be found in this checkout.` : '';
     const project = await this.project(ctx);
@@ -812,7 +874,6 @@ export class IntelligenceService {
     }
 
     if (!body) throw new Error('Project knowledge needs a body: the claim, the rationale, and how to apply it.');
-    const kind: KnowledgeKind = (KNOWLEDGE_KINDS as readonly string[]).includes(String(input.kind)) ? (input.kind as KnowledgeKind) : memoryType === 'procedural' ? 'convention' : 'concept';
     const scope = this.scopeOf(ctx);
     const result = await this.deps.knowledge.propose(
       scope,

@@ -1,3 +1,4 @@
+import { redactSecrets as redactText } from '../../shared/analytics/text';
 import type { SessionMeta, TranscriptItem } from '../../shared/types';
 import { redactSecrets } from '../log';
 import type { IntelligenceContext } from './service';
@@ -37,8 +38,8 @@ function sameScope(a: IntelligenceContext, b: IntelligenceContext | undefined): 
 /** Copy only short, complete prose lines. Tool output, inputs, thinking and code blocks never enter the ledger. */
 function takeaway(answer: string, hasWork: boolean): Pick<PassiveObservation, 'kind' | 'text'> | undefined {
   // Drop the excerpt entirely when a recognizable credential spans a line boundary.
-  // This is a best-effort filter, not a DLP guarantee; excerpts require review for model recall.
-  if (/-----BEGIN|\[redacted\]|:\/\/[^\s/@]+:[^\s/@]+@/i.test(answer) || redactSecrets(answer) !== answer) return;
+  // This is a best-effort filter, not a DLP guarantee. Authorized topical recall can read the note.
+  if (/-----BEGIN|\[redacted\]|:\/\/[^\s/@]+:[^\s/@]+@/i.test(answer) || redactSecrets(answer) !== answer || redactText(answer) !== answer) return;
   let fence: string | undefined;
   let outcome: string | undefined;
   for (const raw of answer.split(/\r?\n/)) {

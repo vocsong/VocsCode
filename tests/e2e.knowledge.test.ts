@@ -2,8 +2,9 @@
  * End-to-end flow for Layer 2 project knowledge: a wiki seeded on disk is ingested and rendered in
  * the right panel's Knowledge tab without any accept step, labels and provenance are shown, a claim
  * is rejected (tombstoned) from its row, and an open page's anchors and relation graph render.
- * Graphify indexes a real Git checkout locally; passive reflection drives the native harness
- * against a keyless loopback fixture. Requires `npm run build`; gated by VOCS_CODE_E2E_UI=1.
+ * Graphify indexes a real Git checkout locally; a keyless Native harness fixture exercises
+ * passive recall and the authenticated MCP draft review flow. Requires `npm run build`;
+ * gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +15,7 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import { serializeKnowledgeDocument, type KnowledgePageMeta } from '../src/shared/knowledge';
+import { KNOWLEDGE_PUBLISH_DIR, serializeKnowledgeDocument, type KnowledgePageMeta } from '../src/shared/knowledge';
 import { MCP_BUILTIN_IDS, type SessionMeta, type TranscriptItem } from '../src/shared/types';
 import { isolatedEnv, openNewSession, seedSettings } from './e2e-ui';
 
@@ -385,20 +386,43 @@ describe.runIf(enabled)('project knowledge panel', () => {
     }
   }, 180_000);
 
-  it('captures a cited local lesson on ordinary turn completion and stops capturing when reflection is off', async () => {
+  it('recalls a cited local lesson on demand, keeps an agent wiki draft pending review, and honors reflection off', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-local-reflection-e2e-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'retry-project');
     const title = 'Retry investigation';
     const model = 'fixture-chat';
+    const recallQuery = 'quasar retry fence';
     const lesson = 'Retain the quasar retry fence until its persisted acknowledgment has been read.';
     const detail = 'The second worker tried to replay a completed write while the acknowledgment was still being read.';
+    const currentTitle = 'Job journal format'; // Positive control for startup priming.
+    const sourceRef = 'src/lease.ts';
+    const draft = {
+      title: 'Lease shutdown ordering',
+      claim: 'Cancel the topaz renewal timer before relinquishing its lease.',
+      body: 'A pending renewal can touch a released lease. Keep cancellation before release in stopLease when changing lease shutdown.',
+      sources: [{ type: 'file', ref: sourceRef }],
+      memory_type: 'procedural',
+      draft: true
+    };
     const turns = [
       { prompt: 'Explain the replay observed in the delayed-acknowledgment test.', reply: `${detail}\n\nLesson learned: ${lesson}` },
-      { prompt: 'Explain what happened in the delayed lease renewal test.', reply: 'The renewal timer fired after the worker had already released the lease.\n\nLesson learned: Cancel the topaz renewal timer before relinquishing its lease.' }
+      { prompt: `Recall the ${recallQuery} lesson, then explain the delayed lease renewal and draft its shutdown rule.`, reply: `The renewal timer fired after the worker had already released the lease.\n\nLesson learned: ${draft.claim}` }
     ] as const;
+    const tool = (id: string, name: string, args: Record<string, unknown>) => ({
+      id, type: 'function', function: { name: `mcp__vocs_memory__${name}`, arguments: JSON.stringify(args) }
+    });
+    const recordDraft = tool('call_draft', 'knowledge_record', draft);
+    const calls = [
+      tool('call_recall_unqueried', 'memory_recall', {}),
+      tool('call_recall_topical', 'memory_recall', { query: recallQuery }),
+      tool('call_compile', 'context_compile', { query: recallQuery }),
+      recordDraft
+    ];
     const requests: string[] = [];
-    // Same OpenAI-compatible SSE shape as the native title E2E, but only ordinary chat is allowed.
+    const continuation = 'MCP tool results';
+    // The loopback provider only scripts model output. Native executes the tools through the
+    // app's real session-scoped stdio server and authenticated gateway.
     const server = createServer((req, res) => {
       if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
         requests.push(`${req.method} ${req.url}`);
@@ -409,16 +433,38 @@ describe.runIf(enabled)('project knowledge panel', () => {
       req.setEncoding('utf8').on('data', (chunk: string) => { json += chunk; });
       req.on('end', () => {
         try {
-          const body = JSON.parse(json) as { model: string; stream?: boolean; messages: { role: string; content: string }[] };
-          const message = body.messages.at(-1);
-          const turn = turns.find(({ prompt }) => message?.role === 'user' && message.content === prompt);
-          if (body.model === model && body.stream === true && turn) {
-            requests.push(turn.prompt);
-            const chunk = (delta: Record<string, string>, finish_reason: 'stop' | null) =>
+          const body = JSON.parse(json) as {
+            model: string; stream?: boolean;
+            messages: { role: string; content: string; tool_call_id?: string }[];
+            tools?: { function: { name: string } }[];
+          };
+          if (body.model === model && body.stream === true) {
+            const message = body.messages.at(-1);
+            const turn = turns.find(({ prompt }) => message?.role === 'user' && message.content === prompt);
+            const results = body.messages.slice(-calls.length);
+            const continuing = results.length === calls.length && results.every((item, i) => item.role === 'tool' && item.tool_call_id === calls[i]!.id);
+            const chunk = (delta: object, finish_reason: 'stop' | 'tool_calls' | null) =>
               `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
-            res.writeHead(200, { 'content-type': 'text/event-stream' });
-            res.end(chunk({ role: 'assistant', content: turn.reply }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n');
-            return;
+            const stream = (delta: object, finish: 'stop' | 'tool_calls') => {
+              res.writeHead(200, { 'content-type': 'text/event-stream' });
+              res.end(chunk({ role: 'assistant', ...delta }, null) + chunk({}, finish) + 'data: [DONE]\n\n');
+            };
+            if (turn === turns[1]) {
+              const missing = calls.filter((call) => !body.tools?.some(({ function: fn }) => fn.name === call.function.name));
+              if (missing.length) {
+                requests.push(`Missing MCP tools: ${missing.map((call) => call.function.name).join(', ')}`);
+                res.writeHead(400).end(requests.at(-1));
+                return;
+              }
+              requests.push(turn.prompt);
+              stream({ tool_calls: calls.map((call, index) => ({ index, ...call })) }, 'tool_calls');
+              return;
+            }
+            if (turn === turns[0] || continuing) {
+              requests.push(continuing ? continuation : turns[0].prompt);
+              stream({ content: continuing ? turns[1].reply : turns[0].reply }, 'stop');
+              return;
+            }
           }
           requests.push(`Unexpected completion: ${body.model} (stream=${body.stream})`);
         } catch {
@@ -434,31 +480,52 @@ describe.runIf(enabled)('project knowledge panel', () => {
       await listening;
       const address = server.address();
       if (!address || typeof address === 'string') throw new Error('Reflection fixture did not bind a TCP address');
-      await Promise.all([userData, project].map((dir) => fs.mkdir(dir, { recursive: true })));
+      const wiki = path.join(project, '.vocs-code', 'wiki', 'conventions');
+      const source = path.join(project, sourceRef);
+      await Promise.all([userData, wiki, path.dirname(source)].map((dir) => fs.mkdir(dir, { recursive: true })));
+      await fs.writeFile(source, 'export function stopLease(cancelRenewal: () => void, release: () => void) {\n  cancelRenewal();\n  release();\n}\n');
+      await fs.writeFile(path.join(wiki, 'job-journal.md'), serializeKnowledgeDocument(pageMeta({
+        id: 'conventions/job-journal', title: currentTitle, claim: 'The job journal is append-only.'
+      }), 'Append a new entry instead of rewriting old entries.'));
       // Leave intelligence, knowledge and the utility model unset. Override the built-in keyless
       // provider too, so even a mistaken background fallback reaches only the loopback server.
       await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
         defaultHarness: 'native', defaultPermissionMode: 'ask', defaultModelByHarness: { native: { provider: 'ollama', model } },
         providers: [{ id: 'ollama', kind: 'ollama', enabled: true, baseUrl: `http://127.0.0.1:${address.port}/v1`,
           models: [{ id: model, provider: 'ollama', displayName: 'Fixture chat' }] }],
-        agent: { enabled: false }, mcpDisabledBuiltins: MCP_BUILTIN_IDS, notifications: false
+        agent: { enabled: false }, mcpDisabledBuiltins: MCP_BUILTIN_IDS.filter((id) => id !== 'vocs-memory'), notifications: false
       }));
 
       let win = await launchApp(userData);
-      await openNewSession(win);
-      // Name the session before the first send so opening-prompt naming cannot make a request.
-      await win.getByRole('button', { name: 'Advanced', exact: true }).click(wait);
-      await win.getByPlaceholder('Auto from first prompt').fill(title, wait);
-      await win.getByRole('button', { name: /^Start session/ }).click(wait);
-      const sessionId = await win.getByTestId('session-row').filter({ hasText: title }).getAttribute('data-session-id', wait);
-      if (!sessionId) throw new Error('New session has no session id');
-      const tab = async (view: 'sources' | 'memory' | 'evidence') => { await win.getByTestId(`knowledge-view-${view}`).click(wait); };
+      const startNamedSession = async (name: string) => {
+        await openNewSession(win);
+        // Name the session before the first send so opening-prompt naming cannot make a request.
+        await win.getByRole('button', { name: 'Advanced', exact: true }).click(wait);
+        await win.getByPlaceholder('Auto from first prompt').fill(name, wait);
+        await win.getByRole('button', { name: /^Start session/ }).click(wait);
+        const id = await win.getByTestId('session-row').filter({ hasText: name }).getAttribute('data-session-id', wait);
+        if (!id) throw new Error('New session has no session id');
+        return id;
+      };
+      const sessionId = await startNamedSession(title);
+      const tab = async (view: 'knowledge' | 'sources' | 'memory' | 'evidence') => { await win.getByTestId(`knowledge-view-${view}`).click(wait); };
       const reflection = () => win.getByTestId('setting-reflection');
       const readView = () => win.evaluate((id) => window.harness.invoke('intelligence:view', { sessionId: id }), sessionId);
       const sendTurn = async (index: 0 | 1) => {
         // The idle Composer sends as the user with mode 'now', not a queued or Plan turn.
         await win.getByPlaceholder(/^(Message the agent|Ask anything)/).fill(turns[index].prompt, wait);
         await win.getByRole('button', { name: 'Send', exact: true }).click(wait);
+        if (index === 1) {
+          const approval = win.locator('.approval.pending').filter({
+            has: win.getByText(`Allow ${recordDraft.function.name}?`, { exact: true })
+          });
+          await approval.waitFor(wait);
+          // Native ran both reads while Local was on. Disable capture before the final reply,
+          // without adding a chat turn. Permission to file the draft does not review the claim.
+          await reflection().selectOption('off', wait);
+          await expect.poll(async () => (await readView()).settings.reflection, wait).toBe('off');
+          await approval.getByRole('button', { name: 'Allow once', exact: true }).click(wait);
+        }
         await expect.poll(() => win.evaluate(async (id) => {
           const meta = await window.harness.invoke('sessions:get', { id });
           const items = await window.harness.invoke('sessions:transcript', { id });
@@ -511,17 +578,73 @@ describe.runIf(enabled)('project knowledge panel', () => {
       await tab('evidence');
       const evidence = win.getByTestId('evidence-view');
       expect(await evidence.getByTestId('evidence-scope').inputValue(wait)).toBe('project');
-      await evidence.getByTestId('evidence-query').fill('quasar retry fence', wait);
+      await evidence.getByTestId('evidence-query').fill(recallQuery, wait);
       await evidence.getByTestId('evidence-search').click(wait);
-      const result = evidence.getByTestId('evidence-row').filter({ hasText: 'quasar retry fence', has: win.getByText('memory', { exact: true }) });
+      const result = evidence.getByTestId('evidence-row').filter({ hasText: recallQuery, has: win.getByText('memory', { exact: true }) });
       await result.getByText('candidate', { exact: true }).waitFor(wait);
       await result.getByText('history', { exact: true }).waitFor(wait);
 
       await tab('sources');
-      await reflection().selectOption('off', wait);
-      await expect.poll(async () => (await readView()).settings.reflection, wait).toBe('off');
       await sendTurn(1);
       expect(await recordIds()).toEqual([learnedId]);
+
+      const tools = await win.evaluate(async (id) => {
+        const items = await window.harness.invoke('sessions:transcript', { id });
+        return items.filter((item) => item.kind === 'tool');
+      }, sessionId);
+      expect(tools).toMatchObject(calls.map(({ id, function: fn }) => ({ id, name: fn.name, status: 'done', output: expect.any(String) })));
+      const [unqueried, recalled, compiled, recorded] = tools;
+      expect(JSON.parse(unqueried!.output!)).toMatchObject({ count: 0, records: [] });
+      expect(JSON.parse(recalled!.output!)).toMatchObject({
+        count: 1,
+        records: [{
+          id: learnedId, scope: 'project', state: 'candidate', servable: false, historical: true, text: lesson,
+          sources: expect.arrayContaining([expect.objectContaining({ type: 'transcript', ref })])
+        }]
+      });
+      const [beforeHistory, history] = compiled!.output!.split('\n## History\n');
+      const citation = `memory:${learnedId}`;
+      expect(beforeHistory).not.toContain(citation);
+      expect(history).toContain('unverified recollection');
+      const citedLine = history?.split('\n## ')[0]?.split('\n').find((line) => line.includes(citation));
+      expect(citedLine).toContain(lesson);
+      expect(citedLine).toContain(`[${citation} · ${path.basename(project)} · history`);
+      expect(citedLine).toContain(`transcript:${ref}`);
+
+      const receipt = JSON.parse(recorded!.output!) as { id: string };
+      expect(receipt).toMatchObject({ stored: 'wiki', state: 'draft', id: expect.stringMatching(/^[^\s]+$/) });
+      const draftQueue = () => win.getByTestId('knowledge-proposals');
+      const draftRow = () => draftQueue().getByRole('button', { name: `Review draft: ${draft.title} (Repository)`, exact: true });
+      const wikiRow = () => win.getByTestId(/^knowledge-page-/).filter({ hasText: draft.title });
+      const wikiDetail = () => win.getByTestId('knowledge-detail');
+      const accept = () => wikiDetail().getByRole('button', { name: 'Accept draft', exact: true });
+      const expectDraft = async () => {
+        await draftRow().waitFor(wait);
+        expect(await wikiRow().count()).toBe(0);
+        await draftRow().click(wait);
+        await wikiDetail().getByText('Review-only draft', { exact: true }).waitFor(wait);
+        const text = await wikiDetail().innerText(wait);
+        expect(text).toContain(draft.title);
+        expect(text).toContain(draft.claim);
+        expect(text).toContain(draft.body);
+        expect(text).toContain(sourceRef);
+        await accept().waitFor(wait);
+        expect(await wikiDetail().getByTestId('knowledge-promote').isDisabled()).toBe(true);
+      };
+      await tab('knowledge');
+      await expectDraft();
+      await wikiDetail().getByTitle('Back to the list', { exact: true }).click(wait);
+      await draftRow().waitFor(wait);
+
+      // Priming is computed at session creation. A fresh session (with no turn) gets the known
+      // current page but not the draft, so a missing digest cannot make this assertion pass.
+      const freshId = await startNamedSession('Fresh lease session');
+      const digest = await win.evaluate(async (id) => (await window.harness.invoke('sessions:get', { id }))?.knowledgeDigest, freshId);
+      expect(digest).toContain(currentTitle);
+      expect(digest).not.toContain(draft.title);
+      expect(digest).not.toContain(receipt.id);
+      expect(digest).not.toContain(lesson);
+      await expect(fs.stat(path.join(project, KNOWLEDGE_PUBLISH_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
 
       await app!.close();
       app = null;
@@ -532,7 +655,19 @@ describe.runIf(enabled)('project knowledge panel', () => {
       await tab('memory');
       await expectCandidate();
       expect(await recordIds()).toEqual([learnedId]);
-      expect(requests).toEqual(turns.map(({ prompt }) => prompt));
+      await tab('knowledge');
+      await expectDraft();
+      await accept().click(wait);
+      await wikiRow().getByText('human-reviewed', { exact: true }).waitFor(wait);
+      expect(await draftQueue().count()).toBe(0);
+      await wikiRow().click(wait);
+      await wikiDetail().getByText('current', { exact: true }).waitFor(wait);
+      // Review makes the page current; sharing and publishing still need separate actions.
+      const afterReview = await readView();
+      expect({ personal: afterReview.personal, shared: afterReview.shared, promotions: afterReview.promotions })
+        .toEqual({ personal: [], shared: [], promotions: [] });
+      await expect(fs.stat(path.join(project, KNOWLEDGE_PUBLISH_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(requests).toEqual([...turns.map(({ prompt }) => prompt), continuation]);
     } finally {
       await app?.close().catch(() => undefined);
       app = null;

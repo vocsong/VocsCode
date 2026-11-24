@@ -347,7 +347,7 @@ describe('Memory ledger', () => {
     expect(screen.queryByTestId('memory-row')).toBeNull();
   });
 
-  it('distinguishes Local capture from the explicit Reflect action and its provider warning', async () => {
+  it('explains selective Local recall and distinguishes it from Reflect and its provider warning', async () => {
     let reflected = false;
     setup(ledger(), {
       'intelligence:view': () => ledger({ records: reflected ? [candidate] : [] }),
@@ -355,21 +355,29 @@ describe('Memory ledger', () => {
     });
     await openView('memory');
     const button = screen.getByTestId('memory-reflect');
-    expect(screen.getByText(/after completed turns/i).textContent).toMatch(/only you can see these notes.*until you verify them/i);
+    expect(screen.getByText(/after completed turns/i).textContent).toMatch(/capture makes no model calls/i);
+    const recall = screen.getByText(/up to 3 short, topic-matched notes/i);
+    expect(recall.textContent).toMatch(/with local selected.*in this project.*from source sessions it can access/i);
+    expect(recall.textContent).toMatch(/no list or broad fallback/i);
+    expect(recall.textContent).toMatch(/recalled notes are history, not guidance.*verification changes their authority in memory, not recall access/i);
+    expect(screen.getByText(/not automatically added to prompts/i).textContent).toMatch(/no extra provider request.*session’s model.*tool results.*cloud-backed/i);
     expect(screen.getByRole('button', { name: 'Reflect on this session', description: /session transcript to your configured background model provider/ })).toBe(button);
-    expect(invoke).not.toHaveBeenCalledWith('intelligence:reflect', expect.anything());
+    expect(intelligenceCalls()).toEqual([['intelligence:view', { sessionId: 's1' }]]);
     await click(button);
     expect(invoke).toHaveBeenCalledWith('intelligence:reflect', { sessionId: 's1' });
     expect(screen.getByTestId('memory-reflect-result').textContent).toBe('Captured one episode');
     expect(record(candidate.id).getByTestId('memory-state').textContent).toBe('candidate');
   });
 
-  it('disables explicit reflection when reflection is Off', async () => {
-    setup(ledger({ settings: resolveIntelligenceSettings({ reflection: 'off' }) }));
+  it('keeps saved Local notes visible on the desktop and explains that agents cannot recall them when Off', async () => {
+    const saved = rowRecord('Saved Local outcome', 'captured', { origin: 'agent:local-learning' });
+    setup(ledger({ settings: resolveIntelligenceSettings({ reflection: 'off' }), records: [saved] }));
     await openView('memory');
     const button = screen.getByTestId('memory-reflect') as HTMLButtonElement;
     expect(button.disabled).toBe(true);
-    expect(screen.queryByText(/after completed turns in ordinary sessions/i)).toBeNull();
+    expect(record(saved.id).getByText(saved.text)).toBeTruthy();
+    expect(screen.getByText(/off keeps saved notes visible on the desktop but withholds them from agents/i)).toBeTruthy();
+    expect(screen.queryByText(/after completed turns/i)).toBeNull();
     await click(button);
     expect(intelligenceCalls()).toEqual([['intelligence:view', { sessionId: 's1' }]]);
   });
@@ -511,7 +519,7 @@ describe('Collections, Sources and Evidence', () => {
     const select = screen.getByTestId('setting-reflection') as HTMLSelectElement;
     expect(select.value).toBe('local');
     expect(select.selectedOptions[0].textContent).toMatch(/local.*completed turns/i);
-    expect(screen.getByRole('combobox', { name: 'Session reflection', description: /capture makes no model calls.*when a session is archived or merged/i })).toBe(select);
+    expect(screen.getByRole('combobox', { name: 'Session reflection', description: /capture makes no model calls.*up to 3 short, topic-matched notes.*cloud-backed.*off keeps saved notes.*when a session is archived or merged/i })).toBe(select);
     expect(invoke).not.toHaveBeenCalledWith('settings:update', expect.anything());
     for (const reflection of ['off', 'manual', 'auto', 'local'] as const) {
       await act(async () => update(select, reflection));

@@ -101,7 +101,7 @@ Local-first, under the project, git-excluded by the existing `.vocs-code/` conve
   branches/<branch>/<kind>/…  branch-scope pages, overlaid for a session on that branch
   _scan.json                  docs scan ledger: file → mtime + size at the last scan
   _graph.json                 derived relation graph (rebuildable, git-ignored)
-  _proposals/*.md             legacy candidates from before automated ingestion; no longer written
+  _proposals/…                Markdown drafts awaiting review, separate from current pages
   _observations/*.jsonl       commit / PR / merge outcomes waiting for distillation
   _evidence.json              claim key → distinct sessions that have seen it
   _rejected.json              claim tombstones, so a job stops refiling a rejection
@@ -157,7 +157,7 @@ One file, path = id (`conventions/harness-lifecycle.md`), narrow frontmatter sub
 id: conventions/harness-lifecycle
 title: Harness lifecycle
 kind: architecture | component | concept | decision | convention | flow | gotcha | testing | migration
-status: current | deprecated | superseded | uncertain   # draft/proposed are legacy
+status: current | deprecated | superseded | uncertain | draft | proposed
 scope: repo | branch
 branch: pi/pty-guard              # only when scope: branch
 confidence: low | medium | high   # judgement, never a computed score
@@ -188,7 +188,7 @@ Rules that keep it honest:
 - Record only provenance you have; no placeholder fields. `reviewed_by`/`reviewed_at` exist only
   once a human reviews or edits a page; `updated_by` distinguishes a human write from an ingested one.
 - `status` drives retrieval: `superseded` and `deprecated` pages are never served as current;
-  `current` and `uncertain` are; `draft`/`proposed` are legacy and no longer written.
+  `current` and `uncertain` are; review-only drafts live separately from the ordinary page view.
   `knowledge_search` returns the authority rung (`human-reviewed`, `auto-current`, `uncertain`, …)
   beside every result.
 - **Authority ladder:** explicit project rules (AGENTS.md) > human-reviewed page > auto-current page
@@ -221,9 +221,11 @@ Rules that keep it honest:
 
 The wiki is easy to generate; keeping it true is the product. The rules:
 
-- **No accept gate.** Every write is automatic and passive: generated pages and `knowledge_propose`
-  land as `status: current` immediately, with `updated_by: agent:*` so they rank below a
-  human-reviewed page. There is no approval queue.
+- **Use drafts for passive learning.** During an ordinary task, an agent can check a durable lesson
+  against current code, docs or tests and file `knowledge_record` with `draft: true`. It creates a
+  separate Markdown draft for desktop review, not guidance. Drafts cite files or commits, never a
+  transcript. Legacy `knowledge_propose` and generated pages still use current-page ingestion and
+  rank below human-reviewed pages.
 - **Tombstones and collision-safe identity.** A rejected claim is recorded in `_rejected.json`;
   the same claim is refused on sight, so a job cannot refile it every scan. Rejection retains its
   conservative case/punctuation-insensitive match, checked against the full stored claim rather
@@ -235,8 +237,9 @@ The wiki is easy to generate; keeping it true is the product. The rules:
   a clear error and leave pages, evidence and supersession untouched. Choose a different title for
   a new page, or pass the existing id explicitly for an intentional claim change. Same-claim repeats
   keep one page and merge evidence; explicit updates preserve creation time and merge provenance.
-- **The panel is for browsing, not approving.** It searches and reads pages, corrects them, rejects
-  or deletes, and publishes to `docs/wiki/`. Rejecting tombstones the claim; accepting is not a step.
+- **Review changes authority, not recall.** The panel can mark a draft reviewed to make it current,
+  or reject it to tombstone the claim. Existing pages can be corrected, rejected, deleted or explicitly
+  published to `docs/wiki/`. Neither recall nor draft creation publishes anything.
 - **Bootstrap is recursive and incremental.** With an explicitly selected, usable utility model, priming an empty wiki can schedule a seed without waiting for the model. Deliberate `Generate from docs` walks *every* markdown
   file in the repository — skipping `node_modules/`, `.git/`, `dist/`, `build/`, `vendor/`,
   `.vocs-code/`, `.gitnexus/`, `CHANGELOG` and `LICENSE` — maps each batch through the utility model,
@@ -326,7 +329,8 @@ paths. The wiki itself costs nothing until an agent asks a question.
 - **L3 recall and capture.** `session_history_search` reads the app's existing transcript index
   (`search.db`, project-scoped, redacted). Local learning observes newly completed ordinary turns and
   keeps short cited work outcomes and lesson candidates in the separate project memory ledger, never
-  in the wiki or digest. Model-assisted session reflection remains separate. See [Local Knowledge
+  in the wiki or digest. The scoped agent tools can retrieve a few relevant ones as unverified
+  history; they don't enumerate them without a query. Model-assisted session reflection remains separate. See [Local Knowledge
   and Memory](INTELLIGENCE.md#what-works-in-the-background) for defaults and controls.
 - **Consolidation.** Repetition detection is in (`_evidence.json`); the next steps are a periodic
   lint (unresolved anchors, changed sources, contradictions) and a merge flow that folds a duplicate

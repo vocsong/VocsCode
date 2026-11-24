@@ -525,6 +525,10 @@ export const MAX_CONTEXT_BUDGET = 6000;
 
 function citation(item: IntelligenceEvidence): string {
   const parts = [`${item.provider}:${item.ref}`, item.projectName, item.authority];
+  if (item.provider === 'memory' && item.historical) {
+    const reply = item.sources?.find((source) => source.type === 'transcript' && /^[\w-]{1,160}#[\w-]{1,160}$/.test(source.ref));
+    if (reply) parts.push(`transcript:${reply.ref}`);
+  }
   if (item.branch) parts.push(`branch ${item.branch}`);
   if (item.revision) parts.push(`@${item.revision.slice(0, 12)}`);
   if (item.freshness === 'stale') parts.push(`stale${item.staleReason ? ` (${item.staleReason})` : ''}`);

@@ -9,6 +9,9 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GATEWAY_TOKEN_ENV, GATEWAY_URL_ENV, IntelligenceGateway, callIntelligenceTool, type GatewaySession, type IntelligenceGatewayDeps, type ToolResult } from '../src/main/intelligence/gateway';
+import { MemoryStore } from '../src/main/intelligence/memory-store';
+import { ProjectRegistry } from '../src/main/intelligence/registry';
+import { IntelligenceService } from '../src/main/intelligence/service';
 import { KnowledgeService } from '../src/main/knowledge/service';
 import { withKnowledgeWriteLock } from '../resources/mcp/knowledge-write.mjs';
 import type { AppSettings } from '../src/shared/types';
@@ -301,6 +304,42 @@ describe('authenticated intelligence gateway', () => {
 });
 
 describe('packaged vocs-memory MCP over stdio', () => {
+  it('records a cited review-only draft behind the existing record grant, never a current page', async () => {
+    const projectRoot = await tmp();
+    const scope = { projectRoot, cwd: projectRoot };
+    await fs.writeFile(path.join(projectRoot, 'retry.test.ts'), '// The fixture covers one initialization.');
+    const log = () => undefined;
+    const settings = () => ({}) as AppSettings;
+    const knowledge = new KnowledgeService({ log, settings });
+    const data = await tmp();
+    const memory = new MemoryStore(data, { log });
+    const registry = new ProjectRegistry(data, { log, facts: async () => ({}) });
+    const intelligence = new IntelligenceService({ memory, registry, knowledge, log, settings, sessions: () => [] });
+    const f = await fixture(session('s1', scope), (s, name, args, signal) => callIntelligenceTool({ knowledge, intelligence }, s, name, args, signal));
+    const client = await spawnMemory(gatewayEnv(f.config), projectRoot);
+    const branchArgs = { title: 'Retry initialization fence', claim: 'The retry initialization fence must not increment a second time.', body: 'Keep the initialization single-shot; the regression test documents the ordering.', kind: 'testing', draft: true, sources: [{ type: 'file', ref: 'retry.test.ts' }] };
+    const send = (patch: Record<string, unknown> = {}) => client.tool('knowledge_record', { ...branchArgs, ...patch });
+    await expect(send({ draft: 'yes' })).resolves.toMatchObject({ isError: true });
+    await expect(send({ sources: [{ type: 'transcript', ref: 's1#a1' }] })).resolves.toMatchObject({ isError: true });
+    await expect(send({ sources: [...branchArgs.sources, { type: 'transcript', ref: 's1#a1' }] })).resolves.toMatchObject({ isError: true });
+    await expect(send({ sources: [{ type: 'file', ref: 'missing/retry.test.ts' }] })).resolves.toMatchObject({ isError: true });
+    await expect(send({ sources: [{ type: 'file', ref: '../retry.test.ts' }] })).resolves.toMatchObject({ isError: true });
+    await expect(send({ body: 'Do not store authorization: Bearer not-a-real-token-1234 in diagnostics.' })).resolves.toMatchObject({ isError: true });
+    await expect(send({ page_id: 'concept/existing' })).resolves.toMatchObject({ isError: true });
+    expect((await knowledge.view(scope)).proposals).toEqual([]);
+
+    const result = JSON.parse((await send()).content[0].text);
+    expect(result).toMatchObject({ stored: 'wiki', state: 'draft', authority: 'candidate', id: expect.any(String) });
+    expect((await knowledge.view(scope)).proposals).toMatchObject([{ id: result.id, status: 'draft', claim: branchArgs.claim }]);
+    await expect(client.tool('knowledge_read', { page: result.id })).resolves.toMatchObject({ isError: true });
+    await expect(knowledge.digest(scope)).resolves.toBeNull();
+    await expect(knowledge.publish(scope, [result.id])).resolves.toMatchObject({ written: [] });
+
+    f.gateway.restrictToRead('s1');
+    await expect(send({ claim: 'A Plan session cannot draft a second lesson.' })).resolves.toEqual(error('This session is not allowed to record through the memory tools.'));
+    expect((await knowledge.view(scope)).proposals).toHaveLength(1);
+  });
+
   it('lists compatible tools and returns exact gateway results with only gateway env and no wiki', async () => {
     const projectRoot = await tmp();
     const knowledge = knowledgeForTests();
