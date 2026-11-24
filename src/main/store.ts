@@ -302,6 +302,22 @@ export class SessionStore {
     return this.transcriptWrites.has(id);
   }
 
+  /**
+   * File-level revision stamp for `transcript.jsonl` (`size:mtimeMs:ctimeMs`), or `null` when
+   * absent/unreadable. Waits for in-flight transcript writes so callers never observe a torn append.
+   */
+  async transcriptStamp(id: string): Promise<string | null> {
+    assertValidSessionId(id);
+    await (this.transcriptWrites.get(id) ?? Promise.resolve());
+    try {
+      const st = await fs.stat(path.join(this.sessionDir(id), 'transcript.jsonl'));
+      if (!st.isFile()) return null;
+      return `${st.size}:${Math.trunc(st.mtimeMs)}:${Math.trunc(st.ctimeMs)}`;
+    } catch {
+      return null;
+    }
+  }
+
   /** Chains a transcript write behind the session's pending ones; the chain never rejects. */
   private queueTranscriptWrite<T>(id: string, run: () => Promise<T>): Promise<T> {
     const next = (this.transcriptWrites.get(id) ?? Promise.resolve()).then(run, run);

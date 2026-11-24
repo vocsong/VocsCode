@@ -1695,7 +1695,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       await fs.realpath(target); // Unlike legacy desktop probes, automation never falls back on a failed canonical read.
     },
     shutdown: async () => {
-      await Promise.all([vocsAccount.dispose(), vesta.dispose(), dictationService?.dispose()]);
+      await Promise.all([vocsAccount.dispose(), vesta.dispose(), dictationService?.dispose(), cuaPreview.close()]);
     }
   };
 }

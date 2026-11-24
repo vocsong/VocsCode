@@ -1,20 +1,19 @@
-/** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
-import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+/** Electron entry point: app lifecycle, service composition, logging, and graceful shutdown. */
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrowserWindow, Menu, Notification, app, nativeTheme, net, powerSaveBlocker, screen, shell } from 'electron';
+import { BrowserWindow, Menu, Notification, app, nativeTheme, net, powerSaveBlocker, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import { hasOngoingWork } from '../shared/ongoing';
 import { sessionTitleText } from '../shared/session-title';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
-import { DEFAULT_PALETTE, chromeFor, themeSourceFor, type PaletteId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
+import { reconcileForkInheritance, repriceClaudeFallbackTranscripts } from './analytics-migrations';
 import { DesktopFocusTracker, forgetVisibleOnRendererReset } from './desktop-focus';
 import { watchEventLoop } from './diag';
 import { gitIdentityFacts, gitResolveCommit, setGitLog } from './git';
-import { PRODUCT_APP_ID, resolveAppIdentity } from './identity';
+import { resolveAppIdentity } from './identity';
 import { registerIpc, pushToRenderer } from './ipc';
 import { KeepAwake } from './keep-awake';
 import { KnowledgeService } from './knowledge/service';
@@ -33,7 +32,6 @@ import { resolveIntelligenceSettings } from '../shared/intelligence';
 import { GITNEXUS_SERVER_ID, gitnexusSharedRoots, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './mcp/gitnexus';
 import { GitnexusIndexer } from './mcp/indexer';
 import { createLogger, describeError, type Logger } from './log';
-import { RendererRecovery } from './renderer-recovery';
 import { SharedGitnexusServer } from './mcp/shared-server';
 import { RuntimeResolver, which } from './runtime';
 import { SearchIndex } from './search';
@@ -49,11 +47,10 @@ import { createProcessSource } from './process-snapshot';
 import { ProcessTracker } from './process-tracker';
 import { SettingsStore } from './settings';
 import { AppInstructions } from './app-instructions';
+import { runGracefulShutdown } from './shutdown';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
 import { UpdateService } from './updater';
-import { modelsForProvider } from './models/static-models';
-import { inheritedUsageOf, pricedModelOf, repricingOf, turnUsageTotals, type ForkInheritance } from './util/usage-repair';
 import { errorMessage } from './util/async';
 import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
@@ -67,6 +64,8 @@ import { RemoteMirror } from './remote/mirror';
 import { AnalyticsSync } from './remote/analytics-sync';
 import { relayUrl } from './remote/relay-url';
 import { WebServer } from './web-server';
+import { MainWindowController, resolvePreloadPath } from './window';
+import { registerAppUserModelId } from './windows-shell-identity';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
@@ -105,7 +104,7 @@ if (process.platform === 'win32') app.setAppUserModelId(identity.appUserModelId)
 // before the lock.
 if (!app.isPackaged || process.env.VOCS_CODE_USER_DATA) app.setPath('userData', identity.userDataDir);
 
-let mainWindow: BrowserWindow | null = null;
+let windowController: MainWindowController | null = null;
 let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
@@ -132,10 +131,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', () => {
     log('info', 'a second launch was redirected to this instance');
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    windowController?.focus();
   });
   app.whenReady().then(main).catch((e) => {
     log('error', `startup failed: ${describeError(e)}`);
@@ -177,25 +173,14 @@ async function main(): Promise<void> {
   const appInstructions = new AppInstructions(userData, logTo);
   const analytics = new AnalyticsStore(userData, { log: logTo });
   const providers = settings.get().providers;
-  await analytics.load(store.list(), (id) => store.readTranscript(id), providers);
+  await analytics.load(store.list(), (id) => store.readTranscript(id), providers, {
+    transcriptStamp: (id) => store.transcriptStamp(id)
+  });
 
   // Spend the Claude adapter recorded at the CLI's fallback rates before it priced third-party
-  // models from the app catalog is corrected here, once and before anything reads it: `load` has
-  // already fixed the session index and the rollups (see `migrateClaudeFallbackSpend`), and the
-  // transcript turn rows the Usage panel's per-turn list is built from follow below. Waiting for
-  // this keeps the headline spend and the turns under it in agreement from the first paint; it
-  // costs about a second on the one boot that has something to repair, and nothing after that,
-  // because a repriced record no longer looks like a fallback-priced one.
+  // models from the app catalog is corrected here, once and before anything reads it.
   if (analytics.repricedSessions.length) {
-    let rows = 0;
-    for (const id of analytics.repricedSessions) {
-      const meta = store.get(id);
-      const ref = meta ? pricedModelOf(meta) : undefined;
-      if (!ref) continue;
-      rows += await store.repriceTurns(id, (turn) => repricingOf(ref, turnUsageTotals(turn), modelsForProvider(providers, ref.provider))?.to);
-    }
-    await store.persist();
-    logTo('info', `usage: repriced ${analytics.repricedSessions.length} claude session(s) recorded at the CLI's fallback rates (${rows} turn row(s))`);
+    await repriceClaudeFallbackTranscripts(analytics.repricedSessions, store, providers, logTo);
   }
 
   // Deep search index: derived from transcripts, so it lives beside them and rebuilds itself.
@@ -205,6 +190,7 @@ async function main(): Promise<void> {
   let intelligence: IntelligenceService | null = null;
   let intelligenceGateway: IntelligenceGateway | null = null;
   let passiveLearning: PassiveLearning | undefined;
+  const currentWindow = () => windowController?.getWindow() ?? null;
   store.hooks = {
     prepareAppend: (id, item) => passiveLearning?.prepare(id, item),
     onAppend: (id, item) => search.indexItem(id, item),
@@ -212,7 +198,7 @@ async function main(): Promise<void> {
       passiveLearning?.discard(id);
       search.resyncSession(id);
       if (replacement && intelligence?.onTranscriptRewritten(id, replacement)) {
-        pushToRenderer(mainWindow, PUSH_CHANNELS.projectMemoryChanged, { sessionId: id });
+        pushToRenderer(currentWindow(), PUSH_CHANNELS.projectMemoryChanged, { sessionId: id });
       }
     },
     onRemove: (id) => {
@@ -226,7 +212,7 @@ async function main(): Promise<void> {
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
   // (app.getAppPath() returns out/main when launched as `electron out/main/index.js`.)
   const appRoot = path.resolve(here, '..', '..');
-  registerAppUserModelId(appRoot);
+  registerAppUserModelId(appRoot, identity, logTo);
   const runtime = new RuntimeResolver(
     {
       appRuntimeDir: path.join(userData, 'runtime'),
@@ -245,7 +231,7 @@ async function main(): Promise<void> {
   const sharedGitnexus = new SharedGitnexusServer({
     command: gitnexusBinary ?? npxBinary ?? 'npx',
     baseArgs: gitnexusBinary ? ['serve'] : ['-y', 'gitnexus@latest', 'serve'],
-    log: (level, message) => log(level, message)
+    log: logTo
   });
   const gitnexusIndexer = new GitnexusIndexer({
     command: gitnexusBinary ?? npxBinary,
@@ -341,7 +327,7 @@ async function main(): Promise<void> {
     session: (id) => store.get(id),
     capture: async (ctx, observation, current) => {
       if (await intelligenceCore.captureLocalTurn(ctx, observation, current)) {
-        pushToRenderer(mainWindow, PUSH_CHANNELS.projectMemoryChanged, { sessionId: ctx.sessionId });
+        pushToRenderer(currentWindow(), PUSH_CHANNELS.projectMemoryChanged, { sessionId: ctx.sessionId });
       }
     },
     failed: () => log('warn', 'intelligence: could not save a local learning note')
@@ -468,7 +454,8 @@ async function main(): Promise<void> {
       // would raise a desktop toast on top of whatever the developer is doing.
       if (e2eQuiet) return;
       if (!settings.get().notifications) return;
-      if (mainWindow?.isFocused()) return;
+      const win = currentWindow();
+      if (win?.isFocused()) return;
       if (!Notification.isSupported()) return;
       const session = store.get(sessionId);
       const n = new Notification({
@@ -477,8 +464,9 @@ async function main(): Promise<void> {
         silent: !settings.get().soundOnApproval
       });
       n.on('click', () => {
-        mainWindow?.show();
-        mainWindow?.focus();
+        const target = currentWindow();
+        target?.show();
+        target?.focus();
         pushAll(PUSH_CHANNELS.focusSession, { sessionId });
       });
       n.show();
@@ -491,7 +479,7 @@ async function main(): Promise<void> {
   // One push fan-out for the window and web clients alike. Declared before Mission recovery, whose
   // session updates already push the session list through it.
   const pushAll = (channel: string, payload: unknown) => {
-    pushToRenderer(mainWindow, channel, payload);
+    pushToRenderer(currentWindow(), channel, payload);
     webServer?.broadcast(channel, payload);
     void remoteHost?.broadcastPush(channel, payload);
   };
@@ -516,8 +504,8 @@ async function main(): Promise<void> {
   void missionRef.sweep().catch((e) => log('warn', `mission: startup sweep failed: ${errorMessage(e)}`));
 
   // Which session the desktop window is on, pushed to paired browsers so they can open the same
-  // one. The window's focus/blur is wired in `createWindow`; the list reconcile forgets a target
-  // that was deleted or archived since it was reported.
+  // one. The window's focus/blur is wired in `MainWindowController`; the list reconcile forgets a
+  // target that was deleted or archived since it was reported.
   const desktopFocus = new DesktopFocusTracker({
     hasSession: (id) => !!sessionsRef.get(id),
     push: (focus) => {
@@ -668,7 +656,7 @@ async function main(): Promise<void> {
     broadcast: (channel, payload) => {
       webServer?.broadcast(channel, payload);
     },
-    getWindow: () => mainWindow,
+    getWindow: currentWindow,
     log
   });
   registryRef = registry;
@@ -694,6 +682,33 @@ async function main(): Promise<void> {
     await webServer.start();
   }
 
+  const watchRenderer = (contents: Electron.WebContents) => {
+    forgetVisibleOnRendererReset(contents, desktopFocus);
+    const cancelEnable = () => localControl.cancelPendingEnable();
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) cancelEnable();
+    });
+    contents.on('render-process-gone', cancelEnable);
+    contents.once('destroyed', cancelEnable);
+  };
+  const winController = new MainWindowController({
+    appName: APP_NAME,
+    appRoot,
+    preloadPath: resolvePreloadPath(here),
+    rendererFile,
+    rendererEntry,
+    rendererDocument,
+    isDev,
+    e2eQuiet,
+    identity,
+    settings,
+    log: logTo,
+    onWindowFocus: (focused) => desktopFocus.setWindowFocused(focused),
+    watchRenderer,
+    onDidStartLoading: () => terminals?.detachAll()
+  });
+  windowController = winController;
+
   let lastGraphSettings = JSON.stringify(graphSettings());
   let lastReflection = settings.get().intelligence?.reflection;
   settings.onChange((s) => {
@@ -708,58 +723,32 @@ async function main(): Promise<void> {
       void graphify.cancel();
       graphScheduler.settingsChanged();
     }
-    currentPalette = s.palette ?? DEFAULT_PALETTE;
-    currentUiScale = s.typography?.uiScale ?? 1;
-    nativeTheme.themeSource = themeSourceFor(s.theme);
-    applyZoom();
-    // Palette and interface size changes don't emit nativeTheme's updated event.
-    applyChrome();
+    winController.applySettings(s);
     terminals?.updateSettings(s.terminal);
   });
-  currentPalette = settings.get().palette ?? DEFAULT_PALETTE;
-  currentUiScale = settings.get().typography?.uiScale ?? 1;
-  nativeTheme.themeSource = themeSourceFor(settings.get().theme);
+  winController.applySettings(settings.get());
 
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
   // buttons over it, so their colors have to follow the theme.
-  nativeTheme.on('updated', applyChrome);
-
-  // GPU and utility processes share the window's fate; a dead one explains a blank or malformed
-  // window, and without a line here it is invisible. Normal exits are not news.
-  app.on('child-process-gone', (_event, details) => {
-    if (details.reason === 'clean-exit') return;
-    log('error', `child process gone: ${details.type} ${details.reason} (exit ${details.exitCode})`);
-  });
+  nativeTheme.on('updated', () => winController.applyChrome());
 
   // No native menu bar: File/Edit/View/Help live in the custom title bar. macOS keeps its
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
-  const watchRenderer = (contents: Electron.WebContents) => {
-    forgetVisibleOnRendererReset(contents, desktopFocus);
-    const cancelEnable = () => localControl.cancelPendingEnable();
-    contents.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument) cancelEnable();
-    });
-    contents.on('render-process-gone', cancelEnable);
-    contents.once('destroyed', cancelEnable);
-  };
-  const openWindow = () => createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), watchRenderer);
-  openWindow();
+  winController.open();
   // A sign-in kept on this computer renews in the background; Settings shows "restoring" meanwhile.
   void vocsAccount.restore().catch(() => undefined);
 
   log('info', `ready in ${Math.round(process.uptime() * 1000)}ms: ${store.list().length} session(s), ${terminals.list().length} terminal tab(s)`);
 
   // History written before a fork stopped inheriting its source's spend is corrected here rather
-  // than in `analytics.load` with the other repairs: this one is the only one that has to read
-  // every transcript, and making the window wait on hundreds of megabytes of JSON would be a
-  // startup the user can see. It runs once — see `settleForkSweep` — and a session's numbers only
-  // ever move down, because the correction takes back what its own rows do not account for.
+  // than in `analytics.load` with the other repairs: this one reads every transcript, so it runs
+  // asynchronously once the window is up.
   if (analytics.forkSweepPending) void reconcileForkInheritance(analytics, store, logTo);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) openWindow();
+    if (BrowserWindow.getAllWindows().length === 0) winController.open();
   });
   app.on('window-all-closed', () => {
     // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
@@ -771,51 +760,31 @@ async function main(): Promise<void> {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
-    localControl.shutdown();
-    keepAwake.quit();
-    // Before the sessions stop: quitting is not a Builder ending its turn, and the next launch
-    // finds running missions interrupted from their records as they are now.
-    missionRef.dispose();
-    updater?.stopChecking();
-    const t0 = Date.now();
-    log('info', `quitting: ${sessions?.list().filter((s) => s.status === 'running' || s.status === 'awaiting' || s.status === 'starting').length ?? 0} live session(s), ${terminals?.list().length ?? 0} terminal tab(s)`);
-    // Drain debounced session-meta persists after the sessions themselves are stopped. Restored
-    // terminal snapshots are written first, and the cap ensures a large terminal set cannot hold
-    // Electron open indefinitely.
-    const deadline = Date.now() + 4000;
-    const safe = async (label: string, task: Promise<unknown> | void | undefined): Promise<void> => {
-      try {
-        await task;
-      } catch (error) {
-        log('warn', `${label} during shutdown failed: ${describeError(error)}`);
-      }
-    };
-    // Each step is independent: a failed stop must never skip the persistence flushes after it.
-    const drainSessions = safe('session stop', sessions?.stopAll()).then(async () => {
-
-      await safe('session persist flush', sessions?.flushPendingPersists());
-      await safe('analytics flush', analytics.flush());
-    });
-    const shutdown = Promise.all([
-      safe('session drain', drainSessions),
-      safe('terminal shutdown', terminals?.shutdown(deadline)),
-      safe('search close', search?.close()),
-      safe('intelligence gateway close', intelligenceGateway?.close()),
-      safe('mission gateway close', missionGateway.close()),
-      safe('Graphify shutdown', Promise.all([graphScheduler.close(), graphify.cancel()])),
-      safe('memory ledger close', Promise.resolve(passiveLearning?.close()).finally(() => memoryStore.close())),
-      safe('knowledge usage flush', knowledgeUsage.close()),
-      safe('web server stop', webServer?.stop()),
-      safe('vesta shutdown', registry.shutdown()),
-      safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop())),
-      safe('process tracker close', processes.close())
-    ]);
-    const cap = new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000));
-    void Promise.race([shutdown.then(() => false), cap]).then((timedOut) => {
-      if (timedOut) log('warn', 'shutdown exceeded the 4s cap; exiting with any remaining state left for the next launch');
-      else log('info', `shutdown complete in ${Date.now() - t0}ms`);
-      app.exit(0);
-    });
+    void runGracefulShutdown({
+      localControl,
+      keepAwake,
+      mission: missionRef,
+      updater,
+      remoteMirror,
+      analyticsSync,
+      remoteHost,
+      sessions,
+      analytics,
+      terminals,
+      search,
+      intelligenceGateway,
+      missionGateway,
+      graphScheduler,
+      graphify,
+      passiveLearning,
+      memoryStore,
+      knowledgeUsage,
+      webServer,
+      registry,
+      sharedGitnexus,
+      processes,
+      log: logTo
+    }).then(() => app.exit(0));
   });
 }
 
@@ -841,336 +810,7 @@ function installAppProcessHandlers(): void {
   app.on('render-process-gone', (_e, contents, details) => {
     // The main window's renderer is reported (and reloaded) by RendererRecovery; this catches any
     // other webContents.
-    if (contents === mainWindow?.webContents) return;
+    if (contents === windowController?.getWindow()?.webContents) return;
     log('error', `a renderer process is gone: ${details.reason} (exit code ${details.exitCode})`);
   });
-}
-
-/** Resolve the same icon in development and in the packaged app's extra resources. */
-function appIconPath(appRoot: string): string {
-  const iconName = process.platform === 'win32' ? 'vocs-code.ico' : 'vocs-code.png';
-  const iconRoot = app.isPackaged ? path.join(process.resourcesPath, 'icons') : path.join(appRoot, 'resources', 'icons');
-  return path.join(iconRoot, iconName);
-}
-
-/** Write the AUMID's DisplayName/IconUri so the Windows taskbar menu shows this run's name, not 'Electron'. */
-function registerAppUserModelId(appRoot: string): void {
-  if (process.platform !== 'win32') return;
-  const key = `HKCU\\Software\\Classes\\AppUserModelId\\${identity.appUserModelId}`;
-  const values: Array<[string, string]> = [
-    ['DisplayName', identity.displayName],
-    ['IconUri', appIconPath(appRoot)]
-  ];
-  for (const [name, data] of values) {
-    const child = spawn('reg', ['add', key, '/f', '/v', name, '/t', 'REG_SZ', '/d', data], {
-      stdio: 'ignore',
-      windowsHide: true
-    });
-    // Best effort: a missing or blocked reg.exe only costs the menu title, nothing else.
-    child.on('error', () => {});
-  }
-  reconcileDevShortcut(appRoot);
-}
-
-/** The shell resolves an AUMID's display name from a matching Start Menu shortcut before the registry,
- *  so in development we keep a correctly named 'Vocs Code (Dev)' shortcut and drop stale ones (e.g. a
- *  leftover 'Electron.lnk' from an earlier dev run) that would make the taskbar menu say 'Electron'.
- *  NSIS owns the installed app's 'Vocs Code' shortcut, so this only runs unpackaged and never writes
- *  its name. */
-function reconcileDevShortcut(appRoot: string): void {
-  if (app.isPackaged) return;
-  const menu = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
-  const exe = process.execPath.toLowerCase();
-  const lnk = path.join(menu, identity.shortcutFile);
-  try {
-    for (const entry of readdirSync(menu)) {
-      const file = path.join(menu, entry);
-      if (file === lnk || !entry.toLowerCase().endsWith('.lnk')) continue;
-      try {
-        const shortcut = shell.readShortcutLink(file);
-        // Only remove shortcuts that point at *this* repo's Electron. The installed app's own Start
-        // Menu entry targets its install path, so it is never touched; anything else carrying one of
-        // our AUMIDs is a leftover dev shortcut — including one an older build wrote over the
-        // installed app's 'Vocs Code.lnk'.
-        const ours = shortcut.appUserModelId === PRODUCT_APP_ID || shortcut.appUserModelId === identity.appUserModelId;
-        if (ours && shortcut.target.toLowerCase() === exe) rmSync(file, { force: true });
-      } catch {
-        // Not one of our shortcuts (or unreadable); leave it alone.
-      }
-    }
-  } catch {
-    // No Start Menu directory; nothing to reconcile.
-  }
-  try {
-    // iconIndex is required: writeShortcutLink silently drops `icon` without it, and a shortcut
-    // without an icon leaves the taskbar (which resolves the window's AUMID to this shortcut)
-    // showing a blank page icon.
-    const options = {
-      target: process.execPath,
-      cwd: appRoot,
-      description: identity.displayName,
-      icon: appIconPath(appRoot),
-      iconIndex: 0,
-      appUserModelId: identity.appUserModelId
-    };
-    // 'replace' only overwrites an existing shortcut; fall back to 'create' on the first run.
-    if (!shell.writeShortcutLink(lnk, existsSync(lnk) ? 'replace' : 'create', options)) {
-      log('warn', 'could not write the dev Start Menu shortcut; taskbar icon may fall back to Electron\'s');
-    }
-  } catch {
-    // Best effort: without the shortcut the registry DisplayName above still names the taskbar menu.
-  }
-}
-
-/** Title bar height in CSS pixels; must match --titlebar in styles.css. */
-const TITLEBAR_HEIGHT = 36;
-
-/** The active palette, so the native caption can follow colors the OS knows nothing about. */
-let currentPalette: PaletteId = DEFAULT_PALETTE;
-
-/**
- * The one-time sweep for spend a fork inherited from the session it was forked from: it reads every
- * transcript once, takes the inherited share off each session's totals and every rollup built from
- * them, and hands the copied turn rows back by zeroing their cost.
- *
- * Sequential on purpose. A transcript can run to tens of megabytes and the parse is synchronous, so
- * the loop yields between sessions instead of freezing the main process for the whole pass. It only
- * ever moves a number down, and it never runs again — the file version settles once every session
- * has been read, so an interrupted pass retries on the next boot rather than leaving the sessions it
- * never reached charged for someone else's work.
- */
-async function reconcileForkInheritance(analytics: AnalyticsStore, store: SessionStore, log: Logger): Promise<void> {
-  const started = Date.now();
-  const metas = store.list();
-  const inheritances = new Map<string, ForkInheritance>();
-  let failed = 0;
-  for (const meta of metas) {
-    try {
-      const found = inheritedUsageOf(meta, await store.readTranscript(meta.id));
-      if (found) inheritances.set(meta.id, found);
-    } catch (e) {
-      // A transcript that could not be read is one this pass cannot judge. Leaving the version at 2
-      // keeps the sweep owed, which costs another read next boot; settling anyway would quietly
-      // leave that session's numbers as they were.
-      failed++;
-      log('warn', `usage: fork sweep could not read ${meta.id}: ${errorMessage(e)}`);
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  if (!inheritances.size) {
-    if (!failed) await analytics.settleForkSweep();
-    return;
-  }
-  const { ids, usd } = analytics.reconcileForks(metas, inheritances);
-  let rows = 0;
-  for (const [id, found] of inheritances) {
-    if (!found.carriedIds.length) continue;
-    const carried = new Set(found.carriedIds);
-    rows += await store.repriceTurns(id, (turn) => (carried.has(turn.id) ? 0 : undefined));
-  }
-  await store.persist();
-  if (!failed) await analytics.settleForkSweep();
-  log(
-    'info',
-    `usage: fork sweep took ${usd.toFixed(2)} USD and ${rows} turn row(s) back from ${ids.length} session(s) out of ${metas.length} read in ${Date.now() - started}ms` +
-      (failed ? `; ${failed} transcript(s) unreadable, so it will run again` : '')
-  );
-}
-
-/** Theme colors for the loading surface and the native caption glyphs. */
-function chrome() {
-  return chromeFor(currentPalette, nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
-}
-
-function titleBarOverlay({ color, symbolColor }: ReturnType<typeof chrome>): Electron.TitleBarOverlay {
-  if (process.platform === 'win32') {
-    // Let the renderer paint the whole bar, including Zen, animated themes and modal scrims.
-    // Electron measures the native hit area in DIPs, while the CSS bar also scales with page zoom.
-    return { color: '#00000000', symbolColor, height: Math.round(TITLEBAR_HEIGHT * currentUiScale) };
-  }
-  return { color, symbolColor, height: TITLEBAR_HEIGHT };
-}
-
-/** Settings → Appearance → Interface size, applied as the window's zoom factor. */
-let currentUiScale = 1;
-
-/**
- * Applies the interface size. The chrome's type is authored in fixed pixels, so zoom is what scales
- * it without breaking layout; it is reapplied after every load because a reload can reset it.
- */
-function applyZoom(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  const wc = mainWindow.webContents;
-  if (Math.abs(wc.getZoomFactor() - currentUiScale) > 0.001) wc.setZoomFactor(currentUiScale);
-}
-
-/** Repaints the window background and the OS-drawn caption buttons for the active theme. */
-function applyChrome(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  const colors = chrome();
-  mainWindow.setBackgroundColor(colors.color);
-  if (process.platform === 'darwin') return;
-  try {
-    mainWindow.setTitleBarOverlay(titleBarOverlay(colors));
-  } catch {
-    // Older/unsupported platforms simply keep the colors they were created with.
-  }
-}
-
-function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (focused: boolean) => void, watchRenderer: (contents: Electron.WebContents) => void): void {
-  const s = settings.get();
-  const bounds = s.windowBounds ?? { width: 1440, height: 900 };
-  const icon = appIconPath(appRoot);
-  const colors = chrome();
-  const win = new BrowserWindow({
-    ...bounds,
-    minWidth: 960,
-    minHeight: 600,
-    title: APP_NAME,
-    icon,
-    backgroundColor: colors.color,
-    // Frameless with an in-app title bar (sidebar toggle, history, menu bar). On Windows/Linux the
-    // overlay keeps the native caption buttons — and with them snap layouts and double-click maximize.
-    titleBarStyle: 'hidden',
-    ...(process.platform === 'darwin'
-      ? { trafficLightPosition: { x: 12, y: (TITLEBAR_HEIGHT - 14) / 2 } }
-      : { titleBarOverlay: titleBarOverlay(colors) }),
-    autoHideMenuBar: true,
-    show: false,
-    webPreferences: {
-      preload: path.join(here, '../preload/index.cjs'),
-      contextIsolation: true,
-      sandbox: true,
-      nodeIntegration: false,
-      spellcheck: true,
-      // An off-screen window is never the foreground window, and throttling would stall the renders
-      // and timers the suites wait on.
-      backgroundThrottling: !e2eQuiet
-    }
-  });
-  if (process.platform === 'win32') {
-    win.setAppDetails({ appId: identity.appUserModelId, appIconPath: icon });
-  }
-  mainWindow = win;
-  log('debug', `window created ${bounds.width}x${bounds.height}${'x' in bounds && bounds.x !== undefined ? ` at ${bounds.x},${bounds.y}` : ''}`);
-  win.once('ready-to-show', () => {
-    log('info', `window shown ${Math.round(process.uptime() * 1000)}ms after launch`);
-    if (!e2eQuiet) {
-      win.show();
-      return;
-    }
-    // Playwright can screenshot a shown window but not a hidden one, so this is off-screen rather
-    // than hidden. `showInactive` shows it without activation, which is what keeps the focus put.
-    const rect = win.getBounds();
-    const displays = screen.getAllDisplays();
-    const left = Math.min(...displays.map((d) => d.bounds.x));
-    const top = Math.min(...displays.map((d) => d.bounds.y));
-    win.setPosition(left - rect.width - 100, top + 50);
-    win.setSkipTaskbar(true);
-    win.showInactive();
-  });
-  win.on('closed', () => {
-    log('debug', 'window closed');
-    mainWindow = null;
-    // A closed window shows nothing: a turn that ends now was not seen, whatever the last blur said.
-    onWindowFocus(false);
-  });
-  // Presence for paired browsers: they follow the desktop only while its window is foregrounded.
-  win.on('focus', () => onWindowFocus(true));
-  win.on('blur', () => onWindowFocus(false));
-  watchRenderer(win.webContents);
-  // A preload failure leaves the renderer with no IPC bridge; the crash, stall and load-failure
-  // handlers live with the recovery wiring below.
-  win.webContents.on('preload-error', (_e, preloadPath, error) => {
-    log('error', `preload script ${preloadPath} failed; the renderer has no IPC bridge: ${describeError(error)}`);
-  });
-  const saveBounds = () => {
-    // The off-screen test position is not user intent; never write it back to settings.
-    if (e2eQuiet) return;
-    if (win.isDestroyed() || win.isMinimized()) return;
-    const b = win.getBounds();
-    settings
-      .update({ windowBounds: { x: b.x, y: b.y, width: b.width, height: b.height } })
-      .catch((e) => log('warn', `could not save window bounds: ${describeError(e)}`));
-  };
-  win.on('resize', debounce(saveBounds, 500));
-  win.on('move', debounce(saveBounds, 500));
-
-  // A renderer that dies leaves a blank window and, without this, no record of why. Reload it
-  // (bounded) so a one-off crash self-heals and a crash loop says so in the log instead of
-  // reloading forever.
-  const recovery = new RendererRecovery({
-    log,
-    reload: () => {
-      if (!win.isDestroyed()) win.webContents.reload();
-    }
-  });
-  win.webContents.on('render-process-gone', (_event, details) => recovery.gone(details.reason, details.exitCode));
-  win.webContents.on('unresponsive', () => log('warn', 'renderer unresponsive — the window is not painting or taking input'));
-  win.webContents.on('responsive', () => log('info', 'renderer responsive again'));
-  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    // -3 is ERR_ABORTED: an in-page navigation (hash, redirect) that is not a failure.
-    if (isMainFrame && errorCode !== -3) log('error', `renderer failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
-  });
-  win.webContents.on('preload-error', (_event, preloadPath, error) => log('error', `preload script failed (${preloadPath}): ${error.stack ?? error.message}`));
-
-  // A reload drops every xterm instance; stop streaming to it and let paused shells run until it re-attaches.
-  win.webContents.on('did-start-loading', () => terminals?.detachAll());
-  win.webContents.on('did-finish-load', applyZoom);
-
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
-    return { action: 'deny' };
-  });
-  // The renderer is a single page: any navigation away from it (including relative file links
-  // from rendered markdown) would leave the app unusable, so block everything but the page itself.
-  win.webContents.on('will-redirect', (details) => {
-    if (details.isMainFrame && details.url.split('#', 1)[0] !== rendererDocument) details.preventDefault();
-  });
-  win.webContents.on('will-navigate', (e, url) => {
-    if (url.split('#', 1)[0] === rendererDocument) return;
-    e.preventDefault();
-    log('debug', `blocked in-app navigation to ${url.slice(0, 200)}${/^https?:\/\//i.test(url) ? ' (opened externally)' : ''}`);
-    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
-  });
-
-  // Renderer console output. Errors and warnings always reach the main log — a packaged build has no
-  // DevTools open, so a React render error or a failed fetch would otherwise vanish. Info/debug chatter
-  // only with the debug flag. (Uncaught exceptions also arrive structured via app:log; the console
-  // copy carries the source location Chromium attaches.)
-  const forwardDebug = isDev || !!process.env.VOCS_CODE_DEBUG;
-  win.webContents.on('console-message', (event) => {
-    const { level, message, lineNumber, sourceId } = event as unknown as { level: string | number; message: string; lineNumber: number; sourceId: string };
-    const lvl = level === 'error' || level === 3 ? 'error' : level === 'warning' || level === 2 ? 'warn' : 'debug';
-    if (lvl === 'debug' && !forwardDebug) return;
-    log(lvl, `[renderer console] ${message.slice(0, 4000)} (${sourceId}:${lineNumber})`);
-  });
-  if (process.env.VOCS_CODE_SCREENSHOT) {
-    win.webContents.once('did-finish-load', () => {
-      setTimeout(async () => {
-        try {
-          const img = await win.webContents.capturePage();
-          await import('node:fs/promises').then((fs) => fs.writeFile(process.env.VOCS_CODE_SCREENSHOT as string, img.toPNG()));
-          log('info', `screenshot written to ${process.env.VOCS_CODE_SCREENSHOT}`);
-        } catch (e) {
-          log('error', `screenshot failed: ${String(e)}`);
-        }
-      }, Number(process.env.VOCS_CODE_SCREENSHOT_DELAY ?? 2500));
-    });
-  }
-
-  if (isDev) {
-    void win.loadURL(rendererEntry.href);
-    win.webContents.openDevTools({ mode: 'detach' });
-  } else {
-    void win.loadFile(rendererFile);
-  }
-}
-
-function debounce<T extends (...a: never[]) => void>(fn: T, ms: number): T {
-  let t: NodeJS.Timeout | null = null;
-  return ((...args: never[]) => {
-    if (t) clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
-  }) as T;
 }
