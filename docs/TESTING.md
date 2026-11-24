@@ -158,7 +158,7 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Sidebar PR labels (`SessionManager`, `branchGitState`) | `tests/session-pr-refresh.test.ts`, `tests/git-branch-state.test.ts`, `tests/startup-perf.test.ts`, PR refresh block in `tests/unit.test.ts` + `e2e.git` (latest mentioned PR merges, with fake `gh` and the Git panel closed) |
 | GitHub PR links in transcripts (`Transcript.tsx`, `git:pullRequest`) | `tests/pr.test.ts`, `tests/git-panel-pr-dialog.test.tsx`, `tests/handler-registry.test.ts` + `e2e.git` (opening the linked PR in Standard and Zen) |
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
-| Copy image from the Files drawer or transcript lightbox | `tests/image-lightbox.test.tsx`, `tests/file-links.test.tsx` + `e2e.files` (real Electron image encoding; intercepts the clipboard write so it leaves the system clipboard alone) |
+| Transcript image lightbox zoom/pan, and copy image from the Files drawer or lightbox | `tests/image-lightbox.test.tsx`, `tests/file-links.test.tsx` + `e2e.files` (real wheel and drag gestures; native image encoding with the clipboard write intercepted) |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |
 | Harness-native slash commands (adapter reporting, `/` popover, `//name` route) | `tests/harness-commands.test.ts`, `tests/composer-harness-commands.test.tsx`, `tests/claude-goal-commands.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/acp-turn-state.test.ts`, `tests/codex-skills.test.ts` + `e2e.harness-commands` |
