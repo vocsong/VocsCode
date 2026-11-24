@@ -416,7 +416,8 @@ describe.runIf(enabled)('project knowledge panel', () => {
     const calls = [
       tool('call_recall_unqueried', 'memory_recall', {}),
       tool('call_recall_topical', 'memory_recall', { query: recallQuery }),
-      tool('call_compile', 'context_compile', { query: recallQuery }),
+      // Rationale ranks the learned note ahead of an identical transcript excerpt, regardless of index flush timing.
+      tool('call_compile', 'context_compile', { query: `Why ${recallQuery}?` }),
       recordDraft
     ];
     const requests: string[] = [];
@@ -607,7 +608,7 @@ describe.runIf(enabled)('project knowledge panel', () => {
       expect(beforeHistory).not.toContain(citation);
       expect(history).toContain('unverified recollection');
       const citedLine = history?.split('\n## ')[0]?.split('\n').find((line) => line.includes(citation));
-      expect(citedLine).toContain(lesson);
+      expect(citedLine, `Expected ${citation} in History:\n${compiled!.output}`).toContain(lesson);
       expect(citedLine).toContain(`[${citation} · ${path.basename(project)} · history`);
       expect(citedLine).toContain(`transcript:${ref}`);
 
