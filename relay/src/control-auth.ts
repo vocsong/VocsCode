@@ -1,11 +1,13 @@
-/** Controller assertions are NOT browser account assertions. The landing attests an OAuth
- *  controller, bound to exact body bytes and one fixed audience/method/path. */
+/** Controller assertions are NOT browser account assertions. Each transport attests an OAuth
+ *  controller, bound to exact body bytes and a fixed audience/method/path. */
 import { z } from 'zod';
 import { CONTROL_MAX_BYTES, controlPrincipalSchema, type ControllerPrincipal } from '../../src/shared/control';
 import type { RelayStore } from './core';
 
 export const CONTROL_PATH = '/v1/control/mcp';
 export const CONTROL_INTERNAL_PATH = '/__internal/control/mcp';
+export const CONTROL_DISCOVERY_INTERNAL_PATH = '/__internal/control/discovery';
+export const controlDiscoveryPrincipalSchema = controlPrincipalSchema.extend({ scopes: z.tuple([z.literal('control:discover')]) });
 export const CONTROLLER_ASSERTION_HEADER = 'x-vocs-controller-assertion';
 export const CONTROL_ASSERTION_TTL_MS = 30_000;
 export const CONTROL_NONCE_LIMIT = 2048;
@@ -91,11 +93,32 @@ function decode(value: string): Uint8Array<ArrayBuffer> | null {
   } catch { return null; }
 }
 
-/** Only the private Hub dispatch may use the rewritten path. The signed audience stays fixed. */
-export async function verifyControllerAssertion(request: Request, body: Uint8Array<ArrayBuffer>, secret: string | undefined, internal = false): Promise<VerifiedController | null> {
+function assertionMessage(audience: string, payload: string) {
+  return encoder.encode(`vocs.controller.assertion.v1\nPOST\n${audience}\n${payload}`);
+}
+
+async function bodyDigest(body: Uint8Array<ArrayBuffer>): Promise<string> {
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256', body))].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Minted inside the relay only, after a trusted binding supplies the short-lived identity.
+ *  A discovery assertion is not valid on the legacy controller route or vice versa. */
+export async function createDiscoveryAssertion(principal: z.infer<typeof controlDiscoveryPrincipalSchema>, body: Uint8Array<ArrayBuffer>, secret: string): Promise<string> {
+  const { validUntil, ...claims } = principal;
+  const payload = base64url(encoder.encode(JSON.stringify({ ...claims, v: 1,
+    expiresAt: validUntil, nonce: crypto.randomUUID(), bodyHash: await bodyDigest(body) })));
+  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = await crypto.subtle.sign('HMAC', key, assertionMessage(CONTROL_DISCOVERY_INTERNAL_PATH, payload));
+  return `${payload}.${base64url(new Uint8Array(signature))}`;
+}
+
+/** The legacy internal rewrite retains its original signed audience. Discovery has its own. */
+export async function verifyControllerAssertion(request: Request, body: Uint8Array<ArrayBuffer>, secret: string | undefined, channel: 'external' | 'internal' | 'discovery' = 'external'): Promise<VerifiedController | null> {
   const url = new URL(request.url);
   const value = request.headers.get(CONTROLLER_ASSERTION_HEADER);
-  if (request.method !== 'POST' || url.pathname !== (internal ? CONTROL_INTERNAL_PATH : CONTROL_PATH) || url.search ||
+  const audience = channel === 'discovery' ? CONTROL_DISCOVERY_INTERNAL_PATH : CONTROL_PATH;
+  const expectedPath = channel === 'internal' ? CONTROL_INTERNAL_PATH : audience;
+  if (request.method !== 'POST' || url.pathname !== expectedPath || url.search ||
       request.headers.has('content-encoding') || !value || value.length > 2048 || !secret || encoder.encode(secret).byteLength < 32 || body.byteLength > CONTROL_MAX_BYTES) return null;
   const parts = value.split('.');
   if (parts.length !== 2) return null;
@@ -104,16 +127,17 @@ export async function verifyControllerAssertion(request: Request, body: Uint8Arr
   if (!payload || !signature || signature.byteLength !== 32) return null;
   try {
     const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
-    if (!(await crypto.subtle.verify('HMAC', key, signature, encoder.encode(`vocs.controller.assertion.v1\nPOST\n${CONTROL_PATH}\n${parts[0]}`)))) return null;
+    if (!(await crypto.subtle.verify('HMAC', key, signature, assertionMessage(audience, parts[0])))) return null;
     const parsed = assertionSchema.safeParse(JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(payload)));
     if (!parsed.success) return null;
     const { v: _v, bodyHash, nonce, expiresAt, ...principal } = parsed.data;
     const now = Date.now();
     if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt > now + CONTROL_ASSERTION_TTL_MS ||
         principal.scopes.length === 0 || principal.scopes.some((scope, i) => i > 0 && principal.scopes[i - 1] >= scope)) return null;
-    const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', body))].map((b) => b.toString(16).padStart(2, '0')).join('');
-    if (hash !== bodyHash || expiresAt <= Date.now()) return null;
-    return { principal: { ...principal, validUntil: expiresAt }, nonce, expiresAt };
+    const identity = { ...principal, validUntil: expiresAt };
+    if (channel === 'discovery' && !controlDiscoveryPrincipalSchema.safeParse(identity).success) return null;
+    if (await bodyDigest(body) !== bodyHash || expiresAt <= Date.now()) return null;
+    return { principal: identity, nonce, expiresAt };
   } catch { return null; }
 }
 

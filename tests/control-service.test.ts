@@ -5,8 +5,11 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { CONTROL_RETRY_GRACE_MS, ControlJournal } from '../src/main/control/journal';
 import { CONTROL_OPEN_WINDOWS_PER_CONTROLLER, CONTROL_OPERATIONS_PER_CONTROLLER, ControlService } from '../src/main/control/service';
+import type { ControlResourceGuard } from '../src/main/control/workspace';
+import { MissionStore, type MissionState } from '../src/main/mission/store';
 import { defaultSettings } from '../src/main/settings';
 import { emptyUsage } from '../src/main/models/static-models';
+import { deferred } from '../src/main/util/async';
 import { writeJson } from '../src/main/util/fs';
 import { CONTROL_SCOPES, type ControllerPrincipal, type ControlOperation, type ControlGrantInput } from '../src/shared/control';
 import type { SessionManager } from '../src/main/session-manager';
@@ -15,7 +18,9 @@ import type { SessionMeta } from '../src/shared/types';
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))); });
 
-async function fixture(persist = writeJson) {
+type DiscoveryMethod = 'projects.list' | 'sessions.list' | 'sessions.get';
+
+async function fixture(persist = writeJson, workspaceRevision = () => 0) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-control-'));
   roots.push(root);
   const project = path.join(root, 'project');
@@ -39,9 +44,11 @@ async function fixture(persist = writeJson) {
     { kind: 'assistant', id: 'answer', ts: 1, text: 'hello' },
     { kind: 'approval', id: 'secret', ts: 2, request: { questions: [{ secret: true, question: 'secret question content' }] } },
   ]);
-  const sessions = { list: () => [meta], get: (id: string) => id === meta.id ? meta : undefined, runControlled, createControlled, interruptControlled, transcript } as unknown as SessionManager;
-  const guard = vi.fn(async () => undefined);
-  const service = new ControlService({ journal, sessions, settings: () => settings, guard, now: () => now });
+  const rows = [meta];
+  const list = vi.fn<SessionManager['list']>(() => rows);
+  const sessions = { list, get: (id: string) => rows.find((row) => id === row.id), runControlled, createControlled, interruptControlled, transcript } as unknown as SessionManager;
+  const guard = vi.fn<ControlResourceGuard>(async () => undefined);
+  const service = new ControlService({ journal, sessions, settings: () => settings, guard, workspaceRevision, now: () => now });
   const state = await service.ownerState();
   const projectId = state.projects[0]!.id;
   const grant: ControlGrantInput = { accountId: principal.accountId, controllerId: principal.controllerId, name: 'Test controller', projectIds: [projectId], scopes: [...CONTROL_SCOPES], permissionModes: ['ask'], harnesses: ['native'], expiresAt: now + 10_000_000 };
@@ -49,9 +56,120 @@ async function fixture(persist = writeJson) {
   await service.setEnabled(true);
   const window = await service.handle(principal, { method: 'windows.create', params: { instanceId: state.instanceId } }) as { admissionWindowId: string };
   const params = { instanceId: state.instanceId, projectId, sessionId: meta.id, admissionWindowId: window.admissionWindowId, idempotencyKey: 'same-intent', text: 'unique-prompt-content' };
-  return { root, project, settings, meta, principal, journal, dispatch, start, runControlled, createControlled, interruptControlled, transcript, sessions, guard, service, state, projectId, grant, params,
+  const discover = (method: DiscoveryMethod) => service.handle(principal, { method, params: {
+    instanceId: state.instanceId, ...(method !== 'projects.list' && { projectId }), ...(method === 'sessions.get' && { sessionId: meta.id }),
+  } });
+  return { root, project, settings, meta, rows, list, principal, journal, dispatch, start, runControlled, createControlled, interruptControlled, transcript, sessions, guard, service, state, projectId, grant, params, discover,
     advance(ms: number) { now += ms; principal.validUntil = now + 30_000; } };
 }
+
+async function duringDiscovery(f: Awaited<ReturnType<typeof fixture>>, method: DiscoveryMethod, change: () => Promise<void>,
+  matches: (resource: Parameters<ControlResourceGuard>[0]) => boolean = (resource) => method === 'projects.list' ? !!resource.projectRoot : !!resource.sessionId,
+) {
+  const entered = deferred<void>(), resume = deferred<void>();
+  const guard = f.guard.getMockImplementation()!;
+  let paused = false;
+  f.guard.mockImplementation(async (resource) => {
+    await guard(resource);
+    if (paused || !matches(resource)) return;
+    paused = true;
+    entered.resolve();
+    await resume.promise;
+  });
+  const result = f.discover(method).then((value) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    await Promise.race([entered.promise, result.then(() => { throw new Error('Discovery finished before reaching the selected guard'); })]);
+    await change();
+  } finally {
+    resume.resolve();
+    await result;
+    f.guard.mockImplementation(guard);
+  }
+  return result;
+}
+
+it('returns the existing discovery metadata without scheduling Git refreshes or writing the control journal', async () => {
+  const f = await fixture();
+  f.list.mockClear();
+  const transaction = vi.spyOn(f.journal, 'transaction');
+  const summary = { id: f.meta.id, title: f.meta.title, status: 'idle', harness: 'native', permissionMode: 'ask', model: undefined, ownerActionNeeded: false };
+  await expect(f.discover('projects.list')).resolves.toEqual({ items: [{ id: f.projectId, name: 'project' }], nextOffset: null });
+  await expect(f.discover('sessions.list')).resolves.toStrictEqual({ items: [summary], nextOffset: null });
+  await expect(f.discover('sessions.get')).resolves.toStrictEqual(summary);
+  expect(f.list.mock.calls).toEqual([[{ refreshGit: false }]]);
+  expect(transaction).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['projects.list', 'revoke'], ['projects.list', 'regrant'], ['sessions.list', 'revoke'],
+  ['sessions.list', 'disable and reenable'], ['sessions.get', 'regrant'],
+] as const)('denies in-flight %s after desktop %s', async (method, action) => {
+  const f = await fixture();
+  const result = await duringDiscovery(f, method, async () => {
+    if (action === 'disable and reenable') {
+      await f.service.setEnabled(false);
+      await f.service.setEnabled(true);
+    } else {
+      await f.service.revoke(f.journal.snapshot().grants[0]!.id);
+      if (action === 'regrant') await f.service.grant(f.grant);
+    }
+  });
+  expect(result).toMatchObject({ error: { code: 'denied' } });
+  if (action !== 'revoke') await expect(f.discover(method)).resolves.toBeDefined();
+});
+
+it.each(['moved', 'was replaced'] as const)('filters an earlier checked session that %s during a later session guard', async (change) => {
+  const f = await fixture();
+  const later = { ...structuredClone(f.meta), id: 's_later' };
+  f.rows.push(later);
+  const result = await duringDiscovery(f, 'sessions.list', async () => {
+    if (change === 'moved') {
+      const outside = path.join(f.root, 'outside');
+      await fs.mkdir(outside);
+      f.meta.cwd = outside;
+    } else f.rows[0] = { ...f.meta, createdAt: f.meta.createdAt + 1 };
+  }, ({ sessionId }) => sessionId === later.id);
+  expect(result).toEqual({ value: { items: [expect.objectContaining({ id: later.id })], nextOffset: null } });
+});
+
+it.each(['projects.list', 'sessions.list', 'sessions.get'] as const)('does not publish %s for a directory replaced during its guard', async (method) => {
+  const f = await fixture();
+  const directory = method === 'projects.list' ? f.project : path.join(f.project, 'worktree');
+  if (method !== 'projects.list') { await fs.mkdir(directory); f.meta.cwd = directory; }
+  const result = await duringDiscovery(f, method, async () => {
+    await fs.rename(directory, `${directory}-previous`);
+    await fs.mkdir(directory);
+  });
+  if (method === 'sessions.get') expect(result).toMatchObject({ error: { code: 'denied' } });
+  else expect(result).toEqual({ value: { items: [], nextOffset: null } });
+});
+
+it.each(['projects.list', 'sessions.list', 'sessions.get'] as const)('denies %s across Mission ownership publication even if snapshotting fails', async (method) => {
+  type OwnershipState = MissionState & { owned: boolean };
+  let journal: MissionStore<OwnershipState> | undefined;
+  const f = await fixture(writeJson, () => journal?.publicationRevision ?? 0);
+  const store = journal = new MissionStore<OwnershipState>(f.root, { validate: () => true, snapshotEvery: 1 });
+  const id = 'mission-test';
+  await store.create({ id, schemaVersion: 1, revision: 0, lastEventSequence: 0, owned: false }, {
+    actor: 'user:test', expectedRevision: 0, idempotencyKey: 'create', kind: 'create',
+  });
+  f.guard.mockImplementation(async ({ projectRoot, sessionId }) => {
+    const resource = method === 'projects.list' ? projectRoot === f.state.projects[0]!.canonicalRoot : sessionId === f.meta.id;
+    if (resource && store.get(id)?.owned) throw new Error('Mission-owned resource');
+  });
+  const result = await duringDiscovery(f, method, async () => {
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('injected snapshot failure'));
+    try {
+      await expect(store.transact(id, { actor: 'user:test', expectedRevision: 1, idempotencyKey: 'own', kind: 'own' }, (draft) => {
+        draft.owned = true;
+      })).rejects.toMatchObject({ code: 'BLOCKED' });
+      expect(store.get(id)?.owned).toBe(true);
+    } finally { rename.mockRestore(); }
+  });
+  expect(result).toMatchObject({ error: { code: 'denied' } });
+  if (method === 'sessions.get') await expect(f.discover(method)).rejects.toMatchObject({ code: 'denied' });
+  else await expect(f.discover(method)).resolves.toEqual({ items: [], nextOffset: null });
+});
 
 it('deduplicates concurrent mutation requests and commits one receipt/event sequence without prompt content', async () => {
   const f = await fixture();

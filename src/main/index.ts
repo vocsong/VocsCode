@@ -582,6 +582,7 @@ async function main(): Promise<void> {
   };
   const control = new ControlService({
     journal: controlJournal, sessions: sessionsRef, settings: () => settings.get(), guard: guardControlResource,
+    workspaceRevision: () => missionStore.publicationRevision,
   });
   const localControl = new LocalControl({
     supported: process.platform === 'win32', userData, roots: () => settings.get().folders,

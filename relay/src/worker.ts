@@ -6,7 +6,7 @@ import { ENROLL_GRANT_TTL_MS, hashToken, PairError } from './core';
 import { accountIdFromDeviceId, ACCOUNT_ASSERTION_HEADER, INTERNAL_ACCOUNT_AUTH_HEADER, INTERNAL_ACCOUNT_ID_HEADER, isAccountId, LEGACY_ACCOUNT_ID, verifyAccountAssertion } from './account';
 import { admit, edgeLimited, forwardAdmitted } from './edge';
 import { HubRouter, type SocketRegistry } from './hub';
-import { CONTROL_INTERNAL_PATH, CONTROL_PATH, CONTROLLER_ASSERTION_HEADER, controlHttpError, controlJson, readControlBytes, verifyControllerAssertion } from './control-auth';
+import { CONTROL_DISCOVERY_INTERNAL_PATH, CONTROL_INTERNAL_PATH, CONTROL_PATH, CONTROLLER_ASSERTION_HEADER, controlHttpError, controlJson, readControlBytes, verifyControllerAssertion } from './control-auth';
 import { ControlHostBridge } from './control-host';
 import { ControlMcpGateway } from './control-mcp';
 import { FixedWindowLimiter } from './rate';
@@ -38,6 +38,8 @@ export interface Env {
   ACCOUNT_ASSERTION_SECRET?: string;
   /** Opt-in only after security + real-client qualification; unset in production config. */
   CONTROL_MCP_ENABLED?: string;
+  /** Binding-only Vocs Code discovery; does not enable the legacy public-path dispatch. */
+  CONTROL_DISCOVERY_ENABLED?: string;
   /** Relay-only HMAC key for device-id route hints. Keep stable until a device-id migration. */
   DEVICE_ROUTE_SECRET?: string;
   /** Edge rate limits (wrangler.jsonc `ratelimits`); absent from configs that predate them. */
@@ -120,6 +122,10 @@ export class Hub {
     return value;
   }
 
+  private controlSocketsEnabled(): boolean {
+    return this.env.CONTROL_MCP_ENABLED === '1' || this.env.CONTROL_DISCOVERY_ENABLED === '1';
+  }
+
   private router(accountId: string): HubRouter<WebSocket> {
     return new HubRouter({
       store: this.store,
@@ -127,7 +133,7 @@ export class Hub {
       deviceRouteSecret: this.env.DEVICE_ROUTE_SECRET,
       now: Date.now,
       sockets: this.sockets(),
-      controlResponse: this.env.CONTROL_MCP_ENABLED === '1'
+      controlResponse: this.controlSocketsEnabled()
         ? (ws, hostId, raw) => this.controlHosts.response(ws, hostId, accountId, raw).catch(() => this.controlHosts.closed(ws))
         : undefined
     });
@@ -163,10 +169,11 @@ export class Hub {
   async fetch(request: Request): Promise<Response> {
     const accountId = request.headers.get(INTERNAL_ACCOUNT_ID_HEADER) ?? '';
     const url = new URL(request.url);
-    if (url.pathname === CONTROL_INTERNAL_PATH) {
-      if (this.env.CONTROL_MCP_ENABLED !== '1') return controlJson({ error: 'not found' }, 404);
+    if (url.pathname === CONTROL_INTERNAL_PATH || url.pathname === CONTROL_DISCOVERY_INTERNAL_PATH) {
+      const discovery = url.pathname === CONTROL_DISCOVERY_INTERNAL_PATH;
+      if ((discovery ? this.env.CONTROL_DISCOVERY_ENABLED : this.env.CONTROL_MCP_ENABLED) !== '1') return controlJson({ error: 'not found' }, 404);
       if (!(await this.pinAccount(accountId))) return controlJson({ error: 'invalid account' }, 403);
-      return this.control.handle(request, accountId, this.env.ACCOUNT_ASSERTION_SECRET);
+      return this.control.handle(request, accountId, this.env.ACCOUNT_ASSERTION_SECRET, discovery ? 'discovery' : 'internal');
     }
     if (!(await this.pinAccount(accountId))) return json({ error: 'invalid account' }, 403);
     // Only the bound EnrollmentDirectory may reach this private subroute. The public Worker refuses
@@ -193,7 +200,7 @@ export class Hub {
       const pair = new WebSocketPair();
       // Tags are Hub-local: distinct account Durable Objects cannot fan out across tenants.
       this.state.acceptWebSocket(pair[1], [`${kind}:${auth.deviceId}`, BROADCAST_TAG[kind]]);
-      if (kind === 'host' && this.env.CONTROL_MCP_ENABLED === '1') this.controlHosts.opened(pair[1], auth.deviceId);
+      if (kind === 'host' && this.controlSocketsEnabled()) this.controlHosts.opened(pair[1], auth.deviceId);
       // Revocation may commit after ticket consumption but before acceptance; re-check before drain.
       if (kind === 'client') await this.router(accountId).clientOpened(pair[1], auth.deviceId);
       return new Response(null, { status: 101, webSocket: pair[0] });
