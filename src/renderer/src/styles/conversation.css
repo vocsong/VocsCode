@@ -226,23 +226,20 @@
   border-radius: inherit;
   pointer-events: none;
   fill: none;
-  stroke: color-mix(in srgb, var(--blue) 74%, var(--fg));
-  stroke-linecap: round;
+  stroke: color-mix(in srgb, var(--blue) 68%, var(--fg));
+  stroke-linecap: butt;
   stroke-linejoin: round;
-  filter: drop-shadow(0 0 0.8px var(--blue));
+}
+.fast-mode-electric-bolt > path {
+  /* The dash covers one whole path; the leader reveals it from the root forward. */
+  stroke-dasharray: 100 100;
 }
 .fast-mode-electric-trace {
-  stroke-width: 0.8;
+  stroke-width: 0.95;
 }
 .fast-mode-electric-fork {
-  stroke-width: 0.5;
+  stroke-width: 0.55;
   opacity: 0.72;
-}
-/* Wide enough to reveal the thickest flare and its fine branches. */
-.fast-mode-electric-flow {
-  stroke: white;
-  stroke-width: 10;
-  stroke-linecap: butt;
 }
 /* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */
 .pill-effort {

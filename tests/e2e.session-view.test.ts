@@ -864,20 +864,6 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       sessionId: SID, ts: Date.now(),
       event: { type: 'models', models: [{ provider: model.provider, id: model.model, displayName, supportedEfforts: ['low', 'medium', 'high'] }] }
     };
-    const expectDisjointRimSpans = (spans: { start: number; end: number }[], label: string, clearance = 0) => {
-      const normalized = spans.map(({ start, end }) => {
-        const from = ((start % 100) + 100) % 100;
-        return { start: from, end: from + (end - start) };
-      });
-      for (const [i, a] of normalized.entries()) {
-        for (let j = i + 1; j < normalized.length; j++) {
-          const b = normalized[j];
-          // Compare against the previous and next turn too: a span can wrap past 100.
-          const gap = Math.min(...[-100, 0, 100].map((turn) => Math.max(a.start - (b.end + turn), b.start + turn - a.end)));
-          expect(gap, `${label}: arcs ${i + 1} and ${j + 1} stay apart`).toBeGreaterThanOrEqual(clearance);
-        }
-      }
-    };
     for (const theme of ['dark', 'light'] as const) {
       const themed: PushPayloads['push:settingsChanged'] = { ...settings, theme };
       await app!.evaluate(({ BrowserWindow }, payload) => {
@@ -892,10 +878,8 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
       const electric = box.locator(':scope > svg.fast-mode-electric');
-      const flow = electric.locator('.fast-mode-electric-flow');
-      const trace = electric.locator('.fast-mode-electric-trace');
-      const arcPaths = electric.locator('.fast-mode-electric-flow, .fast-mode-electric-trace');
-      const playingPaths = () => arcPaths.evaluateAll((paths) => paths.filter((el) => el.getAnimations().some((animation) => animation.playState === 'running')).length);
+      const traces = electric.locator('path.fast-mode-electric-trace');
+      const playingTraces = () => traces.evaluateAll((paths) => paths.filter((el) => el.getAnimations().some((a) => a.playState === 'running')).length);
       await box.evaluate((el) => {
         if (el.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
       });
@@ -903,137 +887,162 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
       expect(await modelPill.locator('svg.fast-mode-electric').count()).toBe(0);
       await win.emulateMedia({ reducedMotion: 'no-preference' });
       await electric.waitFor({ state: 'visible' });
-      expect(await electric.evaluate((el) => getComputedStyle(el).pointerEvents)).toBe('none');
-      await expect.poll(() => flow.count()).toBe(5);
-      await expect.poll(() => trace.count()).toBe(5);
-      await expect.poll(playingPaths).toBe(10);
+      expect(await electric.evaluate((el) => [getComputedStyle(el).pointerEvents, getComputedStyle(el).filter])).toEqual(['none', 'none']);
+      expect(await electric.locator('defs, mask, [mask]').count()).toBe(0);
+      await expect.poll(playingTraces).toBe(5);
 
-      const cycles = await arcPaths.evaluateAll(async (paths) => {
-        const isMask = (el: Element) => el.classList.contains('fast-mode-electric-flow');
-        const current = () => paths.map((el) => {
-          const animations = el.getAnimations();
-          if (animations.length > 1) throw new Error(`Multiple Fast animations on ${el.getAttribute('class')}`);
-          return animations[0];
+      const readBolts = (animated: boolean) => electric.evaluate(async (el, animated) => {
+        const svg = el as SVGSVGElement;
+        const rim = svg.querySelector<SVGRectElement>('rect')!;
+        const bounds = rim.getBBox();
+        const radius = rim.rx.baseVal.value;
+        const { width, height } = svg.viewBox.baseVal;
+        if (width !== svg.clientWidth || height !== svg.clientHeight || getComputedStyle(rim).visibility !== 'hidden') {
+          throw new Error('Fast rim sampler must be hidden and measured in CSS pixels');
+        }
+        const groups = [...svg.querySelectorAll('g.fast-mode-electric-bolt')].map((group) => {
+          const trunks = group.querySelectorAll<SVGPathElement>('path.fast-mode-electric-trace');
+          if (trunks.length !== 1) throw new Error(`Expected one trunk per Fast bolt, found ${trunks.length}`);
+          return { group, trunk: trunks[0] };
         });
-        const sample = (animations: Animation[]) => paths.map((el, i) => {
-          const effect = animations[i]?.effect;
-          if (!(effect instanceof KeyframeEffect)) throw new Error(`Missing Fast animation on ${el.getAttribute('class')}`);
+        const readStroke = (path: SVGPathElement) => {
+          const style = getComputedStyle(path);
+          return { offset: Number.parseFloat(style.strokeDashoffset), opacity: Number(style.opacity), width: Number.parseFloat(style.strokeWidth) };
+        };
+        const readPath = (path: SVGPathElement) => {
+          const d = path.getAttribute('d')?.trim() ?? '';
+          const style = getComputedStyle(path);
+          const [dash, gap = dash] = style.strokeDasharray.split(/[,\s]+/).map(Number.parseFloat);
+          const stroke = readStroke(path);
+          const geometry = {
+            d, length: d ? path.getTotalLength() : 0, normalized: Number(path.getAttribute('pathLength')) === 100,
+            open: /^[Mm]/.test(d) && !/[MmZz]/.test(d.slice(1)),
+            crisp: style.stroke !== 'none' && style.fill === 'none' && style.filter === 'none',
+            fullDash: dash === 100 && gap >= 100,
+            stillVisible: (style.strokeDasharray === 'none' || (dash >= 100 && Math.abs(stroke.offset) < 0.01)) &&
+              Number(style.strokeOpacity) > 0 && path.checkVisibility({ opacityProperty: true, visibilityProperty: true }),
+            stroke
+          };
+          if (!animated) return { ...geometry, growth: null };
+          const [animation, extra] = path.getAnimations();
+          const effect = animation?.effect;
+          if (extra || !(effect instanceof KeyframeEffect)) throw new Error(`Expected one Fast animation on ${path.getAttribute('class')}`);
           const { delay = 0, duration } = effect.getTiming();
-          if (typeof duration !== 'number' || duration <= 0) throw new Error('Fast discharge has no positive duration');
-          // Sample computed SVG styles without seeking or finishing the live animation.
+          if (typeof duration !== 'number' || duration <= 0) throw new Error('Fast bolt has no positive duration');
+          const offsets = effect.getKeyframes().map(({ computedOffset }) => computedOffset);
+          const times = offsets.flatMap((offset, i) => i === 0 ? [offset] : [(offsets[i - 1] + offset) / 2, offset]);
+          // Probe computed styles on a copy so live strikes still finish naturally.
           const probe = new Animation(new KeyframeEffect(effect));
           try {
-            const samples = effect.getKeyframes().map(({ computedOffset }) => {
-              probe.currentTime = delay + Math.min(computedOffset, 0.999999) * duration;
-              const style = getComputedStyle(el);
-              return {
-                opacity: Number(style.opacity),
-                dashes: style.strokeDasharray.split(/[,\s]+/).map(Number.parseFloat),
-                start: -Number.parseFloat(style.strokeDashoffset),
-                width: Number.parseFloat(style.strokeWidth)
-              };
+            const samples = times.map((time) => {
+              probe.currentTime = delay + Math.min(time, 0.999999) * duration;
+              return readStroke(path);
             });
-            return { isMask: isMask(el), delay, duration, samples };
+            return { ...geometry, growth: { delay, duration, offsets, samples } };
           } finally {
             probe.cancel();
           }
+        };
+        const snapshot = () => groups.map(({ group, trunk }) => {
+          const main = readPath(trunk);
+          const points = Array.from({ length: Math.ceil(main.length) + 1 }, (_, i) => trunk.getPointAtLength(Math.min(i, main.length)));
+          // On the long straight sides, the Y excursion is the bolt's zigzag, not a corner turn.
+          const straight = points.filter(({ x }) => x > bounds.x + radius + 1 && x < bounds.x + bounds.width - radius - 1);
+          const middle = bounds.y + bounds.height / 2;
+          const excursion = Math.max(...[true, false].map((top) => {
+            const ys = straight.filter(({ y }) => (y < middle) === top).map(({ y }) => y);
+            return ys.length ? Math.max(...ys) - Math.min(...ys) : 0;
+          }));
+          const slots = [...group.querySelectorAll<SVGPathElement>('path.fast-mode-electric-fork')];
+          const twigs = slots.filter((path) => path.hasAttribute('d')).map((path) => {
+            const root = path.getPointAtLength(0);
+            return { ...readPath(path), attached: points.some(({ x, y }) => Math.hypot(x - root.x, y - root.y) <= 0.55) };
+          });
+          return { main, twigs, slots: slots.length, excursion,
+            start: Number.parseFloat(group.getAttribute('data-rim-start') ?? ''),
+            extent: Number.parseFloat(group.getAttribute('data-rim-extent') ?? '') };
         });
+        if (!animated) return [snapshot()];
+        const current = () => groups.map(({ trunk }) => trunk.getAnimations()[0]);
         const initial = current();
-        const first = sample(initial);
-        // Wait for real finishes and replacements, not a fixed sleep or another initial setup.
+        const first = snapshot();
         let finished = false;
         let cancelled = false;
-        void Promise.all(initial.filter((_, i) => isMask(paths[i])).map((animation) => animation.finished)).then(
-          () => { finished = true; },
-          () => { cancelled = true; }
+        void Promise.all(initial.map((animation) => animation.finished)).then(
+          () => { finished = true; }, () => { cancelled = true; }
         );
         const deadline = performance.now() + 4000;
         while (!cancelled && performance.now() < deadline) {
           const next = current();
-          if (finished && next.every((animation, i) => animation?.playState === 'running' && animation !== initial[i])) {
-            return [first, sample(next)];
-          }
+          if (finished && next.every((a, i) => a?.playState === 'running' && a !== initial[i])) return [first, snapshot()];
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        throw new Error('Fast discharges did not finish naturally and renew all five animation pairs');
-      });
-      for (const [cycle, discharges] of cycles.entries()) {
-        const state = `${theme}: ${cycle === 0 ? 'current' : 'renewed'} discharges`;
-        const masks = discharges.filter(({ isMask }) => isMask);
-        expect(new Set(masks.map(({ delay }) => delay)).size, `${state} have varied waits`).toBeGreaterThan(1);
-        expect(new Set(masks.map(({ duration }) => duration)).size, `${state} have varied lifetimes`).toBeGreaterThan(1);
-        const peakLengths: number[] = [];
-        const spans = masks.map(({ samples, delay }, i) => {
-          const label = `${state}, arc ${i + 1}`;
-          if (cycle > 0) {
-            expect(delay, `${label} waits briefly before its next burst`).toBeGreaterThanOrEqual(60);
-            expect(delay, `${label} waits briefly before its next burst`).toBeLessThanOrEqual(235);
-          }
-          expect(samples[0].opacity, `${label} starts dark`).toBeLessThan(0.01);
-          expect(samples.at(-1)!.opacity, `${label} fades out`).toBeLessThan(0.01);
-          expect(samples.every(({ dashes }) => dashes.length === 2 && dashes[0] > 0 && Math.abs(dashes[0] + dashes[1] - 100) < 0.01), `${label} reveals one segment on the 100-unit rim`).toBe(true);
-          const lit = samples.filter(({ opacity }) => opacity > 0.2);
-          expect(lit.length, `${label} lights up`).toBeGreaterThan(1);
-          expect(new Set(lit.map(({ dashes }) => dashes[0])).size, `${label} changes length while lit`).toBeGreaterThan(1);
-          expect(new Set(lit.map(({ start }) => start)).size, `${label} travels while lit`).toBeGreaterThan(1);
-          // The reserved span covers the full drift plus the longest dash, even at dark endpoints.
-          const starts = samples.map(({ start }) => start);
-          const length = Math.max(...samples.map(({ dashes }) => dashes[0]));
-          peakLengths.push(length);
-          return { start: Math.min(...starts), end: Math.max(...starts) + length };
-        });
-        expect(new Set(peakLengths).size, `${state} have different peak arc lengths`).toBeGreaterThan(1);
-        expectDisjointRimSpans(spans, state, 2.49); // Allow for computed-style rounding of the 2.5-unit gap.
-        for (const { duration } of discharges) {
-          expect(duration, `${state} last less than one second`).toBeGreaterThanOrEqual(410);
-          expect(duration, `${state} last less than one second`).toBeLessThanOrEqual(890);
-        }
-        for (const { samples } of discharges.filter(({ isMask }) => !isMask)) {
-          const widths = samples.map(({ width }) => width);
-          const peak = Math.max(...widths);
-          const ends = Math.max(widths[0], widths.at(-1)!);
-          expect(Math.min(...widths), `${state} have visible stroke widths`).toBeGreaterThan(0);
-          expect(ends, `${state} start and end as hairlines`).toBeLessThan(0.8);
-          expect(peak, `${state} thicken at the peak`).toBeGreaterThanOrEqual(2.2);
-          expect(peak, `${state} limit the peak width`).toBeLessThanOrEqual(3.6);
-        }
-      }
+        throw new Error('All five Fast trunks must finish naturally and renew');
+      }, animated);
 
+      const cycles = await readBolts(true);
       await win.emulateMedia({ reducedMotion: 'reduce' });
       await expect.poll(() => electric.evaluate((el) => el.getAnimations({ subtree: true }).length)).toBe(0);
-      const stillMasks = await flow.evaluateAll((els) => els.map((el) => {
-        const path = el as SVGPathElement;
-        const style = getComputedStyle(path);
-        const dashes = style.strokeDasharray.split(/[,\s]+/).map(Number.parseFloat);
-        const start = -Number.parseFloat(style.strokeDashoffset);
-        return {
-          id: path.closest('mask')?.id,
-          start, end: start + dashes[0],
-          revealsTrace: Number(path.getAttribute('pathLength')) === 100 && path.getTotalLength() > 0 &&
-            style.stroke === 'rgb(255, 255, 255)' && style.visibility === 'visible' && Number(style.opacity) > 0 &&
-            Number(style.strokeOpacity) > 0 && Number.parseFloat(style.strokeWidth) > 0 &&
-            dashes.length === 2 && dashes[0] > 0 && dashes[0] < 100 && dashes[1] > 0
-        };
-      }));
-      expect(stillMasks.map(({ revealsTrace }) => revealsTrace)).toEqual([true, true, true, true, true]);
-      expectDisjointRimSpans(stillMasks, `${theme}: reduced motion`);
-      const still = await trace.evaluateAll((els) => els.map((el) => {
-        const path = el as SVGPathElement;
-        const { width, height } = path.ownerSVGElement!.viewBox.baseVal;
-        const bounds = path.getBBox();
-        const style = getComputedStyle(path);
-        return {
-          mask: path.closest('[mask]')?.getAttribute('mask'),
-          coversRim: bounds.x < 5 && bounds.y < 5 && bounds.x + bounds.width > width - 5 && bounds.y + bounds.height > height - 5,
-          hairline: Number.parseFloat(style.strokeWidth) > 0 && Number.parseFloat(style.strokeWidth) < 1,
-          visible: style.stroke !== 'none' && path.checkVisibility({ opacityProperty: true, visibilityProperty: true })
-        };
-      }));
-      expect(new Set(stillMasks.map(({ id }) => id)).size).toBe(5);
-      expect(still).toEqual(stillMasks.map(({ id }) => ({ mask: `url(#${id})`, coversRim: true, hairline: true, visible: true })));
-      expect(await electric.locator('.fast-mode-electric-fork').count()).toBeGreaterThan(0);
+      cycles.push(...await readBolts(false));
+      const excursion = Math.max(...cycles.flatMap((bolts) => bolts.map((bolt) => bolt.excursion)));
+      expect(excursion, `${theme}: straight-edge zigzag in CSS pixels`).toBeGreaterThanOrEqual(6);
+      expect(excursion, `${theme}: straight-edge zigzag in CSS pixels`).toBeLessThanOrEqual(10.5);
+      for (const [cycle, bolts] of cycles.entries()) {
+        const state = `${theme}: ${['live', 'renewed', 'reduced motion'][cycle]} bolts`;
+        expect(bolts, state).toHaveLength(5);
+        const spans = [...bolts].sort((a, b) => a.start - b.start);
+        for (const [i, { start, extent }] of spans.entries()) {
+          expect(start, state).toBeGreaterThanOrEqual(0);
+          expect(start, state).toBeLessThan(100);
+          expect(extent, state).toBeGreaterThanOrEqual(3 - 0.01); // Crowded gaps may shorten a strike.
+          expect(extent, state).toBeLessThanOrEqual(17);
+          // The last interval can wrap past 100; compare it to the first in the next turn.
+          const next = spans[i + 1]?.start ?? spans[0].start + 100;
+          expect(next - (start + extent), `${state}: reservation ${i + 1} keeps its gap`).toBeGreaterThanOrEqual(2.49);
+        }
+        if (cycle < 2) expect(new Set(bolts.map(({ main }) => main.growth?.offsets.join(','))).size, `${state}: varied growth timing`).toBeGreaterThan(1);
+        for (const [i, { main, twigs, slots }] of bolts.entries()) {
+          const label = `${state}, bolt ${i + 1}`;
+          expect(main.length, label).toBeGreaterThan(0);
+          expect(slots, label).toBeLessThanOrEqual(10);
+          expect(twigs.length, label).toBeGreaterThanOrEqual(2);
+          expect(twigs.every(({ attached, length }) => attached && length >= 1.5 && length <= 11), `${label}: short attached twigs`).toBe(true);
+          if (cycle === 1) {
+            expect(main.d, `${label}: new geometry after natural finish`).not.toBe(cycles[0][i].main.d);
+            expect(main.growth?.delay, label).toBeGreaterThanOrEqual(60);
+            expect(main.growth?.delay, label).toBeLessThanOrEqual(235);
+          }
+          if (main.growth) {
+            expect(main.growth.duration, label).toBeGreaterThanOrEqual(410);
+            expect(main.growth.duration, label).toBeLessThanOrEqual(890);
+          }
+          for (const [j, path] of [main, ...twigs].entries()) {
+            const part = `${label}, ${j === 0 ? 'trunk' : `twig ${j}`}`;
+            const { growth } = path;
+            const width = j === 0 ? 0.95 : 0.55;
+            expect(path.open && path.normalized && path.crisp, `${part}: one open normalized stroke`).toBe(true);
+            if (!growth) {
+              expect(path.stillVisible, `${part}: visible without animation`).toBe(true);
+              expect(path.stroke.width, part).toBeCloseTo(width, 2);
+              continue;
+            }
+            expect(path.fullDash, `${part}: a dash and gap covering the path`).toBe(true);
+            if (j > 0) expect(growth.delay, `${part}: sprouts after the trunk`).toBeGreaterThan(main.growth!.delay);
+            const { samples } = growth;
+            const offsets = samples.map(({ offset }) => offset);
+            expect(offsets[0], part).toBeCloseTo(100, 2);
+            expect(offsets.at(-1), part).toBeCloseTo(0, 2);
+            expect(offsets.every((offset, k) => k === 0 || offset <= offsets[k - 1] + 0.01), `${part}: grows without retreating`).toBe(true);
+            const partial = samples.filter(({ offset, opacity }) => offset > 0.01 && offset < 99.99 && opacity > 0.1);
+            expect(new Set(partial.map(({ offset }) => offset)).size, `${part}: lit at partial lengths`).toBeGreaterThanOrEqual(j === 0 ? 2 : 1);
+            expect(samples.some(({ offset, opacity }) => Math.abs(offset) < 0.01 && opacity > 0.2), `${part}: fully grown before fading`).toBe(true);
+            expect(samples.at(-1)!.opacity, `${part}: fades out`).toBeLessThan(0.01);
+            expect(samples.every((sample) => Math.abs(sample.width - width) < 0.01), `${part}: fixed hairline width`).toBe(true);
+          }
+        }
+      }
       await win.emulateMedia({ reducedMotion: 'no-preference' });
-      await expect.poll(playingPaths).toBe(10);
+      await expect.poll(playingTraces).toBe(5);
       const permission = footer.getByRole('button', { name: 'Permission mode: Full', exact: true });
       await permission.waitFor();
 
@@ -1126,8 +1135,12 @@ await import(${JSON.stringify(pathToFileURL(desktopEntry).href)});
     await expect.poll(() => footer.locator('.pill[title="Model"]').evaluate((el) => Number(getComputedStyle(el.closest('.dropdown')!).opacity))).toBe(0);
     const zenElectric = box.locator(':scope > svg.fast-mode-electric');
     expect(await box.evaluate((el) => el.matches(':focus-within'))).toBe(false);
-    expect(await zenElectric.locator('.fast-mode-electric-trace').first().evaluate((el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true }))).toBe(true);
-    await expect.poll(() => zenElectric.locator('.fast-mode-electric-flow').first().evaluate((el) => el.getAnimations().some((animation) => animation.playState === 'running'))).toBe(true);
+    await expect.poll(() => zenElectric.locator('path.fast-mode-electric-trace').evaluateAll((paths) => paths.some((el) => {
+      const style = getComputedStyle(el);
+      return el.getAnimations().some((a) => a.playState === 'running') &&
+        el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) &&
+        Number(style.opacity) > 0.05 && Number.parseFloat(style.strokeDashoffset) < 99;
+    }))).toBe(true);
     await box.screenshot({ path: path.join(shots, 'session-view-fast-unfocused-zen.png') });
 
     const saved = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
