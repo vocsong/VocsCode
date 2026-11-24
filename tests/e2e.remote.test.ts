@@ -347,7 +347,8 @@ describe.runIf(enabled)('remote access settings', () => {
     async function expectOff(panel: Locator) {
       await expect.poll(() => panel.innerText(), { timeout: 10_000 }).toContain('Local discovery is off.');
       const projects = panel.getByRole('group', { name: 'Projects to grant' });
-      expect(await projects.getByRole('checkbox').count()).toBe(2);
+      // The project list loads after the status line; a slow runner can count it before it renders.
+      await expect.poll(() => projects.getByRole('checkbox').count(), { timeout: 10_000 }).toBe(2);
       expect(await projects.getByRole('checkbox', { checked: true }).count()).toBe(0);
       expect(await panel.getByRole('checkbox', { name: /apps running as this Windows user/ }).isChecked()).toBe(false);
       expect(await panel.getByRole('button', { name: 'Enable grant', exact: true }).isEnabled()).toBe(false);
