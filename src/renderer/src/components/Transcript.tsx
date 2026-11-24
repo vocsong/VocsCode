@@ -86,6 +86,7 @@ function transcriptFileKind(path: string, root: string, canRevealOutside: boolea
 /** `active` is false for a split pane the user is not working in: it keeps streaming, but window-wide keys skip it. */
 export function Transcript({ session, active = true }: { session: SessionMeta; active?: boolean }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
+  const sessionProcesses = useStore((s) => (isWeb ? EMPTY : (s.processSummary?.bySession?.[session.id] ?? EMPTY)));
   const loaded = useStore((s) => s.loaded[session.id]);
   const transcriptError = useStore((s) => s.transcriptErrors[session.id]);
   const loadTranscript = useStore((s) => s.loadTranscript);
@@ -227,7 +228,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
     if (stick && !findOpen && !jumpHere && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, session.ongoing, stick, findOpen, jumpHere, measureVersion]);
+  }, [items, session.ongoing, sessionProcesses, stick, findOpen, jumpHere, measureVersion]);
 
   // Prepending older items must not move what the reader is looking at: restore the distance from
   // the bottom captured before the prepend. Only runs `some` when the head actually changed.

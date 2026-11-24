@@ -79,9 +79,11 @@ export function ongoingStripHeadline(items: readonly OngoingItem[]): string {
     if (item.kind === 'subagent') return item.agent ? `Background ${item.agent} running` : 'Background subagent running';
     if (item.kind === 'hook') return item.detail ? `${item.detail} hook running` : 'Hook running';
     if (item.detail === 'wakeup') return 'Delivering subagent result…';
-    if (item.detail === 'local_bash') return 'Background command running';
+    if (item.detail === 'local_bash' || item.detail === 'terminal') return 'Background command running';
     if (item.detail === 'local_workflow') return 'Background workflow running';
     if (item.detail === 'mcp_task') return 'Background MCP task running';
+    if (item.detail === 'schedule' || item.detail === 'cron') return 'Scheduled task pending';
+    if (item.detail === 'timer') return 'Timer running';
     return 'Background task running';
   }
   let subagents = 0;

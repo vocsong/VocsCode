@@ -423,6 +423,25 @@
 .header-ongoing-pill:hover {
   background: color-mix(in srgb, var(--blue) 22%, transparent);
 }
+.header-processes-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.header-processes-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
 .ongoing-stack {
   display: flex;
   flex-direction: column;
@@ -499,7 +518,8 @@
   overflow: hidden;
 }
 .ongoing-meta,
-.ongoing-hint {
+.ongoing-hint,
+.ongoing-pid {
   white-space: nowrap;
   flex-shrink: 0;
 }

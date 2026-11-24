@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { GitSummary, SessionMeta } from '../../../shared/types';
 import { hasOngoingWork, ongoingBadgeLabel } from '../../../shared/ongoing';
-import { invoke } from '../api';
+import type { SessionOngoingProcess } from '../../../shared/processes';
+import { invoke, isWeb } from '../api';
 import { basename } from '../format';
 import { archiveSession } from '../sessionActions';
 import { useGitSummary } from '../gitReads';
@@ -18,6 +19,8 @@ import { canClosePane, canSplit } from '../panes';
  *
  * `paneId` is the split pane this header sits in; it carries the split and close-pane actions.
  */
+const EMPTY_PROCS: readonly SessionOngoingProcess[] = [];
+
 export function Header({ session, paneId }: { session: SessionMeta; paneId?: string }) {
   const panelVisible = useStore((s) => s.panelOpen || !!s.layout.filePreview);
   const togglePanel = useStore((s) => s.togglePanel);
@@ -29,6 +32,7 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
   const splittable = useStore((s) => canSplit(s.layout));
   // A file preview beside a lone session does not make that session's pane closable.
   const split = useStore((s) => !!paneId && canClosePane(s.layout, paneId));
+  const sessionProcesses = useStore((s) => (isWeb ? EMPTY_PROCS : (s.processSummary?.bySession?.[session.id] ?? EMPTY_PROCS)));
   const { data: summary } = useGitSummary(session.id, changesVersion);
   const branch = summary?.branch;
   const folder = basename(session.cwd);
@@ -69,6 +73,18 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
             }}
           >
             {ongoingBadgeLabel(session.ongoing!)}
+          </button>
+        )}
+        {!busy && sessionProcesses.length > 0 && (
+          <button
+            type="button"
+            className="header-processes-pill"
+            data-testid="header-processes"
+            title={sessionProcesses.map((p) => `${p.label} (PID ${p.pid})`).join(' · ')}
+            onClick={() => useStore.getState().setPanelBottomTab('processes')}
+          >
+            <Icon name="activity" size={11} />
+            <span>{sessionProcesses.length === 1 ? '1 process' : `${sessionProcesses.length} processes`}</span>
           </button>
         )}
         <span className="spacer" />

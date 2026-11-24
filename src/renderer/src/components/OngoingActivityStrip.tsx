@@ -25,7 +25,8 @@ const EMPTY_PROCS: readonly SessionOngoingProcess[] = [];
 function itemIcon(item: OngoingItem): string {
   if (item.kind === 'subagent') return 'fork';
   if (item.kind === 'hook') return 'bolt';
-  if (item.detail === 'local_bash') return 'terminal';
+  if (item.detail === 'schedule' || item.detail === 'timer' || item.detail === 'cron') return 'clock';
+  if (item.detail === 'local_bash' || item.detail === 'terminal') return 'terminal';
   return 'activity';
 }
 
@@ -48,9 +49,12 @@ export function OngoingActivityStrip({ session }: { session: SessionMeta }) {
   const autonomous = session.ongoing ?? EMPTY_ONGOING;
   const sessionProcesses = useStore((s) => (isWeb ? EMPTY_PROCS : (s.processSummary?.bySession?.[session.id] ?? EMPTY_PROCS)));
   const parentRunning = session.status === 'running' || session.status === 'starting';
-  // During an active parent turn, live tool cards already represent running shell commands;
-  // show notable OS processes once the parent turn is no longer actively running.
-  const processes = parentRunning ? EMPTY_PROCS : sessionProcesses;
+  // During an active parent turn, live tool cards already represent foreground shell commands
+  // under the harness root; still surface detached jobs and terminal-tab commands right away,
+  // and show all remaining notable OS processes once the parent turn finishes.
+  const processes = parentRunning
+    ? sessionProcesses.filter((p) => p.detached || !!p.terminalId)
+    : sessionProcesses;
   const hasAutonomous = autonomous.length > 0;
   const hasProcesses = processes.length > 0;
 
@@ -210,10 +214,11 @@ export function OngoingActivityStrip({ session }: { session: SessionMeta }) {
       {hasProcesses && (
         <div className="ongoing-strip ongoing-processes" role="status" data-testid="ongoing-processes">
           {processes.length === 1 ? (
-            <div className="ongoing-head">
-              <Icon name="activity" size={12} />
+            <div className="ongoing-head" data-pid={processes[0]!.pid}>
+              <Icon name={processes[0]!.terminalId ? 'terminal' : 'activity'} size={12} />
               <span className="ongoing-headline">Background process running</span>
               <span className="ongoing-desc mono" title={processes[0]!.command ?? processes[0]!.name}>{processes[0]!.label}</span>
+              <span className="ongoing-pid mono muted small" data-testid="ongoing-process-pid">PID {processes[0]!.pid}</span>
               {processes[0]!.detached && <span className="process-flag">detached</span>}
               {processes[0]!.startedAt > 0 && now - processes[0]!.startedAt >= 1_000 && (
                 <span className="ongoing-meta muted small">{fmtDuration(now - processes[0]!.startedAt)}</span>
@@ -262,6 +267,7 @@ export function OngoingActivityStrip({ session }: { session: SessionMeta }) {
                       <li key={key} className="ongoing-row" data-testid="ongoing-process-item" data-pid={proc.pid}>
                         <Icon name={proc.terminalId ? 'terminal' : 'activity'} size={12} />
                         <span className="ongoing-desc mono" title={proc.command ?? proc.name}>{proc.label}</span>
+                        <span className="ongoing-pid mono muted small" data-testid="ongoing-process-pid">PID {proc.pid}</span>
                         {proc.detached && <span className="process-flag">detached</span>}
                         {proc.startedAt > 0 && now - proc.startedAt >= 1_000 && (
                           <span className="ongoing-meta muted small">{fmtDuration(now - proc.startedAt)}</span>
