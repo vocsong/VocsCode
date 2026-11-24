@@ -1219,16 +1219,18 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
   const toast = useStore((s) => s.toast);
   const [note, setNote] = useState('');
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [multiAnswers, setMultiAnswers] = useState<Record<string, string[]>>({});
   const [editedCommand, setEditedCommand] = useState<string | null>(null);
   const [responseState, setResponseState] = useState<'idle' | 'sending' | 'sent'>('idle');
   const [validationError, setValidationError] = useState<string | null>(null);
-  useEffect(() => setValidationError(null), [answers, note]);
+  useEffect(() => setValidationError(null), [answers, multiAnswers, note]);
   const responding = useRef(false);
   const fieldId = useId();
   const decided = !!item.decision;
   const locked = decided || !canRespond || responseState !== 'idle';
   const questionComment = req.kind === 'question' && req.supportsQuestionComment !== false;
-  const emptyQuestion = questionComment && !Object.values(answers).some((answer) => answer.trim()) && !note.trim();
+  const hasMultiAnswer = Object.values(multiAnswers).some((selected) => selected.length > 0);
+  const emptyQuestion = questionComment && !Object.values(answers).some((answer) => answer.trim()) && !hasMultiAnswer && !note.trim();
   const noteLabel = req.kind === 'question' ? 'Additional context (optional)' : 'Note for the agent (sent with Deny only)';
   const decisionKind = req.options.find((o) => o.id === item.decision?.optionId)?.kind ?? item.decision?.optionId ?? '';
   // Mission mode: a Builder's request goes to its Lead first. The Lead's copy of the card answers the
@@ -1242,7 +1244,10 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
     const option = req.options.find((o) => o.id === optionId);
     const sendsNote = questionComment || (req.kind !== 'question' && (option?.kind === 'deny' || option?.kind === 'deny_always'));
     const decision: ApprovalDecision = { optionId, note: sendsNote ? note.trim() || undefined : undefined };
-    if (req.questions?.length) decision.answers = answers;
+    if (req.questions?.length) {
+      decision.answers = answers;
+      if (req.questions.some((q) => q.multiSelect)) decision.multiAnswers = multiAnswers;
+    }
     if (editedCommand !== null && editedCommand !== req.command && req.input && typeof req.input === 'object') decision.updatedInput = { ...(req.input as Record<string, unknown>), command: editedCommand };
     try {
       validateQuestionResponse(req, decision);
@@ -1303,28 +1308,67 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
       {req.changes?.length ? <ChangesPreview changes={req.changes} /> : null}
       {req.questions?.map((q, qi) => {
         const questionId = `${fieldId}-question-${qi}`;
-        const savedAnswer = /deny|reject|cancel/.test(decisionKind) ? undefined : item.decision?.answers?.[q.id];
-        const savedOption = !q.secret && q.options?.find((o) => o.label === savedAnswer);
+        const skipped = /deny|reject|cancel/.test(decisionKind);
+        const savedAnswer = skipped ? undefined : item.decision?.answers?.[q.id]?.trim() || undefined;
+        const savedMulti = skipped ? undefined : item.decision?.multiAnswers?.[q.id]?.filter(Boolean);
+        const savedOption = !q.secret && !q.multiSelect && q.options?.find((o) => o.label === savedAnswer);
+        const savedMultiOptions = !q.secret && q.multiSelect && savedMulti?.length
+          ? savedMulti.map((label) => ({ label, description: q.options?.find((o) => o.label === label)?.description }))
+          : [];
+        const hasSaved = Boolean(savedAnswer || savedMulti?.length);
         return (
           <div key={q.id} className="approval-question" role="group" aria-labelledby={questionId}>
             {q.header && <div className="approval-qhead">{q.header}</div>}
             <div className="approval-qtext" id={questionId}>{q.question}</div>
             {decided ? (
-              savedAnswer ? (
-                <div className="approval-answer">
-                  <span>{q.secret ? 'Answer hidden' : savedAnswer}</span>
-                  {savedOption && savedOption.description && <span className="approval-choice-desc">{savedOption.description}</span>}
-                </div>
+              hasSaved ? (
+                q.secret ? (
+                  <div className="approval-answer"><span>Answer hidden</span></div>
+                ) : q.multiSelect ? (
+                  <div className="approval-answer">
+                    {savedMultiOptions.map((opt) => (
+                      <div key={opt.label} className="approval-answer-item">
+                        <span>{opt.label}</span>
+                        {opt.description && <span className="approval-choice-desc">{opt.description}</span>}
+                      </div>
+                    ))}
+                    {savedAnswer && <div className="approval-answer-item"><span>{savedAnswer}</span></div>}
+                  </div>
+                ) : (
+                  <div className="approval-answer">
+                    <span>{savedAnswer}</span>
+                    {savedOption && savedOption.description && <span className="approval-choice-desc">{savedOption.description}</span>}
+                  </div>
+                )
               ) : <div className="muted small">No answer provided</div>
             ) : (
               <>
+                {q.multiSelect && q.options?.length ? <div className="approval-qhint muted small">Select one or more</div> : null}
                 {q.options?.length ? (
                   <div className="approval-qopts">
                     {q.options.map((o, oi) => {
                       const descriptionId = `${questionId}-option-${oi}`;
+                      const selected = q.multiSelect ? (multiAnswers[q.id]?.includes(o.label) ?? false) : answers[q.id] === o.label;
                       return (
-                        <button key={o.label} type="button" className={`approval-choice ${answers[q.id] === o.label ? 'active' : ''}`} disabled={locked} onClick={() => setAnswers(answers[q.id] === o.label ? Object.fromEntries(Object.entries(answers).filter(([id]) => id !== q.id)) : { ...answers, [q.id]: o.label })} aria-label={o.label} aria-pressed={answers[q.id] === o.label} aria-describedby={o.description ? descriptionId : undefined}>
-                          <span className="approval-choice-label">{o.label}{answers[q.id] === o.label && <Icon name="check" size={14} />}</span>
+                        <button
+                          key={o.label}
+                          type="button"
+                          className={`approval-choice ${selected ? 'active' : ''}`}
+                          disabled={locked}
+                          onClick={() => {
+                            if (q.multiSelect) {
+                              const prev = multiAnswers[q.id] ?? [];
+                              const next = prev.includes(o.label) ? prev.filter((label) => label !== o.label) : [...prev, o.label];
+                              setMultiAnswers(next.length ? { ...multiAnswers, [q.id]: next } : Object.fromEntries(Object.entries(multiAnswers).filter(([id]) => id !== q.id)));
+                            } else {
+                              setAnswers(answers[q.id] === o.label ? Object.fromEntries(Object.entries(answers).filter(([id]) => id !== q.id)) : { ...answers, [q.id]: o.label });
+                            }
+                          }}
+                          aria-label={o.label}
+                          aria-pressed={selected}
+                          aria-describedby={o.description ? descriptionId : undefined}
+                        >
+                          <span className="approval-choice-label">{o.label}{selected && <Icon name="check" size={14} />}</span>
                           {o.description && <span className="approval-choice-desc" id={descriptionId}>{o.description}</span>}
                         </button>
                       );
@@ -1334,7 +1378,14 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
                 {(q.allowOther || !q.options?.length) && (
                   <label className="approval-field">
                     <span>Type an answer</span>
-                    <input type={q.secret ? 'password' : 'text'} placeholder="Type an answer" aria-describedby={questionId} disabled={locked} value={answers[q.id] && !q.options?.some((o) => o.label === answers[q.id]) ? answers[q.id] : ''} onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })} />
+                    <input
+                      type={q.secret ? 'password' : 'text'}
+                      placeholder="Type an answer"
+                      aria-describedby={questionId}
+                      disabled={locked}
+                      value={q.multiSelect ? (answers[q.id] ?? '') : (answers[q.id] && !q.options?.some((o) => o.label === answers[q.id]) ? answers[q.id] : '')}
+                      onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
+                    />
                   </label>
                 )}
               </>

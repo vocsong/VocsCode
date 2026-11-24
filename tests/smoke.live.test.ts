@@ -371,6 +371,26 @@ describe('live harness smoke', () => {
     assertSuccessfulTurn(items, events, 'PONG');
   });
 
+  it.runIf(want('antigravity') && process.env.HARNESS_SMOKE_QUESTIONS === '1')('Antigravity asks a structured question via ACP elicitation and receives the selected choice', async () => {
+    const { ctx, events, items, waitTurn } = await makeCtx('antigravity', { permissionMode: 'ask' });
+    const drafts: ApprovalDraft[] = [];
+    ctx.requestApproval = async (draft) => {
+      drafts.push(draft);
+      if (draft.kind !== 'question' || !draft.questions?.length) throw new Error('Expected a structured question card, not a tool permission.');
+      const q = draft.questions[0]!;
+      const pick = q.options?.find((option) => /blue/i.test(option.label))?.label ?? q.options?.[0]?.label ?? 'Blue';
+      return { optionId: 'allow', answers: { [q.id]: pick }, note: 'Keep it concise.' };
+    };
+    const adapter = createAdapter('antigravity', ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    await adapter.send({ text: 'Before answering, use ask_question to ask me one single-select question: "Pick a color" with options "Red" and "Blue". After I answer, reply with exactly COLOR_BLUE if I chose Blue. Do not call any other tools.' });
+    await waitTurn(170_000);
+    assertSuccessfulTurn(items, events, 'COLOR_BLUE');
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]!.questions?.[0]?.options?.map((option) => option.label)).toEqual(expect.arrayContaining(['Red', 'Blue']));
+  });
+
   it.runIf(want('native'))('native loop answers a prompt through an OpenAI-compatible provider', async () => {
     const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : null;
     if (!provider) throw new Error('Native smoke requested but no DEEPSEEK_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY is available.');
