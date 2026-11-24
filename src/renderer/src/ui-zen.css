@@ -367,7 +367,7 @@
   background: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
-:root[data-ui='zen'] .session-row:is([data-status='running'], [data-status='starting']) .session-pin::before {
+:root[data-ui='zen'] .session-row:is([data-status='running'], [data-status='starting'], [data-ongoing='true']) .session-pin::before {
   opacity: 1;
   background: var(--blue);
   animation: zen-breathe 1.6s ease-in-out infinite;

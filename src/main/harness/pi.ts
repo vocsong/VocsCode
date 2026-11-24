@@ -228,6 +228,8 @@ export class PiAdapter implements HarnessAdapter {
   private readonly pendingSubagentCost = new Map<string, SubagentCost>();
   /** Live Vocs Code subagent runs by run id, until their terminal record arrives. */
   private readonly subagentRuns = new Map<string, { agent: string; description: string; mode: 'foreground' | 'background'; provider?: string; model?: string; startedAt: number; costUsd: number; turns: number; toolUses: number }>();
+  /** True during the completion debounce after a background child ends and before the parent turn starts. */
+  private wakeupPending = false;
   private exited = false;
   private transportError: Error | null = null;
   private modeFile: string | null = null;
@@ -321,6 +323,7 @@ export class PiAdapter implements HarnessAdapter {
     this.recordedSubagents.clear();
     this.pendingSubagentCost.clear();
     this.subagentRuns.clear();
+    this.wakeupPending = false;
     const meta = this.ctx.session();
     const s = this.ctx.settings();
     const mission = meta.mission;
@@ -681,6 +684,10 @@ export class PiAdapter implements HarnessAdapter {
         this.missionSettling = false;
         this.idleReported = false;
         this._busy = true;
+        if (this.wakeupPending) {
+          this.wakeupPending = false;
+          this.ctx.emit({ type: 'ongoing', source: 'wakeup', items: [] });
+        }
         if (!this.turnStartedAt) this.usage.beginTurn();
         this.turnStartedAt = this.turnStartedAt || Date.now();
         this.ctx.emit({ type: 'status', status: 'running' });
@@ -889,11 +896,33 @@ export class PiAdapter implements HarnessAdapter {
       return;
     }
     if (this.extensionNonce && (payload.version !== 1 || payload.nonce !== this.extensionNonce)) return;
-    const runId = typeof payload.runId === 'string' ? payload.runId : '';
-    if (!runId) return;
     const kind = payload.kind;
     const number = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
     const text = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined);
+    if (kind === 'wakeup') {
+      const pending = payload.pending === true;
+      if (pending) {
+        this.wakeupPending = true;
+        const count = Math.max(1, number(payload.count) || 1);
+        this.ctx.emit({
+          type: 'ongoing',
+          source: 'wakeup',
+          items: [{
+            id: 'wakeup:subagent',
+            kind: 'task',
+            label: count > 1 ? `Delivering ${count} subagent results…` : 'Delivering subagent result…',
+            detail: 'wakeup',
+            startedAt: number(payload.startedAt) || Date.now()
+          }]
+        });
+      } else if (this.wakeupPending) {
+        this.wakeupPending = false;
+        this.ctx.emit({ type: 'ongoing', source: 'wakeup', items: [] });
+      }
+      return;
+    }
+    const runId = typeof payload.runId === 'string' ? payload.runId : '';
+    if (!runId) return;
     if (kind === 'start') {
       if (this.subagentRuns.has(runId) || this.recordedSubagents.has(runId)) return;
       const run = {
@@ -1622,6 +1651,10 @@ export class PiAdapter implements HarnessAdapter {
     this.followUps.length = 0;
     this.deferredLines.length = 0;
     this.runtimeQueued = 0;
+    if (this.wakeupPending) {
+      this.wakeupPending = false;
+      this.ctx.emit({ type: 'ongoing', source: 'wakeup', items: [] });
+    }
     this.updateQueued();
     this.usageReporter.close();
     this.extensionCapabilities.clear();

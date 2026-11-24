@@ -5,6 +5,7 @@
 import type { EffortLevel, FastModeStatus, HarnessId, HarnessRef, ModelInfo, ModelRef, PermissionMode } from './harness-types';
 import type { HarnessCommand } from './harness-commands';
 import type { MissionOwnership } from './mission';
+import type { OngoingItem, OngoingSource } from './ongoing';
 import type { ApprovalDecision, ApprovalRequest, FileAttachment, ImageAttachment, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem } from './transcript-types';
 import type { UsageTotals } from './usage-types';
 
@@ -153,6 +154,11 @@ export interface SessionMeta {
   workspaceWriterClaims?: string[];
   /** Number of queued (steer/follow-up) messages waiting. */
   queued?: number;
+  /**
+   * Ephemeral live autonomous background work (subagents, background harness tasks, hooks) that
+   * can remain active after the parent turn returns to idle. Never persisted across restarts.
+   */
+  ongoing?: OngoingItem[];
 }
 
 export type SessionEvent =
@@ -171,6 +177,8 @@ export type SessionEvent =
   | { type: 'subagent'; completion: SubagentCompletion }
   /** Live subagent run state for the panel; the durable record is the run file on disk. */
   | { type: 'subagent.run'; run: SubagentRunUpdate }
+  /** Live autonomous background work per producer channel (replace semantics per source). */
+  | { type: 'ongoing'; source: OngoingSource; items: OngoingItem[] }
   | { type: 'meta'; patch: Partial<SessionMeta> }
   | { type: 'error'; message: string; fatal?: boolean }
   | { type: 'models'; models: ModelInfo[] }

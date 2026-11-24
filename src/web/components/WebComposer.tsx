@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from 'react';
 import { canInvoke, invoke } from '@renderer/api';
 import { Button, Icon } from '@renderer/components/ui';
 import { useStore } from '@renderer/store';
+import { hasOngoingWork } from '@shared/ongoing';
 import type { FileAttachment, SessionMeta, SendMode } from '@shared/types';
 
 // Base64 and the sealed remote frame expand these bytes; keep the per-file cap conservative.
@@ -129,7 +130,7 @@ export function WebComposer({ session, offline }: { session: SessionMeta; offlin
             e.preventDefault();
             void send('now');
           }}
-          placeholder={running ? 'Steer or queue a message…' : session.status === 'stopped' ? 'Sending restarts it on your computer' : 'Message…'}
+          placeholder={running ? 'Steer or queue a message…' : hasOngoingWork(session) ? 'Background work running… message anytime' : session.status === 'stopped' ? 'Sending restarts it on your computer' : 'Message…'}
           rows={2}
           aria-label="Message"
         />

@@ -57,10 +57,29 @@ export interface ProcessEndResult {
   failed: { pid: number; error: string }[];
 }
 
-/** The tab badge, pushed with every sample so leftovers show without opening the panel. */
+/** One notable non-infrastructure OS process running for a session (desktop-only). */
+export interface SessionOngoingProcess {
+  pid: number;
+  startedAt: number;
+  name: string;
+  /** Human-readable process title from `describeProcess`. */
+  label: string;
+  /** Full command line, when readable, for tooltips. */
+  command?: string;
+  /** True when its launcher exited (kept attributable via Windows session Job Object). */
+  detached?: boolean;
+  /** Set when running inside one of the session's terminal tabs. */
+  terminalId?: string;
+  cpu?: number;
+  memory?: number;
+}
+
+/** The tab badge and per-session ongoing OS processes, pushed with every sample. Desktop only. */
 export interface ProcessSummary {
   count: number;
   orphaned: number;
+  /** Notable non-infrastructure processes keyed by sessionId; omitted when empty. */
+  bySession?: Record<string, SessionOngoingProcess[]>;
 }
 
 export function processKey(p: ProcessTarget): string {
@@ -272,4 +291,146 @@ export function groupProcesses(list: TrackedProcess[], activeSessionId?: string)
 /** A group's top-level processes: ending them (each with its subtree) ends the whole group. */
 export function rootsOf(rows: ProcessRow[]): TrackedProcess[] {
   return rows.filter((row) => row.depth === 0).map((row) => row.process);
+}
+
+const HARNESS_WRAPPED_PATTERN = /(?:pi-coding-agent|claude(?:\.exe|\b)|codex(?:\.exe|\b)|@cursor\/sdk|\bagy\b|\bdsh\b|\bgemini\b|@anthropic-ai\/claude-agent-sdk)/i;
+const MCP_INFRA_PATTERN = /(?:vocs-memory|gitnexus-scope|cua-driver|@modelcontextprotocol|mcp[-_.]?(?:server|proxy|bridge)|--mcp\b|\bmcp\b)/i;
+
+function isMcpInfrastructure(p: TrackedProcess): boolean {
+  if (p.owner.label && /^MCP\b/i.test(p.owner.label)) return true;
+  const hay = `${p.name} ${p.command ?? ''}`;
+  return MCP_INFRA_PATTERN.test(hay);
+}
+
+/** True when a shell process is running an explicit script/command rather than sitting idle at a prompt. */
+function isShellWithCommand(p: TrackedProcess): boolean {
+  const exe = stem(p.name).toLowerCase();
+  const cmd = p.command ?? '';
+  if (!cmd) return false;
+  if (cmd.includes('CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT')) return false;
+  if (exe === 'cmd') {
+    if (!/\s\/[ck]\s+/i.test(cmd)) return false;
+    return !HARNESS_WRAPPED_PATTERN.test(cmd);
+  }
+  if (exe === 'powershell' || exe === 'pwsh') {
+    if (!/\s-(?:c|command|file|encodedcommand|enc)\b/i.test(cmd)) return false;
+    return !HARNESS_WRAPPED_PATTERN.test(cmd);
+  }
+  if (SHELLS.has(exe)) {
+    if (!/\s-c\s+/i.test(cmd)) return false;
+    return !HARNESS_WRAPPED_PATTERN.test(cmd);
+  }
+  return false;
+}
+
+/** True for a bare interactive shell (or Claude's persistent shell launcher) with no inline command. */
+function isIdleShellWrapper(p: TrackedProcess): boolean {
+  const exe = stem(p.name).toLowerCase();
+  if (p.command?.includes('CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT')) return true;
+  if (exe === 'cmd' || exe === 'powershell' || exe === 'pwsh' || SHELLS.has(exe)) {
+    return !isShellWithCommand(p);
+  }
+  return false;
+}
+
+/**
+ * Classifies live session-owned OS processes into notable ongoing work per session, excluding
+ * persistent idle session infrastructure (the harness CLI root, MCP stdio server trees, and idle
+ * interactive terminal shells).
+ *
+ * Included as notable:
+ * - Detached session processes (`orphaned` && `!previousRun`, e.g. Start-Process via session Job).
+ * - Running commands inside a session's terminal tab (children of a terminal shell root).
+ * - Non-MCP child commands executing under a harness root, or direct non-harness tool shells
+ *   (e.g. Native harness `runBash`).
+ *
+ * Each entry names the top-level notable root so multi-process commands (e.g. `npm run dev` +
+ * worker children) surface once rather than flooding the session UI.
+ */
+export function classifySessionOngoingProcesses(list: readonly TrackedProcess[]): Record<string, SessionOngoingProcess[]> {
+  const bySessionProcs = new Map<string, TrackedProcess[]>();
+  for (const p of list) {
+    if (!p.owner.sessionId || p.previousRun) continue;
+    let bucket = bySessionProcs.get(p.owner.sessionId);
+    if (!bucket) {
+      bucket = [];
+      bySessionProcs.set(p.owner.sessionId, bucket);
+    }
+    bucket.push(p);
+  }
+
+  const out: Record<string, SessionOngoingProcess[]> = {};
+  for (const [sessionId, rawProcs] of bySessionProcs) {
+    const procs = [...rawProcs].sort((a, b) => a.startedAt - b.startedAt || a.pid - b.pid);
+    const byPid = new Map(procs.map((p) => [p.pid, p]));
+    const isParent = (parent: TrackedProcess | undefined, child: TrackedProcess) =>
+      !!parent && parent !== child && (!parent.startedAt || !child.startedAt || parent.startedAt <= child.startedAt);
+    const kids = new Map<number, TrackedProcess[]>();
+    const roots: TrackedProcess[] = [];
+    for (const p of procs) {
+      const parent = byPid.get(p.ppid);
+      if (isParent(parent, p)) {
+        let listForParent = kids.get(parent!.pid);
+        if (!listForParent) {
+          listForParent = [];
+          kids.set(parent!.pid, listForParent);
+        }
+        listForParent.push(p);
+      } else {
+        roots.push(p);
+      }
+    }
+
+    const notable: SessionOngoingProcess[] = [];
+    const record = (p: TrackedProcess, detached: boolean) => {
+      notable.push({
+        pid: p.pid,
+        startedAt: p.startedAt,
+        name: p.name,
+        label: describeProcess(p),
+        ...(p.command ? { command: p.command } : {}),
+        ...(detached ? { detached: true } : {}),
+        ...(p.owner.terminalId ? { terminalId: p.owner.terminalId } : {}),
+        ...(p.cpu !== undefined ? { cpu: p.cpu } : {}),
+        ...(p.memory !== undefined ? { memory: p.memory } : {})
+      });
+    };
+
+    const inspectChildren = (parent: TrackedProcess) => {
+      for (const child of kids.get(parent.pid) ?? []) {
+        if (isMcpInfrastructure(child)) continue;
+        if (isIdleShellWrapper(child)) {
+          // A persistent shell wrapper (e.g. Claude's shell launcher or an idle nested shell)
+          // is only interesting if it is currently hosting a real child command.
+          inspectChildren(child);
+          continue;
+        }
+        record(child, !!child.orphaned);
+      }
+    };
+
+    for (const root of roots) {
+      if (root.orphaned) {
+        // Detached from its launcher (kept attributable by the session's Job Object).
+        if (!isMcpInfrastructure(root)) record(root, true);
+        continue;
+      }
+      if (root.owner.terminalId) {
+        // The terminal tab's own shell is idle infrastructure; any child command running in it is notable.
+        inspectChildren(root);
+        continue;
+      }
+      if (isMcpInfrastructure(root)) continue;
+      if (isShellWithCommand(root)) {
+        // Direct tool shell spawned by main (e.g. Native harness runBash).
+        record(root, false);
+        continue;
+      }
+      // Persistent harness runtime root (claude, pi, codex, cursor, agy/dsh/ACP): inspect its children.
+      inspectChildren(root);
+    }
+
+    if (notable.length > 0) out[sessionId] = notable;
+  }
+  return out;
 }
