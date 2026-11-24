@@ -8,6 +8,7 @@ import { createHandlerRegistry, type DesktopBridge, type HandlerDeps, type Handl
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
 import type { IntelligenceService } from './intelligence/service';
+import type { KnowledgeUsage } from './intelligence/usage';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
 import type { SecretStore } from './secrets';
@@ -36,6 +37,7 @@ export interface IpcDeps {
   knowledge?: KnowledgeService;
   /** Memory lifecycle, collections and scoped retrieval; absent in tests that do not exercise it. */
   intelligence?: IntelligenceService;
+  knowledgeUsage?: KnowledgeUsage;
   revokeMemoryGrants?: () => void;
   /** Passive built-in GitNexus freshness queue. */
   gitnexusIndexer?: GitnexusIndexer;
@@ -144,6 +146,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     search: deps.search,
     knowledge: deps.knowledge,
     intelligence: deps.intelligence,
+    knowledgeUsage: deps.knowledgeUsage,
     revokeMemoryGrants: deps.revokeMemoryGrants,
     gitnexusIndexer: deps.gitnexusIndexer,
     appInstructions: deps.appInstructions,

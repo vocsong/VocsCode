@@ -192,14 +192,25 @@ describe('handler registry', () => {
   it('keeps intelligence grants on the desktop and derives the project from the held session', async () => {
     const view = vi.fn(async () => ({ available: true }));
     const forget = vi.fn(async () => ({ forgotten: true }));
-    const { registry, deps } = stubDeps({ intelligence: { view, forget } as unknown as HandlerDeps['intelligence'] });
+    const usage = { report: vi.fn(() => ({ enabled: false })), configure: vi.fn(), clear: vi.fn(), vote: vi.fn(() => true) };
+    const { registry, deps } = stubDeps({ intelligence: { view, forget } as unknown as HandlerDeps['intelligence'], knowledgeUsage: usage as unknown as HandlerDeps['knowledgeUsage'] });
     const settingsUpdate = vi.spyOn(deps.settings, 'update');
+    const usageRequest = { sessionId: 's_test', days: 7 };
+    const voteRequest = { sessionId: 's_test', receipt: 'ffc9bb53-5b1d-4f0b-bc0b-b456a376b36e', vote: 'helped' };
     for (const actor of ['user', 'agent'] as const) {
       await expect(registry.invoke('intelligence:view', { sessionId: 's_test' }, actor)).rejects.toThrow(/desktop owner/);
       await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: 'mem_abcdef' }, actor)).rejects.toThrow(/desktop owner/);
       await expect(registry.invoke('settings:update', { intelligence: { gateway: false, personalMemory: true } }, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('intelligence:usage:view', usageRequest, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('intelligence:usage:configure', { ...usageRequest, enabled: true }, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('intelligence:usage:clear', usageRequest, actor)).rejects.toThrow(/desktop owner/);
+      await expect(registry.invoke('intelligence:usage:vote', voteRequest, actor)).rejects.toThrow(/desktop owner/);
     }
     expect(settingsUpdate).not.toHaveBeenCalled();
+    await expect(registry.invoke('intelligence:usage:view', { ...usageRequest, days: 90 }, 'desktop')).rejects.toThrow();
+    await expect(registry.invoke('intelligence:usage:configure', { ...usageRequest, enabled: true, projectRoot: 'untrusted' }, 'desktop')).rejects.toThrow(/Unrecognized key/);
+    await expect(registry.invoke('intelligence:usage:vote', { ...voteRequest, vote: 'a string rather than a vote' }, 'desktop')).rejects.toThrow();
+    for (const fn of Object.values(usage)) expect(fn).not.toHaveBeenCalled();
     await expect(registry.invoke('intelligence:view', { sessionId: '../s_test' }, 'desktop')).rejects.toThrow(/Invalid session identifier/);
     await expect(registry.invoke('intelligence:view', { sessionId: 's_unknown' }, 'desktop')).rejects.toThrow('Session not found');
     await expect(registry.invoke('intelligence:memory:forget', { sessionId: 's_test', id: '../../another' }, 'desktop')).rejects.toThrow('A memory record id is required');
@@ -212,7 +223,13 @@ describe('handler registry', () => {
     session.cwd = path.join(ws, 'worktree');
     session.worktreeBranch = 'vocs/test';
     await expect(registry.invoke('intelligence:view', { sessionId: 's_test', projectRoot: 'attacker', cwd: 'attacker', branch: 'other' }, 'desktop')).resolves.toEqual({ available: true });
-    expect(view).toHaveBeenCalledExactlyOnceWith({ sessionId: 's_test', projectRoot: ws, cwd: session.cwd, branch: session.worktreeBranch });
+    const liveScope = { sessionId: 's_test', projectRoot: ws, cwd: session.cwd, branch: session.worktreeBranch };
+    expect(view).toHaveBeenCalledExactlyOnceWith(liveScope);
+    await expect(registry.invoke('intelligence:usage:configure', { ...usageRequest, enabled: true }, 'desktop')).resolves.toEqual({ enabled: false });
+    expect(usage.configure).toHaveBeenCalledExactlyOnceWith(liveScope, true);
+    expect(usage.report).toHaveBeenCalledExactlyOnceWith(liveScope, 7);
+    await expect(registry.invoke('intelligence:usage:vote', voteRequest, 'desktop')).resolves.toBe(true);
+    expect(usage.vote).toHaveBeenCalledExactlyOnceWith(liveScope, voteRequest.receipt, 'helped');
   });
 
   it('keeps all account channels local-only and accepts no endpoint/credential configuration', async () => {

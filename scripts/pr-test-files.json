@@ -22,6 +22,7 @@
   "tests/intelligence-graphify.test.ts",
   "tests/intelligence-service.test.ts",
   "tests/intelligence-gateway.test.ts",
+  "tests/intelligence-usage.test.ts",
   "tests/intelligence-ui.test.tsx",
   "tests/mcp-memory.test.ts",
   "tests/chat-import.test.ts",

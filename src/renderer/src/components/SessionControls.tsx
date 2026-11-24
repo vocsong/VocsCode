@@ -19,7 +19,6 @@ import { useStore } from '../store';
 import { useMinimalUi } from '../ui-mode';
 import { Dropdown, Icon, MenuItem } from './ui';
 import { ModelMenu } from './ModelMenu';
-import { FastModeElectric } from './FastModeElectric';
 
 export function SessionControls({ session }: { session: SessionMeta }) {
   const { models, loading: modelsLoading, error: modelsError } = useSessionModels(session);
@@ -67,12 +66,11 @@ export function SessionControls({ session }: { session: SessionMeta }) {
       <Dropdown
         align="left"
         trigger={(open) => (
-          <button type="button" className={`pill pill-model${fastSelected ? ' is-fast' : ''}${open ? ' open' : ''}`} title="Model" aria-label={`Model: ${modelDetail}`}>
+          <button type="button" className={`pill pill-model${open ? ' open' : ''}`} title="Model" aria-label={`Model: ${modelDetail}`}>
             <Icon name={fastSelected ? 'bolt' : 'sparkles'} size={13} />
             {/* Provider first: the same model can be reached through more than one provider. */}
             <span className="pill-text" title={modelRefName(current)}>{current ? modelName(current.provider, currentInfo?.displayName ?? current.model) : 'Default model'}</span>
             {effortLabel && <span className="pill-effort">{effortLabel}</span>}
-            {fastSelected && <FastModeElectric />}
             <Icon name="chevron" size={12} />
           </button>
         )}
