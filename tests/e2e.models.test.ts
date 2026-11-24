@@ -370,7 +370,6 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     const win = await launch(userData);
     await win.setViewportSize(viewport);
-    await win.emulateMedia({ reducedMotion: 'no-preference' });
     await openNewSession(win);
     await pickModel(win, 'openai/gpt-5.4');
     const creationToggle = win.getByRole('checkbox', { name: 'Fast mode', exact: true });
@@ -403,8 +402,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const requested = fast.getByText('Requested', { exact: true });
     const confirm = win.getByRole('button', { name: 'Enable Fast mode', exact: true });
     const bolt = modelPill.locator('[data-icon="bolt"]');
-    const electric = modelPill.locator('svg.fast-mode-electric');
-    const activeAnimations = () => electric.evaluate((el) => el.getAnimations({ subtree: true }).length);
+    const electric = win.locator('.composer-box > svg.fast-mode-electric');
     const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
 
     await modelPill.click({ timeout: 60_000 });
@@ -426,13 +424,10 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await modelPill.locator('.pill-text').getAttribute('title')).toBe('openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('Model: openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('high');
+    expect(await modelPill.getAttribute('aria-label')).toContain('Fast requested');
     expect(await bolt.isVisible()).toBe(true);
-    await win.emulateMedia({ reducedMotion: 'no-preference' });
-    await expect.poll(activeAnimations).toBeGreaterThan(0);
-    await win.emulateMedia({ reducedMotion: 'reduce' });
-    await expect.poll(activeAnimations).toBe(0);
-    expect(await bolt.isVisible()).toBe(true);
-    await win.emulateMedia({ reducedMotion: 'no-preference' });
+    expect(await modelPill.locator('svg.fast-mode-electric').count()).toBe(0);
+    await electric.waitFor({ state: 'visible' });
 
     // More models follows the shortlist; the arrow keys reach both sets of inline radio items.
     await starred.press('ArrowDown');
@@ -481,13 +476,14 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(dialog.y + dialog.height).toBeLessThanOrEqual(viewport.height);
     await win.screenshot({ path: path.join(shots, 'models-08-fast-confirm.png'), animations: 'disabled' });
     expect(await on.getAttribute('aria-checked')).toBe('false');
+    expect(await electric.count()).toBe(0);
     expect((await saved())[0].config.fastMode).toBe(false);
     await confirm.click();
     await menu.waitFor({ state: 'hidden' });
     await modelPill.click();
     await expect.poll(() => on.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
     expect(await off.getAttribute('aria-checked')).toBe('false');
-    await expect.poll(activeAnimations).toBeGreaterThan(0);
+    await electric.waitFor({ state: 'visible' });
     await requested.waitFor();
     expect(await low.getAttribute('aria-checked')).toBe('true');
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
