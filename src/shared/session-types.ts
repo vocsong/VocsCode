@@ -197,8 +197,11 @@ export interface SessionEventEnvelope {
   seq?: number;
 }
 
-/** Filters narrowing a session search to a subset of sessions. */
+export type SearchCategory = 'all' | 'title' | 'goal' | 'transcript' | 'tool';
+
+/** Filters narrowing a session search by content and session scope. */
 export interface SearchFilters {
+  category?: SearchCategory;
   archived?: boolean;
   harness?: HarnessId;
   projectRoot?: string;
