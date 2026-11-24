@@ -127,7 +127,7 @@ function session(id: string, project: string, cost: number, createdAt = T0): Usa
 
 function snapshotOf(days: [string, UsageDay][], sessions: UsageSessionRecord[], reliabilityRows = 0): AnalyticsSnapshot {
   const reliability = emptyReliabilityReport(T0, 30);
-  reliability.overall.counts.executions = reliabilityRows;
+  reliability.overall.counts.executed = reliabilityRows;
   return buildAnalyticsSnapshot(
     { days: Object.fromEntries(days), sessions, tools: { Edit: { calls: 2, errors: 0, declined: 0, durationMs: 10 } }, modelTools: {}, harnessTools: {}, harnessModelTools: {}, reports: { '30': { reliability, codeOutput: emptyCodeOutputReport(T0, 30) } } },
     { ...META, generatedAt: T0 }
@@ -206,7 +206,7 @@ describe('combining computers', () => {
 
   it('keeps reliability per computer', () => {
     const at30 = combineSnapshots([{ hostId: 'pc', name: 'Vocs PC', snapshot: pc }, { hostId: 'mac', name: 'Vocs Macmini', snapshot: mac }], 30, T0);
-    expect(at30.computers.map((c) => c.summary.reliability.overall.counts.executions)).toEqual([10, 20]);
+    expect(at30.computers.map((c) => c.summary.reliability.overall.counts.executed)).toEqual([10, 20]);
     expect('reliability' in at30.summary).toBe(false);
   });
 
