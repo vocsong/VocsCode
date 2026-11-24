@@ -796,6 +796,10 @@
 .slist-gone {
   color: var(--amber);
 }
+.slist-computer {
+  color: var(--fg);
+  font-weight: 500;
+}
 .slist .num {
   font-family: var(--mono);
   font-size: 12px;

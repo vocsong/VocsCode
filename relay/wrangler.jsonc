@@ -5,7 +5,9 @@
   "compatibility_date": "2026-01-15",
   // MCP SDK uses Node built-ins; verified locally only, this change does not deploy anything.
   "compatibility_flags": ["nodejs_compat"],
-  "assets": { "directory": "public" },
+  // /app was the retired web remote client; the Worker answers it first with a redirect to
+  // /dashboard, so a stale build left in public/app can never be served (docs/WEB-DASHBOARD.md).
+  "assets": { "directory": "public", "run_worker_first": ["/app", "/app/*"] },
   "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }, { "name": "ENROLLMENTS", "class_name": "EnrollmentDirectory" }] },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Hub"] },

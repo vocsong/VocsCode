@@ -1,13 +1,14 @@
 # Static assets are served by Workers Assets without running worker.ts. The landing Worker
-# forwards /app through a service binding and preserves this policy on non-101 responses.
-/app/*
-  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' wss://code.vocs.io wss://vocs-relay.vocs.workers.dev ws://localhost:* ws://127.0.0.1:*; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'
+# forwards /dashboard through a service binding and preserves this policy on non-101 responses.
+# The dashboard only fetches same-origin JSON; it opens no sockets.
+/dashboard/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   X-Frame-Options: DENY
   Cache-Control: no-store
 
-# Hashed bundles can be cached forever; the ! line drops the /app/* no-store rule above.
-/app/assets/*
+# Hashed bundles can be cached forever; the ! line drops the /dashboard/* no-store rule above.
+/dashboard/assets/*
   ! Cache-Control
   Cache-Control: public, max-age=31536000, immutable

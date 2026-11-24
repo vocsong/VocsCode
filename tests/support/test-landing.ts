@@ -66,7 +66,7 @@ export async function startTestLanding(
         res.end(JSON.stringify({ login: identity.login, accountId: identity.accountId }));
         return;
       }
-      if ((isOwner || isAccountRoute || browserDevice || pathname === '/app' || pathname.startsWith('/app/')) && !identity) {
+      if ((isOwner || isAccountRoute || browserDevice || pathname === '/app' || pathname.startsWith('/app/') || pathname === '/dashboard' || pathname.startsWith('/dashboard/')) && !identity) {
         res.writeHead(401, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
         res.end('Not authenticated');
         return;

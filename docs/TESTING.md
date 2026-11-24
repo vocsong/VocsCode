@@ -76,10 +76,10 @@ seconds — starts the whole relay Worker locally in workerd (`tests/support/loc
 programmatic dev server with a throwaway secret) and runs the full smoke flow against it over real
 sockets: pairing, the sealed credential, proof-of-possession tokens, handshake, invoke, mirror key,
 revocation. It is what found a refused request's unread body ending a `wrangler dev` session and a
-revocation answering 500, which no fake could. `e2e.remote-web` (in `test:e2e:ci`) loads the web
-app in Electron's Chromium from that local relay: the native WebSocket, IndexedDB keys across a
-reload, the static CSP, the pairing link, the computer switcher, a streamed terminal typed into and
-unpair;
+revocation answering 500, which no fake could. `e2e.web-dashboard` (in `test:e2e:ci`) loads the
+web dashboard in Electron's Chromium from that local relay: two desktops join through its Connect
+with Vocs page (one through the retired `/app` link), upload their analytics, and the page shows
+them combined and apart under the static CSP;
 and, through `tests/support/test-landing.ts` (a stand-in for the landing that signs per-account
 assertions, gates owner routes and isolates accounts), Connect with Vocs, account switching and
 pairing from the signed-in computer list. `e2e.remote` drives the desktop side of the same flow in
@@ -111,9 +111,9 @@ checkout and pass all changed no-provider suites in one guarded invocation. For 
 ```bash
 npm run build && node scripts/e2e-guard.mjs tests/e2e.themes.test.ts tests/e2e.ui-modes.test.ts
 # Standalone web-only check builds its own web output (no desktop bundle needed):
-node scripts/e2e-guard.mjs tests/e2e.remote-web.test.ts
+node scripts/e2e-guard.mjs tests/e2e.web-dashboard.test.ts
 # If npm run build just passed in the same checkout and sources haven't changed, reuse its web output:
-VOCS_CODE_E2E_WEB_PREBUILT=1 node scripts/e2e-guard.mjs tests/e2e.remote-web.test.ts
+VOCS_CODE_E2E_WEB_PREBUILT=1 node scripts/e2e-guard.mjs tests/e2e.web-dashboard.test.ts
 # Reproduce the full release E2E job when diagnosing release CI:
 npm run build && VOCS_CODE_E2E_WEB_PREBUILT=1 npm run test:e2e:ci
 ```
@@ -190,9 +190,11 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy, the pairing QR (`shared/qr.ts`, `PairingQr.tsx`) | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/remote-host-lifecycle.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-client.test.ts`, `tests/remote-ui.test.tsx`, `tests/qr.test.ts` |
 | Remote controller MCP (`shared/control.ts`, `main/control/**`, controlled SessionManager turns, `relay/src/control-*.ts`, `relay/src/entry.ts`, `ControlSettings.tsx`) | `tests/control-service.test.ts`, `tests/control-turns.test.ts`, `tests/control-relay.test.ts`, `tests/control-relay-workerd.test.ts`, `tests/handler-registry.test.ts`, `tests/remote-ui.test.tsx` + `e2e.remote`. `test:relay-do` exercises discovery over the named binding, with two authenticated simulated hosts, denial before dispatch and nonce replay across restart. Retain the affected lifecycle and relay rows below. The separate gateway repos own their OAuth/consent tests; actual Dots/Muse and two real computers are rollout gates, not implied by offline success. |
 | Windows local CLI/stdio discovery (`scripts/vocs-code.mjs`, `main/control/local.ts`, `windows-pipe.*`, `LocalControlSettings.tsx`) | `tests/local-control.test.ts`, `tests/local-control-cli.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + on Windows `tests/local-control-windows.test.ts` (native ACL, restricted-token denial, peer identity, frame limits and owner death) and `e2e.remote` (owner grant, CLI and SDK stdio, exact profile and revocation). See [LOCAL-CONTROL.md](LOCAL-CONTROL.md#verification). |
-| Remote terminal (P3.5): `src/main/remote/terminal-streams.ts`, `TerminalManager.watch/snapshot`, `shared/remote-terminal.ts`, `src/web/terminal/**`, `src/web/sheets/TerminalSheet.tsx` | `tests/remote-terminal-streams.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-terminal.test.ts`, `tests/web-terminal-sheet.test.tsx`, `tests/terminal.test.ts` + `e2e.remote-web` |
+| Remote terminal (P3.5): `src/main/remote/terminal-streams.ts`, `TerminalManager.watch/snapshot`, `shared/remote-terminal.ts` | `tests/remote-terminal-streams.test.ts`, `tests/remote-e2e.test.ts`, `tests/terminal.test.ts` |
 | Relay routing, accounts, auth, tokens or rate limiting (`relay/src/{account,core,routes,edge,rate}.ts`) | `tests/relay-account.test.ts`, `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-e2e.test.ts`, `tests/remote-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
-| Web shell, relay web client and the account-partitioned browser vault (`src/web/**`, `vite.config.web.ts`, `relay/src/web-client.ts`, `relay/public/_headers`) | `tests/web-transport.test.ts`, `tests/web-router.test.ts`, `tests/web-shell.test.tsx`, `tests/web-bundle.test.ts`, `tests/web-client.test.ts`, `tests/browser-socket.test.ts`, `tests/relay-page-layout.test.ts` (reads `_headers`) + `e2e.remote-web` (real browser, CSP and account switching). Also cover desktop flows that use the changed renderer core. |
+| Web dashboard (`src/web/**`, `vite.config.web.ts`, `relay/public/_headers`, `relay/src/legacy-app.ts`) and the shared analytics view it reuses (`components/analytics/{AnalyticsView,env}.tsx`) | `tests/web-dashboard.test.tsx`, `tests/web-router.test.ts`, `tests/web-account.test.ts`, `tests/web-bundle.test.ts`, `tests/relay-page-layout.test.ts` (reads `_headers` and the `/app` redirect), `tests/analytics-dashboard.test.tsx` + `e2e.web-dashboard` (real browser, CSP, Connect with Vocs). |
+| Analytics snapshot, its relay storage and the desktop uploader (`shared/analytics/{snapshot,snapshot-codec,snapshot-wire,combine,usage-summary}.ts`, `relay/src/analytics.ts`, `main/remote/analytics-sync.ts`) | `tests/analytics-snapshot.test.ts`, `tests/relay-analytics.test.ts`, `tests/analytics-sync.test.ts`, `tests/analytics.test.ts`, `tests/relay-edge.test.ts` + `e2e.web-dashboard` |
+| Relay browser client used by the pairing suites (`relay/src/web-client.ts`) | `tests/web-client.test.ts`, `tests/browser-socket.test.ts`, `tests/remote-workerd.test.ts`, `e2e.remote` |
 | Relay Durable Object and frame routing (`relay/src/{worker,hub}.ts`, socket lifecycle/tags/queues) | `test:relay-do`, `tests/remote-workerd.test.ts` + `test:remote-live` against the deployed origin after deploy |
 | CI workflows and test runners (`.github/workflows/`, `scripts/test-*.mjs`, `scripts/e2e-guard*.mjs`, `scripts/pr-test-files.json`) | `tests/ci-workflow.test.ts` and the affected runner tests: `tests/test-changed.test.ts`, `tests/e2e-guard.test.ts`, `tests/test-metrics.test.ts`, `tests/test-inventory.test.ts`. `vitest.relay.config.ts` or relay test config changes also need `npm run test:relay-do`. |
 | Split view — panes, the active pane, the divider, drag-to-split, layout restore (`panes.ts`, `components/SessionPanes.tsx`, the `layout`/`activeId` pair in `store.ts`) | `tests/session-panes.test.ts`, `tests/split-view.test.tsx` + `e2e.split`; `e2e.files` checks the editor drawer does not resize the split |
@@ -212,7 +214,7 @@ Windows job preflights ConPTY ownership before the long real-Git suite; the pref
 the full no-skip run. This release gate preserves broad coverage while keeping routine develop PRs
 shorter. CI prints slow files/cases and uploads sanitized timing reports; raw Vitest JSON stays in
 runner temp because failure messages could contain sensitive data. The Windows E2E job sets
-`VOCS_CODE_E2E_WEB_PREBUILT=1` only after `npm run build`, so `e2e.remote-web` consumes the
+`VOCS_CODE_E2E_WEB_PREBUILT=1` only after `npm run build`, so `e2e.web-dashboard` consumes the
 validated prebuilt web bundle instead of building it again. Standalone runs still build it.
 Paid/live tiers remain manual.
 

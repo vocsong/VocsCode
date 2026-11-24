@@ -76,5 +76,5 @@
   "tests/relay-routes.test.ts",
   "tests/qr.test.ts",
   "tests/web-router.test.ts",
-  "tests/web-transport.test.ts"
+  "tests/web-dashboard.test.tsx"
 ]

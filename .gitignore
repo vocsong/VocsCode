@@ -4,7 +4,9 @@ dist/
 # Build-only Graphify artifact cache and generated dev payloads.
 /.graphify-build-cache/
 /resources/graphify-runtime/
-# The web shell is built, not committed: npm run build:web fills relay/public/app for deploys.
+# The web dashboard is built, not committed: npm run build:web fills relay/public/dashboard for deploys.
+relay/public/dashboard/
+# The retired remote client's build output, if an old checkout left one behind.
 relay/public/app/
 *.log
 .DS_Store
