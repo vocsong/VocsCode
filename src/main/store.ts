@@ -33,8 +33,14 @@ export class SessionStore {
   private importing = new Set<string>();
   /** Imports and removals own a directory until publication or cleanup has completely finished. */
   private sessionLifecycles = new Map<string, Promise<void>>();
-  /** Optional observers (the search indexer); set after construction to avoid a dependency cycle. */
-  hooks: { onAppend?: (sessionId: string, item: TranscriptItem) => void; onRewrite?: (sessionId: string) => void; onRemove?: (sessionId: string) => void } = {};
+  /** Optional observers; set after construction to avoid a dependency cycle. */
+  hooks: {
+    /** Sample eligibility before queuing the write; run the returned observer only on success. */
+    prepareAppend?: (sessionId: string, item: TranscriptItem) => (() => void) | undefined;
+    onAppend?: (sessionId: string, item: TranscriptItem) => void;
+    onRewrite?: (sessionId: string, replacement?: readonly TranscriptItem[]) => void;
+    onRemove?: (sessionId: string) => void;
+  } = {};
   private readonly log: Logger;
 
   constructor(userData: string, log: Logger = () => undefined) {
@@ -203,9 +209,11 @@ export class SessionStore {
   }
 
   async appendTranscript(id: string, item: TranscriptItem): Promise<void> {
+    const afterPersist = this.hooks.prepareAppend?.(id, item);
     const run = this.queueTranscriptWrite(id, () => appendLine(path.join(this.sessionDir(id), 'transcript.jsonl'), JSON.stringify(item)));
     await run;
     this.hooks.onAppend?.(id, item);
+    afterPersist?.();
   }
 
   async readTranscript(id: string): Promise<TranscriptItem[]> {
@@ -261,7 +269,7 @@ export class SessionStore {
       await ensureDir(path.dirname(file));
       await fs.writeFile(file, items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : ''), 'utf8');
     });
-    this.hooks.onRewrite?.(id);
+    this.hooks.onRewrite?.(id, items);
   }
 
   /** Controller barrier: an atomic, fsynced whole-file snapshot behind ordinary appenders.
@@ -280,10 +288,18 @@ export class SessionStore {
     this.hooks.onRewrite?.(id);
   }
 
+  transcriptWritePending(id: string): boolean {
+    return this.transcriptWrites.has(id);
+  }
+
   /** Chains a transcript write behind the session's pending ones; the chain never rejects. */
   private queueTranscriptWrite<T>(id: string, run: () => Promise<T>): Promise<T> {
     const next = (this.transcriptWrites.get(id) ?? Promise.resolve()).then(run, run);
-    this.transcriptWrites.set(id, next.then(() => undefined, () => undefined));
+    const settled = next.then(() => undefined, () => undefined);
+    this.transcriptWrites.set(id, settled);
+    void settled.then(() => {
+      if (this.transcriptWrites.get(id) === settled) this.transcriptWrites.delete(id);
+    });
     return next;
   }
 

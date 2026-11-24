@@ -1,6 +1,7 @@
-/** Desktop-owned background refresh for one selected session. No database or tool call schedules work. */
+/** Desktop-owned background refresh for the selected checkout. No database or tool call schedules work. */
 export class GraphScheduler {
   private selected: string | null = null;
+  private checkoutKey: string | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running?: { controller: AbortController; done: Promise<void> };
   private closed = false;
@@ -13,10 +14,14 @@ export class GraphScheduler {
     pollMs?: number;
   }) {}
 
-  select(sessionId: string | null): void {
-    if (sessionId === this.selected || this.closed) return;
+  /** Cross-session reuse requires a trusted, normalized checkout key from the caller. */
+  select(sessionId: string | null, checkoutKey?: string): void {
+    if (this.closed) return;
+    const key = sessionId === null ? undefined : checkoutKey;
+    const sameCheckout = key === this.checkoutKey && (key !== undefined || sessionId === this.selected);
     this.selected = sessionId;
-    this.settingsChanged();
+    this.checkoutKey = key;
+    if (!sameCheckout) this.settingsChanged();
   }
 
   settingsChanged(): void {

@@ -1109,14 +1109,34 @@ export async function gitFetchPrune(cwd: string): Promise<{ ok: boolean; output:
 
 export const slugify = branchSlug;
 
-/** Keeps the app's `.vocs-code/` folder (worktrees, project wiki) out of git status. */
-export async function excludeVocsCodeDir(root: string): Promise<void> {
+/** Best-effort local ignore. Never create Git metadata or follow a linked exclude file. */
+export async function excludeVocsCodeDir(root: string, signal?: AbortSignal): Promise<void> {
+  const { O_RDWR, O_APPEND, O_NOFOLLOW } = fsCallback.constants;
   try {
-    const exclude = path.join(root, '.git', 'info', 'exclude');
-    const cur = (await exists(exclude)) ? await fs.readFile(exclude, 'utf8') : '';
-    if (!cur.includes('.vocs-code/')) await fs.appendFile(exclude, `${cur.endsWith('\n') || !cur ? '' : '\n'}.vocs-code/\n`);
+    const info = path.join(await fs.realpath(root), '.git', 'info');
+    if (pathKey(await fs.realpath(info)) !== pathKey(info)) return;
+    const exclude = path.join(info, 'exclude');
+    const before = await fs.lstat(exclude, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size > 1024n * 1024n) return;
+    // No O_CREAT: even if the parent changed, opening an absent file has no side effects.
+    // Windows doesn't expose O_NOFOLLOW; compare the handle to the no-follow stat before I/O.
+    const file = await fs.open(exclude, O_RDWR | O_APPEND | (O_NOFOLLOW ?? 0));
+    try {
+      const opened = await file.stat({ bigint: true });
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1n) return;
+      if (pathKey(await fs.realpath(info)) !== pathKey(info)) return;
+      const bytes = Buffer.alloc(Number(before.size));
+      const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+      const cur = bytes.toString('utf8', 0, bytesRead);
+      if (!cur.split(/\r?\n/).some((line) => line === '.vocs-code/' || line === '/.vocs-code/')) {
+        signal?.throwIfAborted();
+        await file.appendFile(`${cur.endsWith('\n') || !cur ? '' : '\n'}.vocs-code/\n`);
+      }
+    } finally {
+      await file.close();
+    }
   } catch {
-    /* ignore */
+    /* Not a regular checkout, no local exclude, canceled, or inaccessible. */
   }
 }
 
