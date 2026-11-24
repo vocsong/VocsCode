@@ -225,10 +225,11 @@ describe('composer Fast mode request', () => {
     const on = fastOption('On');
     fireEvent.click(within(on).getByText('On'));
     const dialog = await screen.findByRole('dialog', { name: 'Enable Fast mode?' });
-    const anchoredAtOn = on.hasAttribute('data-dialog-anchor');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(on.disabled).toBe(false));
-    expect(anchoredAtOn).toBe(true);
+    expect(on.hasAttribute('data-dialog-anchor')).toBe(true);
+    fireEvent.keyDown(within(dialog).getByRole('button', { name: 'Cancel' }), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Enable Fast mode?' })).toBeNull());
+    expect(fastOption('On')).toBe(on); // Escape closes only the confirmation, not the menu behind it.
+    expect(on.disabled).toBe(false);
     expect(on.hasAttribute('data-dialog-anchor')).toBe(false);
     expect(invoke).not.toHaveBeenCalledWith('sessions:setFastMode', expect.anything());
     fireEvent.click(on);

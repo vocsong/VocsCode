@@ -431,11 +431,15 @@ describe('per-folder new-session defaults', () => {
 
   it('closes the folder menu on Escape before it closes the dialog', async () => {
     render(<NewSessionDialog />);
-    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    const trigger = screen.getByTitle(`${ROOT} — change folder`);
+    fireEvent.click(trigger);
     expect(screen.getByRole('menu')).toBeTruthy();
 
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    const filter = screen.getByRole('textbox', { name: 'Filter folders' });
+    // Even if closing flushes before the dialog's document listener, the key is already handled.
+    expect(fireEvent.keyDown(filter, { key: 'Escape' })).toBe(false);
     expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
     expect(useStore.getState().openNewSession).not.toHaveBeenCalled();
 
     fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });

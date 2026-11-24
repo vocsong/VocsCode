@@ -278,7 +278,9 @@ describe.runIf(enabled)('remote access settings', () => {
   }, 180_000);
 
   if (process.platform === 'win32') it('scopes and revokes native local CLI and stdio discovery for two projects', async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-local-control-e2e-'));
+    // Windows CI can expose TEMP through an 8.3 alias. Local discovery intentionally
+    // refuses aliased project and profile paths; seed the fixture under the canonical path.
+    const tmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-local-control-e2e-')));
     const userData = path.join(tmp, 'userData');
     const alpha = 'local-alpha';
     const beta = 'local-beta';
@@ -347,8 +349,7 @@ describe.runIf(enabled)('remote access settings', () => {
     async function expectOff(panel: Locator) {
       await expect.poll(() => panel.innerText(), { timeout: 10_000 }).toContain('Local discovery is off.');
       const projects = panel.getByRole('group', { name: 'Projects to grant' });
-      // The project list loads after the status line; a slow runner can count it before it renders.
-      await expect.poll(() => projects.getByRole('checkbox').count(), { timeout: 10_000 }).toBe(2);
+      expect(await projects.getByRole('checkbox').count()).toBe(2);
       expect(await projects.getByRole('checkbox', { checked: true }).count()).toBe(0);
       expect(await panel.getByRole('checkbox', { name: /apps running as this Windows user/ }).isChecked()).toBe(false);
       expect(await panel.getByRole('button', { name: 'Enable grant', exact: true }).isEnabled()).toBe(false);
