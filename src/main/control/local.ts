@@ -51,7 +51,6 @@ export class LocalControl {
     roots(): readonly string[];
     sessions: Pick<SessionManager, 'list' | 'get'>;
     guard: ControlResourceGuard;
-    workspaceRevision(): number;
     open: OpenLocalPipe;
   }) { this.roots = new Set(this.deps.roots().filter(localDirectory).map((root) => path.resolve(root))); }
 
@@ -105,7 +104,6 @@ export class LocalControl {
     this.revoke();
     const pending = new AbortController();
     this.pending = pending;
-    const revision = this.deps.workspaceRevision();
     let pipe: LocalPipe | undefined;
     let opened: Grant | undefined;
     let closed = false;
@@ -124,7 +122,7 @@ export class LocalControl {
         dispatch: (request) => this.dispatch(opened, request),
         closed: () => { closed = true; if (opened && this.active === opened) this.active = undefined; },
       });
-      if (closed || pending.signal.aborted || revision !== this.deps.workspaceRevision() || !selected.every((project) => this.knows(project))) throw new ControlError('unavailable');
+      if (closed || pending.signal.aborted || !selected.every((project) => this.knows(project))) throw new ControlError('unavailable');
       opened = { projects: selected, pipe, target: { v: LOCAL_CONTROL_VERSION, profileId, instanceId, pipeName: name, pid: pipe.pid, started: pipe.started } };
       this.active = opened;
       return this.ownerStateFor(projects);
@@ -179,7 +177,6 @@ export class LocalControl {
       }
       const { profileId, instanceId, request } = localControlRequestSchema.parse(input);
       if (profileId !== grant.target.profileId || instanceId !== grant.target.instanceId) return denied;
-      const revision = this.deps.workspaceRevision();
       let result: Record<string, unknown>;
       switch (request.method) {
         case 'capabilities':
@@ -203,7 +200,7 @@ export class LocalControl {
           if (params.instanceId !== instanceId || !project || !await this.liveProject(project)) return denied;
           // Limit filesystem work to the requested page of candidates. A page may omit stale or
           // unavailable rows; its next offset refers to the scan, not the number of rows returned.
-          const candidatePage = page(this.deps.sessions.list({ refreshGit: false }).filter((session) => !session.mission && !session.archived &&
+          const candidatePage = page(this.deps.sessions.list({ refreshGit: false }).filter((session) => !session.archived &&
             key(session.config.projectRoot) === key(project.root) && controlIdSchema.safeParse(session.id).success), params.offset, params.limit);
           const checked = [];
           for (const session of candidatePage.items) {
@@ -215,8 +212,8 @@ export class LocalControl {
             } catch { /* Not an ordinary session in the selected workspace. */ }
           }
           if (!await this.liveProject(project) || this.active !== grant) return denied;
-          // Re-sample the approved cwd identities after the asynchronous Mission/resource guard.
-          // The final in-process revisions below reject changes during this filesystem scan.
+          // Re-sample the approved cwd identities after the asynchronous resource guard, so a
+          // change during this filesystem scan is not reported as checked.
           const verified = await Promise.all(checked.map(async (entry) => {
             try { return await localWorkspaceIdentity(entry.session, project.canonicalRoot) === entry.workspace ? entry : null; }
             catch { return null; }
@@ -235,7 +232,7 @@ export class LocalControl {
           break;
         }
       }
-      return grant === this.active && revision === this.deps.workspaceRevision() ? { ok: true, result } : denied;
+      return grant === this.active ? { ok: true, result } : denied;
     } catch (error) { return { ok: false, error: controlErrorCode(error) }; }
   }
 }

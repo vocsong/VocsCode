@@ -33,8 +33,8 @@ The [remote HTTPS MCP](CONTROL-MCP.md) rollout is separate.
 ## Authority and limits
 
 - The desktop owner grants project discovery and ordinary session metadata (ID, title, status,
-  harness). Titles can contain text from the opening prompt. Archived and Mission-managed sessions
-  are excluded. Canonical project and workspace checks apply. There are no transcripts, approval
+  harness). Titles can contain text from the opening prompt. Archived sessions are
+  excluded. Canonical project and workspace checks apply. There are no transcripts, approval
   or grant-management tools, settings reads, arbitrary workspace paths, session writes, shell,
   credentials, or remote routing.
 - No listener is created until the owner enables the grant from the trusted desktop page. An

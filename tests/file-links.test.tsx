@@ -59,7 +59,6 @@ beforeEach(() => {
     sessions: [session],
     activeId: session.id,
     layout: singlePaneLayout(session.id),
-    missions: {},
     transcripts: {},
     loaded: {},
     transcriptErrors: {},

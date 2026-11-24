@@ -6,7 +6,6 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { CONTROL_RETRY_GRACE_MS, ControlJournal } from '../src/main/control/journal';
 import { CONTROL_OPEN_WINDOWS_PER_CONTROLLER, CONTROL_OPERATIONS_PER_CONTROLLER, ControlService } from '../src/main/control/service';
 import type { ControlResourceGuard } from '../src/main/control/workspace';
-import { MissionStore, type MissionState } from '../src/main/mission/store';
 import { defaultSettings } from '../src/main/settings';
 import { emptyUsage } from '../src/main/models/static-models';
 import { deferred } from '../src/main/util/async';
@@ -20,7 +19,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => fs.rm(ro
 
 type DiscoveryMethod = 'projects.list' | 'sessions.list' | 'sessions.get';
 
-async function fixture(persist = writeJson, workspaceRevision = () => 0) {
+async function fixture(persist = writeJson) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-control-'));
   roots.push(root);
   const project = path.join(root, 'project');
@@ -48,7 +47,7 @@ async function fixture(persist = writeJson, workspaceRevision = () => 0) {
   const list = vi.fn<SessionManager['list']>(() => rows);
   const sessions = { list, get: (id: string) => rows.find((row) => id === row.id), runControlled, createControlled, interruptControlled, transcript } as unknown as SessionManager;
   const guard = vi.fn<ControlResourceGuard>(async () => undefined);
-  const service = new ControlService({ journal, sessions, settings: () => settings, guard, workspaceRevision, now: () => now });
+  const service = new ControlService({ journal, sessions, settings: () => settings, guard, now: () => now });
   const state = await service.ownerState();
   const projectId = state.projects[0]!.id;
   const grant: ControlGrantInput = { accountId: principal.accountId, controllerId: principal.controllerId, name: 'Test controller', projectIds: [projectId], scopes: [...CONTROL_SCOPES], permissionModes: ['ask'], harnesses: ['native'], expiresAt: now + 10_000_000 };
@@ -142,33 +141,6 @@ it.each(['projects.list', 'sessions.list', 'sessions.get'] as const)('does not p
   });
   if (method === 'sessions.get') expect(result).toMatchObject({ error: { code: 'denied' } });
   else expect(result).toEqual({ value: { items: [], nextOffset: null } });
-});
-
-it.each(['projects.list', 'sessions.list', 'sessions.get'] as const)('denies %s across Mission ownership publication even if snapshotting fails', async (method) => {
-  type OwnershipState = MissionState & { owned: boolean };
-  let journal: MissionStore<OwnershipState> | undefined;
-  const f = await fixture(writeJson, () => journal?.publicationRevision ?? 0);
-  const store = journal = new MissionStore<OwnershipState>(f.root, { validate: () => true, snapshotEvery: 1 });
-  const id = 'mission-test';
-  await store.create({ id, schemaVersion: 1, revision: 0, lastEventSequence: 0, owned: false }, {
-    actor: 'user:test', expectedRevision: 0, idempotencyKey: 'create', kind: 'create',
-  });
-  f.guard.mockImplementation(async ({ projectRoot, sessionId }) => {
-    const resource = method === 'projects.list' ? projectRoot === f.state.projects[0]!.canonicalRoot : sessionId === f.meta.id;
-    if (resource && store.get(id)?.owned) throw new Error('Mission-owned resource');
-  });
-  const result = await duringDiscovery(f, method, async () => {
-    const rename = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('injected snapshot failure'));
-    try {
-      await expect(store.transact(id, { actor: 'user:test', expectedRevision: 1, idempotencyKey: 'own', kind: 'own' }, (draft) => {
-        draft.owned = true;
-      })).rejects.toMatchObject({ code: 'BLOCKED' });
-      expect(store.get(id)?.owned).toBe(true);
-    } finally { rename.mockRestore(); }
-  });
-  expect(result).toMatchObject({ error: { code: 'denied' } });
-  if (method === 'sessions.get') await expect(f.discover(method)).rejects.toMatchObject({ code: 'denied' });
-  else await expect(f.discover(method)).resolves.toEqual({ items: [], nextOffset: null });
 });
 
 it('deduplicates concurrent mutation requests and commits one receipt/event sequence without prompt content', async () => {
@@ -444,7 +416,7 @@ it.each(['workspace', 'permission mode'] as const)('rechecks the session %s afte
 
 it('rejects replaced project roots and managed aliases before privileged calls', async () => {
   const f = await fixture();
-  f.guard.mockRejectedValueOnce(new Error('Mission-owned'));
+  f.guard.mockRejectedValueOnce(new Error('Resource refused'));
   await expect(f.service.handle(f.principal, { method: 'sessions.send', params: f.params })).rejects.toBeDefined();
   await fs.rename(f.project, `${f.project}-old`); await fs.mkdir(f.project);
   await expect(f.service.handle(f.principal, { method: 'sessions.send', params: f.params })).rejects.toMatchObject({ code: 'unavailable' });

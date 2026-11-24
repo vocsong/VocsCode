@@ -5,7 +5,6 @@ import { HARNESS_BY_ID, HARNESSES } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { harnessShort } from '../format';
 import { useStore } from '../store';
-import { MISSION_MANAGED_REASON } from '../missions';
 import { Dropdown, Icon, MenuItem } from './ui';
 
 /** The sidebar row's fork button as a reusable dropdown: the same trigger menu wherever it is mounted. */
@@ -30,7 +29,6 @@ export function ForkIntoDropdown({ session, onForked, trigger }: {
       })
       .catch((e) => toast(e instanceof Error ? e.message : String(e), 'error'));
   };
-  if (session.mission) return <button type="button" className="row-act-btn" disabled title={MISSION_MANAGED_REASON} aria-label="Fork session unavailable for Mission"><Icon name="fork" size={15} /></button>;
   return (
     <Dropdown align="right" width={190} trigger={trigger ?? (() => (
       <button type="button" className="row-act-btn" title="Fork into another harness" aria-label="Fork session">
@@ -71,7 +69,6 @@ export function ForkIntoItems({ session, onForked }: { session: SessionMeta; onF
   const availabilityError = useStore((s) => s.availabilityError);
   const refreshAvailability = useStore((s) => s.refreshAvailability);
   const toast = useStore((s) => s.toast);
-  if (session.mission) return <MenuItem disabled hint={MISSION_MANAGED_REASON}>Fork unavailable for Mission</MenuItem>;
   return (
     <>
       <div className="menu-sep" />

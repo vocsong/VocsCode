@@ -4,7 +4,7 @@
 import { parseGitHubPullRequestUrl } from '../../../shared/github-pull-request';
 import type { GitPullRequestDetail } from '../../../shared/types';
 import { invoke, invokeErrorMessage } from '../api';
-import { fileScope, showOutsideFile } from '../file-open';
+import { showOutsideFile } from '../file-open';
 import { workspaceRelativePath } from '../file-refs';
 import * as panes from '../panes';
 import type { FilePreviewTarget } from '../panes';
@@ -13,8 +13,6 @@ import { applyNav, markPanelBottomOpened, pushHistory } from './helpers';
 import type { Getter, Setter, State, StoreRuntime } from './types';
 
 type LayoutSliceKeys =
-  | 'newSessionKind'
-  | 'newMissionSourceId'
   | 'activeId'
   | 'layout'
   | 'view'
@@ -51,7 +49,6 @@ type LayoutSliceKeys =
   | 'resizePanes'
   | 'navBack'
   | 'navForward'
-  | 'openMissionLaunch'
   | 'setView'
   | 'setAnalyticsView'
   | 'toggleSidebar'
@@ -78,8 +75,6 @@ type LayoutSliceKeys =
 
 export function createLayoutSlice(rt: StoreRuntime, toastError: (error: unknown) => void) {
   return (set: Setter, get: Getter): Pick<State, LayoutSliceKeys> => ({
-    newSessionKind: 'normal',
-    newMissionSourceId: null,
     activeId: null,
     layout: panes.singlePaneLayout(),
     view: 'chat',
@@ -110,12 +105,6 @@ export function createLayoutSlice(rt: StoreRuntime, toastError: (error: unknown)
     historyIndex: -1,
 
     async setActive(id, pane) {
-      const target = id ? get().sessions.find((session) => session.id === id) : undefined;
-      if (target?.mission?.role === 'worker') {
-        await get().inspectMissionSession(target.mission.missionId, target.id);
-        return;
-      }
-      if (target?.mission) void get().loadMission(target.mission.missionId);
       set((s) => ({
         activeId: id,
         view: 'chat',
@@ -154,10 +143,9 @@ export function createLayoutSlice(rt: StoreRuntime, toastError: (error: unknown)
 
     dropSession(paneId, zone, sessionId) {
       const target = get().sessions.find((s) => s.id === sessionId);
-      if (!target || target.mission?.role === 'worker') return;
+      if (!target) return;
       const layout = panes.applyDrop(get().layout, paneId, zone, sessionId);
       if (layout === get().layout) return;
-      if (target.mission) void get().loadMission(target.mission.missionId);
       set({ layout, activeId: sessionId, view: 'chat' });
       pushHistory(rt, set, get, { view: 'chat', sessionId });
       void get().loadTranscript(sessionId).catch(toastError);
@@ -178,10 +166,6 @@ export function createLayoutSlice(rt: StoreRuntime, toastError: (error: unknown)
       const { history, historyIndex } = get();
       if (historyIndex >= history.length - 1) return;
       await applyNav(rt, set, get, history[historyIndex + 1], historyIndex + 1);
-    },
-
-    openMissionLaunch(root, sourceId) {
-      set({ newSessionOpen: true, newSessionRoot: root, newSessionKind: 'mission', newMissionSourceId: sourceId ?? null });
     },
 
     setView(view) {
@@ -250,19 +234,11 @@ export function createLayoutSlice(rt: StoreRuntime, toastError: (error: unknown)
       const st = get();
       const session = st.sessions.find((s) => s.id === sessionId);
       if (!session) return;
-      const mission = session.mission ? st.missions[session.mission.missionId] : undefined;
-      if (session.mission && !mission && !opts.missionLoaded) {
-        // A Mission lead reads its files from a workspace on the Mission record: load it, then open.
-        void get().loadMission(session.mission.missionId)
-          .then(() => get().revealFile(sessionId, path, line, { ...opts, missionLoaded: true }))
-          .catch(toastError);
-        return;
-      }
-      const scope = fileScope(session, mission, opts.workspace);
+      const root = session.cwd;
       const target = path.trim();
-      const rel = workspaceRelativePath(scope.root, target);
+      const rel = workspaceRelativePath(root, target);
       if (rel === null) {
-        void showOutsideFile(sessionId, scope.root, target, (text, kind) => get().toast(text, kind));
+        void showOutsideFile(sessionId, root, target, (text, kind) => get().toast(text, kind));
         return;
       }
       const filesPanel = { panelTab: 'files', panelFocus: 'top', panelPeek: true, view: 'chat' } as const;
@@ -277,8 +253,7 @@ export function createLayoutSlice(rt: StoreRuntime, toastError: (error: unknown)
         path: clean,
         nonce: ++rt.fileNonce,
         ...(line && line > 0 ? { line } : {}),
-        ...(opts.exact ? { exact: true } : {}),
-        ...(session.mission ? { missionWorkspaceId: scope.missionWorkspaceId } : {})
+        ...(opts.exact ? { exact: true } : {})
       };
       const layout = panes.openFilePreview(st.layout, file);
       if (layout !== st.layout) set({ ...filesPanel, layout });
@@ -312,7 +287,7 @@ export function createLayoutSlice(rt: StoreRuntime, toastError: (error: unknown)
         if (!r.path) return;
         root = r.path;
       }
-      set({ newSessionOpen: true, newSessionRoot: root, newSessionKind: 'normal', newMissionSourceId: null });
+      set({ newSessionOpen: true, newSessionRoot: root });
     },
 
     openQuickSession(quickSessionOpen, quickSessionPrefill) {
@@ -329,17 +304,7 @@ export function createLayoutSlice(rt: StoreRuntime, toastError: (error: unknown)
 
     jumpToSearchMatch(sessionId, itemId) {
       set((s) => ({ searchOpen: false, searchJump: itemId ? { sessionId, itemId, n: (s.searchJump?.n ?? 0) + 1 } : null }));
-      const worker = get().sessions.find((s) => s.id === sessionId);
-      if (worker?.mission?.role === 'worker') {
-        void get().inspectMissionSession(worker.mission.missionId, sessionId, itemId).catch(toastError);
-      } else {
-        // Search can include an archived child absent from the current list. Resolve its ownership first.
-        void (async () => {
-          const session = worker ?? await invoke('sessions:get', { id: sessionId });
-          if (session?.mission?.role === 'worker') await get().inspectMissionSession(session.mission.missionId, sessionId, itemId);
-          else await get().setActive(sessionId);
-        })().catch(toastError);
-      }
+      void get().setActive(sessionId).catch(toastError);
     },
 
     toggleThinking() {

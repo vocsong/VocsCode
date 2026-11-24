@@ -3,13 +3,12 @@ import type { ApprovalDecision, ApprovalRequest, FileChange, SessionMeta, Transc
 import { parseGitHubPullRequestUrl } from '../../../shared/github-pull-request';
 import { imageMimeType } from '../../../shared/image-files';
 import { invoke, isWeb, platform } from '../api';
-import { fileManagerName, fileScope } from '../file-open';
+import { fileManagerName } from '../file-open';
 import { workspaceRelativePath } from '../file-refs';
 import { useCanInvoke, useTranscriptCapabilities } from '../capabilities';
 import { fmtCost, fmtDuration, fmtRate, fmtStamp, fmtStampFull, fmtTokens } from '../format';
 import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
-import { MISSION_MANAGED_REASON } from '../missions';
 import { chunkKey, estimateChunkHeight, windowRange, type RenderChunk } from '../transcript-window';
 import { useStreamingMarkdown } from '../use-streaming-markdown';
 import { validateQuestionResponse } from '../../../shared/question-response';
@@ -20,7 +19,6 @@ import { ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { HarnessPill } from './SessionTitle';
 import { TranscriptFind } from './TranscriptFind';
 import { askConfirm, Badge, Button, Icon, Spinner } from './ui';
-import { MissionCompletion } from './mission/MissionCompletion';
 import { OngoingActivityStrip } from './OngoingActivityStrip';
 import './transcript-links.css';
 
@@ -67,7 +65,7 @@ function pinnedPromptIndex(userChunks: number[], tops: number[], base: number, s
 }
 
 function canOpenTranscriptPullRequest(session: SessionMeta | undefined, activeId: string | null): boolean {
-  return !isWeb && !!session && !session.mission && session.id === activeId;
+  return !isWeb && !!session && session.id === activeId;
 }
 
 /** Mirrors revealFile's routing without reading or resolving files ahead of a click. */
@@ -88,7 +86,6 @@ function transcriptFileKind(path: string, root: string, canRevealOutside: boolea
 /** `active` is false for a split pane the user is not working in: it keeps streaming, but window-wide keys skip it. */
 export function Transcript({ session, active = true }: { session: SessionMeta; active?: boolean }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
-  const mission = useStore((s) => session.mission?.role === 'lead' ? s.missions[session.mission.missionId] : undefined);
   const loaded = useStore((s) => s.loaded[session.id]);
   const transcriptError = useStore((s) => s.transcriptErrors[session.id]);
   const loadTranscript = useStore((s) => s.loadTranscript);
@@ -122,17 +119,9 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
     (path: string, line?: number) => useStore.getState().revealFile(session.id, path, line),
     [session.id]
   );
-  const canEdit = caps.editAndResend && !session.mission && session.config.harness === 'native' && session.status === 'idle';
+  const canEdit = caps.editAndResend && session.config.harness === 'native' && session.status === 'idle';
 
-  const chunks = useMemo(() => {
-    const grouped = groupTranscript(items, showThinking);
-    if (mission?.status !== 'completed' || !mission.completionReport) return grouped;
-    // Completion precedes later answer-only questions. Do not append it after each new answer
-    // or forge an assistant item; this host projection has its own measured virtual-list row.
-    const nextQuestion = grouped.findIndex((chunk) => chunk.kind === 'single' && chunk.item.kind === 'user' && chunk.item.ts > mission.completionReport!.completedAt);
-    grouped.splice(nextQuestion < 0 ? grouped.length : nextQuestion, 0, { kind: 'mission-completion', record: mission });
-    return grouped;
-  }, [items, mission, showThinking]);
+  const chunks = useMemo(() => groupTranscript(items, showThinking), [items, showThinking]);
   const running = session.status === 'running' || session.status === 'starting';
   // Work in flight stays open: that is the stretch nothing has followed yet. Once the next message
   // starts, the stretch is finished and collapses to its header, like every earlier one.
@@ -238,7 +227,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
     if (stick && !findOpen && !jumpHere && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, session.ongoing, mission?.completionReport, stick, findOpen, jumpHere, measureVersion]);
+  }, [items, session.ongoing, stick, findOpen, jumpHere, measureVersion]);
 
   // Prepending older items must not move what the reader is looking at: restore the distance from
   // the bottom captured before the prepend. Only runs `some` when the head actually changed.
@@ -427,7 +416,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
             </Button>
           </div>
         )}
-        {loaded && items.length === 0 && !mission?.completionReport && (
+        {loaded && items.length === 0 && (
           <div className="transcript-empty">
             <Icon name="sparkles" size={28} />
             <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
@@ -539,9 +528,7 @@ const TranscriptRow = memo(function TranscriptRow({
   }, [key, measureRow]);
   return (
     <div className="transcript-row" ref={ref}>
-      {chunk.kind === 'mission-completion' ? (
-        <MissionCompletion record={chunk.record} />
-      ) : chunk.kind === 'work' ? (
+      {chunk.kind === 'work' ? (
         <WorkGroup chunk={chunk} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} live={live} />
       ) : chunk.kind === 'group' ? (
         <ToolGroup entries={chunk.entries} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} />
@@ -555,7 +542,6 @@ const TranscriptRow = memo(function TranscriptRow({
 
 /** Grouping recreates wrappers; unchanged constituent items still have stable store identities. */
 function sameChunk(a: RenderChunk, b: RenderChunk): boolean {
-  if (a.kind === 'mission-completion' && b.kind === 'mission-completion') return a.record === b.record;
   if (a.kind === 'single' && b.kind === 'single') return a.item === b.item;
   if (a.kind === 'group' && b.kind === 'group') return a.id === b.id && sameEntries(a.entries, b.entries);
   return a.kind === 'work' && b.kind === 'work' && a.id === b.id && sameEntries(a.entries, b.entries) &&
@@ -636,7 +622,6 @@ function PlanCard({ item }: { item: Extract<TranscriptItem, { kind: 'plan' }> })
 }
 
 export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; sessionId?: string; canEdit?: boolean; onImageExpand?: OnImageExpand }) {
-  const managed = useStore((s) => !!s.sessions.find((session) => session.id === sessionId)?.mission);
   const images = item.images ?? [];
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.text);
@@ -655,7 +640,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
   const rerun = async () => {
     const text = draft.trim();
     if (!text && !images.length && !item.files?.length) return;
-    if (!sessionId || managed) return;
+    if (!sessionId) return;
     const confirmed = await askConfirm({
       title: 'Edit and rerun this message?',
       body: 'All transcript items after this message will be discarded. Files changed by those turns are not rolled back.',
@@ -720,7 +705,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
       <div className="msg-user-meta">
         <Stamp ts={item.ts} />
         <button type="button" className="msg-action" title="Copy message" aria-label="Copy message" onClick={() => void copy()}><Icon name="copy" size={14} /></button>
-        {sessionId && (canEdit || managed) && <button type="button" className="msg-action" title={managed ? MISSION_MANAGED_REASON : 'Edit and rerun message'} aria-label={managed ? 'Rewind unavailable for Mission' : 'Edit and rerun message'} onClick={() => !managed && setEditing(true)} disabled={rerunning || managed}><Icon name="edit" size={14} /></button>}
+        {sessionId && canEdit && <button type="button" className="msg-action" title="Edit and rerun message" aria-label="Edit and rerun message" onClick={() => setEditing(true)} disabled={rerunning}><Icon name="edit" size={14} /></button>}
       </div>
     </div>
   );
@@ -733,11 +718,10 @@ function AssistantMessage({ item, sessionId, showThinking, onImageExpand }: { it
   // React must leave the hydrated DOM alone when only the active pane or link capability changes.
   const markup = useMemo(() => ({ __html: html }), [html]);
   const session = useStore((s) => s.sessions.find((candidate) => candidate.id === sessionId));
-  const mission = useStore((s) => session?.mission ? s.missions[session.mission.missionId] : undefined);
   const canOpenPr = useStore((s) => canOpenTranscriptPullRequest(session, s.activeId));
   const { openFile } = useTranscriptCapabilities();
   const canRevealOutside = useCanInvoke('app:showInFolder');
-  const root = !isWeb && openFile && session ? fileScope(session, mission).root : undefined;
+  const root = !isWeb && openFile && session ? session.cwd : undefined;
   const cwd = session?.cwd;
   const body = useMarkdownImages(html, sessionId, cwd, onImageExpand);
   useLayoutEffect(() => {

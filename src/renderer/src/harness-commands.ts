@@ -7,15 +7,15 @@ import { useStore } from './store';
  * The session's own list, or — until its harness has started and reported one — the latest list a
  * session of the same harness in the same project reported. Commands come from the harness and the
  * project's files, so a sibling's list is what this one will report; the session's own replaces it
- * the moment it arrives. Mission sessions never borrow: their harness runs a reduced command set.
+ * the moment it arrives.
  * Undefined while nothing is known yet, which is not the same as a harness that reported none.
  */
 export function useHarnessCommandList(session: SessionMeta): HarnessCommand[] | undefined {
   return useStore((s) => {
-    if (session.harnessCommandList || session.mission) return session.harnessCommandList;
+    if (session.harnessCommandList) return session.harnessCommandList;
     let best: SessionMeta | undefined;
     for (const other of s.sessions) {
-      if (other.id === session.id || other.mission || !other.harnessCommandList?.length) continue;
+      if (other.id === session.id || !other.harnessCommandList?.length) continue;
       if (other.config.harness !== session.config.harness || other.config.projectRoot !== session.config.projectRoot) continue;
       if (!best || other.updatedAt > best.updatedAt) best = other;
     }

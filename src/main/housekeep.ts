@@ -153,7 +153,6 @@ export class HousekeepService {
     if (session.archived) return 'Already archived.';
     if (excluded.has(session.id) || this.deps.hasTerminalOrView(session.id)) return 'Open, has a draft, or has a terminal.';
     if (session.pinned) return 'Pinned session.';
-    if (session.mission) return 'Mission-owned session.';
     if (session.status === 'pr') return 'An open pull request is recorded.';
     if (!['idle', 'merged', 'stopped'].includes(session.status) || session.queued || session.goal?.status === 'active' || session.goal?.status === 'paused' || !checkRuntime()) {
       return 'Session activity, queued input, or workspace ownership is not safely idle.';

@@ -74,7 +74,7 @@ Five seams:
    MCP capability is `inject` or `client`. Cursor does not get it (inherit-only, file export); pi
    subagent children do, over the parent's connections, unless their agent definition sets
    `mcp: false` — which the shipped Explore and Plan templates do. The gateway can recall history
-   without a wiki. Only explicit legacy mode requires a wiki; managed Mission sessions get neither.
+   without a wiki. Only explicit legacy mode requires a wiki.
 2. **Push.** When a wiki exists and `knowledge.prime` is on (default), a new session gains a bounded
    `<digest>` naming the most useful pages. It never contains page bodies and never outranks
    AGENTS.md. A harness with a system prompt (pi, Claude, native) gets it through

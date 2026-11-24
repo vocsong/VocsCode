@@ -2,7 +2,6 @@
  * Shared types and constants for the renderer Zustand store and its slices.
  */
 import type { AgentState } from '../../../shared/agent';
-import type { MissionRecord } from '../../../shared/mission';
 import type { ProcessSummary } from '../../../shared/processes';
 import type { TerminalInfo } from '../../../shared/terminal';
 import type {
@@ -78,12 +77,6 @@ export interface State {
   bootError: string | null;
   settings: AppSettings | null;
   sessions: SessionMeta[];
-  /** Coordination snapshots, never renderer-owned scheduling state. */
-  missions: Record<string, MissionRecord>;
-  missionErrors: Record<string, string>;
-  missionInspector: { missionId: string; sessionId: string; itemId?: string } | null;
-  newSessionKind: 'normal' | 'mission';
-  newMissionSourceId: string | null;
   /** The active pane's session; every global panel follows it. Kept equal to `layout`'s active pane. */
   activeId: string | null;
   /** The split conversation workspace (panes.ts); a single pane is the app as it always was. */
@@ -215,10 +208,6 @@ export interface State {
   applyEvent(env: SessionEventEnvelope): void;
   setSettings(s: AppSettings): void;
   setSessions(list: SessionMeta[]): void;
-  setMission(record: MissionRecord): void;
-  loadMission(missionId: string): Promise<void>;
-  inspectMissionSession(missionId: string, sessionId: string, itemId?: string): Promise<void>;
-  openMissionLaunch(root: string, sourceId?: string): void;
   setView(v: View): void;
   setAnalyticsView(patch: { tab?: AnalyticsTab; range?: AnalyticsRange }): void;
   navBack(): Promise<void>;
@@ -235,10 +224,9 @@ export interface State {
   /**
    * Opens a path a session names (workspace-relative, shortened, or absolute inside its folder). A
    * file opens a preview and a folder opens for browsing, both in the Files tab. A path outside the
-   * folder is only shown in the system file manager. `exact` skips the shortened-name lookup;
-   * `workspace` picks a Mission workspace ('' is the integration result, absent is the lead's).
+   * folder is only shown in the system file manager. `exact` skips the shortened-name lookup.
    */
-  revealFile(sessionId: string, path: string, line?: number, opts?: { exact?: boolean; workspace?: string; missionLoaded?: boolean }): void;
+  revealFile(sessionId: string, path: string, line?: number, opts?: { exact?: boolean }): void;
   closeFilePreview(): void;
   consumeFileReveal(): void;
   /** Opens the Subagents tab on one run, used by a transcript tool card. */

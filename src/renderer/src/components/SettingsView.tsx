@@ -10,7 +10,6 @@ import { ChatImport } from './ChatImport';
 import { ControlSettings } from './ControlSettings';
 import { InstructionsSection } from './InstructionsSection';
 import { LocalControlSettings } from './LocalControlSettings';
-import { MissionSettings } from './mission/MissionSettings';
 import { PiSection } from './PiSettings';
 import { SettingsGroup } from './SettingsPrimitives';
 import { VocsAccountSettings } from './VocsAccountSettings';
@@ -146,7 +145,6 @@ export function SettingsView() {
               {section === 'appearance' && <AppearanceSection settings={settings} update={update} />}
               {section === 'sessions' && <SessionDefaultsSection settings={settings} update={update} />}
               {section === 'assistant' && <BackgroundModelFields settings={settings} update={update} />}
-              {section === 'mission' && <MissionSettings settings={settings} />}
               {section === 'shortcuts' && <ShortcutsSection settings={settings} />}
               {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
               {section === 'account' && <VocsAccountSettings />}

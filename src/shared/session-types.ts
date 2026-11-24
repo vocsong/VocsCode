@@ -4,7 +4,6 @@
  */
 import type { EffortLevel, FastModeStatus, HarnessId, HarnessRef, ModelInfo, ModelRef, PermissionMode } from './harness-types';
 import type { HarnessCommand } from './harness-commands';
-import type { MissionOwnership } from './mission';
 import type { OngoingItem, OngoingSource } from './ongoing';
 import type { ApprovalDecision, ApprovalRequest, FileAttachment, ImageAttachment, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem } from './transcript-types';
 import type { UsageTotals } from './usage-types';
@@ -77,9 +76,7 @@ export interface SessionMeta {
   forkedFrom?: string;
   /** Host-allocated controller creation receipt; never accepted from ordinary create/patch. */
   controlCreation?: { operationId: string; requestHash: string };
-  /** Host-managed Mission identity; absent for ordinary sessions. Children are not sidebar rows. */
-  mission?: MissionOwnership;
-  /** Effective working directory (worktree path if isolated), never the Mission integration view. */
+  /** Effective working directory (worktree path if isolated). */
   cwd: string;
   /**
    * The app-managed worktree this session owns and may remove. A fork of a worktree session gets
@@ -149,9 +146,6 @@ export interface SessionMeta {
   /** Epoch ms when pinned; pinned rows sort by it ascending (first pin on top). Rewritten on drag-reorder. */
   pinnedAt?: number;
   archived?: boolean;
-  /** Ordinary runtime writer claims persisted before writable startup. Only the same runtime's
-   * positive disposal proof clears its claim; restart or a newer runtime cannot clear old debt. */
-  workspaceWriterClaims?: string[];
   /** Number of queued (steer/follow-up) messages waiting. */
   queued?: number;
   /**

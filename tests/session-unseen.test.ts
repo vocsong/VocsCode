@@ -13,7 +13,6 @@ import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SettingsStore } from '../src/main/settings';
-import type { MissionOwnership } from '../src/shared/mission';
 import type { HarnessAdapter } from '../src/main/harness/types';
 import { REMOTE_CHANNELS } from '../src/shared/remote-channels';
 
@@ -64,8 +63,6 @@ async function fixture(meta: SessionMeta, viewing = false) {
   return { dir, store, upsert, pushSessions, isViewing, manager, finishTurn, get: () => manager.get(meta.id)! };
 }
 
-const worker: MissionOwnership = { missionId: 'm1', role: 'worker', generation: 1, sourceAccess: 'read_only', requestedTools: [], reasoningDefault: false };
-
 describe('marking a turn that finished unviewed', () => {
   it('marks a completed turn nobody was looking at, and says so to the sidebar', async () => {
     const f = await fixture(session());
@@ -96,12 +93,6 @@ describe('marking a turn that finished unviewed', () => {
 
   it('does not mark a turn that ended on screen in the focused window', async () => {
     const f = await fixture(session(), true);
-    f.finishTurn('completed');
-    expect(f.get().unseenAt).toBeUndefined();
-  });
-
-  it('does not mark a Mission worker, which is never a sidebar row', async () => {
-    const f = await fixture(session({ mission: worker }));
     f.finishTurn('completed');
     expect(f.get().unseenAt).toBeUndefined();
   });
@@ -183,7 +174,7 @@ describe('markViewed', () => {
     const registry = createHandlerRegistry({ sessions: f.manager, log: () => undefined } as unknown as HandlerDeps);
     const meta = (await registry.invoke('sessions:markViewed', { id: 's1' })) as SessionMeta;
     expect(meta.unseenAt).toBeUndefined();
-    await expect(registry.invoke('sessions:markViewed', { id: '../etc' })).rejects.toThrow('Invalid Mission/session identifier');
+    await expect(registry.invoke('sessions:markViewed', { id: '../etc' })).rejects.toThrow('Invalid session identifier');
     await expect(registry.invoke('sessions:markViewed', { id: 's1', extra: 1 } as never)).rejects.toThrow();
   });
 

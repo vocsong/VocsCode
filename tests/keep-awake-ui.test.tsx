@@ -37,15 +37,13 @@ it('reflects the host choice, changes it mid-turn, and reads the new session on 
   expect(preference).toHaveBeenLastCalledWith({ id: 's_one', enabled: false });
 });
 
-it('does not offer the switch without the desktop bridge, or for managed/archived sessions', () => {
+it('does not offer the switch without the desktop bridge, or for archived sessions', () => {
   const { rerender } = render(<SessionControls session={session} />);
   const query = () => screen.queryByRole('switch', { name: 'Keep computer awake' });
   expect(query()).toBeNull();
   const preference = vi.fn();
   vi.stubGlobal('keepAwake', { preference });
   rerender(<SessionControls session={{ ...session, archived: true }} />);
-  expect(query()).toBeNull();
-  rerender(<SessionControls session={{ ...session, mission: {} as NonNullable<SessionMeta['mission']> }} />);
   expect(query()).toBeNull();
   expect(preference).not.toHaveBeenCalled();
 });

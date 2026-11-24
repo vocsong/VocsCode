@@ -92,14 +92,4 @@ describe('dropping files onto a session', () => {
     expect(view.container.querySelectorAll('.file-attachment')).toHaveLength(1);
     expect(toast).toHaveBeenCalledWith(expect.stringContaining('src is a folder'), 'error');
   });
-
-  it('does not offer a drop on a read-only specialist session', () => {
-    show([meta('drop-worker', { mission: { missionId: 'm1', role: 'worker' } as SessionMeta['mission'] })]);
-    render(<SessionPanes empty={null} />);
-    const pane = screen.getByTestId('session-pane');
-    const over = fileDrag([new File(['x'], 'x.txt')]);
-    fireEvent.dragOver(pane, over);
-    expect(over.dataTransfer.dropEffect).toBe('none');
-    expect(screen.queryByTestId('file-drop-overlay')).toBeNull();
-  });
 });

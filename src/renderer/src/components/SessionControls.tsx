@@ -107,7 +107,7 @@ export function SessionControls({ session }: { session: SessionMeta }) {
           )}
         </Dropdown>
       )}
-      {!session.mission && !session.archived && window.keepAwake && (
+      {!session.archived && window.keepAwake && (
         <KeepAwakeSwitch key={session.id} id={session.id} bridge={window.keepAwake} />
       )}
     </div>

@@ -91,7 +91,6 @@ export function createQuestionTool() {
     async execute(toolCallId: string, params: QuestionInput, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: QuestionContext) {
       const question = parseQuestionInput(params);
       const nonce = process.env.VOCS_CODE_PI_NONCE;
-      if (process.env.VOCS_CODE_MISSION_POLICY) throw new Error('Managed Mission questions must use the Mission broker, not ask_user.');
       if (!nonce || !ctx.hasUI || typeof ctx.ui?.select !== 'function') throw new Error('The Vocs Code question UI is unavailable; no user answer was obtained.');
       if (signal?.aborted) throw new Error('Question was interrupted before it could be asked.');
       const payload: QuestionPayload = { ...question, version: 1, nonce, toolCallId };

@@ -689,9 +689,9 @@ previous refresh token stays valid until a new one is used.
 
 **Proxy.** While connected, `resolveForSession` adds `vocs-openrouter` (reserved in
 `MCP_BUILTIN_IDS`, `builtin` provenance set) for every `inject`/`client` harness, except
-managed Mission runs and when the app-wide or per-repo built-in switch has it off. Its
+when the app-wide or per-repo built-in switch has it off. Its
 definition is `http://127.0.0.1:<port>/hub/openrouter` with an app-minted bearer for that
-connection instance, marked `secretHeaderKeys: ['Authorization']` like the Mission broker:
+connection instance, marked `secretHeaderKeys: ['Authorization']`:
 Codex exec passes it through the environment, other harnesses receive it the way they
 receive any HTTP header (Claude's `--mcp-config`, Pi's session-dir `mcp.json`). The Hub token
 never reaches a harness. The proxy accepts only that bearer, the exact path, a loopback

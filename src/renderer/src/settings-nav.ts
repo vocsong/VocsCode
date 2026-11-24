@@ -9,7 +9,7 @@ import { useStore } from './store';
 let requestedSection: SettingsSection | null = null;
 const sectionListeners = new Set<(section: SettingsSection) => void>();
 
-/** Deep links ("Configure Mission") land on their section, whether or not Settings is open. */
+/** Deep links ("Housekeep settings") land on their section, whether or not Settings is open. */
 export function openSettings(section: SettingsSection): void {
   requestedSection = section;
   for (const listener of sectionListeners) listener(section);

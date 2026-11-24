@@ -58,7 +58,7 @@ two-desktop run remain activation gates. The Windows CLI and browser Remote Acce
    offline, unapproved or older computer is not silently replaced by another target.
 
 Only the actual desktop main frame can invoke the grant-management IPC channels. A paired browser,
-internal agent, Mission, or controller cannot enable control or change its grants.
+internal agent, or controller cannot enable control or change its grants.
 
 Project enrollment binds a stable ID to a canonical root and filesystem identity. A missing,
 replaced or redirected root is refused. A moved root needs explicit owner re-enrollment; automatic
@@ -100,7 +100,7 @@ merely because an acknowledgment was lost.
 Transcript access is independent from send permission. Approval/question cards are replaced with
 owner-action notices, and so is the tool call a question card belongs to, since it carries the question
 and the owner's answer. **All questions and security approvals remain owner-only**, including ordinary
-questions in this first slice. There are no generic invoke, filesystem, terminal, secret, Mission,
+questions in this first slice. There are no generic invoke, filesystem, terminal, secret,
 queue, steer, attachment or slash-command tools.
 
 ## Receipts, recovery and revocation

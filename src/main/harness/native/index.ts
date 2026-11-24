@@ -80,7 +80,7 @@ export class NativeAdapter implements HarnessAdapter {
     }
     this.model = meta.activeModel ?? meta.config.model ?? this.defaultModel();
     this.effort = this.ctx.effort();
-    this.fastMode = meta.config.fastMode === true && !meta.mission;
+    this.fastMode = meta.config.fastMode === true;
     this.reportFastMode();
     this.ctx.log('info', `native loop: model=${this.model ? modelName(this.model.provider, this.model.model) : 'none configured'}${this.effort ? ` effort=${this.effort}` : ''}, ${this.history.length} history message(s) restored`);
     if (!this.model) this.ctx.log('warn', 'native loop has no usable model: no enabled provider with a key; the first message will fail');
@@ -488,7 +488,6 @@ export class NativeAdapter implements HarnessAdapter {
   }
 
   async setFastMode(enabled: boolean): Promise<void> {
-    if (enabled && this.ctx.session().mission) throw new Error('Fast mode is unavailable for Missions.');
     const support = fastModeSupport(this.id, this.model ?? undefined, this.ctx.settings().providers);
     if (enabled && !support.supported) throw new Error(support.reason);
     this.fastMode = enabled;

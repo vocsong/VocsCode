@@ -170,7 +170,7 @@
 .type-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 @media (max-width: 560px) { .type-width { grid-template-columns: 1fr; } }
 /* The remaining sections share the same card, field, disclosure and table vocabulary. */
-.settings .provider-card, .settings .harness-row, .settings .mission-card, .settings .shortcut-ref { background: var(--bg-elev); border-radius: 11px; margin: 14px 0; }
+.settings .provider-card, .settings .harness-row, .settings .shortcut-ref { background: var(--bg-elev); border-radius: 11px; margin: 14px 0; }
 .settings .provider-head { gap: 10px; flex-wrap: wrap; padding: 16px 20px; }
 .settings .provider-body { padding: 4px 20px 18px; gap: 10px; }
 .settings .provider-head .toggle { margin: 0; }
@@ -192,8 +192,6 @@
 .settings .pi-prompt-actions { flex-wrap: wrap; gap: 9px; padding: 12px 0 0; }
 .settings .pi-prompt-actions .mono { overflow-wrap: anywhere; max-width: 65%; }
 .settings .pi-resource { padding: 14px 0; }
-.settings .mission-settings .mission-card { padding: 21px; }
-.settings .mission-settings .mission-actions { position: sticky; bottom: -52px; background: var(--bg); padding: 16px 0; border-top: 1px solid var(--border); z-index: 2; }
 .settings details { border: 1px solid var(--border); border-radius: 9px; padding: 12px 16px; margin: 18px 0; background: var(--bg-elev); }
 .settings summary { cursor: pointer; font-size: 12px; font-weight: 550; line-height: 1.7; }
 .settings details[open] > summary { margin-bottom: 16px; }
@@ -232,7 +230,6 @@
   .settings-preview-workspace { padding: 22px 18px; }
   .settings-preview-workspace > strong { font-size: 18px; }
   .settings .provider-head, .settings .provider-body { padding-left: 14px; padding-right: 14px; }
-  .settings .mission-settings .mission-limits { grid-template-columns: minmax(0, 1fr); }
   .settings-search-result { padding: 15px; gap: 12px; }
 }
 @container settings (max-width: 400px) {

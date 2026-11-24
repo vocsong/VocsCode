@@ -1,4 +1,4 @@
-/** Question tool and host RPC boundary, including absence, cancellation and broker isolation. */
+/** Question tool and host RPC boundary, including absence and cancellation. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createQuestionTool, parseQuestionInput, parseQuestionPayload, QUESTION_MARKER, type QuestionPayload } from '../resources/pi/question-tool';
 import { PiAdapter } from '../src/main/harness/pi';
@@ -10,14 +10,13 @@ const payload: QuestionPayload = { ...input, header: 'Deployment', version: 1, n
 
 beforeEach(() => {
   vi.stubEnv('VOCS_CODE_PI_NONCE', 'question-runtime');
-  vi.stubEnv('VOCS_CODE_MISSION_POLICY', '');
 });
 afterEach(() => vi.unstubAllEnvs());
 
-function host(decision: ApprovalDecision = { optionId: 'allow', answers: { answer: 'staging' }, note: 'Wait for Friday.' }, mission = false) {
+function host(decision: ApprovalDecision = { optionId: 'allow', answers: { answer: 'staging' }, note: 'Wait for Friday.' }) {
   const requestApproval = vi.fn(async () => decision);
   const log = vi.fn();
-  const ctx = { session: () => ({ cwd: '/repo', usage: {}, ...(mission ? { mission: {} } : {}) }), requestApproval, log, emit: vi.fn() } as unknown as HarnessContext;
+  const ctx = { session: () => ({ cwd: '/repo', usage: {} }), requestApproval, log, emit: vi.fn() } as unknown as HarnessContext;
   const adapter = new PiAdapter(ctx);
   const access = adapter as unknown as { handleUiRequest(request: object): Promise<void>; extensionNonce: string; write(message: object): void };
   access.extensionNonce = 'question-runtime';
@@ -56,12 +55,6 @@ describe('Pi structured question host bridge', () => {
     expect(h.write).toHaveBeenCalledExactlyOnceWith({ type: 'extension_ui_response', id: 'dialog1', cancelled: true });
   });
 
-  it('keeps managed Mission questions on the broker even if a runtime requests this dialog', async () => {
-    const h = host(undefined, true); await h.ask();
-    expect(h.requestApproval).not.toHaveBeenCalled();
-    expect(h.write).toHaveBeenCalledExactlyOnceWith({ type: 'extension_ui_response', id: 'dialog1', cancelled: true });
-  });
-
   it('keeps raw extension selects exact and does not advertise unsupported comments', async () => {
     const h = host({ optionId: 'allow', answers: { choice: 'staging' }, note: 'not part of scalar choice' });
     await h.access.handleUiRequest({ id: 'raw', method: 'select', title: 'Choose', options: ['staging'] });
@@ -86,12 +79,10 @@ describe('Pi question tool', () => {
     expect(result.content[0].text).toContain('Do not infer a choice');
   });
 
-  it('refuses to ask when UI is absent, an abort has already happened, or a Mission broker owns the conversation', async () => {
+  it('refuses to ask when UI is absent or an abort has already happened', async () => {
     const select = vi.fn(); const ctx = { hasUI: true, ui: { select } };
     await expect(createQuestionTool().execute('q', input, undefined, undefined, { hasUI: false })).rejects.toThrow(/UI is unavailable/);
     await expect(createQuestionTool().execute('q', input, AbortSignal.abort(), undefined, ctx)).rejects.toThrow(/interrupted/);
-    vi.stubEnv('VOCS_CODE_MISSION_POLICY', '{}');
-    await expect(createQuestionTool().execute('q', input, undefined, undefined, ctx)).rejects.toThrow(/Mission broker/);
     expect(select).not.toHaveBeenCalled();
   });
 
