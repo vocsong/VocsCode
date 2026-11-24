@@ -46,8 +46,10 @@ visits to Import within the guide; dismissing the guide does not persist those d
 - **Google Antigravity.** Install Antigravity CLI (`agy`) 1.5.12 or newer. Open **Sign in with
   Google** to run `agy acp --login` in the vendor's terminal flow, then select **Recheck setup**.
   A saved CLI login is detected automatically. **Check Antigravity quota** shows the account's
-  reported remaining quota and reset times. Choose **Google Antigravity** in New Session, send your
-  first prompt on the default Gemini model, then pick from the account's advertised models.
+  reported remaining quota and reset times. From an Antigravity session in the desktop app, open
+  the right-hand **Usage** tab (or type `/usage`) and select **Check quota** for the same account
+  figures, separate from session tokens and spend. Choose **Google Antigravity** in New Session,
+  send your first prompt on the default Gemini model, then pick from the account's advertised models.
   If the app cannot find an installed CLI, set its executable under **Settings → Harnesses →
   Runtime configuration**. [Google's install guide](https://antigravity.google/docs/getting-started?tab=cli)
 - **Native/local:** Choose a configured API provider or local server. Local servers do not require

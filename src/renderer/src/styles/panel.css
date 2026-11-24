@@ -1164,6 +1164,26 @@ body.resizing {
   align-items: center;
   gap: 8px;
 }
+.usage-quota {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  overflow-wrap: anywhere;
+}
+.usage-quota .usage-block-head {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 8px;
+}
+.usage-quota .callout {
+  margin: 0;
+}
+.usage-quota-group {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+}
 .usage-switch {
   display: flex;
   align-items: center;
