@@ -341,6 +341,93 @@ describe('structured questions', () => {
       }
     });
   });
+
+  const multiQuestion: ApprovalRequest = {
+    id: 'question-multi', sessionId: 's1', harness: 'antigravity', kind: 'question', title: 'Antigravity has 2 questions',
+    questions: [
+      {
+        id: 'q1', question: 'Pick a color', allowOther: true,
+        options: [{ label: 'Red' }, { label: 'Blue' }]
+      },
+      {
+        id: 'q2', question: 'Pick fruits', allowOther: true, multiSelect: true,
+        options: [
+          { label: 'Apple', description: 'Crisp and sweet' },
+          { label: 'Banana', description: 'Soft and rich' }
+        ]
+      }
+    ],
+    options: [{ id: 'allow', label: 'Answer', kind: 'allow' }, { id: 'deny', label: 'Skip', kind: 'deny' }],
+    createdAt: 1
+  };
+
+  it('toggles multiple options independently on a multi-select question and keeps typed answers alongside them', () => {
+    render(<ApprovalCard item={item(multiQuestion)} sessionId="s1" />);
+    const answer = screen.getByRole('button', { name: 'Answer' }) as HTMLButtonElement;
+    expect(answer.disabled).toBe(true);
+    expect(screen.getByText('Select one or more')).toBeTruthy();
+
+    const apple = screen.getByRole('button', { name: 'Apple' });
+    const banana = screen.getByRole('button', { name: 'Banana' });
+    fireEvent.click(apple);
+    expect(answer.disabled).toBe(false);
+    expect(apple.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(banana);
+    expect(apple.getAttribute('aria-pressed')).toBe('true');
+    expect(banana.getAttribute('aria-pressed')).toBe('true');
+
+    // Typing a custom answer on a multi-select question keeps the chosen checkboxes selected.
+    const group2 = screen.getByRole('group', { name: 'Pick fruits' });
+    const otherInput = within(group2).getByRole('textbox', { name: 'Type an answer' }) as HTMLInputElement;
+    fireEvent.change(otherInput, { target: { value: 'Mango' } });
+    expect(apple.getAttribute('aria-pressed')).toBe('true');
+    expect(banana.getAttribute('aria-pressed')).toBe('true');
+
+    // Clicking a selected option unselects just that option without clearing the other or typed text.
+    fireEvent.click(banana);
+    expect(apple.getAttribute('aria-pressed')).toBe('true');
+    expect(banana.getAttribute('aria-pressed')).toBe('false');
+    expect(otherInput.value).toBe('Mango');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Blue' }));
+    fireEvent.click(answer);
+    expect(invoke).toHaveBeenCalledWith('approvals:respond', {
+      sessionId: 's1',
+      requestId: 'question-multi',
+      decision: {
+        optionId: 'allow',
+        note: undefined,
+        answers: { q1: 'Blue', q2: 'Mango' },
+        multiAnswers: { q2: ['Apple'] }
+      }
+    });
+  });
+
+  it('renders all saved multi-select options and typed custom answers on a decided card, and hides stale selections on Skip', () => {
+    const { rerender } = render(
+      <ApprovalCard
+        item={item(multiQuestion, { optionId: 'allow', answers: { q1: 'Blue', q2: 'Mango' }, multiAnswers: { q2: ['Apple', 'Banana'] } })}
+        sessionId="s1"
+      />
+    );
+    expect(screen.getByText('Blue')).toBeTruthy();
+    expect(screen.getByText('Apple')).toBeTruthy();
+    expect(screen.getByText('Crisp and sweet')).toBeTruthy();
+    expect(screen.getByText('Banana')).toBeTruthy();
+    expect(screen.getByText('Soft and rich')).toBeTruthy();
+    expect(screen.getByText('Mango')).toBeTruthy();
+    expect(screen.queryByText('Red')).toBeNull();
+
+    rerender(
+      <ApprovalCard
+        item={item(multiQuestion, { optionId: 'deny', answers: { q1: 'Blue' }, multiAnswers: { q2: ['Apple'] } })}
+        sessionId="s1"
+      />
+    );
+    expect(screen.queryByText('Apple')).toBeNull();
+    expect(screen.queryByText('Blue')).toBeNull();
+    expect(screen.getAllByText('No answer provided')).toHaveLength(2);
+  });
 });
 
 it.each(['Allow once', 'Deny'])('keeps permission notes honestly deny-only when choosing %s', (action) => {
