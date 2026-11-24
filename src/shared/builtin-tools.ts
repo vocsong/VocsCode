@@ -59,9 +59,26 @@ export function isBuiltinReadOnlyTool(serverId: string, tool: string): boolean {
  * the prefix splits server from tool.
  */
 export function isBuiltinReadOnlyMcpName(name: string): boolean {
-  if (!name.startsWith('mcp__')) return false;
+  const parts = splitMcpName(name);
+  return !!parts && isBuiltinReadOnlyTool(parts.server, parts.tool);
+}
+
+/** Like `isBuiltinReadOnlyMcpName`, for a Mission coordination tool (`mcp__vocs-mission__<tool>`). */
+export function isBuiltinMissionMcpName(name: string): boolean {
+  const parts = splitMcpName(name);
+  return !!parts && isBuiltinMissionTool(parts.server, parts.tool);
+}
+
+/** Like `isBuiltinReadOnlyMcpName`, for any tool every tier runs (`isBuiltinTrustedTool`). */
+export function isBuiltinTrustedMcpName(name: string): boolean {
+  const parts = splitMcpName(name);
+  return !!parts && isBuiltinTrustedTool(parts.server, parts.tool);
+}
+
+function splitMcpName(name: string): { server: string; tool: string } | undefined {
+  if (!name.startsWith('mcp__')) return undefined;
   const rest = name.slice('mcp__'.length);
   const split = rest.indexOf('__');
-  if (split <= 0) return false;
-  return isBuiltinReadOnlyTool(rest.slice(0, split), rest.slice(split + 2));
+  if (split <= 0) return undefined;
+  return { server: rest.slice(0, split), tool: rest.slice(split + 2) };
 }

@@ -37,9 +37,10 @@ interface PiLike {
 
 export interface McpBridgeTool extends PiToolDefinition {
   /**
-   * True only for a tool on the built-in read-only allowlist (`BUILTIN_READ_ONLY_TOOLS`) of a server
-   * whose host-set provenance marker says the definition is that built-in. A server's name or its
-   * own readOnly annotation never grants it.
+   * True only for a tool the gate runs in every tier: one on the built-in read-only allowlist
+   * (`BUILTIN_READ_ONLY_TOOLS`) or a Mission coordination tool (`MISSION_TOOLS`), of a server whose
+   * host-set provenance marker says the definition is that built-in. A server's name or its own
+   * readOnly annotation never grants it.
    */
   readOnly: boolean;
 }
@@ -145,19 +146,29 @@ export default async function vocsCodeMcp(pi: PiLike): Promise<void> {
   if (registered) {
     pi.on('session_start', (_event, ctx) => ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce: process.env.VOCS_CODE_PI_NONCE, capability: 'mcp', ready: true }), 'info'));
   }
-  if (registered || state.gatewayMemory) pi.on('session_shutdown', (event) => closeMcpBridge(event?.reason === 'reload'));
+  if (registered || state.gatewayServers?.length) pi.on('session_shutdown', (event) => closeMcpBridge(event?.reason === 'reload'));
 }
 
 // The app's own memory server and gateway keys, mirroring src/main/mcp/memory.ts.
 const MEMORY_SERVER = 'vocs-memory';
 const MEMORY_GATEWAY_URL_ENV = 'VOCS_MEMORY_GATEWAY_URL';
 const MEMORY_GATEWAY_TOKEN_ENV = 'VOCS_MEMORY_GATEWAY_TOKEN';
+// The Mission mode server and its gateway keys, mirroring src/main/mcp/mission.ts.
+const MISSION_SERVER = 'vocs-mission';
+const MISSION_GATEWAY_URL_ENV = 'VOCS_MISSION_GATEWAY_URL';
+const MISSION_GATEWAY_TOKEN_ENV = 'VOCS_MISSION_GATEWAY_TOKEN';
+
+/** The token-bearing servers the host hands over only through VOCS_CODE_MCP_EPHEMERAL, with their keys. */
+const GATEWAY_SERVERS: Readonly<Record<string, { url: string; token: string }>> = {
+  [MEMORY_SERVER]: { url: MEMORY_GATEWAY_URL_ENV, token: MEMORY_GATEWAY_TOKEN_ENV },
+  [MISSION_SERVER]: { url: MISSION_GATEWAY_URL_ENV, token: MISSION_GATEWAY_TOKEN_ENV }
+};
 
 /**
  * The app's built-in server ids, mirroring `MCP_BUILTIN_IDS` in src/shared/types.ts. Their names are
  * reserved in every spelling that folds to the same tool names (see `reservedKey`).
  */
-export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', 'vocs-openrouter'];
+export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', MISSION_SERVER, 'vocs-openrouter'];
 
 /**
  * Tools the app's own built-in servers expose read-only, mirroring `BUILTIN_READ_ONLY_TOOLS` in
@@ -182,6 +193,25 @@ export const BUILTIN_READ_ONLY_TOOLS: Readonly<Record<string, readonly string[]>
 /** True when `tool` (its MCP name, before sanitizing) is a read-only tool of the built-in `serverId`. */
 export function isBuiltinReadOnlyTool(serverId: string, tool: string): boolean {
   return Object.prototype.hasOwnProperty.call(BUILTIN_READ_ONLY_TOOLS, serverId) && BUILTIN_READ_ONLY_TOOLS[serverId]!.includes(tool);
+}
+
+/**
+ * Mission mode coordination tools, mirroring `BUILTIN_MISSION_TOOLS` in src/shared/builtin-tools.ts
+ * (LEAD_TOOLS then BUILDER_TOOLS of src/shared/mission-mode.ts). They never touch the workspace, so
+ * the gate runs them in every tier, Plan included; the app's gateway lists and accepts only the
+ * session's own role's tools. tests/pi-mcp-builtin-trust.test.ts pins this copy to the host's.
+ */
+export const MISSION_TOOLS: Readonly<Record<string, readonly string[]>> = {
+  [MISSION_SERVER]: [
+    'start_builder', 'message_builder', 'answer_request', 'list_builders', 'wait_for_builders',
+    'builder_diff', 'builder_log', 'record_check', 'accept_builder', 'stop_builder', 'finish_mission',
+    'ask_lead', 'report_done', 'report_blocked', 'land_on_lead'
+  ]
+};
+
+/** True when `tool` (its MCP name, before sanitizing) is a Mission tool of the built-in `serverId`. */
+export function isBuiltinMissionTool(serverId: string, tool: string): boolean {
+  return Object.prototype.hasOwnProperty.call(MISSION_TOOLS, serverId) && MISSION_TOOLS[serverId]!.includes(tool);
 }
 
 /**
@@ -237,7 +267,40 @@ interface BridgeState {
   bridge: Promise<McpBridgeTool[]> | null;
   connections: PiMcpConnection[];
   // Kept only in this process so an extension reload can reconnect without restoring the env.
-  gatewayMemory?: PiMcpServerConfig;
+  gatewayServers?: PiMcpServerConfig[];
+}
+
+/** The capability a token-bearing definition carries, for redaction; undefined for any other server. */
+function gatewayToken(cfg: PiMcpServerConfig): string | undefined {
+  const keys = Object.prototype.hasOwnProperty.call(GATEWAY_SERVERS, cfg.id) ? GATEWAY_SERVERS[cfg.id] : undefined;
+  return keys ? cfg.env?.[keys.token] : undefined;
+}
+
+/**
+ * The runtime-only definitions (memory, Mission): at most one of each, each the app's own by its
+ * provenance, over stdio, with its complete URL and token pair. Anything else refuses them all.
+ */
+function parseEphemeral(raw: string): PiMcpServerConfig[] {
+  let injected: PiMcpServerConfig[];
+  try { injected = parseMcpConfig(JSON.parse(raw)); }
+  catch { throw new Error('Invalid ephemeral MCP configuration.'); }
+  const seen = new Set<string>();
+  const valid = injected.length >= 1 && injected.length <= Object.keys(GATEWAY_SERVERS).length && injected.every((cfg) => {
+    const kind = provenance(cfg);
+    const keys = kind && Object.prototype.hasOwnProperty.call(GATEWAY_SERVERS, kind) ? GATEWAY_SERVERS[kind] : undefined;
+    if (!kind || !keys || seen.has(kind) || cfg.transport !== 'stdio' || !cfg.env?.[keys.url] || !cfg.env?.[keys.token]) return false;
+    seen.add(kind);
+    return true;
+  });
+  if (!valid) throw new Error('Invalid ephemeral MCP configuration.');
+  return injected;
+}
+
+/** A file-configured definition that carries a gateway variable; the file never may. */
+function fileGatewayServer(cfg: PiMcpServerConfig): boolean {
+  const reserved = reservedBuiltinName(cfg.id);
+  const keys = reserved && Object.prototype.hasOwnProperty.call(GATEWAY_SERVERS, reserved) ? GATEWAY_SERVERS[reserved] : undefined;
+  return !!keys && (cfg.env?.[keys.url] !== undefined || cfg.env?.[keys.token] !== undefined);
 }
 // Pi/Jiti gives separate extension entrypoints separate module caches. A process-wide cache is
 // required after the one-use environment capability is consumed (and avoids duplicate servers).
@@ -250,8 +313,10 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
   // Consume before connecting ANY stdio server or shell tool: children must not inherit the token.
   const ephemeral = process.env.VOCS_CODE_MCP_EPHEMERAL;
   delete process.env.VOCS_CODE_MCP_EPHEMERAL;
-  delete process.env[MEMORY_GATEWAY_URL_ENV];
-  delete process.env[MEMORY_GATEWAY_TOKEN_ENV];
+  for (const keys of Object.values(GATEWAY_SERVERS)) {
+    delete process.env[keys.url];
+    delete process.env[keys.token];
+  }
   let servers: PiMcpServerConfig[] = [];
   if (configPath) {
     try { servers = parseMcpConfig(JSON.parse(readFileSync(configPath, 'utf8'))); }
@@ -261,31 +326,22 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
     }
   }
   servers = servers.filter((cfg) => {
-    if (reservedBuiltinName(cfg.id) !== MEMORY_SERVER || (cfg.env?.[MEMORY_GATEWAY_URL_ENV] === undefined && cfg.env?.[MEMORY_GATEWAY_TOKEN_ENV] === undefined)) return true;
-    console.error('[vocs-code-mcp] skipping file-configured memory gateway; restart its Vocs Code session');
+    if (!fileGatewayServer(cfg)) return true;
+    console.error(`[vocs-code-mcp] skipping file-configured ${reservedBuiltinName(cfg.id) === MISSION_SERVER ? 'Mission' : 'memory'} gateway; restart its Vocs Code session`);
     return false;
   });
-  if (ephemeral !== undefined) {
-    let injected: PiMcpServerConfig[];
-    try { injected = parseMcpConfig(JSON.parse(ephemeral)); }
-    catch { throw new Error('Invalid ephemeral memory MCP configuration.'); }
-    const memory = injected[0];
-    if (injected.length !== 1 || provenance(memory) !== MEMORY_SERVER || memory.transport !== 'stdio'
-      || !memory.env?.[MEMORY_GATEWAY_URL_ENV] || !memory.env?.[MEMORY_GATEWAY_TOKEN_ENV]) {
-      throw new Error('Invalid ephemeral memory MCP configuration.');
-    }
-    state.gatewayMemory = memory;
-  }
-  servers = admitServers(state.gatewayMemory ? [state.gatewayMemory, ...servers] : servers);
+  if (ephemeral !== undefined) state.gatewayServers = parseEphemeral(ephemeral);
+  servers = admitServers([...(state.gatewayServers ?? []), ...servers]);
 
   const tools: McpBridgeTool[] = [];
   for (const cfg of servers) {
-    const memoryToken = cfg.id === MEMORY_SERVER ? cfg.env?.[MEMORY_GATEWAY_TOKEN_ENV] : undefined;
+    const token = gatewayToken(cfg);
+    const kind = cfg.id === MISSION_SERVER ? 'Mission' : 'memory';
     let connection: PiMcpConnection;
     try {
       connection = await PiMcpConnection.connect(cfg);
     } catch (error) {
-      console.error(`[vocs-code-mcp] skipping MCP server "${cfg.id}": ${memoryToken ? 'memory gateway MCP handshake failed' : errorText(error)}`);
+      console.error(`[vocs-code-mcp] skipping MCP server "${cfg.id}": ${token ? `${kind} gateway MCP handshake failed` : errorText(error)}`);
       continue;
     }
     state.connections.push(connection);
@@ -294,7 +350,7 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
     try {
       listed = await connection.listTools();
     } catch (error) {
-      console.error(`[vocs-code-mcp] listing tools for MCP server "${cfg.id}" failed${memoryToken ? '' : `: ${errorText(error)}`}`);
+      console.error(`[vocs-code-mcp] listing tools for MCP server "${cfg.id}" failed${token ? '' : `: ${errorText(error)}`}`);
       continue;
     }
 
@@ -317,8 +373,8 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
         promptSnippet: promptSnippetFor(tool.description, tool.name),
         ...(guidelines ? { promptGuidelines: [...guidelines] } : {}),
         parameters: tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
-        // The allowlist decides, keyed by provenance; the server's own readOnly annotation does not.
-        readOnly: !!builtin && isBuiltinReadOnlyTool(builtin, tool.name),
+        // The allowlists decide, keyed by provenance; the server's own readOnly annotation does not.
+        readOnly: !!builtin && (isBuiltinReadOnlyTool(builtin, tool.name) || isBuiltinMissionTool(builtin, tool.name)),
         async execute(_id, params, signal) {
           let result;
           try { result = await connection.callTool(tool.name, params ?? {}, signal); }
@@ -326,12 +382,12 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
             // Cancellation must stay an AbortError.
             if (error instanceof Error && error.name === 'AbortError') throw error;
             // The stdio client can append raw stderr (including a clipped credential).
-            if (memoryToken) throw new Error('Memory gateway MCP request failed.');
+            if (token) throw new Error(`${kind === 'Mission' ? 'Mission' : 'Memory'} gateway MCP request failed.`);
             throw error;
           }
           if (result.isError) {
             const text = result.content.map((part) => part.type === 'text' ? part.text : '').filter(Boolean).join('\n') || 'MCP tool ' + tool.name + ' failed';
-            throw new Error(memoryToken ? text.replaceAll(memoryToken, '[redacted]') : text);
+            throw new Error(token ? text.replaceAll(token, '[redacted]') : text);
           }
           return { content: result.content, details: { server: cfg.id, tool: tool.name } };
         }
@@ -352,7 +408,10 @@ export async function mcpToolNames(): Promise<string[]> {
   return (await loadMcpBridge()).map((tool) => tool.name);
 }
 
-/** Names the gate runs in every tier, Plan included: the app's own built-in read-only tools. */
+/**
+ * Names the gate runs in every tier, Plan included: the app's own built-in read-only tools and the
+ * Mission coordination tools, each only from the definition the app built.
+ */
 export async function mcpReadOnlyToolNames(): Promise<ReadonlySet<string>> {
   return new Set((await loadMcpBridge()).filter((tool) => tool.readOnly).map((tool) => tool.name));
 }
@@ -366,7 +425,7 @@ export async function registerMcpTools(pi: PiLike): Promise<number> {
 
 /** Closes the process-wide connections; the parent's shutdown handler is the one caller in practice. */
 export function closeMcpBridge(reload = false): void {
-  if (!reload) state.gatewayMemory = undefined;
+  if (!reload) state.gatewayServers = undefined;
   for (const connection of state.connections) {
     try {
       connection.close();

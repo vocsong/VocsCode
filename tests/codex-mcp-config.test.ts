@@ -108,6 +108,8 @@ enabled = true
     'vocs-memory': injected,
     gitnexus: { enabled: false },
     'cua-driver': { enabled: false },
+    // Mission mode's server is reserved too: only a mission session is handed it.
+    'vocs-mission': { enabled: false, command: '' },
     'vocs-openrouter': { enabled: false, command: '' }
   });
   await fixture.expectUnchanged();
