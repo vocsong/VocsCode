@@ -1,16 +1,15 @@
 /** Codex exec SDK adapter. It cannot ask for approval, so the sandbox mode is the only boundary; prefer the app-server adapter for interactive work. */
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
 import { Codex, type CodexOptions, type ModelReasoningEffort, type SandboxMode, type Thread, type ThreadEvent, type ThreadItem, type UserInput as CodexInput } from '@openai/codex-sdk';
 import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UserInput } from '../../shared/types';
 import { errorMessage, shortId, truncate } from '../util/async';
-import { fastModeSupport } from '../../shared/fast-mode';
 import { toCodex } from '../mcp/effective';
 import { bundledCodexPath, spawnableCodex, type ResolvedBinary } from '../runtime';
 import { applyCodexMcpSuppression, readCodexMcpServers } from './codex-mcp-config';
+import { codexModelSpeedTiers, listCodexModels } from './codex-models';
+import { CODEX_FAST_PRICING_UNAVAILABLE_MSG, codexFastModeCapability, codexFastModeStatus, codexFastServiceTier, writeCodexSessionImage } from './codex-provider';
+import { normalizeCodexInputTokens } from './codex-usage';
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
-import { listCodexModels } from './codex-app-server';
 import { reportHarnessCommands } from './commands';
 import { codexSkillCommands, codexSkillInvocation, readCodexSkills, type CodexSkill } from './codex-skills';
 import { fastModePricing } from './native/fast-mode-pricing';
@@ -149,10 +148,7 @@ export class CodexExecAdapter implements HarnessAdapter {
     // `codex exec` takes text only; Codex resolves the `$skill` it names (./codex-skills.ts).
     if (input.text) parts.push({ type: 'text', text: codexSkillInvocation(input.text, this.skills.length ? this.skills : this.ctx.session().harnessCommandList ?? []).text });
     for (const img of input.images ?? []) {
-      const ext = img.mimeType.split('/')[1] ?? 'png';
-      const file = path.join(this.ctx.sessionDir, 'images', `${shortId('img_')}.${ext}`);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, Buffer.from(img.data, 'base64'));
+      const file = await writeCodexSessionImage(this.ctx.sessionDir, img);
       parts.push({ type: 'local_image', path: file });
     }
     this._busy = true;
@@ -226,13 +222,13 @@ export class CodexExecAdapter implements HarnessAdapter {
         const u = ev.usage;
         // input_tokens includes cached_input_tokens (OpenAI convention); count the uncached
         // remainder as input so cache reads are not counted twice in rates and cost estimates.
-        const delta = { inputTokens: Math.max(0, u.input_tokens - u.cached_input_tokens), outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, cacheWriteTokens: u.cache_write_input_tokens, reasoningTokens: u.reasoning_output_tokens };
+        const delta = { inputTokens: normalizeCodexInputTokens(u.input_tokens, u.cached_input_tokens), outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, cacheWriteTokens: u.cache_write_input_tokens, reasoningTokens: u.reasoning_output_tokens };
         // Codex reports tokens but no price, so the turn's spend is priced here from the same
         // catalog the rest of the app bills through; without it the session reads $0.00 however
         // much it used. The delta is per-turn usage, so the rates apply to this turn alone.
         const fast = this.fastMode && this.fastModeCapability().supported;
         const pricing = fast ? fastModePricing(this.model ?? '', u.input_tokens) : this.pricing();
-        if (fast && !pricing) this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: 'Fast-mode pricing is unavailable for this model/context. Reported spend excludes these requests; check the provider bill for the full cost.' } });
+        if (fast && !pricing) this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: CODEX_FAST_PRICING_UNAVAILABLE_MSG } });
         const turnCost = estimateCostUsd(pricing, delta);
         this.usage.addUsage({ ...delta, costUsd: turnCost });
         const completed = this.usage.finishTurn();
@@ -306,27 +302,28 @@ export class CodexExecAdapter implements HarnessAdapter {
   }
 
   private fastModeCapability() {
-    if (this.ctx.session().config.codexModelProvider) return { supported: false, reason: 'Fast mode is unavailable on custom Codex provider routes.' };
-    const model = this.model ?? this.models.find((entry) => entry.isDefault)?.id;
-    if (model && this.speedTiers.size && !this.models.some((entry) => entry.id === model)) return { supported: false, reason: 'The selected model is not in this Codex runtime’s available model catalog.' };
-    const tiers = model ? this.speedTiers.get(model) : undefined;
-    if (tiers && !tiers.includes('fast') && !tiers.includes('priority')) return { supported: false, reason: 'This Codex runtime does not advertise a Fast service tier for the selected model.' };
-    return fastModeSupport(this.id, this.model ? { provider: this.modelProvider ?? 'openai', model: this.model } : undefined, this.ctx.settings().providers);
+    return codexFastModeCapability({
+      harness: this.id,
+      hasCustomProvider: Boolean(this.ctx.session().config.codexModelProvider),
+      modelRef: this.model ? { provider: this.modelProvider ?? 'openai', model: this.model } : undefined,
+      models: this.models,
+      speedTiers: this.speedTiers,
+      providers: this.ctx.settings().providers
+    });
   }
 
   private configureFastMode(enabled: boolean): void {
     if (!this.codexOptions) throw new Error('Codex exec is not ready.');
     const support = this.fastModeCapability();
     const fast = enabled && support.supported;
-    const model = this.model ?? this.models.find((entry) => entry.isDefault)?.id;
-    const tier = model && this.speedTiers.get(model)?.includes('priority') ? 'priority' : 'fast';
+    const tier = codexFastServiceTier(this.model, this.models, this.speedTiers);
     const options = { ...this.codexOptions, config: { ...this.codexOptions.config, features: { fast_mode: fast }, service_tier: fast ? tier : 'default' } };
     const codex = new Codex(options);
     this.codexOptions = options;
     this.codex = codex;
     this.thread = null; // The next turn resumes the existing id with the new CLI config.
     this.fastMode = enabled;
-    this.ctx.updateMeta({ fastModeStatus: !enabled ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
+    this.ctx.updateMeta({ fastModeStatus: codexFastModeStatus(enabled, support) });
   }
 
   async setFastMode(enabled: boolean): Promise<void> {
@@ -364,7 +361,7 @@ export class CodexExecAdapter implements HarnessAdapter {
     if (!bin) return CODEX_STATIC_MODELS;
     try {
       const models = await listCodexModels(bin.path, (model) => {
-        const tiers = model.serviceTiers?.map((tier) => tier.id) ?? model.additionalSpeedTiers;
+        const tiers = codexModelSpeedTiers(model);
         if (tiers) this.speedTiers.set(model.model, tiers);
       });
       this.models = models;
