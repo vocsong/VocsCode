@@ -4,7 +4,7 @@
  * whisper.cpp builds and models the app downloads, and the defaults. Shared so main normalizes
  * settings against the same catalog the renderer offers. No runtime deps, no Electron imports.
  */
-import type { ProviderKind } from './types';
+import type { ProviderKind } from './harness-types';
 
 /** What the mic button transcribes with. */
 export type DictationEngine = 'cloud' | 'local';
