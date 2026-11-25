@@ -110,6 +110,10 @@ describe('assistant workspace markdown images', () => {
     expect(screen.getByRole('dialog', { name: 'Image preview' })).toBeTruthy();
     const close = screen.getByRole('button', { name: 'Close image preview' });
     expect(document.activeElement).toBe(close);
+    for (const name of ['Zoom out', 'Reset zoom', 'Zoom in']) {
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name }));
+    }
     await user.tab();
     expect(document.activeElement).toBe(close);
     expect(useStore.getState().fileReveal).toBeNull();
