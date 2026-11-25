@@ -41,7 +41,7 @@ describe('application branding', () => {
   it('writes the dev Start Menu shortcut with an icon and a first-run create fallback', () => {
     // shell.writeShortcutLink silently drops `icon` unless iconIndex is set, and 'replace'
     // fails when the shortcut does not exist yet — either way the taskbar loses its icon.
-    const source = readFileSync(path.join(root, 'src', 'main', 'index.ts'), 'utf8');
+    const source = readFileSync(path.join(root, 'src', 'main', 'windows-shell-identity.ts'), 'utf8');
     const fn = source.match(/function reconcileDevShortcut[\s\S]*?\n\}/);
     expect(fn, 'reconcileDevShortcut must exist').not.toBeNull();
     expect(fn![0]).toContain('icon: appIconPath(appRoot)');

@@ -223,6 +223,22 @@ async function checkNarrowTabs(page: Page): Promise<void> {
   await strip.getByRole('tab', { name: 'Overview', selected: true }).waitFor({ timeout: 5_000 });
 }
 
+async function checkChartDuringResize(page: Page): Promise<void> {
+  const { measured, available, rendered } = await page.getByTestId('by-computer').locator('.chart').evaluate((chart: HTMLElement) => {
+    const svg = chart.querySelector('svg')!;
+    const prior = chart.style.inlineSize;
+    // Measure in one browser turn, before ResizeObserver can redraw the SVG at the new width.
+    chart.style.inlineSize = `${chart.clientWidth - 70}px`;
+    try {
+      return { measured: Number(svg.getAttribute('width')), available: chart.clientWidth, rendered: svg.getBoundingClientRect().width };
+    } finally {
+      chart.style.inlineSize = prior;
+    }
+  });
+  expect(measured, 'the chart still has its previous width').toBeGreaterThan(available);
+  expect(rendered, 'the chart fits even before it redraws').toBeLessThanOrEqual(available + 1);
+}
+
 async function checkDashboardAppearance(page: Page): Promise<void> {
   const shell = page.locator('html[data-product="code"] .v-root');
   const heading = shell.getByRole('heading', { name: 'Analytics', level: 1, exact: true }).and(shell.locator('h1'));
@@ -255,6 +271,7 @@ async function checkDashboardAppearance(page: Page): Promise<void> {
     ]) {
       await page.setViewportSize({ width, height });
       for (const element of [heading, brand, summary, signOut]) await element.waitFor({ timeout: 5_000 });
+      if (width === 390) await checkChartDuringResize(page);
       const size = await shell.evaluate((el) => ({
         background: getComputedStyle(el).backgroundColor,
         client: document.documentElement.clientWidth,

@@ -471,6 +471,11 @@ button.w-computer[aria-pressed='true'] {
   min-width: 0;
 }
 
+/* Keep a previous SVG measurement from widening the page while ResizeObserver catches up. */
+.w-dashboard .chart:not(.heatmap) > svg {
+  max-width: 100%;
+}
+
 .w-dashboard .chart-axis {
   font-family: var(--v-font-mono);
 }
