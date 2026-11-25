@@ -18,6 +18,7 @@
     "noUnusedLocals": false,
     "baseUrl": ".",
     "paths": {
+      "@web/*": ["src/web/*"],
       "@renderer/*": ["src/renderer/src/*"],
       "@shared/*": ["src/shared/*"]
     }
