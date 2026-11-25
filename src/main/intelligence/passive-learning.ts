@@ -1,7 +1,7 @@
 import { redactSecrets as redactText } from '../../shared/analytics/text';
 import type { SessionMeta, TranscriptItem } from '../../shared/types';
 import { redactSecrets } from '../log';
-import type { IntelligenceContext } from './service';
+import type { IntelligenceContext } from './context';
 
 // These limits hold even if many sessions overlap. No full transcript read or polling is needed.
 const MAX_TRACKED = 64;

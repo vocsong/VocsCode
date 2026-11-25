@@ -9,38 +9,9 @@ import { z } from 'zod';
 import { VOCS_HUB_SCOPES, type VocsAccountRealm, type VocsAccountSignInRequest, type VocsAccountState, type VocsHubConnectionId } from '../shared/vocs-account';
 import { createNativeMcpOAuth, DEVICE_ID, DEVICE_MAX_LIFETIME_MS, DEVICE_REFRESH_TOKEN, NativeOAuthError, parseDeviceGrant, type NativeDeviceGrant, type NativeMcpOAuth, type NativeMcpOAuthOptions } from './mcp/oauth';
 import type { VocsHubBroker } from './vocs-hub';
-/** The public client that enrolls a kept ("Keep me signed in") device. */
-export const VOCS_DEVICE_CLIENT_ID = 'vocs-code-device';
-interface RealmConfig {
-  issuer: string;
-  identityIssuer: string;
-  hub: string;
-  resource: string;
-  clientId: string;
-  /** Set only where the issuer offers device grants (`NATIVE_DEVICE_GRANTS_ENABLED`). Without it the
-   *  realm offers no "Keep me signed in" and always uses the temporary `clientId` flow. */
-  deviceClientId?: typeof VOCS_DEVICE_CLIENT_ID;
-}
-export const VOCS_REALMS: Readonly<Record<VocsAccountRealm, Readonly<RealmConfig>>> = Object.freeze({
-  production: Object.freeze({
-    issuer: 'https://auth.vocs.io/api/auth',
-    identityIssuer: 'https://auth.vocs.io',
-    hub: 'https://mcp.vocs.io',
-    resource: 'https://mcp.vocs.io/api/connections',
-    clientId: 'vocs-code'
-    // No deviceClientId yet: production has device grants off. Set it to VOCS_DEVICE_CLIENT_ID only
-    // once the owner turns NATIVE_DEVICE_GRANTS_ENABLED on in production (docs/ARCHITECTURE.md).
-  }),
-  staging: Object.freeze({
-    issuer: 'https://vocs-login-staging.vocs.workers.dev/api/auth',
-    identityIssuer: 'https://vocs-login-staging.vocs.workers.dev',
-    hub: 'https://vocs-mcp-staging.vocs.workers.dev',
-    resource: 'https://vocs-mcp-staging.vocs.workers.dev/api/connections',
-    clientId: 'vocs-code',
-    deviceClientId: VOCS_DEVICE_CLIENT_ID
-  })
-});
-export const VOCS_STAGING = VOCS_REALMS.staging;
+import { VOCS_DEVICE_CLIENT_ID, VOCS_REALMS, VOCS_STAGING, type RealmConfig, type VocsAccountVault } from './vocs-account-config';
+
+export { VOCS_DEVICE_CLIENT_ID, VOCS_REALMS, VOCS_STAGING, type VocsAccountVault };
 /** Main-process choice only: the renderer can never pick an issuer. Production unless a
  *  developer launches with `VOCS_CODE_ACCOUNT_REALM=staging`. */
 export function vocsAccountRealm(env: NodeJS.ProcessEnv = process.env): VocsAccountRealm {
@@ -55,14 +26,6 @@ export const VOCS_ACCOUNT_VAULT_IDS = [vocsAccountVaultId('production'), vocsAcc
 /** The device label the issuer shows on the account page (no hostname, by owner decision). */
 export function vocsDeviceName(platform: NodeJS.Platform = process.platform): string {
   return platform === 'win32' ? 'Vocs Code on Windows' : platform === 'darwin' ? 'Vocs Code on macOS' : 'Vocs Code on Linux';
-}
-/** The subset of `SecretStore` the broker uses. */
-export interface VocsAccountVault {
-  get(id: string): Promise<string | undefined>;
-  set(id: string, value: string): Promise<void>;
-  clear(id: string): Promise<void>;
-  /** True when the value is held for this run only (no OS keychain). */
-  isMemoryOnly?(id: string): boolean;
 }
 function catalogSchema(target: RealmConfig) {
   return z.strictObject({

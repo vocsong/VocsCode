@@ -6,7 +6,8 @@
  *  identity, relay credential and host trust anchor; one is active at a time. Pairings live in a
  *  PairingVault — IndexedDB in the browser, where the private keys are non-extractable CryptoKeys
  *  that page script can use but never read out. */
-import { clientFinish, createHello, generateKeyIdentity, importAesKey, lockIdentity, openBlob, openFrame, openSealedToKey, pairingTokenContext, publicOf, sealFrame, sign, tokenProofPayload, type AnyIdentity, type Identity, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
+import { clientFinish, createHello, generateKeyIdentity, importAesKey, lockIdentity, openBlob, openSealedToKey, pairingTokenContext, publicOf, sealFrame, sign, tokenProofPayload, type AnyIdentity, type Identity, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
+import { openCheckedFrame } from '../../src/shared/e2e-session';
 import type { MirrorIndex, MirrorSnapshot } from '../../src/shared/mirror';
 import type { RemoteDeviceInfo } from '../../src/shared/types';
 import { assertEndpointUrl, credentialFetch, endpointSocketUrl } from '../../src/shared/endpoint-policy';
@@ -487,18 +488,10 @@ export class RelayClient {
   }
 
   private async onSealed(session: WebSession, sealed: { salt: string; seq: number; ct: string }): Promise<void> {
-    if (this.session !== session || !sealed || !Number.isSafeInteger(sealed.seq) || sealed.seq < 0 ||
-        typeof sealed.salt !== 'string' || typeof sealed.ct !== 'string' || sealed.seq <= session.inSeq ||
-        (session.inSalt !== undefined && sealed.salt !== session.inSalt)) return;
-    let inner: InnerFrame;
-    try {
-      inner = await openFrame(session.key, sealed);
-    } catch {
-      return;
-    }
     if (this.session !== session) return;
-    session.inSeq = sealed.seq;
-    session.inSalt = sealed.salt;
+    const opened = await openCheckedFrame<InnerFrame>(session, sealed, { isCurrent: () => this.session === session });
+    if (opened.status !== 'ok') return;
+    const inner = opened.value;
     if (inner.type === 'result' && typeof inner.id === 'number') {
       const entry = this.pending.get(inner.id);
       if (!entry) return;

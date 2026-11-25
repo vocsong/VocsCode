@@ -15,7 +15,7 @@ import type { MissionService } from '../mission-mode/service';
 import type { ModelCatalogCache } from '../model-catalog-cache';
 import type { PiConfigStore } from '../pi-config';
 import type { ProcessTracker } from '../process-tracker';
-import type { RemoteHost } from '../remote/host';
+import type { RemoteHostPort } from '../remote/types';
 import type { RuntimeResolver } from '../runtime';
 import type { SearchIndex } from '../search';
 import type { SecretStore } from '../secrets';
@@ -79,7 +79,7 @@ export interface HandlerDeps {
   /** Best-effort GitNexus freshness queue; absent in tests/hosts that do not run the built-in. */
   gitnexusIndexer?: Pick<GitnexusIndexer, 'schedule' | 'index'>;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
-  remote?: RemoteHost;
+  remote?: RemoteHostPort;
   /** Local owner configuration, never exposed through browser/agent invocation origins. */
   control?: import('../control/service').ControlService;
   localControl?: Pick<import('../control/local').LocalControl, 'ownerState' | 'enable' | 'disable'>;

@@ -13,7 +13,7 @@ import { z } from 'zod';
 import { VOCS_HUB_CONNECTION_IDS, VOCS_HUB_SCOPES, vocsHubServerId, type VocsAccountConnection, type VocsAccountRealm, type VocsHubConnectionId, type VocsHubConnectionState, type VocsHubScope } from '../shared/vocs-account';
 import { createNativeMcpOAuth, NativeOAuthError, REFRESH_TOKEN, type NativeMcpOAuth, type NativeMcpOAuthOptions, type NativeRefreshGrant } from './mcp/oauth';
 import type { ResolvedServer } from './mcp/effective';
-import { VOCS_REALMS, type VocsAccountVault } from './vocs-account';
+import { VOCS_REALMS, type VocsAccountVault } from './vocs-account-config';
 
 /** One keychain slot per realm and connection, so a staging grant never restores as production. */
 export function vocsHubVaultId(realm: VocsAccountRealm, connectionId: VocsHubConnectionId): `vocs-hub:${VocsAccountRealm}:${VocsHubConnectionId}` {

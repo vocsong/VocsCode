@@ -6,18 +6,21 @@ import { createHash, randomBytes } from 'node:crypto';
 import { CONTROL_MAX_BYTES, controlErrorCode, controlHostRequestSchema } from '../../shared/control';
 import os from 'node:os';
 import { WebSocket } from 'ws';
-import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
+import { enrollTokenContext, generateIdentity, hostAccept, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
+import { openCheckedFrame } from '../../shared/e2e-session';
 import { connectCheckCode, connectLink } from '../../shared/pairing';
 import { assertEndpointUrl, credentialFetch, endpointSocketUrl } from '../../shared/endpoint-policy';
 import { isRemoteChannel, isRemoteHostChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
 import { REMOTE_TERMINAL_INPUT_MAX, type RemoteTerminalFrame } from '../../shared/remote-terminal';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
-import type { HandlerRegistry } from '../handlers';
+import type { HandlerRegistry } from '../handlers/context';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';
+import { MirrorWriteSuperseded, RemoteMirrorTransport } from './mirror-transport';
 import { projectRemoteValue } from './project';
 import { RemoteTerminalStreams, type TerminalSource } from './terminal-streams';
+import type { RemoteHostPort } from './types';
 
 const relayRequest = credentialFetch();
 
@@ -50,20 +53,6 @@ const PAIRING_REQUEST_TIMEOUT_MS = 5 * 60_000;
  *  (the relay keeps an owner's grant ten minutes). */
 const SIGN_IN_POLL_MS = 2000;
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
-/** A mirror clear the relay did not confirm is retried after this, doubling up to the cap. */
-const MIRROR_CLEAR_RETRY_MS = 15_000;
-const MIRROR_CLEAR_RETRY_MAX_MS = 5 * 60_000;
-/** After a mirror upload failed in transit, a clear is repeated once after this delay, in case
- *  the request still reaches the relay after the first clear. */
-const MIRROR_LATE_WRITE_MS = 5_000;
-
-/** A mirror upload whose publication went stale (mirroring off, re-keyed, host gone) before its
- *  request left: it is dropped, not sent. */
-class MirrorWriteSuperseded extends Error {
-  constructor() {
-    super('mirror upload superseded');
-  }
-}
 
 interface PendingPairingRequest {
   code: string;
@@ -106,7 +95,7 @@ interface WsMessage {
   payload?: unknown;
 }
 
-export class RemoteHost {
+export class RemoteHost implements RemoteHostPort {
   private creds: HostCredentials | null = null;
   private ws: WebSocket | null = null;
   private status: RemoteState['status'] = 'off';
@@ -133,25 +122,8 @@ export class RemoteHost {
   /** The short-lived relay access token (§6.2), in memory only. */
   private access: { token: string; expiresAt: number; deviceId: string } | null = null;
   private refreshing: Promise<string> | null = null;
-  /** Mirror uploads between their fence check and the relay's answer; a clear waits for them so
-   *  it always lands after them. */
-  private readonly mirrorWrites = new Set<Promise<unknown>>();
-  /** A mirror upload ended without an HTTP answer: its request may still reach the relay later,
-   *  so the next successful clear is repeated once after a short delay. */
-  private mirrorWriteUncertain = false;
-  /** Mirror clears asked for, and the newest one the relay confirmed. While they differ the relay
-   *  may still hold blobs that should be gone: uploads wait for the clear first, and a timer
-   *  retries it in the meantime. */
-  private mirrorClearsRequested = 0;
-  private mirrorClearedThrough = 0;
-  /** The one clear run in progress, if any: every retry and every waiting upload joins it rather
-   *  than sending a DELETE of its own. */
-  private mirrorClearing: Promise<boolean> | null = null;
-  /** A repeat clear for an upload that failed in transit is not sent before this time. */
-  private mirrorClearNotBefore = 0;
-  private mirrorClearFailing = false;
-  private mirrorRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  private mirrorRetryDelay = 0;
+  /** Offline-mirror upload and clear-retry coordinator. */
+  private readonly mirrorTransport: RemoteMirrorTransport;
   /** A connect is between its start and opening its socket (it may be buying an access token). */
   private connectInFlight = false;
   private connectAttempt = 0;
@@ -189,6 +161,15 @@ export class RemoteHost {
       control?: Pick<import('../control/service').ControlService, 'handle'>;
     }
   ) {
+    this.mirrorTransport = new RemoteMirrorTransport({
+      enrolled: () => this.enrolled(),
+      isOff: () => this.status === 'off',
+      relayFetch: (path, init, proceed) => this.relayFetch(path, init, proceed),
+      log: (level, message) => this.deps.log(level, message),
+      audit: this.deps.audit,
+      retryMs: this.deps.mirrorRetryMs,
+      lateWriteMs: this.deps.mirrorLateWriteMs
+    });
     this.terminalStreams = new RemoteTerminalStreams({
       source: () => this.deps.terminals?.() ?? null,
       send: (clientId, frame: RemoteTerminalFrame) => this.sendTo(clientId, { type: 'push', channel: 'push:remoteTerminal', payload: frame }),
@@ -287,7 +268,7 @@ export class RemoteHost {
     this.clearPairing();
     this.signingIn = undefined;
     // A mirror clear still owed is retried on the next connect or upload, not while paused.
-    this.cancelMirrorClearRetry();
+    this.mirrorTransport.cancelRetry();
     this.push();
   }
 
@@ -304,7 +285,7 @@ export class RemoteHost {
     this.pairingAttempt++;
     this.clearPairing();
     this.signingIn = undefined;
-    this.cancelMirrorClearRetry();
+    this.mirrorTransport.cancelRetry();
   }
 
   /** Loads or creates this computer's identity for `relayUrl`, without connecting. */
@@ -506,33 +487,7 @@ export class RemoteHost {
    *  relay has not confirmed still fails, when `current` reports the upload went stale (asked
    *  after every wait, right before the request leaves), or when the relay refused it. */
   async putMirror(kind: 'index' | 'session', sessionId: string | undefined, blob: SealedBlob, current: () => boolean = () => true): Promise<boolean> {
-    if (!this.enrolled()) return false;
-    // Nothing new lands next to blobs a clear should have removed: wait until no clear is owed.
-    // The write below is registered synchronously after this loop, so any later clear waits for it.
-    while (this.mirrorClearing || this.mirrorClearPending()) {
-      if (!(await this.runOwedMirrorClear())) return false;
-    }
-    if (!current()) return false;
-    const path = kind === 'index' ? '/v1/mirror' : `/v1/mirror/${encodeURIComponent(sessionId ?? '')}`;
-    const write = this.relayFetch(
-      path,
-      { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(blob) },
-      current
-    );
-    this.mirrorWrites.add(write);
-    let res: Response | null;
-    try {
-      res = await write;
-    } catch (e) {
-      if (e instanceof MirrorWriteSuperseded) return false;
-      // No HTTP answer: the request may still be delivered, after a clear that follows.
-      this.mirrorWriteUncertain = true;
-      res = null;
-    } finally {
-      this.mirrorWrites.delete(write);
-    }
-    if (!res?.ok) this.deps.log('warn', `remote: mirror upload refused (${res?.status ?? 'network error'})`);
-    return !!res?.ok;
+    return this.mirrorTransport.put(kind, sessionId, blob, current);
   }
 
   /** An analytics call as this computer (docs/WEB-DASHBOARD.md), or null while remote access is
@@ -547,112 +502,10 @@ export class RemoteHost {
    *  confirm it: the failure is logged and audited, and the clear is retried (on a timer, on the
    *  next connect, and before the next upload) until the relay confirms it. */
   async clearMirror(): Promise<boolean> {
-    this.mirrorClearsRequested++;
-    return this.runOwedMirrorClear();
+    return this.mirrorTransport.clear();
   }
 
   // --- internals ---
-
-  private mirrorClearPending(): boolean {
-    return this.mirrorClearedThrough < this.mirrorClearsRequested;
-  }
-
-  /** Runs the clear that is owed, or joins the run already in progress: retries never stack
-   *  DELETEs. True once nothing is owed; false when the relay did not confirm it. */
-  private runOwedMirrorClear(fromTimer = false): Promise<boolean> {
-    if (!this.mirrorClearing) {
-      const finish = (ok: boolean) => {
-        if (this.mirrorClearing === run) this.mirrorClearing = null;
-        return ok;
-      };
-      const run: Promise<boolean> = this.runMirrorClears(fromTimer).then(finish, (e: unknown) => {
-        this.deps.log('warn', `remote: mirror clear failed: ${e instanceof Error ? e.message : String(e)}`);
-        this.scheduleMirrorClearRetry(false);
-        return finish(false);
-      });
-      this.mirrorClearing = run;
-    }
-    return this.mirrorClearing;
-  }
-
-  private async runMirrorClears(fromTimer: boolean): Promise<boolean> {
-    while (this.mirrorClearPending()) {
-      if (!(await this.attemptMirrorClear(fromTimer))) return false;
-      fromTimer = false;
-    }
-    return true;
-  }
-
-  /** One DELETE covering every clear asked for before it is sent. */
-  private async attemptMirrorClear(fromTimer: boolean): Promise<boolean> {
-    this.cancelMirrorClearRetry();
-    // Not enrolled: nothing of this desktop's is reachable, and the relay drops a revoked
-    // desktop's mirror along with it.
-    if (!this.enrolled()) {
-      this.mirrorClearedThrough = this.mirrorClearsRequested;
-      this.mirrorClearNotBefore = 0;
-      this.mirrorClearSucceeded();
-      return true;
-    }
-    const repeat = this.mirrorClearNotBefore > 0;
-    const wait = this.mirrorClearNotBefore - Date.now();
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    await Promise.allSettled([...this.mirrorWrites]);
-    const uncertain = this.mirrorWriteUncertain;
-    this.mirrorWriteUncertain = false;
-    const target = this.mirrorClearsRequested;
-    try {
-      const res = await this.relayFetch('/v1/mirror', { method: 'DELETE' });
-      if (!res.ok) throw new Error(`relay answered ${res.status}`);
-    } catch (e) {
-      this.mirrorWriteUncertain ||= uncertain;
-      const why = e instanceof Error ? e.message : String(e);
-      this.deps.log('warn', `remote: mirror clear failed, will retry: ${why}`);
-      if (!this.mirrorClearFailing) this.deps.audit?.record('mirror-clear-failed', { detail: why });
-      this.mirrorClearFailing = true;
-      this.scheduleMirrorClearRetry(fromTimer);
-      return false;
-    }
-    this.mirrorClearedThrough = Math.max(this.mirrorClearedThrough, target);
-    this.mirrorClearNotBefore = 0;
-    if (uncertain && !repeat) {
-      // An upload that failed in transit may still land after this DELETE: owe one more clear,
-      // sent after a short delay (once; the repeat does not schedule another).
-      this.mirrorClearsRequested++;
-      this.mirrorClearNotBefore = Date.now() + (this.deps.mirrorLateWriteMs ?? MIRROR_LATE_WRITE_MS);
-    }
-    this.mirrorClearSucceeded();
-    return true;
-  }
-
-  private mirrorClearSucceeded(): void {
-    this.mirrorRetryDelay = 0;
-    if (this.mirrorClearFailing) {
-      this.mirrorClearFailing = false;
-      this.deps.log('info', 'remote: mirror clear succeeded on retry');
-      this.deps.audit?.record('mirror-clear-recovered');
-    }
-  }
-
-  /** Arms the retry timer for an owed clear. Only a failed timer attempt lengthens the delay; an
-   *  attempt an upload started re-arms it at the current delay. Nothing is armed while remote
-   *  access is paused: the next connect or upload retries instead. */
-  private scheduleMirrorClearRetry(backoff: boolean): void {
-    if (this.mirrorRetryTimer || this.status === 'off') return;
-    const first = this.deps.mirrorRetryMs ?? MIRROR_CLEAR_RETRY_MS;
-    if (!this.mirrorRetryDelay) this.mirrorRetryDelay = first;
-    else if (backoff) this.mirrorRetryDelay = Math.min(this.mirrorRetryDelay * 2, Math.max(first, MIRROR_CLEAR_RETRY_MAX_MS));
-    this.mirrorRetryTimer = setTimeout(() => {
-      this.mirrorRetryTimer = null;
-      if (this.mirrorClearPending()) void this.runOwedMirrorClear(true);
-    }, this.mirrorRetryDelay);
-    this.mirrorRetryTimer.unref?.();
-  }
-
-  private cancelMirrorClearRetry(): void {
-    if (this.mirrorRetryTimer) clearTimeout(this.mirrorRetryTimer);
-    this.mirrorRetryTimer = null;
-  }
 
   private clearPairing(): void {
     this.pendingRequest = undefined;
@@ -883,7 +736,7 @@ export class RemoteHost {
       this.deps.log('info', `remote: relay connection open (${enrolled ? 'online' : 'awaiting enrollment'})`);
       this.push();
       if (enrolled) void this.reconcile();
-      if (enrolled && this.mirrorClearPending()) void this.runOwedMirrorClear();
+      if (enrolled) this.mirrorTransport.flushIfPending();
       if (enrolled) this.deps.onOnline?.();
     });
     ws.on('message', (data) => void this.onMessage(String(data), ws));
@@ -1097,20 +950,18 @@ export class RemoteHost {
 
   private async onFrame(from: string, seq: number, payload: unknown): Promise<void> {
     const session = this.sessions.get(from);
-    const sealed = payload as { salt?: unknown; seq?: unknown; ct?: unknown } | null;
-    if (!session || !sealed || !Number.isSafeInteger(seq) || seq < 0 || sealed.seq !== seq ||
-        typeof sealed.salt !== 'string' || typeof sealed.ct !== 'string' || seq <= session.inSeq ||
-        (session.inSalt !== undefined && sealed.salt !== session.inSalt)) return;
-    let inner: { type: string; id?: number; channel?: string; request?: unknown; sig?: string };
-    try {
-      inner = await openFrame(session.key, sealed as { salt: string; seq: number; ct: string });
-    } catch {
+    if (!session) return;
+    const opened = await openCheckedFrame<{ type: string; id?: number; channel?: string; request?: unknown; sig?: string }>(
+      session,
+      payload,
+      { expectedSeq: seq, isCurrent: () => this.sessions.get(from) === session }
+    );
+    if (opened.status === 'undecryptable') {
       this.deps.log('warn', `remote: undecryptable frame from ${from} (seq ${seq})`);
       return;
     }
-    if (this.sessions.get(from) !== session) return;
-    session.inSalt = sealed.salt;
-    session.inSeq = seq;
+    if (opened.status !== 'ok') return;
+    const inner = opened.value;
     if (inner.type === 'invoke' && inner.channel) {
       const allowed = isRemoteChannel(inner.channel);
       // Approvals are signed inside the e2e channel (§6.8): only a paired device key resolves.

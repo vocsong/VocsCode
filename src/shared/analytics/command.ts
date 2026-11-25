@@ -3,7 +3,7 @@
  * what the agent was trying to do. Deterministic and free of any output inspection, so the same
  * command always yields the same shape. Nothing here decides whether a command failed.
  */
-import type { HarnessId } from '../types';
+import type { HarnessId } from '../harness-types';
 import type { LogicalOperation, ShellDialect } from './taxonomy';
 
 export type CommandComplexity = 'simple' | 'pipeline' | 'compound' | 'script';
