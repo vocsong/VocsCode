@@ -45,6 +45,8 @@ src/main
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
+    git/          Git panel modules used by BranchesTab.tsx (useGitPanelPolling, BranchList, WorktreeList, GitHubLists, GitItemDialogs)
+    transcript/   Transcript modules re-exported by Transcript.tsx (grouping, shared, ApprovalCard, ToolCards, MessageViews, Groups)
     settings/     modular Settings sections (appearance, general, sessions, terminal, providers, harnesses, shortcuts, remote, about)
     SessionTitle.tsx  shared desktop and web session label with a harness pill and project | session name
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
