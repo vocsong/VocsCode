@@ -11,8 +11,11 @@
  * once, outside this suite — it needs the Codex binary and a model turn.
  */
 import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
 import { MISSION_GATEWAY_TOKEN_ENV, MISSION_GATEWAY_URL_ENV, missionServerDef } from '../src/main/mcp/mission';
@@ -105,6 +108,12 @@ const BUILDER: SessionMission = { missionId: 'm1', role: 'builder', leadId: 'lea
 const ROLE_PROMPT = 'MISSION RULES: you are a Mission participant.';
 const attachment = { url: 'http://127.0.0.1:4567', token: 'C'.repeat(43) };
 
+// The adapter checks the real workspace on disk. A fictional root would ask for approval.
+const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'vocs-mission-codex-')));
+const project = path.join(base, 'project');
+mkdirSync(project);
+afterAll(() => rmSync(base, { recursive: true, force: true }));
+
 function missionServer(): ResolvedServer {
   const def = missionServerDef({ missionServerPath: 'C:/app/resources/mcp/vocs-mission.mjs', attachment })!;
   return { def, missing: [], secretEnvKeys: [MISSION_GATEWAY_TOKEN_ENV], secretHeaderKeys: [] };
@@ -116,8 +125,8 @@ async function start(opts: { mission?: SessionMission; mode?: PermissionMode; re
   const codex = new FakeCodex(child, opts.inherited);
   const meta: SessionMeta = {
     id: 's1', title: 'Mission', createdAt: 0, updatedAt: 0,
-    config: { harness: 'codex', projectRoot: '/proj', permissionMode: opts.mode ?? 'auto' },
-    cwd: '/proj', status: 'idle', harnessRef: opts.resume ? { codexThreadId: 'thread-1' } : {}, usage: emptyUsage(),
+    config: { harness: 'codex', projectRoot: project, permissionMode: opts.mode ?? 'auto' },
+    cwd: project, status: 'idle', harnessRef: opts.resume ? { codexThreadId: 'thread-1' } : {}, usage: emptyUsage(),
     ...(opts.mission ? { mission: opts.mission } : {})
   };
   const approvals: ApprovalDraft[] = [];
@@ -127,7 +136,7 @@ async function start(opts: { mission?: SessionMission; mode?: PermissionMode; re
     session: () => meta,
     settings: () => defaultSettings(),
     runtime: { resolve: () => ({ name: 'codex', path: 'C:/fake/codex.exe' }) },
-    sessionDir: process.cwd(),
+    sessionDir: base,
     permissionMode: () => meta.config.permissionMode,
     effort: () => undefined,
     getApiKey: async () => undefined,
@@ -147,7 +156,8 @@ async function start(opts: { mission?: SessionMission; mode?: PermissionMode; re
   return { adapter, codex, approvals, instructions, spawn: mocks.spawnCalls.at(-1)!, meta };
 }
 
-const command = (codex: FakeCodex, cmd: string) => codex.serverRequest('item/commandExecution/requestApproval', { threadId: 'thread-1', turnId: 't', itemId: `cmd-${cmd}`, command: cmd, cwd: '/proj' });
+const command = (codex: FakeCodex, cmd: string, cwd = project) =>
+  codex.serverRequest('item/commandExecution/requestApproval', { threadId: 'thread-1', turnId: 't', itemId: `cmd-${cmd}`, command: cmd, cwd });
 /** Codex 0.153.4's MCP tool approval, as captured from the real binary. */
 const elicitation = (codex: FakeCodex, serverName: string, meta: AnyRecord | null, tool = 'list_builders') =>
   codex.serverRequest('mcpServer/elicitation/request', {
@@ -290,10 +300,16 @@ describe('Codex Mission approvals', () => {
     await ordinary.adapter.dispose();
   });
 
-  it('lets an ordinary Auto session push without asking, as before', async () => {
+  it('does not add a Mission approval to an ordinary Auto session inside its workspace', async () => {
     const { codex, approvals, adapter } = await start({ mode: 'auto' });
-    expect(await command(codex, 'git push origin main')).toEqual({ decision: 'accept' });
-    expect(approvals).toEqual([]);
-    await adapter.dispose();
+    const push = 'git push origin main';
+    try {
+      expect(await command(codex, push)).toEqual({ decision: 'accept' });
+      expect(approvals).toEqual([]);
+      expect(await command(codex, push, base)).toEqual({ decision: 'decline' });
+      expect(approvals).toEqual([expect.objectContaining({ kind: 'command', command: push, cwd: base })]);
+    } finally {
+      await adapter.dispose();
+    }
   });
 });

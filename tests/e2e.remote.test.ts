@@ -24,6 +24,7 @@ import { ENROLL, FakeRelay } from './fake-relay';
 import { generateIdentity, publicOf } from '../src/shared/crypto';
 import { decodeQrPath } from './support/qr-decode';
 import { startTestLanding, TEST_SESSION_COOKIE } from './support/test-landing';
+import { prepareWindowsLocalPipeOnCi } from './support/windows-local-pipe-fixture';
 import { memoryVault, RelayClient, type SimpleSocket } from '../relay/src/web-client';
 import { connectCheckCode } from '../src/shared/pairing';
 import { decodeLocalControlTarget, encodeLocalControlTarget } from '../src/shared/local-control';
@@ -278,6 +279,7 @@ describe.runIf(enabled)('remote access settings', () => {
   }, 180_000);
 
   if (process.platform === 'win32') it('scopes and revokes native local CLI and stdio discovery for two projects', async () => {
+    await prepareWindowsLocalPipeOnCi();
     // Windows CI can expose TEMP through an 8.3 alias. Local discovery intentionally
     // refuses aliased project and profile paths; seed the fixture under the canonical path.
     const tmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-local-control-e2e-')));
@@ -336,7 +338,9 @@ describe.runIf(enabled)('remote access settings', () => {
     }
     async function copyTarget(panel: Locator, projectCount: number) {
       const status = `Local discovery is on for ${projectCount} ${projectCount === 1 ? 'project' : 'projects'}.`;
-      await expect.poll(() => panel.innerText(), { timeout: 35_000 }).toContain(status);
+      const error = panel.getByRole('alert');
+      await panel.getByText(status, { exact: true }).or(error).first().waitFor({ timeout: 35_000 });
+      if (await error.isVisible()) throw new Error(await error.innerText());
       const field = panel.getByTestId('local-control-target');
       expect(await field.getAttribute('readonly')).not.toBeNull();
       const shown = await field.inputValue();
