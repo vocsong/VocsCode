@@ -67,7 +67,9 @@ The native suite uses synthetic data on a fresh local pipe: it reads back the pr
 ACL, requires Windows to deny a restricted token at open while allowing the ordinary owner token
 on that same pipe, checks PID and creation-time mismatches and exact frame limits, and checks
 cleanup after abrupt loss of the watched owner process. No accounts or privileges are added.
-The Electron case verifies the full CLI and SDK stdio path with disposable profile data.
+The Electron case verifies the full CLI and SDK stdio path with disposable profile data. On hosted
+Windows CI only, both cases first measure a cold helper launch on a disposable endpoint and close
+it before testing. Each tested grant starts a fresh helper under the unchanged 30-second deadline.
 
 A restricted token is **not a second Windows account**. For separate-account qualification in an
 authorized lab, use two existing standard accounts with distinct user SIDs (`whoami /user`) and a
