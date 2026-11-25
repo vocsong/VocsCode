@@ -9,12 +9,12 @@ src/shared        types, IPC contract, harness metadata, diff parser, theme cata
 src/main
   harness/        adapters → normalized SessionEvent stream
     claude.ts + claude-{provider,gateway-mcp,subscription,ongoing,usage,tools,subagents}.ts   Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
-    codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
+    codex-app-server.ts + codex-{models,provider,items,usage,skills,mcp-config,quota}.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
     codex-exec.ts SDK fallback
     cursor.ts     @cursor/sdk, local runtime; sandbox + plan-mode allowlist instead of approvals
     pi.ts + pi-{models,launch,subagents,usage}.ts   pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
     provider-env.ts  shared provider-id → API-key env var map used by Pi, ACP, and registry model discovery
-    acp.ts        Agent Client Protocol client (Google Antigravity and generic ACP agents)
+    acp.ts + acp-{config,elicitation,events,launch,ongoing}.ts   Agent Client Protocol client (Google Antigravity and generic ACP agents)
     antigravity.ts  Antigravity CLI settings, account probe and quota decoding
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
   mission-mode/   Mission mode (docs/MISSION-MODE.md): service (mission record, Lead/Builder lifecycle, inbox
