@@ -15,20 +15,9 @@ export type Json = Record<string, unknown>;
 import { enrollTokenContext, pairingDecisionPayload, pairingTokenContext, sealToKey, stable, tokenProofPayload, verify, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
 import { createDeviceId } from './account';
 import { clearAnalytics } from './analytics';
+import type { RelayStorage, RelayStore } from './storage';
 
-/** Implemented by Durable Object storage (worker) and in-memory maps (tests). */
-export interface RelayStorage {
-  get<T>(key: string): Promise<T | undefined>;
-  put<T>(key: string, value: T): Promise<void>;
-  delete(key: string): Promise<void>;
-  /** All entries whose key starts with `prefix`, with the full key. */
-  list<T>(prefix: string): Promise<Array<[string, T]>>;
-}
-
-export interface RelayStore extends RelayStorage {
-  /** Atomic multi-key commit for device minting; never publish a partially approved pair. */
-  transaction<T>(work: (tx: RelayStorage) => Promise<T>): Promise<T>;
-}
+export type { RelayStorage, RelayStore };
 
 export interface DeviceRecord {
   deviceId: string;

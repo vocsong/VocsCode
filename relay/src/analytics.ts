@@ -11,7 +11,7 @@
  * Unlike the transcript mirror these values are readable aggregates, not ciphertext: the owner
  * decided the dashboard should work from a Vocs sign-in alone.
  */
-import type { RelayStorage, RelayStore } from './core';
+import type { RelayStorage, RelayStore } from './storage';
 import {
   ANALYTICS_MAX_PARTS,
   ANALYTICS_PART_MAX_BASE64,

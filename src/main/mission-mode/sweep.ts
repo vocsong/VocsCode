@@ -8,7 +8,7 @@
 import path from 'node:path';
 import { gitWorktrees } from '../git';
 import { cleanupWorktree, currentHead, isLanded, MISSION_BRANCH_PREFIX, statusPorcelain } from './git-ops';
-import type { BuilderRecord, MissionRecord } from './service';
+import type { BuilderRecord, MissionRecord } from './record';
 
 export interface CleanupOutcome {
   /** The worktree folder is gone. */
