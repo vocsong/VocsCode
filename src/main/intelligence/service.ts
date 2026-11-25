@@ -79,22 +79,11 @@ import { checkDraftEvidence } from './draft-evidence';
 import { graphCheckoutStamp } from './graph-snapshot';
 import type { GraphifyProvider, GraphScope } from './graphify';
 import { LOCAL_LEARNING_ORIGIN, type MemorySearchHit, type MemoryStore, type MemoryVisibility } from './memory-store';
+import type { IntelligenceContext } from './context';
 import type { PassiveObservation } from './passive-learning';
 import { normalizeRoot, type ProjectRegistry } from './registry';
 
-/** The session a call is made for. Always built by the app from its own session record. */
-export interface IntelligenceContext {
-  sessionId: string;
-  projectRoot: string;
-  cwd: string;
-  branch?: string;
-  /** App-issued for restricted sessions: no collection, personal or transcript access. */
-  restricted?: boolean;
-  /** Set only by the host tool gateway; passive excerpts have a stricter policy than desktop reads. */
-  modelFacing?: boolean;
-  /** Revoked on disconnect or grant/scope change. App-controlled, not a tool argument. */
-  signal?: AbortSignal;
-}
+export type { IntelligenceContext };
 
 /** What the service needs to know about a session to scope history recall to a project. */
 export interface SessionRef {

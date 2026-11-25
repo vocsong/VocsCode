@@ -7,8 +7,6 @@
  * Desktop-only OS process activity rides separately on `ProcessSummary.bySession` so OS PIDs and
  * command lines stay off remote channels.
  */
-import type { SessionStatus } from './session-types';
-
 export type OngoingKind = 'subagent' | 'task' | 'hook';
 
 /** Independent producer channel for `SessionEvent { type: 'ongoing' }` (replace semantics per source). */
@@ -48,7 +46,7 @@ export function runningSubagentCount(session: { ongoing?: readonly OngoingItem[]
 }
 
 /** True when a session has either an active parent turn or live autonomous background work. */
-export function isSessionActiveWork(session: { status: SessionStatus; ongoing?: readonly OngoingItem[] }): boolean {
+export function isSessionActiveWork(session: { status: 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped' | 'pr' | 'merged'; ongoing?: readonly OngoingItem[] }): boolean {
   return session.status === 'starting' || session.status === 'running' || session.status === 'awaiting' || hasOngoingWork(session);
 }
 
