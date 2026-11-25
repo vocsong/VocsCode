@@ -1,225 +1,31 @@
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
-import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem, UserInput } from '../../shared/types';
-import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
-import { modelName, UNKNOWN_MODEL_KEY } from '../../shared/model-names';
-import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
-import { shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
-import { missionPrompt, sessionAppendPrompt } from './system-prompt';
-import type { HarnessAdapter, HarnessContext } from './types';
-import { OPTIONS_ALLOW_DENY } from './permissions';
-import { reportHarnessCommands } from './commands';
-import type { HarnessCommand } from '../../shared/harness-commands';
-import { PI_FAST_MODE_COMMAND, PI_FAST_MODE_MARKER } from '../../../resources/pi/vocs-code-fast-mode';
 import { parseQuestionPayload, QUESTION_MARKER, QUESTION_RESPONSE_LIMIT, QUESTION_TOOL } from '../../../resources/pi/question-tool';
+import { PI_FAST_MODE_COMMAND, PI_FAST_MODE_MARKER } from '../../../resources/pi/vocs-code-fast-mode';
+import { isEffortLevel } from '../../shared/harness-meta';
 import { questionResponse } from '../../shared/question-response';
-import { TurnUsageTracker } from '../util/turn-usage';
-import { UsageReporter } from '../util/usage-reporter';
-import { installPiAgentOverrides } from '../pi-agents';
-import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, VOCS_MEMORY_SERVER_ID } from '../mcp/memory';
-import { MISSION_GATEWAY_TOKEN_ENV, MISSION_GATEWAY_URL_ENV, isMissionGatewayDef } from '../mcp/mission';
+import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UserInput } from '../../shared/types';
 import { mergePiCatalog } from '../models/pi-catalog';
-import { estimateCostUsd } from '../models/static-models';
-import { fastModePricing } from './native/fast-mode-pricing';
+import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
+import { reportHarnessCommands } from './commands';
+import { OPTIONS_ALLOW_DENY } from './permissions';
+import { checkMissingPiSessionDir, preparePiLaunch, writePiEffortConfig, writePiPermissionMode } from './pi-launch';
+import { listPiModels, PI_ENV_KEYS, piHarnessCommands, piModelToInfo, piThinkingLevel, type PiModel } from './pi-models';
+import { PI_SUBAGENT_MARKER, PiSubagentTracker, SUBAGENT_TOOLS } from './pi-subagents';
+import { PiUsageAndFastMode } from './pi-usage';
+import { shutdownChild, spawnTool } from './spawn';
+import type { HarnessAdapter, HarnessContext } from './types';
+
+export { listPiModels, PI_ENV_KEYS, piHarnessCommands, piModelToInfo };
 
 export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
 const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
 const PI_READY_MARKER = 'VCODE_PI_READY::';
 const PI_EXTENSION_ERROR_MARKER = 'VCODE_PI_ERROR::';
 const PI_TOOL_INPUT_MARKER = 'VCODE_PI_TOOL_INPUT::';
-const PI_FAST_FALLBACK_MULTIPLIER = 2;
-const PI_FAST_FALLBACK_ESTIMATE = `${PI_FAST_FALLBACK_MULTIPLIER}x Pi's standard cost estimate`;
-/** Vocs Code's own subagent extension reports run activity as these notifications. */
-const PI_SUBAGENT_MARKER = 'VCODE_SUBAGENT::';
-/** Tool names our subagent extension registers; their cards read as agent work, not shell work. */
-const SUBAGENT_TOOLS = new Set(['subagent', 'subagent_result', 'subagent_steer']);
-
-/** pi-subagents' completion payload, as it reaches us on the tool result or the custom notification. */
-interface PiSubagentDetails {
-  id?: string;
-  agentId?: string;
-  description?: string;
-  status?: string;
-  modelName?: string;
-  toolUses?: number;
-  /** Foreground tool-result name for the cost. */
-  cost?: number;
-  /** Background notification name for the cost. */
-  totalCost?: number;
-  totalTokens?: number;
-  durationMs?: number;
-  error?: string;
-  others?: PiSubagentDetails[];
-}
-
-/** A pi-subagents run is only counted once its own status is terminal. */
-function isTerminalSubagentStatus(status: string | undefined): status is string {
-  return status === 'completed' || status === 'error' || status === 'stopped' || status === 'aborted';
-}
-/**
- * pi-subagents' delegation tools, kept out of a mission session (which delegates through its
- * Builders) alongside our own subagent extension, which such a session never loads.
- */
-const PI_DELEGATION_TOOLS = ['Agent', 'get_subagent_result'];
-/** Tells the Pi gate (resources/pi/subagent-gate.ts) the session is a Mission Builder. */
-const MISSION_BUILDER_ENV = 'VOCS_CODE_MISSION_BUILDER';
-
-/**
- * The user's extra arguments with the delegation tools excluded too. Pi 0.85.1 keeps only the last
- * `--exclude-tools`, so the user's own exclusions are folded into one flag, placed last.
- */
-function withDelegationExcluded(extraArgs: readonly string[]): string[] {
-  const rest: string[] = [];
-  const excluded: string[] = [];
-  for (let i = 0; i < extraArgs.length; i++) {
-    const arg = extraArgs[i]!;
-    const list = arg === '--exclude-tools' ? extraArgs[++i] : arg.startsWith('--exclude-tools=') ? arg.slice('--exclude-tools='.length) : undefined;
-    if (list === undefined && arg !== '--exclude-tools') rest.push(arg);
-    else excluded.push(...(list ?? '').split(',').map((name) => name.trim()).filter(Boolean));
-  }
-  return [...rest, '--exclude-tools', [...new Set([...excluded, ...PI_DELEGATION_TOOLS])].join(',')];
-}
-const PI_TOOL_PROMPT = 'Pi tools: prefer path (file_path is accepted). edit uses edits[]; a single old_string/new_string pair is accepted, including empty new_string. replace_all:true is unsupported: use unique non-overlapping edits. bash timeout is seconds; timeout_ms explicitly means milliseconds. Never send both timeout fields or guess their units.';
-
-async function appendSystemPrompt(args: string[], value: string, command: string, fallbackFile: string): Promise<void> {
-  let argument = value;
-  if (usesWindowsCommandShim(command) && /[%\r\n]/.test(value)) {
-    // Pi accepts prompt-file paths. This crosses cmd.exe without changing the prompt text.
-    await fs.writeFile(fallbackFile, value, 'utf8');
-    argument = fallbackFile;
-  }
-  args.push('--append-system-prompt', argument);
-}
 
 function toolPath(input: Record<string, unknown> | undefined): string | undefined {
   return typeof input?.path === 'string' ? input.path : typeof input?.file_path === 'string' ? input.file_path : undefined;
-}
-
-/** Env var names pi understands for each of our provider ids. */
-export const PI_ENV_KEYS: Record<string, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  'opencode-go': 'OPENCODE_API_KEY',
-  groq: 'GROQ_API_KEY',
-  xai: 'XAI_API_KEY',
-  mistral: 'MISTRAL_API_KEY',
-  gemini: 'GEMINI_API_KEY'
-};
-
-interface PiModel {
-  id: string;
-  name: string;
-  provider: string;
-  api?: string;
-  reasoning?: boolean;
-  input?: string[];
-  contextWindow?: number;
-  maxTokens?: number;
-  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-  thinkingLevelMap?: Record<string, string | null>;
-}
-
-export function piModelToInfo(m: PiModel): ModelInfo {
-  const efforts = piSupportedEfforts(m);
-  return {
-    id: m.id,
-    provider: m.provider,
-    displayName: m.name || m.id,
-    contextWindow: m.contextWindow,
-    maxOutputTokens: m.maxTokens,
-    supportsImages: (m.input ?? []).includes('image'),
-    supportsReasoning: !!m.reasoning,
-    supportedEfforts: efforts && efforts.length ? efforts : undefined,
-    pricing: m.cost ? { input: m.cost.input, output: m.cost.output, cacheRead: m.cost.cacheRead, cacheWrite: m.cost.cacheWrite } : undefined
-  };
-}
-
-/**
- * Mirrors pi's own getSupportedThinkingLevels: a level is hidden only by an explicit `null`, a
- * missing standard level keeps the provider's default mapping, and the extended `xhigh`/`max`
- * levels need an explicit mapping. `off` is dropped — leaving effort unset already runs the model
- * default. Without a map we keep the full list; pi clamps anything the model cannot use.
- */
-function piSupportedEfforts(m: PiModel): EffortLevel[] | undefined {
-  const map = m.thinkingLevelMap;
-  if (!m.reasoning || !map) return undefined;
-  return EFFORT_LEVELS.filter((level) => {
-    const mapped = map[level];
-    if (mapped === null) return false;
-    if (level === 'xhigh' || level === 'max') return mapped !== undefined;
-    return true;
-  });
-}
-
-function piThinkingLevel(effort: EffortLevel | undefined): string | undefined {
-  return effort;
-}
-
-interface PiStreamUsage {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  reasoning: number;
-  cost: number;
-}
-
-function finiteCounter(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
-}
-
-function piStreamUsage(value: unknown): PiStreamUsage | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const raw = value as Record<string, unknown>;
-  const cost = raw.cost && typeof raw.cost === 'object' && !Array.isArray(raw.cost) ? (raw.cost as Record<string, unknown>) : undefined;
-  return {
-    input: finiteCounter(raw.input),
-    output: finiteCounter(raw.output),
-    cacheRead: finiteCounter(raw.cacheRead),
-    cacheWrite: finiteCounter(raw.cacheWrite),
-    reasoning: finiteCounter(raw.reasoning),
-    cost: finiteCounter(cost?.total)
-  };
-}
-
-function piUsageDelta(previous: PiStreamUsage | null, current: PiStreamUsage): PiStreamUsage {
-  const delta = (before: number | null, after: number) => before === null || after < before ? after : after - before;
-  return {
-    input: delta(previous?.input ?? null, current.input),
-    output: delta(previous?.output ?? null, current.output),
-    cacheRead: delta(previous?.cacheRead ?? null, current.cacheRead),
-    cacheWrite: delta(previous?.cacheWrite ?? null, current.cacheWrite),
-    reasoning: delta(previous?.reasoning ?? null, current.reasoning),
-    cost: delta(previous?.cost ?? null, current.cost)
-  };
-}
-
-function hasPiUsage(usage: PiStreamUsage): boolean {
-  return usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0 || usage.reasoning > 0 || usage.cost > 0;
-}
-
-/** Extension commands this app registers in Pi to drive it (fast mode, subagent control); never the user's to type. */
-const PI_APP_COMMAND = /^vocs-(?:code|subagent)-/i;
-const PI_COMMAND_KIND = { extension: 'extension', prompt: 'prompt', skill: 'skill' } as const;
-
-/**
- * Pi's `get_commands` rows: extension commands, prompt templates and `skill:<name>` skills, each run
- * by sending `/name args` as a prompt. Pi's built-in TUI commands are not listed — in RPC mode they
- * are separate requests, which the app's own `/model`, `/compact`, `/rename` and `/export` drive.
- */
-export function piHarnessCommands(raw: unknown): HarnessCommand[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((c): HarnessCommand[] => {
-    if (!c || typeof c !== 'object') return [];
-    const { name, description, source } = c as { name?: unknown; description?: unknown; source?: unknown };
-    if (typeof name !== 'string' || PI_APP_COMMAND.test(name)) return [];
-    const kind = typeof source === 'string' && source in PI_COMMAND_KIND ? PI_COMMAND_KIND[source as keyof typeof PI_COMMAND_KIND] : 'command';
-    return [{ name, description: typeof description === 'string' ? description : undefined, kind }];
-  });
 }
 
 export class PiAdapter implements HarnessAdapter {
@@ -231,25 +37,13 @@ export class PiAdapter implements HarnessAdapter {
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private declinedTools = new Set<string>();
   private turnStartedAt = 0;
-  private readonly usage: TurnUsageTracker;
-  private readonly usageReporter: UsageReporter;
-  /** Latest cumulative usage in the current assistant stream, used to derive per-update deltas. */
-  private streamUsage: PiStreamUsage | null = null;
+  private readonly usage: PiUsageAndFastMode;
+  private readonly subagents: PiSubagentTracker;
   /** stopReason/errorMessage of the last assistant message — pi reports turn failures here, not as events. */
   private lastStopReason: string | null = null;
   private lastErrorMessage: string | null = null;
   private models: ModelInfo[] = [];
   private nextId = 1;
-  /** agentId -> the model name its Agent call reported, for attributing the completion notification. */
-  private readonly subagentModelNames = new Map<string, string>();
-  /** agentIds already counted, so a background run's tool result and notification are not both recorded. */
-  private readonly recordedSubagents = new Set<string>();
-  /** Subagent spend since the last usage report, keyed `provider/model`, for model re-attribution. */
-  private readonly pendingSubagentCost = new Map<string, SubagentCost>();
-  /** Live Vocs Code subagent runs by run id, until their terminal record arrives. */
-  private readonly subagentRuns = new Map<string, { agent: string; description: string; mode: 'foreground' | 'background'; provider?: string; model?: string; startedAt: number; costUsd: number; turns: number; toolUses: number }>();
-  /** True during the completion debounce after a background child ends and before the parent turn starts. */
-  private wakeupPending = false;
   private exited = false;
   private transportError: Error | null = null;
   private modeFile: string | null = null;
@@ -259,15 +53,6 @@ export class PiAdapter implements HarnessAdapter {
   private extensionCapabilities = new Set<string>();
   private extensionFailure: string | null = null;
   private effortFile: string | null = null;
-  private fastModeRequested = false;
-  /** Only the nonce-bound extension's endpoint-checked runtime model can select Fast pricing. */
-  private fastModeEffectiveModel: ModelRef | undefined;
-  private streamFastModeModel: ModelRef | undefined;
-  /** Additive premium above Pi's standard-rate cumulative session cost, including earlier turns. */
-  private fastModeCostAdjustment = 0;
-  private readonly unknownFastCostReported = new Set<string>();
-  private fastModeRevision = 0;
-  private fastModeChange: { requestId: string; revision: number; enabled: boolean; ack: Deferred<void> } | null = null;
   private settling = false;
   private turnFinishing: Promise<void> | null = null;
   private statsOverlapped = false;
@@ -285,8 +70,17 @@ export class PiAdapter implements HarnessAdapter {
   private stopping = false;
 
   constructor(private readonly ctx: HarnessContext) {
-    this.usage = new TurnUsageTracker(ctx.session().usage);
-    this.usageReporter = new UsageReporter((event) => this.ctx.emit(event));
+    this.usage = new PiUsageAndFastMode(ctx.session().usage, {
+      emit: (event) => this.ctx.emit(event),
+      updateMeta: (patch) => this.ctx.updateMeta(patch),
+      info: (text, level) => this.info(text, level)
+    });
+    this.subagents = new PiSubagentTracker({
+      emit: (event) => this.ctx.emit(event),
+      info: (text, level) => this.info(text, level),
+      log: (level, message) => this.ctx.log(level, message),
+      getModels: () => this.models
+    });
   }
 
   get busy(): boolean {
@@ -305,93 +99,22 @@ export class PiAdapter implements HarnessAdapter {
     this.extensionFailure = null;
     this.exited = false;
     this.transportError = null;
-    this.subagentModelNames.clear();
-    this.recordedSubagents.clear();
-    this.pendingSubagentCost.clear();
-    this.subagentRuns.clear();
-    this.wakeupPending = false;
+    this.subagents.reset();
     const meta = this.ctx.session();
-    const s = this.ctx.settings();
-    this.fastModeRequested = meta.config.fastMode === true;
-    this.fastModeRevision = 0;
-    this.fastModeChange = null;
-    this.ctx.updateMeta({ fastModeStatus: { state: this.fastModeRequested ? 'requested' : 'off' } });
-    const intendedEffort = this.ctx.effort();
-    const extraArgs = s.pi.extraArgs ?? [];
-    const bin = this.ctx.runtime.resolve('pi');
-    if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
-    const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
-    const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
-    const mcpExt = this.ctx.runtime.resource('pi', 'vocs-code-mcp.ts');
-    const subagentsExt = this.ctx.runtime.resource('pi', 'vocs-code-subagents.ts');
-    const sessionDir = path.join(this.ctx.sessionDir, 'pi');
-    await fs.mkdir(sessionDir, { recursive: true });
+    this.usage.initLaunch(meta.config.fastMode === true);
 
-    // Subagents inherit the session model: override pi-subagents' pinned Explore agent in pi's
-    // global agent dir, without clobbering a user's file there. The same pass drops a legacy
-    // project copy and turns on usage reporting so subagent spend reaches the session totals and
-    // analytics.
-    await installPiAgentOverrides({
-      cwd: meta.cwd,
-      log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
+    const launch = await preparePiLaunch(this.ctx, {
+      extensionNonce: this.extensionNonce,
+      fastModeRequested: this.usage.requested
     });
-
-    const mcpServers = (await this.ctx.mcpServers()).map(({ def }) => def);
-    // The bridge consumes the gateway definitions (memory, Mission) from the launch environment,
-    // never the file. Also exclude incomplete gateway definitions rather than persisting any part of them.
-    const gatewayServers = mcpServers.filter((server) => isMissionGatewayDef(server) || (server.id === VOCS_MEMORY_SERVER_ID
-      && (server.env?.[MEMORY_GATEWAY_URL_ENV] !== undefined || server.env?.[MEMORY_GATEWAY_TOKEN_ENV] !== undefined)));
-    const ephemeral = gatewayServers;
-    const persisted = mcpServers.filter((server) => !gatewayServers.includes(server));
-    // A mission session delegates through its Builders: no subagent extension of ours, and none of
-    // pi-subagents' tools either.
-    this.missionLaunch = !!meta.mission;
-    const args = ['--mode', 'rpc',
-      '-e', ext, '-e', toolsExt, '-e', this.ctx.runtime.resource('pi', 'vocs-code-fast-mode.ts'), ...(this.missionLaunch ? [] : ['-e', subagentsExt]), '--session-dir', sessionDir];
-    if (persisted.length || ephemeral.length) args.push('-e', mcpExt);
-    const mcpConfigFile = path.join(sessionDir, 'mcp.json');
-    if (persisted.length) await fs.writeFile(mcpConfigFile, JSON.stringify({ servers: persisted }, null, 2) + '\n', 'utf8');
-    else await fs.rm(mcpConfigFile, { force: true }); // A resumed/disabled session may still have the older generated file.
-    if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
-    if (meta.config.model) {
-      if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
-      args.push('--model', meta.config.model.model);
-    }
-    const level = piThinkingLevel(intendedEffort);
-    if (level) args.push('--thinking', level);
-    const append = sessionAppendPrompt(meta, await this.ctx.appInstructions?.(), await missionPrompt(this.ctx));
-    if (append) {
-      await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
-    }
-    await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
-    args.push(...(this.missionLaunch ? withDelegationExcluded(extraArgs) : extraArgs));
-
-    this.modeFile = path.join(sessionDir, 'permission-mode.txt');
-    await fs.writeFile(this.modeFile, this.ctx.permissionMode(), 'utf8');
-    this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
-    await this.writeEffortConfig(intendedEffort, meta.config.model);
-    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE_PROJECT_ROOT: meta.config.projectRoot, VOCS_CODE: '1' };
-    // Explicit on every launch: resume and inherited parent env cannot restore stale Fast mode.
-    env.VOCS_CODE_FAST_MODE = this.fastModeRequested ? '1' : '0';
-    // Never inherit another session's MCP config, gateway capabilities or Mission role.
-    const reservedEnv = ['VOCS_CODE_MCP_EPHEMERAL', 'VOCS_CODE_MCP_CONFIG', MEMORY_GATEWAY_URL_ENV, MEMORY_GATEWAY_TOKEN_ENV, MISSION_GATEWAY_URL_ENV, MISSION_GATEWAY_TOKEN_ENV, MISSION_BUILDER_ENV];
-    for (const key of Object.keys(env)) {
-      if (reservedEnv.includes(process.platform === 'win32' ? key.toUpperCase() : key)) delete env[key];
-    }
-    if (meta.mission?.role === 'builder') env[MISSION_BUILDER_ENV] = '1';
-    if (ephemeral.length) env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: ephemeral });
-    if (persisted.length) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
-    for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
-      if (!env[envKey]) {
-        const key = await this.ctx.getApiKey(pid);
-        if (key) env[envKey] = key;
-      }
-    }
+    this.missionLaunch = launch.missionLaunch;
+    this.modeFile = launch.modeFile;
+    this.effortFile = launch.effortFile;
 
     // Which binary answered is the first question when pi misbehaves; the args carry no secrets (env does).
-    this.ctx.log('info', `spawning pi: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
+    this.ctx.log('info', `spawning pi: ${launch.bin.path} (${launch.bin.source} runtime) in ${meta.cwd}`);
     if (this.stopping) throw new Error('Pi startup was canceled before launch.');
-    const child = spawnTool(bin.path, args, { cwd: meta.cwd, env });
+    const child = spawnTool(launch.bin.path, launch.args, { cwd: meta.cwd, env: launch.env });
     this.child = child;
     let ready = false;
     let startupErrno: string | undefined;
@@ -408,7 +131,7 @@ export class PiAdapter implements HarnessAdapter {
       this.rejectPending(new Error(detail));
       if (ready && !this.transportError) this.ctx.emit({ type: 'status', status: 'stopped', detail });
     });
-    child.on('error', (e: NodeJS.ErrnoException) => {
+    const onTransportError = (e: NodeJS.ErrnoException) => {
       if (this.child !== child || this.exited || this.transportError) return;
       const message = `${ready ? 'pi process failed' : 'pi failed to start'}: ${errorMessage(e)}`;
       this.transportError = new Error(message);
@@ -419,7 +142,11 @@ export class PiAdapter implements HarnessAdapter {
       this.rejectPending(this.transportError);
       if (ready) this.ctx.emit({ type: 'error', message, fatal: true });
       else startupErrno = e.code;
-    });
+    };
+    child.on('error', onTransportError);
+    // stdin is a separate EventEmitter; a write to a dead pipe (EPIPE) after the child exits
+    // would otherwise be an uncaught exception that kills the process.
+    child.stdin?.on('error', onTransportError);
 
     try {
       const state = await withTimeout(this.request<{ model?: PiModel; thinkingLevel?: string; sessionFile?: string }>('get_state'), 60_000, 'pi get_state');
@@ -430,21 +157,15 @@ export class PiAdapter implements HarnessAdapter {
       if (state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
       // A resumed session can report a different model than the one on the session config; keep the
       // effort file pointed at whatever pi actually loaded.
-      await this.writeEffortConfig(intendedEffort, state.model ? { provider: state.model.provider, model: state.model.id } : meta.config.model);
+      await writePiEffortConfig(this.ctx, this.effortFile, launch.intendedEffort, state.model ? { provider: state.model.provider, model: state.model.id } : meta.config.model);
       if (this.transportError) throw this.transportError;
       if (this.child !== child || this.exited || this.stopping) throw new Error('Pi startup was canceled.');
       this.refreshCommands();
     } catch (error) {
       const checkFolder = startupErrno === 'ENOENT' && error === this.transportError;
       await this.dispose();
-      if (checkFolder) {
-        // Windows names cmd.exe in ENOENT even if the saved working directory is the problem.
-        // Diagnose the folder if we can, but never retry a prompt in some other checkout.
-        const unavailable = await withTimeout(fs.stat(meta.cwd), 1_000, 'Pi session folder check').then(
-          (stat) => !stat.isDirectory(),
-          (e: NodeJS.ErrnoException) => e.code === 'ENOENT' || e.code === 'ENOTDIR'
-        );
-        if (unavailable) throw new Error(`Pi could not start: session folder is missing or not a directory: ${meta.cwd}. Restore the folder or use an existing worktree.`);
+      if (checkFolder && await checkMissingPiSessionDir(meta.cwd)) {
+        throw new Error(`Pi could not start: session folder is missing or not a directory: ${meta.cwd}. Restore the folder or use an existing worktree.`);
       }
       throw error;
     }
@@ -455,7 +176,7 @@ export class PiAdapter implements HarnessAdapter {
 
   private assertExtensionsReady(): void {
     const required = this.missionLaunch ? ['approvals', 'tools'] : ['approvals', 'tools', 'subagents'];
-    if (this.fastModeRequested) required.push('fast-mode');
+    if (this.usage.requested) required.push('fast-mode');
     const missing = required.filter((capability) => !this.extensionCapabilities.has(capability));
     if (this.extensionFailure || missing.length) {
       throw new Error(`Incompatible Pi runtime: Vocs Code requires working approvals and tool compatibility extensions (Pi 0.85.1 APIs). ${this.extensionFailure ?? `Missing readiness: ${missing.join(', ')}.`} Update Pi or disable conflicting extensions; no prompt was sent.`);
@@ -465,7 +186,7 @@ export class PiAdapter implements HarnessAdapter {
   private rejectPending(error: Error): void {
     for (const request of this.pending.values()) request.reject(error);
     this.pending.clear();
-    this.fastModeChange?.ack.reject(error);
+    this.usage.rejectFastModeChange(error);
   }
 
   private write(cmd: Record<string, unknown>): void {
@@ -522,10 +243,7 @@ export class PiAdapter implements HarnessAdapter {
         this.settling = false;
         this.idleReported = false;
         this._busy = true;
-        if (this.wakeupPending) {
-          this.wakeupPending = false;
-          this.ctx.emit({ type: 'ongoing', source: 'wakeup', items: [] });
-        }
+        this.subagents.clearWakeup();
         if (!this.turnStartedAt) this.usage.beginTurn();
         this.turnStartedAt = this.turnStartedAt || Date.now();
         this.ctx.emit({ type: 'status', status: 'running' });
@@ -554,10 +272,7 @@ export class PiAdapter implements HarnessAdapter {
       case 'message_start': {
         const msg = ev.message as { role?: string; provider?: string; model?: string };
         if (msg?.role === 'assistant') {
-          // Pi's streaming usage is cumulative for one assistant message, not the whole session.
-          this.streamUsage = null;
-          const effective = this.fastModeRequested ? this.fastModeEffectiveModel : undefined;
-          this.streamFastModeModel = effective && (!msg.provider || msg.provider === effective.provider) && (!msg.model || msg.model === effective.model) ? effective : undefined;
+          this.usage.onAssistantStart(msg.provider, msg.model);
           this.currentAssistant = { id: shortId('a_'), kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, model: msg.model };
           this.ctx.emit({ type: 'item.upsert', item: { ...this.currentAssistant } });
         }
@@ -566,7 +281,7 @@ export class PiAdapter implements HarnessAdapter {
       case 'message_update': {
         // The RPC stream carries the provider's latest usage alongside each content delta. Turn it
         // into a per-message delta so the session totals can move while the model is still working.
-        this.reportPiUsage(ev.usage);
+        this.usage.reportUsage(ev.usage);
         const ame = ev.assistantMessageEvent as { type: string; delta?: string; toolCall?: { id: string; name: string; arguments: Record<string, unknown> } } | undefined;
         if (!ame) return;
         // Tool-call start/delta events can arrive after startTool has closed the text bubble. Only
@@ -590,13 +305,11 @@ export class PiAdapter implements HarnessAdapter {
         if (msg?.role === 'custom') {
           // pi-subagents reports each finished background run as a custom message; without this the
           // run's spend and tool uses were dropped on the floor.
-          if (msg.customType === 'subagent-notification') this.handleSubagentNotification(msg.details);
+          if (msg.customType === 'subagent-notification') this.subagents.handleSubagentNotification(msg.details);
           return;
         }
         if (msg?.role === 'assistant') {
-          this.reportPiUsage(msg.usage, true);
-          this.streamUsage = null;
-          this.streamFastModeModel = undefined;
+          this.usage.onAssistantEnd(msg.usage);
           this.lastStopReason = msg.stopReason ?? null;
           this.lastErrorMessage = msg.errorMessage ?? null;
         }
@@ -650,7 +363,7 @@ export class PiAdapter implements HarnessAdapter {
         if (typeof details?.exitCode === 'number') item.exitCode = details.exitCode;
         // Our subagent tools report the run id on the result, which is what the panel links on.
         if (SUBAGENT_TOOLS.has(e.toolName) && typeof details?.runId === 'string') item.runId = details.runId;
-        if (e.toolName === 'Agent' || e.toolName === 'get_subagent_result') this.captureSubagentResult(details);
+        if (e.toolName === 'Agent' || e.toolName === 'get_subagent_result') this.subagents.captureSubagentResult(details);
         this.ctx.emit({ type: 'item.upsert', item: { ...item } });
         return;
       }
@@ -681,8 +394,7 @@ export class PiAdapter implements HarnessAdapter {
       case 'extension_error': {
         const e = ev as { extensionPath?: string; error?: string };
         if (e.extensionPath === `command:${PI_FAST_MODE_COMMAND}` || e.extensionPath && /vocs-code-fast-mode\.[cm]?[jt]s$/.test(e.extensionPath)) {
-          this.fastModeChange?.ack.reject(new Error(e.error ?? 'Pi Fast mode extension failed.'));
-          this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: 'Pi Fast mode extension failed.' } });
+          this.usage.onFastModeExtensionError(e.error);
         }
         if (!e.extensionPath || /vocs-code-(?:tools|approvals|subagents|mcp)\.[cm]?[jt]s$/.test(e.extensionPath)) {
           this.extensionFailure = e.error ?? 'Required Pi extension failed.';
@@ -720,263 +432,8 @@ export class PiAdapter implements HarnessAdapter {
     }
   }
 
-  /**
-   * Live activity from Vocs Code's own subagent extension. Runs are already durable in
-   * `<sessionDir>/subagents/<runId>.jsonl`; this translates them into app events: a live run view
-   * for the panel and, on the terminal record, the completion analytics has always consumed.
-   */
   private handleSubagentEvent(raw: string): void {
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      this.ctx.log('warn', 'pi: malformed subagent notification');
-      return;
-    }
-    if (this.extensionNonce && (payload.version !== 1 || payload.nonce !== this.extensionNonce)) return;
-    const kind = payload.kind;
-    const number = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
-    const text = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined);
-    if (kind === 'wakeup') {
-      const pending = payload.pending === true;
-      if (pending) {
-        this.wakeupPending = true;
-        const count = Math.max(1, number(payload.count) || 1);
-        this.ctx.emit({
-          type: 'ongoing',
-          source: 'wakeup',
-          items: [{
-            id: 'wakeup:subagent',
-            kind: 'task',
-            label: count > 1 ? `Delivering ${count} subagent results…` : 'Delivering subagent result…',
-            detail: 'wakeup',
-            startedAt: number(payload.startedAt) || Date.now()
-          }]
-        });
-      } else if (this.wakeupPending) {
-        this.wakeupPending = false;
-        this.ctx.emit({ type: 'ongoing', source: 'wakeup', items: [] });
-      }
-      return;
-    }
-    const runId = typeof payload.runId === 'string' ? payload.runId : '';
-    if (!runId) return;
-    if (kind === 'start') {
-      if (this.subagentRuns.has(runId) || this.recordedSubagents.has(runId)) return;
-      const run = {
-        agent: text(payload.agent) ?? 'general-purpose',
-        description: text(payload.description) ?? '',
-        mode: payload.mode === 'background' ? ('background' as const) : ('foreground' as const),
-        provider: text(payload.provider),
-        model: text(payload.model),
-        startedAt: number(payload.startedAt) || Date.now(),
-        costUsd: 0,
-        turns: 0,
-        toolUses: 0
-      };
-      this.subagentRuns.set(runId, run);
-      this.ctx.emit({ type: 'subagent.run', run: { runId, agent: run.agent, description: run.description, mode: run.mode, status: 'running', ...(run.provider ? { provider: run.provider } : {}), ...(run.model ? { model: run.model } : {}), startedAt: run.startedAt } });
-      return;
-    }
-    const run = this.subagentRuns.get(runId);
-    if (kind === 'call' && run) {
-      const call = (payload.call ?? {}) as Record<string, unknown>;
-      run.costUsd += number(call.costUsd);
-      run.turns += 1;
-      const live: SubagentRunUpdate = { runId, agent: run.agent, description: run.description, mode: run.mode, status: 'running', costUsd: run.costUsd, turns: run.turns, toolUses: run.toolUses, startedAt: run.startedAt };
-      this.ctx.emit({ type: 'subagent.run', run: live });
-      return;
-    }
-    if (kind === 'item' && run) {
-      const item = (payload.item ?? {}) as Record<string, unknown>;
-      if (item.kind === 'tool' && item.status && item.status !== 'running') {
-        run.toolUses += 1;
-        this.ctx.emit({ type: 'subagent.run', run: { runId, agent: run.agent, description: run.description, mode: run.mode, status: 'running', costUsd: run.costUsd, turns: run.turns, toolUses: run.toolUses, startedAt: run.startedAt } });
-      }
-      return;
-    }
-    if (kind === 'uncertain' && run) {
-      this.info(`Subagent ${runId} has not settled: ${text(payload.error) ?? 'child disposal is unproven'}`, 'warn');
-      return;
-    }
-    if (kind !== 'end' || !run || !['completed', 'error', 'stopped', 'interrupted'].includes(String(payload.status))) return;
-    this.recordedSubagents.add(runId);
-    const totals = (payload.totals ?? {}) as Record<string, unknown>;
-    const status = String(payload.status);
-    const endedAt = number(payload.endedAt) || Date.now();
-    const model = run?.provider && run.model ? { provider: run.provider, model: run.model } : undefined;
-    const tokens = number(totals.inputTokens) + number(totals.outputTokens) + number(totals.cacheReadTokens) + number(totals.cacheWriteTokens);
-    this.ctx.emit({
-      type: 'subagent',
-      completion: {
-        agentId: runId,
-        ...(run?.description ? { description: run.description } : {}),
-        status,
-        ...(model ? { model } : {}),
-        toolUses: number(totals.toolUses) || run?.toolUses || 0,
-        costUsd: number(totals.costUsd),
-        tokens,
-        durationMs: number(totals.durationMs),
-        ...(text(payload.error) ? { error: text(payload.error) } : {}),
-        ...(run?.agent ? { agentType: run.agent } : {}),
-        // A background run's spend never reaches the harness totals, so analytics adds it here.
-        // Foreground spend is already folded in through the tool result; reporting it again would double it.
-        ...(run?.mode === 'background'
-          ? {
-              usage: {
-                inputTokens: number(totals.inputTokens),
-                outputTokens: number(totals.outputTokens),
-                cacheReadTokens: number(totals.cacheReadTokens),
-                cacheWriteTokens: number(totals.cacheWriteTokens),
-                reasoningTokens: number(totals.reasoningTokens),
-                costUsd: number(totals.costUsd),
-                turns: number(totals.turns)
-              }
-            }
-          : {})
-      }
-    });
-    this.ctx.emit({
-      type: 'subagent.run',
-      run: {
-        runId,
-        agent: run?.agent ?? 'general-purpose',
-        description: run?.description ?? '',
-        mode: run?.mode ?? 'foreground',
-        status: status === 'completed' || status === 'error' || status === 'stopped' || status === 'interrupted' ? status : 'error',
-        ...(run?.provider ? { provider: run.provider } : {}),
-        ...(run?.model ? { model: run.model } : {}),
-        startedAt: run?.startedAt ?? endedAt,
-        endedAt,
-        costUsd: number(totals.costUsd),
-        turns: number(totals.turns),
-        toolUses: number(totals.toolUses),
-        ...(text(payload.error) ? { error: text(payload.error) } : {})
-      }
-    });
-    this.subagentRuns.delete(runId);
-  }
-
-  /** Captures the model and terminal stats pi-subagents puts on an Agent / get_subagent_result tool result. */
-  private captureSubagentResult(details: unknown): void {
-    const d = details as PiSubagentDetails | undefined;
-    if (!d || typeof d !== 'object') return;
-    const agentId = d.agentId ?? d.id;
-    if (!agentId) return;
-    if (d.modelName) this.subagentModelNames.set(agentId, d.modelName);
-    // Foreground runs return their full stats here; a background spawn's result is zeros, not
-    // settlement. Track that known child in the same normalized stream as our shipped extension.
-    if (isTerminalSubagentStatus(d.status)) this.recordSubagent(d, agentId);
-    else if (!this.recordedSubagents.has(agentId) && !this.subagentRuns.has(agentId)) {
-      const run = { agent: 'Agent', description: d.description ?? '', mode: 'background' as const, startedAt: Date.now(), costUsd: 0, turns: 0, toolUses: 0 };
-      this.subagentRuns.set(agentId, run);
-      this.ctx.emit({ type: 'subagent.run', run: { ...run, runId: agentId, status: 'running' } });
-    }
-  }
-
-  /** Handles a background completion, including a group notification's `others`. */
-  private handleSubagentNotification(details: unknown): void {
-    const d = details as PiSubagentDetails | undefined;
-    if (!d || typeof d !== 'object') return;
-    for (const rec of [d, ...(Array.isArray(d.others) ? d.others : [])]) {
-      const agentId = rec.id ?? rec.agentId;
-      if (agentId && isTerminalSubagentStatus(rec.status)) this.recordSubagent(rec, agentId);
-    }
-  }
-
-  /** Records one finished run once: tool uses go to analytics, spend to the model that actually ran it. */
-  private recordSubagent(d: PiSubagentDetails, agentId: string): void {
-    if (this.recordedSubagents.has(agentId)) return;
-    this.recordedSubagents.add(agentId);
-    const costUsd = typeof d.cost === 'number' ? d.cost : typeof d.totalCost === 'number' ? d.totalCost : undefined;
-    const model = this.resolveSubagentModel(d.modelName ?? this.subagentModelNames.get(agentId));
-    if (costUsd && Number.isFinite(costUsd) && costUsd > 0) {
-      const key = model ? modelName(model.provider, model.model) : UNKNOWN_MODEL_KEY;
-      const cur = this.pendingSubagentCost.get(key) ?? { ...(model ?? { provider: null, model: null }), costUsd: 0 };
-      cur.costUsd += costUsd;
-      this.pendingSubagentCost.set(key, cur);
-    }
-    const completion: SubagentCompletion = {
-      agentId,
-      description: d.description,
-      status: d.status ?? 'completed',
-      model,
-      toolUses: typeof d.toolUses === 'number' ? d.toolUses : 0,
-      costUsd,
-      tokens: typeof d.totalTokens === 'number' ? d.totalTokens : undefined,
-      durationMs: d.durationMs,
-      error: d.error
-    };
-    this.ctx.emit({ type: 'subagent', completion });
-    const run = this.subagentRuns.get(agentId);
-    if (run) {
-      this.ctx.emit({ type: 'subagent.run', run: { ...run, runId: agentId, status: d.status === 'completed' ? 'completed' : d.status === 'error' ? 'error' : 'stopped', endedAt: Date.now() } });
-      this.subagentRuns.delete(agentId);
-    }
-    const bits: string[] = [completion.status === 'error' ? 'failed' : 'finished'];
-    bits.push(model ? modelName(model.provider, model.model) : 'model unknown');
-    if (completion.toolUses) bits.push(`${completion.toolUses} tool ${completion.toolUses === 1 ? 'use' : 'uses'}`);
-    if (completion.tokens) bits.push(`${completion.tokens.toLocaleString()} tokens`);
-    if (costUsd) bits.push(`$${costUsd.toFixed(4)}`);
-    this.info(`Subagent${d.description ? ` "${d.description}"` : ''}: ${bits.join(' · ')}`, completion.status === 'error' ? 'error' : 'info');
-  }
-
-  /** Resolve a legacy name only when its best match identifies one provider/model, never by order. */
-  private resolveSubagentModel(name?: string): ModelRef | null {
-    if (!name || !this.models.length) return null;
-    const typed = name.trim();
-    const unique = (matches: ModelInfo[]): ModelRef | null => {
-      const refs = new Map(matches.map((m) => [modelName(m.provider, m.id), { provider: m.provider, model: m.id }]));
-      return refs.size === 1 ? refs.values().next().value ?? null : null;
-    };
-    // Preserve explicit routes before normalization can merge distinct punctuation or providers.
-    const qualified = this.models.filter((m) => modelName(m.provider, m.id) === typed);
-    if (qualified.length) return unique(qualified);
-    const norm = (s: string) => s.toLowerCase().replace(/^claude\s+/, '').replace(/[^a-z0-9]/g, '');
-    const target = norm(typed);
-    if (!target) return null;
-    const exact = this.models.filter((m) => norm(m.displayName) === target || norm(m.id) === target || norm(modelName(m.provider, m.id)) === target);
-    if (exact.length) return unique(exact);
-    // An unresolved slashed route must not become a different provider through a fuzzy id match.
-    if (typed.includes('/')) return null;
-    return unique(this.models.filter((m) => {
-      const display = norm(m.displayName);
-      const id = norm(m.id);
-      return (display && display.includes(target)) || (id && target.includes(id));
-    }));
-  }
-
-  /** Applies the latest per-assistant usage snapshot and publishes a throttled live session update. */
-  private reportPiUsage(raw: unknown, final = false): void {
-    const current = piStreamUsage(raw);
-    if (!current) return;
-    // Price the completed request, not growing partial input (long-context rates can differ).
-    // Pi exposes no response tier; this is a requested-service estimate, not confirmed billing.
-    const model = final ? this.streamFastModeModel : undefined;
-    if (model) {
-      const pricing = model.provider === 'openai' || model.provider === 'anthropic'
-        ? fastModePricing(model.model, current.input + current.cacheRead + current.cacheWrite) : undefined;
-      // Pi does not expose cache TTL; Anthropic cache writes use the five-minute estimate.
-      const hasFastRates = pricing && (!current.cacheWrite || pricing.cacheWrite !== undefined);
-      const estimate = hasFastRates
-        ? estimateCostUsd(pricing, { inputTokens: current.input, outputTokens: current.output, cacheReadTokens: current.cacheRead, cacheWriteTokens: current.cacheWrite })
-        : current.cost * PI_FAST_FALLBACK_MULTIPLIER;
-      const premium = Math.max(0, estimate - current.cost);
-      current.cost += premium;
-      this.fastModeCostAdjustment += premium;
-      if (!hasFastRates) {
-        const key = `${model.provider}/${model.model}`;
-        if (!this.unknownFastCostReported.has(key)) {
-          this.unknownFastCostReported.add(key);
-          this.info(`Pi Fast pricing is unavailable for this model or context. Analytics estimates spend at ${PI_FAST_FALLBACK_ESTIMATE} when available. Check provider billing for actual charges.`, 'warn');
-        }
-      }
-    }
-    const delta = piUsageDelta(this.streamUsage, current);
-    this.streamUsage = current;
-    if (!hasPiUsage(delta)) return;
-    this.usage.addUsage({ inputTokens: delta.input, outputTokens: delta.output, cacheReadTokens: delta.cacheRead, cacheWriteTokens: delta.cacheWrite, reasoningTokens: delta.reasoning, costUsd: delta.cost });
-    this.usageReporter.report(this.usage.snapshot());
+    this.subagents.handleSubagentEvent(raw, this.extensionNonce);
   }
 
   private async handleUiRequest(req: { id: string; method: string; title?: string; message?: string; options?: string[]; notifyType?: string }): Promise<void> {
@@ -1112,29 +569,7 @@ export class PiAdapter implements HarnessAdapter {
       const payload = JSON.parse(message.slice(marker.length)) as Record<string, unknown>;
       if (!payload || payload.version !== 1 || !this.extensionNonce || payload.nonce !== this.extensionNonce) return true;
       if (marker === PI_FAST_MODE_MARKER) {
-        const change = this.fastModeChange;
-        const acknowledged = !!change && payload.requestId === change.requestId && payload.revision === change.revision && payload.enabled === change.enabled;
-        const current = payload.revision === this.fastModeRevision && payload.enabled === this.fastModeRequested;
-        if ((!acknowledged && !current) || !['off', 'requested', 'unavailable', 'cooldown'].includes(String(payload.state)) ||
-            (payload.enabled === false) !== (payload.state === 'off')) return true;
-        if (acknowledged) {
-          this.fastModeRequested = change!.enabled;
-          this.fastModeRevision = change!.revision;
-          change!.ack.resolve();
-        }
-        const effective = payload.effectiveModel as Partial<ModelRef> | undefined;
-        this.fastModeEffectiveModel = effective && typeof effective.provider === 'string' && typeof effective.model === 'string'
-          ? { provider: effective.provider, model: effective.model } : undefined;
-        let detail = typeof payload.detail === 'string' ? payload.detail : undefined;
-        if (payload.enabled && this.fastModeEffectiveModel) {
-          const model = this.fastModeEffectiveModel;
-          const priced = (model.provider === 'openai' || model.provider === 'anthropic') && fastModePricing(model.model, 0);
-          const pricingDetail = priced
-            ? `Analytics uses published Fast rates where available, or ${PI_FAST_FALLBACK_ESTIMATE} otherwise. Anthropic cache writes assume a five-minute TTL.`
-            : `Fast pricing is unavailable; analytics estimates spend at ${PI_FAST_FALLBACK_ESTIMATE} when available.`;
-          detail = `${detail ?? ''} ${pricingDetail} Check provider billing for actual charges.`.trim();
-        }
-        this.ctx.updateMeta({ fastModeStatus: { state: payload.state as 'off' | 'requested' | 'unavailable' | 'cooldown', ...(detail ? { detail } : {}) } });
+        this.usage.handleFastModeNotification(payload);
       } else if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'mcp' || payload.capability === 'fast-mode')) {
         if (payload.ready === false) this.extensionCapabilities.delete(payload.capability);
         else this.extensionCapabilities.add(payload.capability);
@@ -1188,19 +623,9 @@ export class PiAdapter implements HarnessAdapter {
         'get_session_stats'
       );
       if (stats.sessionFile) this.ctx.updateRef({ piSessionFile: stats.sessionFile });
-      const t = stats.tokens ?? {};
       // A snapshot that overlaps a newer run already includes its deferred samples. Keep this
       // turn's streamed usage; the next non-overlapping cumulative snapshot reconciles both.
-      if (!this.statsOverlapped) this.usage.setCumulative({
-        inputTokens: t.input,
-        outputTokens: t.output,
-        cacheReadTokens: t.cacheRead,
-        cacheWriteTokens: t.cacheWrite,
-        // Pi's stats remain standard-rate. Keep all locally estimated premiums across toggles.
-        costUsd: typeof stats.cost === 'number' ? stats.cost + this.fastModeCostAdjustment : undefined,
-        contextTokens: stats.contextUsage?.tokens,
-        contextWindow: stats.contextUsage?.contextWindow
-      });
+      if (!this.statsOverlapped) this.usage.applySessionStats(stats);
     } catch (e) {
       // A failed or timed-out stats request must not skip the turn's own accounting: pi reports
       // tokens cumulatively, so the samples it already streamed for this turn are all the app has.
@@ -1211,17 +636,8 @@ export class PiAdapter implements HarnessAdapter {
     }
     // Accounting cannot publish a completed turn after a transport error or during teardown.
     if (this.child !== child || this.transportError || this.stopping) return;
-    const completed = this.usage.finishTurn();
     // Subagent spend accrued since the last report, so analytics can put it on the model that ran it.
-    const subagentCostByModel = this.pendingSubagentCost.size ? [...this.pendingSubagentCost.values()] : undefined;
-    this.pendingSubagentCost.clear();
-    this.usageReporter.report(completed.totals, subagentCostByModel);
-    this.usageReporter.flush();
-    const turnCost = completed.usage?.costUsd ?? 0;
-    // The whole delta, not just input/output: a turn's cache reads and reasoning tokens are part of
-    // what it cost and how fast it ran. A turn with neither a streamed sample nor a stats snapshot
-    // has no measured usage at all, so the row stays unknown instead of claiming a measured zero.
-    const turnUsage = completed.usage && Object.values(completed.usage).some((value) => (value ?? 0) > 0) ? completed.usage : undefined;
+    const { turnCost, turnUsage } = this.usage.finishTurn(this.subagents.drainPendingCost());
     // pi ends a failed turn with an assistant message (stopReason 'error'), not an error event.
     const stopReason = this.steeringInterrupt ? 'aborted' : this.lastStopReason;
     const errorMsg = this.lastErrorMessage;
@@ -1349,16 +765,15 @@ export class PiAdapter implements HarnessAdapter {
   async setModel(model: ModelRef): Promise<void> {
     await this.request('set_model', { provider: model.provider, modelId: model.model });
     this.ctx.updateMeta({ activeModel: model });
-    await this.writeEffortConfig(this.ctx.effort(), model);
+    await writePiEffortConfig(this.ctx, this.effortFile, this.ctx.effort(), model);
   }
 
   async setFastMode(enabled: boolean): Promise<void> {
     if (typeof enabled !== 'boolean') throw new Error('Pi Fast mode must be a boolean.');
-    if (this._busy || this.fastModeChange) throw new Error('Pi Fast mode can only change while idle.');
+    if (this._busy || this.usage.changing) throw new Error('Pi Fast mode can only change while idle.');
     if (!this.child || this.exited) throw new Error('pi process is not running');
     if (!this.extensionCapabilities.has('fast-mode')) throw new Error('Pi Fast mode extension is unavailable. Update Pi and restart the session.');
-    const change = { requestId: randomUUID(), revision: this.fastModeRevision + 1, enabled, ack: deferred<void>() };
-    this.fastModeChange = change;
+    const change = this.usage.beginFastModeChange(enabled);
     try {
       // prompt executes an extension command without adding a user/model turn. RPC success alone
       // is insufficient: require the exact nonce/revision acknowledgement from our extension.
@@ -1373,45 +788,18 @@ export class PiAdapter implements HarnessAdapter {
       await this.dispose();
       throw error;
     } finally {
-      this.fastModeChange = null;
+      this.usage.clearFastModeChange();
     }
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {
     await this.request('set_thinking_level', { level: piThinkingLevel(effort) });
     this.ctx.updateMeta({ activeEffort: effort });
-    await this.writeEffortConfig(effort, this.ctx.session().activeModel);
-  }
-
-  /**
-   * Persist the effort the user chose so the bundled extension can forward it to OpenRouter. pi
-   * clamps a level against the model's bundled map before each request, and that map can lag
-   * OpenRouter's live catalog (it hides `low`/`max` and promotes `max` to `xhigh` for DeepSeek).
-   * Only levels the live catalog advertises are written; anything else clears the file so pi's own
-   * mapping stands.
-   */
-  private async writeEffortConfig(effort: EffortLevel | undefined, model: ModelRef | undefined): Promise<void> {
-    if (!this.effortFile) return;
-    const provider = model ? this.ctx.settings().providers.find((p) => p.kind === 'openrouter' && p.id === model.provider) : undefined;
-    const supported = provider?.models.find((m) => m.id === model?.model)?.supportedEfforts;
-    const payload = model && effort && supported?.includes(effort) ? { provider: model.provider, model: model.model, effort } : null;
-    try {
-      await fs.writeFile(this.effortFile, JSON.stringify(payload), 'utf8');
-    } catch (e) {
-      this.ctx.log('warn', `failed to write pi reasoning effort file: ${errorMessage(e)}`);
-    }
+    await writePiEffortConfig(this.ctx, this.effortFile, effort, this.ctx.session().activeModel);
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
-    // The approvals extension re-reads this file before every tool call.
-    if (!this.modeFile) return;
-    try {
-      await fs.writeFile(this.modeFile, mode, 'utf8');
-    } catch (e) {
-      // Surface the failure: silently keeping the old mode active would grant or withhold
-      // permissions behind the user's back.
-      this.ctx.log('warn', `failed to write permission mode file: ${errorMessage(e)}`);
-    }
+    await writePiPermissionMode(this.ctx, this.modeFile, mode);
   }
 
   async compact(): Promise<void> {
@@ -1450,12 +838,9 @@ export class PiAdapter implements HarnessAdapter {
     this.followUps.length = 0;
     this.deferredLines.length = 0;
     this.runtimeQueued = 0;
-    if (this.wakeupPending) {
-      this.wakeupPending = false;
-      this.ctx.emit({ type: 'ongoing', source: 'wakeup', items: [] });
-    }
+    this.subagents.clearWakeup();
     this.updateQueued();
-    this.usageReporter.close();
+    this.usage.close();
     this.extensionCapabilities.clear();
     this.declinedTools.clear();
     // Disposal can detach the runtime before close arrives (and close need not arrive at all).
@@ -1472,31 +857,5 @@ export class PiAdapter implements HarnessAdapter {
     });
     this.disposal = operation;
     try { await operation; } finally { this.disposal = null; }
-  }
-}
-
-/** One-shot model listing: `pi --mode rpc --no-session` + get_available_models. */
-export async function listPiModels(piPath: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<ModelInfo[]> {
-  const child = spawnTool(piPath, ['--mode', 'rpc', '--no-session', '--no-extensions', '--no-skills'], { env: { ...process.env, ...extraEnv } });
-  const d = deferred<ModelInfo[]>();
-  const splitter = new LineSplitter((line) => {
-    try {
-      const ev = JSON.parse(line) as { type: string; command?: string; success?: boolean; data?: { models: PiModel[] }; error?: string };
-      if (ev.type === 'response' && ev.command === 'get_available_models') {
-        if (ev.success && ev.data) d.resolve(ev.data.models.map(piModelToInfo));
-        else d.reject(new Error(ev.error ?? 'get_available_models failed'));
-      }
-    } catch {
-      /* ignore non-json */
-    }
-  });
-  child.stdout?.on('data', (b: Buffer) => splitter.push(b));
-  child.on('error', (e) => d.reject(e));
-  child.on('close', () => d.reject(new Error('pi exited before answering')));
-  child.stdin?.write(JSON.stringify({ id: 'm1', type: 'get_available_models' }) + '\n');
-  try {
-    return await withTimeout(d.promise, 45_000, 'pi model list');
-  } finally {
-    await shutdownChild(child, 1000);
   }
 }
