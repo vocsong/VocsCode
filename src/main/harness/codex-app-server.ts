@@ -1,28 +1,36 @@
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
-import type { EffortLevel, FileChange, ModelInfo, ModelRef, OngoingItem, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { isEffortLevel } from '../../shared/harness-meta';
-import { fastModeSupport } from '../../shared/fast-mode';
 import { assertEndpointUrl } from '../../shared/endpoint-policy';
-import { isCodexBuiltinProvider, isOpenAiWireProvider } from '../../shared/providers';
-import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
-import { TurnUsageTracker } from '../util/turn-usage';
-import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
-import { codexProviderModels } from '../models/codex-catalog';
-import { toCodex, type CodexMcpConfig } from '../mcp/effective';
 import { isBuiltinTrustedTool } from '../../shared/builtin-tools';
+import { isEffortLevel } from '../../shared/harness-meta';
+import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, UserInput } from '../../shared/types';
+import { toCodex, type CodexMcpConfig } from '../mcp/effective';
 import { VOCS_MISSION_SERVER_ID } from '../mcp/mission';
 import { isMissionToolFor } from '../mission-mode/tools';
-import { JsonRpcStdioClient } from './jsonrpc';
+import { codexProviderModels } from '../models/codex-catalog';
+import { CODEX_STATIC_MODELS } from '../models/static-models';
+import { deferred, errorMessage, shortId, withTimeout, type Deferred } from '../util/async';
+import { CodexChildThreadTracker, CodexItemTracker, mapCodexFileChanges, type FileChangeThreadItem, type ThreadItem } from './codex-items';
 import { applyCodexMcpSuppression, getCodexMcpServers } from './codex-mcp-config';
+import { codexModelSpeedTiers, codexModelToInfo, listCodexModels, readCodexModelCatalog } from './codex-models';
+import {
+  codexFastModeCapability,
+  codexFastModeStatus,
+  codexFastServiceTier,
+  isCodexFastTier,
+  isCodexFastUnavailableStderr,
+  resolveCodexProvider,
+  writeCodexSessionImage
+} from './codex-provider';
+import { codexSkillCommands, codexSkillInvocation, listCodexSkills, type CodexSkill } from './codex-skills';
+import { CodexUsageTracker, type CodexTokenUsageNotification } from './codex-usage';
+import { reportHarnessCommands } from './commands';
+import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, OPTIONS_ALLOW_DENY, requiresPathApproval } from './permissions';
 import { questionAnswerWithNote } from './question-answers';
 import { spawnTool } from './spawn';
 import { missionPrompt } from './system-prompt';
-import { fastModePricing } from './native/fast-mode-pricing';
 import type { HarnessAdapter, HarnessContext } from './types';
-import { reportHarnessCommands } from './commands';
-import { codexSkillCommands, codexSkillInvocation, listCodexSkills, type CodexSkill } from './codex-skills';
+
+export { codexModelToInfo, listCodexModels };
 
 /* ---- Minimal protocol shapes (from `codex app-server generate-ts`) ---- */
 type AskForApproval = 'untrusted' | 'on-request' | 'never';
@@ -30,44 +38,6 @@ type SandboxPolicy =
   | { type: 'dangerFullAccess' }
   | { type: 'readOnly'; networkAccess: boolean }
   | { type: 'workspaceWrite'; writableRoots: string[]; networkAccess: boolean; excludeTmpdirEnvVar: boolean; excludeSlashTmp: boolean };
-
-interface CodexModel {
-  id: string;
-  model: string;
-  displayName: string;
-  description: string;
-  hidden: boolean;
-  supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
-  defaultReasoningEffort: string;
-  inputModalities: string[];
-  isDefault: boolean;
-  serviceTiers?: { id: string }[];
-  additionalSpeedTiers?: string[];
-}
-
-type ThreadItem =
-  | { type: 'userMessage'; id: string }
-  | { type: 'agentMessage'; id: string; text: string; phase: string | null }
-  | { type: 'plan'; id: string; text: string }
-  | { type: 'reasoning'; id: string; summary: string[]; content: string[] }
-  | {
-      type: 'commandExecution';
-      id: string;
-      command: string;
-      cwd: string;
-      status: 'inProgress' | 'completed' | 'failed' | 'declined';
-      aggregatedOutput: string | null;
-      exitCode: number | null;
-      durationMs: number | null;
-    }
-  | { type: 'fileChange'; id: string; changes: { path: string; kind: { type: 'add' | 'delete' | 'update'; move_path?: string | null }; diff: string }[]; status: 'inProgress' | 'completed' | 'failed' | 'declined' }
-  | { type: 'mcpToolCall'; id: string; server: string; tool: string; status: string; arguments: unknown; result: { content: unknown[]; structuredContent: unknown } | null; error: { message: string } | null; durationMs: number | null }
-  | { type: 'dynamicToolCall'; id: string; tool: string; arguments: unknown; status: string; contentItems: unknown[] | null; success: boolean | null }
-  | { type: 'webSearch'; id: string; query?: string }
-  | { type: 'contextCompaction'; id: string }
-  | { type: 'subAgentActivity'; id: string; [k: string]: unknown }
-  | { type: 'collabAgentToolCall'; id: string; tool: string; [k: string]: unknown }
-  | { type: string; id: string; [k: string]: unknown };
 
 /**
  * Codex approval policies. Below Full every tier uses `untrusted`: Codex runs only its known-safe
@@ -183,8 +153,6 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private fastModeModel: ModelRef | undefined;
   private speedTiers = new Map<string, string[]>();
   private serviceTier = 'default';
-  private unknownFastCostReported = false;
-  private items = new Map<string, TranscriptItem>();
   private fileChangeItems = new Map<string, FileChange[]>();
   /**
    * Tools the user allowed "for session". Kept only here: Codex is always sent a one-time accept,
@@ -193,18 +161,33 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private sessionGrants = new Set<SessionGrant>();
   private queue: UserInput[] = [];
   private turnStartedAt = 0;
-  private readonly usage: TurnUsageTracker;
+  private readonly usage: CodexUsageTracker;
+  private readonly items: CodexItemTracker;
+  private readonly childThreads: CodexChildThreadTracker;
   private models: ModelInfo[] = [];
   /** This cwd's enabled skills, from `skills/list`; empty until it answers. */
   private skills: CodexSkill[] = [];
   private compactionWaiter: Deferred<void> | null = null;
-  /** Live child subagent threads observed on this shared app-server connection. */
-  private childThreads = new Map<string, { threadId: string; label: string; startedAt: number }>();
-  /** Most recent parent-thread subagent tool label, used to name child threads that carry no title. */
-  private lastSubagentLabel: string | undefined;
 
   constructor(private readonly ctx: HarnessContext) {
-    this.usage = new TurnUsageTracker(ctx.session().usage);
+    this.childThreads = new CodexChildThreadTracker((event) => this.ctx.emit(event));
+    this.items = new CodexItemTracker({
+      emit: (event) => this.ctx.emit(event),
+      activeModel: () => this.model,
+      onFileChanges: (item) => this.rememberFileChanges(item),
+      onSubagentLabel: (label) => this.childThreads.noteSubagentLabel(label)
+    });
+    this.usage = new CodexUsageTracker(ctx.session().usage, {
+      emit: (event) => this.ctx.emit(event),
+      warn: (message) => this.info(message, 'warn'),
+      pricingContext: () => ({
+        fastMode: this.fastMode,
+        serviceTier: this.serviceTier,
+        model: this.model ?? this.fastModeModel?.model ?? '',
+        provider: this.modelProvider ?? 'openai',
+        models: this.models
+      })
+    });
   }
 
   get busy(): boolean {
@@ -246,21 +229,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     return decision.optionId === 'allow' || decision.optionId === 'allow_session';
   }
 
-  /**
-   * The OpenAI-compatible provider this thread is pinned to. An explicit session override wins;
-   * otherwise a model selected from one of the app's configured providers supplies one. Codex's
-   * own `openai` provider needs no `model_providers` entry. Codex 0.153 only accepts the Responses
-   * wire API, so every custom provider is registered as `responses`.
-   */
-  private resolveCodexProvider(): { id: string; name: string; baseUrl: string; envKey?: string; wireApi: 'chat' | 'responses' } | undefined {
-    const meta = this.ctx.session();
-    const explicit = meta.config.codexModelProvider;
-    if (explicit) return { ...explicit, wireApi: explicit.wireApi ?? 'responses' };
-    const id = (meta.config.model ?? meta.activeModel)?.provider;
-    if (isCodexBuiltinProvider(id)) return undefined;
-    const provider = this.ctx.settings().providers.find((p) => p.id === id && p.enabled && p.baseUrl && isOpenAiWireProvider(p));
-    if (!provider?.baseUrl) return undefined;
-    return { id: provider.id, name: provider.name, baseUrl: provider.baseUrl, envKey: provider.envKey, wireApi: 'responses' };
+  private resolveCodexProvider() {
+    return resolveCodexProvider(this.ctx.session(), this.ctx.settings());
   }
 
   async start(): Promise<void> {
@@ -283,7 +253,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     try {
       this.rpc.onStderr = (l) => {
         this.ctx.log('debug', `[codex] ${l}`);
-        if (this.fastMode && /configured tier.*not advertised|fast.*(?:disabled|unavailable)|service.tier.*(?:ignored|unsupported)/i.test(l)) {
+        if (this.fastMode && isCodexFastUnavailableStderr(l)) {
           this.serviceTier = 'default';
           this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: l } });
         }
@@ -291,7 +261,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.rpc.onClose = (code) => {
         this.compactionWaiter?.reject(new Error(`Codex stopped during context compaction (${code}).`));
         this._busy = false;
-        this.clearChildThreads();
+        this.childThreads.clear();
         this.ctx.emit({ type: 'status', status: 'stopped', detail: `codex app-server exited (${code})` });
       };
       this.wireNotifications(this.rpc);
@@ -374,7 +344,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.serviceTier = res.serviceTier ?? (fast ? this.fastServiceTier() : 'default');
       this.fastModeModel = { provider: res.modelProvider || 'openai', model: res.model };
       this.reportFastMode();
-      if (fast && res.serviceTier !== undefined && res.serviceTier !== 'fast' && res.serviceTier !== 'priority') {
+      if (fast && res.serviceTier !== undefined && !isCodexFastTier(res.serviceTier)) {
         this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: 'Codex did not accept a Fast service tier.' } });
       }
       this.ctx.updateRef({ codexThreadId: this.threadId });
@@ -423,26 +393,16 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const tier = (p as { threadSettings?: { serviceTier?: string | null } }).threadSettings?.serviceTier;
       if (tier === undefined) return;
       this.serviceTier = tier ?? 'default';
-      if (this.fastMode && tier !== 'fast' && tier !== 'priority') {
+      if (this.fastMode && !isCodexFastTier(tier)) {
         this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: `Codex selected service tier: ${this.serviceTier}` } });
       }
     });
-    rpc.onNotification('thread/closed', (p) => {
-      const n = p as { threadId?: string };
-      if (n.threadId && this.childThreads.delete(n.threadId)) this.emitChildThreads();
-    });
+    rpc.onNotification('thread/closed', (p) => this.childThreads.onChildThreadEnded((p as { threadId?: string }).threadId));
     rpc.onNotification('turn/started', (p) => {
       const n = p as { threadId?: string; turn: { id: string } };
       if (!this.threadId) return;
       if (n.threadId !== this.threadId) {
-        if (n.threadId && !this.childThreads.has(n.threadId)) {
-          this.childThreads.set(n.threadId, {
-            threadId: n.threadId,
-            label: this.lastSubagentLabel || 'Codex subagent',
-            startedAt: Date.now()
-          });
-          this.emitChildThreads();
-        }
+        this.childThreads.onChildTurnStarted(n.threadId);
         return;
       }
       this.turnId = n.turn.id;
@@ -453,75 +413,44 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     });
     rpc.onNotification('item/started', (p) => {
       const { threadId, item } = p as { threadId: string; item: ThreadItem };
-      if (threadId === this.threadId) this.upsertItem(item, false);
+      if (threadId === this.threadId) this.items.upsertItem(item, false);
       // Child approvals can still reach this client. The approval request refers to this item's patch.
-      else if (item.type === 'fileChange') this.rememberFileChanges(item as Extract<ThreadItem, { type: 'fileChange' }>);
+      else if (item.type === 'fileChange') this.rememberFileChanges(item as FileChangeThreadItem);
     });
-    onThreadNotification('item/completed', (p) => this.upsertItem((p as { item: ThreadItem }).item, true));
+    onThreadNotification('item/completed', (p) => this.items.upsertItem((p as { item: ThreadItem }).item, true));
     onThreadNotification('item/agentMessage/delta', (p) => {
       const n = p as { itemId: string; delta: string };
-      const item = this.items.get(n.itemId);
-      if (item && item.kind === 'assistant') {
-        item.text += n.delta;
-        this.ctx.emit({ type: 'item.delta', id: n.itemId, textDelta: n.delta });
-      }
+      this.items.applyTextDelta(n.itemId, n.delta);
     });
     onThreadNotification('item/plan/delta', (p) => {
       const n = p as { itemId: string; delta: string };
-      const item = this.items.get(n.itemId);
-      if (item && item.kind === 'assistant') {
-        item.text += n.delta;
-        this.ctx.emit({ type: 'item.delta', id: n.itemId, textDelta: n.delta });
-      }
+      this.items.applyTextDelta(n.itemId, n.delta);
     });
     const reasoningDelta = (p: unknown) => {
       const n = p as { itemId: string; delta: string };
-      let item = this.items.get(n.itemId);
-      if (!item) {
-        item = { id: n.itemId, kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, phase: 'commentary' };
-        this.upsert(item);
-      }
-      if (item.kind === 'assistant') {
-        item.thinking = (item.thinking ?? '') + n.delta;
-        this.ctx.emit({ type: 'item.delta', id: n.itemId, thinkingDelta: n.delta });
-      }
+      this.items.applyReasoningDelta(n.itemId, n.delta);
     };
     onThreadNotification('item/reasoning/summaryTextDelta', reasoningDelta);
     onThreadNotification('item/reasoning/textDelta', reasoningDelta);
-    onThreadNotification('item/reasoning/summaryPartAdded', (p) => {
-      const n = p as { itemId: string };
-      const item = this.items.get(n.itemId);
-      if (item && item.kind === 'assistant' && item.thinking) {
-        item.thinking += '\n\n';
-        this.ctx.emit({ type: 'item.delta', id: n.itemId, thinkingDelta: '\n\n' });
-      }
-    });
+    onThreadNotification('item/reasoning/summaryPartAdded', (p) => this.items.applyReasoningSummaryPartAdded((p as { itemId: string }).itemId));
     onThreadNotification('item/commandExecution/outputDelta', (p) => {
       const n = p as { itemId: string; delta: string };
-      const item = this.items.get(n.itemId);
-      if (item && item.kind === 'tool') {
-        item.output = (item.output ?? '') + n.delta;
-        this.ctx.emit({ type: 'item.delta', id: n.itemId, outputDelta: n.delta });
-      }
+      this.items.applyToolOutputDelta(n.itemId, n.delta);
     });
     onThreadNotification('item/fileChange/outputDelta', (p) => {
       const n = p as { itemId: string; delta: string };
-      const item = this.items.get(n.itemId);
-      if (item && item.kind === 'tool') {
-        item.output = (item.output ?? '') + n.delta;
-        this.ctx.emit({ type: 'item.delta', id: n.itemId, outputDelta: n.delta });
-      }
+      this.items.applyToolOutputDelta(n.itemId, n.delta);
     });
     rpc.onNotification('turn/completed', (p) => {
       const n = p as { threadId?: string; turn: { id: string; status: 'completed' | 'interrupted' | 'failed' | 'inProgress'; error: { message: string } | null; durationMs: number | null } };
       if (!this.threadId) return;
       if (n.threadId !== this.threadId) {
-        if (n.threadId && this.childThreads.delete(n.threadId)) this.emitChildThreads();
+        this.childThreads.onChildThreadEnded(n.threadId);
         return;
       }
       this._busy = false;
       this.turnId = null;
-      for (const item of this.items.values()) if (item.kind === 'assistant' && item.streaming) this.ctx.emit({ type: 'item.upsert', item: { ...item, streaming: false } });
+      this.items.finishStreaming();
       const status = n.turn.status === 'failed' ? 'failed' : n.turn.status === 'interrupted' ? 'interrupted' : 'completed';
       if (this.fastMode && status === 'failed') this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: n.turn.error?.message ?? 'Codex turn failed.' } });
       const completed = this.usage.finishTurn();
@@ -538,46 +467,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.ctx.updateMeta({ queued: this.queue.length });
       if (next) void this.send({ ...next, mode: 'now' }).catch((e) => this.info(errorMessage(e), 'error'));
     });
-    onThreadNotification('thread/tokenUsage/updated', (p) => {
-      const n = p as { tokenUsage: { total: { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }; last: { totalTokens: number }; modelContextWindow: number | null } };
-      const t = n.tokenUsage.total;
-      const before = this.usage.snapshot();
-      // Codex counts cached input inside its input tokens (OpenAI convention); store the uncached
-      // remainder so cache reads are not counted twice in rates and cost estimates.
-      const cumulative = {
-        inputTokens: Math.max(0, t.inputTokens - t.cachedInputTokens),
-        outputTokens: t.outputTokens,
-        cacheReadTokens: t.cachedInputTokens,
-        cacheWriteTokens: t.cacheWriteInputTokens,
-        reasoningTokens: t.reasoningOutputTokens,
-        contextWindow: n.tokenUsage.modelContextWindow ?? before.contextWindow,
-        contextTokens: n.tokenUsage.last?.totalTokens ?? before.contextTokens
-      };
-      this.usage.setCumulative(cumulative);
-      // Codex reports these counters but no price, and a rate belongs to the model that produced
-      // each sample: the increment this sample added is priced at the current model's rates, while
-      // pricing the running totals would re-bill everything a mid-session model switch already
-      // counted at the previous model's rate. How much was added is the tracker's own epoch handling
-      // to decide — a reset counter contributes nothing rather than a negative.
-      const after = this.usage.snapshot();
-      const added = {
-        inputTokens: Math.max(0, after.inputTokens - before.inputTokens),
-        outputTokens: Math.max(0, after.outputTokens - before.outputTokens),
-        cacheReadTokens: Math.max(0, after.cacheReadTokens - before.cacheReadTokens),
-        cacheWriteTokens: Math.max(0, after.cacheWriteTokens - before.cacheWriteTokens)
-      };
-      // Spend is additive and never reconciled: Codex reports no cost to reconcile it against, and
-      // money spent at an earlier model's rate stays spent.
-      const fast = this.fastMode && (this.serviceTier === 'fast' || this.serviceTier === 'priority');
-      const model = this.model ?? this.fastModeModel?.model ?? '';
-      const pricing = fast ? fastModePricing(model, added.inputTokens + added.cacheReadTokens + added.cacheWriteTokens) : findPricing(this.modelProvider ?? 'openai', model, this.models);
-      if (fast && !pricing && !this.unknownFastCostReported) {
-        this.unknownFastCostReported = true;
-        this.info('Fast-mode pricing is unavailable for this model/context. Reported spend excludes these requests; check the provider bill for the full cost.', 'warn');
-      }
-      this.usage.addUsage({ costUsd: estimateCostUsd(pricing, added) });
-      this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
-    });
+    onThreadNotification('thread/tokenUsage/updated', (p) => this.usage.applyNotification(p as CodexTokenUsageNotification));
     onThreadNotification('error', (p) => {
       const n = p as { error: { message: string }; willRetry: boolean };
       if (this.fastMode && !n.willRetry) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: n.error.message } });
@@ -737,155 +627,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     return { allowed: false, rejection: decision.note || 'User declined' };
   }
 
-  private upsertItem(item: ThreadItem, completed: boolean): void {
-    const existing = this.items.get(item.id);
-    const ts = existing?.ts ?? Date.now();
-    let out: TranscriptItem | null = null;
-    switch (item.type) {
-      case 'userMessage':
-      case 'hookPrompt':
-      case 'sleep':
-        return;
-      case 'agentMessage': {
-        const it = item as Extract<ThreadItem, { type: 'agentMessage' }>;
-        const prev = existing && existing.kind === 'assistant' ? existing : undefined;
-        const text = completed || !prev ? it.text : prev.text.length > it.text.length ? prev.text : it.text;
-        out = { id: it.id, kind: 'assistant', ts, text, streaming: !completed, model: this.model, phase: it.phase === 'commentary' ? 'commentary' : 'final', thinking: prev?.thinking };
-        break;
-      }
-      case 'plan': {
-        const it = item as Extract<ThreadItem, { type: 'plan' }>;
-        out = { id: it.id, kind: 'assistant', ts, text: it.text, streaming: !completed, phase: 'plan' };
-        break;
-      }
-      case 'reasoning': {
-        const it = item as Extract<ThreadItem, { type: 'reasoning' }>;
-        const prev = existing && existing.kind === 'assistant' ? existing.thinking ?? '' : '';
-        const full = [...(it.summary ?? []), ...(it.content ?? [])].join('\n\n');
-        out = { id: it.id, kind: 'assistant', ts, text: '', thinking: full.length >= prev.length ? full : prev, streaming: !completed, phase: 'commentary' };
-        break;
-      }
-      case 'commandExecution': {
-        const it = item as Extract<ThreadItem, { type: 'commandExecution' }>;
-        const prevOut = existing && existing.kind === 'tool' ? existing.output ?? '' : '';
-        out = {
-          id: it.id,
-          kind: 'tool',
-          ts,
-          name: 'shell',
-          hint: 'execute',
-          summary: it.command,
-          input: { command: it.command, cwd: it.cwd },
-          output: truncate((it.aggregatedOutput ?? '').length >= prevOut.length ? it.aggregatedOutput ?? '' : prevOut, 40_000),
-          status: it.status === 'inProgress' ? 'running' : it.status === 'failed' ? 'error' : it.status === 'declined' ? 'declined' : 'done',
-          exitCode: it.exitCode,
-          durationMs: it.durationMs ?? undefined
-        };
-        break;
-      }
-      case 'fileChange': {
-        const it = item as Extract<ThreadItem, { type: 'fileChange' }>;
-        const changes = this.rememberFileChanges(it);
-        out = {
-          id: it.id,
-          kind: 'tool',
-          ts,
-          name: 'apply_patch',
-          hint: 'edit',
-          summary: changes.map((c) => c.path).join(', '),
-          changes,
-          status: it.status === 'inProgress' ? 'running' : it.status === 'failed' ? 'error' : it.status === 'declined' ? 'declined' : 'done'
-        };
-        break;
-      }
-      case 'mcpToolCall': {
-        const it = item as Extract<ThreadItem, { type: 'mcpToolCall' }>;
-        out = {
-          id: it.id,
-          kind: 'tool',
-          ts,
-          name: `${it.server}.${it.tool}`,
-          hint: 'mcp',
-          input: it.arguments,
-          summary: truncate(JSON.stringify(it.arguments ?? {}), 200, '…'),
-          output: it.error ? it.error.message : it.result ? truncate(JSON.stringify(it.result.structuredContent ?? it.result.content ?? '', null, 2), 40_000) : undefined,
-          status: it.status === 'inProgress' ? 'running' : it.status === 'failed' ? 'error' : 'done',
-          durationMs: it.durationMs ?? undefined
-        };
-        break;
-      }
-      case 'dynamicToolCall': {
-        const it = item as Extract<ThreadItem, { type: 'dynamicToolCall' }>;
-        out = {
-          id: it.id,
-          kind: 'tool',
-          ts,
-          name: it.tool,
-          hint: 'other',
-          input: it.arguments,
-          summary: truncate(JSON.stringify(it.arguments ?? {}), 200, '…'),
-          output: it.contentItems ? truncate(JSON.stringify(it.contentItems, null, 2), 40_000) : undefined,
-          status: it.status === 'inProgress' ? 'running' : it.success === false ? 'error' : 'done'
-        };
-        break;
-      }
-      case 'webSearch': {
-        const it = item as Extract<ThreadItem, { type: 'webSearch' }>;
-        out = { id: it.id, kind: 'tool', ts, name: 'web_search', hint: 'fetch', summary: it.query ?? '', status: completed ? 'done' : 'running' };
-        break;
-      }
-      case 'contextCompaction':
-        out = { id: item.id, kind: 'info', ts, level: 'info', text: 'Codex compacted the conversation context.' };
-        break;
-      case 'subAgentActivity':
-      case 'collabAgentToolCall': {
-        const it = item as { id: string; tool?: string; prompt?: string; description?: string; [k: string]: unknown };
-        const label = typeof it.description === 'string' && it.description.trim()
-          ? it.description.trim()
-          : typeof it.prompt === 'string' && it.prompt.trim()
-            ? truncate(it.prompt.trim(), 80, '…')
-            : typeof it.tool === 'string'
-              ? `agent.${it.tool}`
-              : 'Codex subagent';
-        if (!completed) this.lastSubagentLabel = label;
-        out = { id: it.id, kind: 'tool', ts, name: typeof it.tool === 'string' ? `agent.${it.tool}` : 'subagent', hint: 'agent', input: it, summary: label, status: completed ? 'done' : 'running' };
-        break;
-      }
-      case 'enteredReviewMode':
-        out = { id: item.id, kind: 'info', ts, level: 'info', text: 'Codex entered review mode.' };
-        break;
-      case 'exitedReviewMode':
-        out = { id: item.id, kind: 'info', ts, level: 'info', text: 'Codex exited review mode.' };
-        break;
-      case 'imageGeneration':
-      case 'imageView':
-        out = { id: item.id, kind: 'info', ts, level: 'info', text: `${item.type} item (not rendered).` };
-        break;
-      default:
-        out = { id: item.id, kind: 'info', ts, level: 'info', text: `${item.type}: ${truncate(JSON.stringify(item), 500, '…')}` };
-    }
-    if (out) this.upsert(out);
-  }
-
-  private rememberFileChanges(item: Extract<ThreadItem, { type: 'fileChange' }>): FileChange[] {
-    const changes: FileChange[] = item.changes.map((c) => ({
-      path: c.path,
-      kind: c.kind.type === 'update' && c.kind.move_path ? 'rename' : c.kind.type,
-      diff: c.diff,
-      oldPath: c.kind.type === 'update' ? c.kind.move_path ?? undefined : undefined
-    }));
+  private rememberFileChanges(item: FileChangeThreadItem): FileChange[] {
+    const changes = mapCodexFileChanges(item);
     this.fileChangeItems.set(item.id, changes);
     return changes;
-  }
-
-  /**
-   * Keep the adapter's live item locally and emit a snapshot of it. The session manager owns the
-   * emitted item and mutates it as deltas stream, so handing it this map's object would apply
-   * every delta (reasoning text, command output) twice.
-   */
-  private upsert(item: TranscriptItem): void {
-    this.items.set(item.id, item);
-    this.ctx.emit({ type: 'item.upsert', item: { ...item } });
   }
 
   private info(text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
@@ -903,10 +648,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     const skill = invocation.skill as Partial<CodexSkill> | undefined;
     if (skill?.path) content.push({ type: 'skill', name: skill.name, path: skill.path });
     for (const img of input.images ?? []) {
-      const ext = img.mimeType.split('/')[1] ?? 'png';
-      const file = path.join(this.ctx.sessionDir, 'images', `${shortId('img_')}.${ext}`);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, Buffer.from(img.data, 'base64'));
+      const file = await writeCodexSessionImage(this.ctx.sessionDir, img);
       content.push({ type: 'localImage', path: file });
     }
     if (this._busy && this.turnId) {
@@ -931,7 +673,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     };
     this.reportFastMode();
     this.serviceTier = String(params.serviceTier);
-    this.unknownFastCostReported = false;
+    this.usage.resetFastWarning();
     this._busy = true;
     this.turnStartedAt = Date.now();
     this.usage.beginTurn();
@@ -961,26 +703,22 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   private fastModeCapability() {
-    if (this.resolveCodexProvider()) return { supported: false, reason: 'Fast mode is unavailable on custom Codex provider routes.' };
-    const model = this.fastModeModel?.model ?? this.models.find((entry) => entry.isDefault)?.id;
-    if (model && this.speedTiers.size && !this.models.some((entry) => entry.id === model)) return { supported: false, reason: 'The selected model is not in this Codex runtime’s available model catalog.' };
-    const tiers = model ? this.speedTiers.get(model) : undefined;
-    if (tiers && !tiers.includes('fast') && !tiers.includes('priority')) return { supported: false, reason: 'This Codex runtime does not advertise a Fast service tier for the selected model.' };
-    return fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+    return codexFastModeCapability({
+      harness: this.id,
+      hasCustomProvider: Boolean(this.resolveCodexProvider()),
+      modelRef: this.fastModeModel,
+      models: this.models,
+      speedTiers: this.speedTiers,
+      providers: this.ctx.settings().providers
+    });
   }
 
   private fastServiceTier(): string {
-    const model = this.fastModeModel?.model ?? this.models.find((entry) => entry.isDefault)?.id;
-    return model && this.speedTiers.get(model)?.includes('priority') ? 'priority' : 'fast';
+    return codexFastServiceTier(this.fastModeModel?.model, this.models, this.speedTiers);
   }
 
   private reportFastMode(): void {
-    if (!this.fastMode) {
-      this.ctx.updateMeta({ fastModeStatus: { state: 'off' } });
-      return;
-    }
-    const support = this.fastModeCapability();
-    this.ctx.updateMeta({ fastModeStatus: !this.fastMode ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
+    this.ctx.updateMeta({ fastModeStatus: codexFastModeStatus(this.fastMode, this.fastMode ? this.fastModeCapability() : { supported: false }) });
   }
 
   async setFastMode(enabled: boolean): Promise<void> {
@@ -1036,7 +774,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     if (!this.rpc) return CODEX_STATIC_MODELS;
     try {
       this.models = await readCodexModelCatalog(this.rpc, (model) => {
-        const tiers = model.serviceTiers?.map((tier) => tier.id) ?? model.additionalSpeedTiers;
+        const tiers = codexModelSpeedTiers(model);
         if (tiers) this.speedTiers.set(model.model, tiers);
       });
       return this.models.length ? this.models : CODEX_STATIC_MODELS;
@@ -1046,28 +784,9 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
   }
 
-  private emitChildThreads(): void {
-    const items: OngoingItem[] = [...this.childThreads.values()].map((t) => ({
-      id: `thread:${t.threadId}`,
-      kind: 'subagent',
-      label: t.label,
-      agent: 'Subagent',
-      startedAt: t.startedAt,
-      canStop: false
-    }));
-    this.ctx.emit({ type: 'ongoing', source: 'threads', items });
-  }
-
-  private clearChildThreads(): void {
-    if (!this.childThreads.size) return;
-    this.childThreads.clear();
-    this.lastSubagentLabel = undefined;
-    this.ctx.emit({ type: 'ongoing', source: 'threads', items: [] });
-  }
-
   async dispose(): Promise<void> {
     this.compactionWaiter?.reject(new Error('Codex stopped during context compaction.'));
-    this.clearChildThreads();
+    this.childThreads.clear();
     const rpc = this.rpc;
     this.rpc = null;
     if (!rpc) return;
@@ -1076,64 +795,5 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     } finally {
       await rpc.close();
     }
-  }
-}
-
-export function codexModelToInfo(m: CodexModel, provider = 'openai'): ModelInfo {
-  const pricing = findPricing('openai', m.model);
-  // Codex advertises levels the app does not model (ultra, persistent); only ours may enter the shared effort state.
-  const efforts = (m.supportedReasoningEfforts ?? []).map((o) => o.reasoningEffort).filter(isEffortLevel);
-  return {
-    id: m.model,
-    provider,
-    displayName: m.displayName || m.model,
-    description: m.description,
-    supportsImages: (m.inputModalities ?? []).includes('image'),
-    supportsReasoning: true,
-    supportedEfforts: efforts.length ? efforts : undefined,
-    defaultEffort: isEffortLevel(m.defaultReasoningEffort) ? m.defaultReasoningEffort : undefined,
-    isDefault: m.isDefault,
-    pricing
-  };
-}
-
-/** Read every visible-model page, within one deadline; never serve a silently truncated catalog. */
-async function readCodexModelCatalog(rpc: JsonRpcStdioClient, observe?: (model: CodexModel) => void): Promise<ModelInfo[]> {
-  const deadline = Date.now() + 20_000;
-  const seen = new Set<string>();
-  const models = new Map<string, ModelInfo>();
-  let cursor: string | undefined;
-  do {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new Error('model/list timed out after 20000ms');
-    const page = await withTimeout(
-      rpc.request<{ data: CodexModel[]; nextCursor?: string | null }>('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) }),
-      remaining,
-      'model/list'
-    );
-    for (const model of page.data) {
-      observe?.(model);
-      models.set(model.model, codexModelToInfo(model));
-    }
-    cursor = page.nextCursor ?? undefined;
-    if (cursor) {
-      if (seen.has(cursor)) throw new Error('model/list repeated a pagination cursor');
-      seen.add(cursor);
-    }
-  } while (cursor);
-  return [...models.values()];
-}
-
-/**
- * One-shot model listing without a session: spawn app-server, initialize, model/list, exit.
- */
-export async function listCodexModels(codexPath: string, observe?: (model: CodexModel) => void): Promise<ModelInfo[]> {
-  const child = spawnTool(codexPath, ['app-server']);
-  const rpc = new JsonRpcStdioClient(child);
-  try {
-    await withTimeout(rpc.request('initialize', { clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }, capabilities: { experimentalApi: false, requestAttestation: false } }), 20_000, 'initialize');
-    return await readCodexModelCatalog(rpc, observe);
-  } finally {
-    await rpc.close();
   }
 }

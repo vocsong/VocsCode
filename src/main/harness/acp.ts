@@ -2,25 +2,31 @@ import type { ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
-import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, OngoingItem, OngoingKind, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { sameOngoingItems } from '../../shared/ongoing';
-import { HARNESS_BY_ID, assertPermissionModeOffered, isEffortLevel } from '../../shared/harness-meta';
-import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
-import { which } from '../runtime';
-import { toAcp } from '../mcp/effective';
-import { isDangerousCommand, isMissionUserCommand, type HarnessAdapter, type HarnessContext } from './types';
-import { requiresPathApproval } from './permissions';
-import { reportHarnessCommands } from './commands';
-import type { HarnessCommand } from '../../shared/harness-commands';
-import { shutdownChild, spawnTool } from './spawn';
+import { assertPermissionModeOffered, isEffortLevel } from '../../shared/harness-meta';
+import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UserInput } from '../../shared/types';
+import { errorMessage, shortId, withTimeout } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
-import { ANTIGRAVITY_ACP_ARGS, ANTIGRAVITY_SIGN_IN_MESSAGE, antigravityAccountEnv, connectAcp, isAntigravityAuthRequired } from './antigravity';
 import { acpModelCatalog, decodeAcpModelValue, findEffortOption, findModelOption, flattenSelect, type ConfigOptionLike } from './acp-config';
 import { buildAcpElicitationResponse, planAcpFormElicitation } from './acp-elicitation';
-import { PROVIDER_ENV_KEYS } from './provider-env';
+import {
+  acpChangesFromContent,
+  acpHarnessCommands,
+  acpToolHint,
+  applyAcpToolUpdate,
+  buildAcpPromptBlocks,
+  mapAcpStopReason,
+  type AcpToolCallUpdate
+} from './acp-events';
+import { resolveAcpLaunch, resolveAcpMcpServers } from './acp-launch';
+import { AcpOngoingTracker } from './acp-ongoing';
+import { ANTIGRAVITY_SIGN_IN_MESSAGE, connectAcp, isAntigravityAuthRequired } from './antigravity';
+import { reportHarnessCommands } from './commands';
+import { requiresPathApproval } from './permissions';
+import { shutdownChild, spawnTool } from './spawn';
+import { isDangerousCommand, isMissionUserCommand, type HarnessAdapter, type HarnessContext } from './types';
 
-const ACP_ENV_KEYS = PROVIDER_ENV_KEYS;
+export { acpHarnessCommands };
 
 /** ACP's tool kinds (`ToolKind`), minus `other`. */
 const ACP_TOOL_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode']);
@@ -36,64 +42,6 @@ type ActivePrompt = {
   cancelTimer?: NodeJS.Timeout;
   recovering?: boolean;
 };
-
-type AcpChildSession = {
-  id: string;
-  label: string;
-  agent?: string;
-  startedAt: number;
-  toolUses: number;
-};
-
-type AcpLiveTerminal = {
-  id: string;
-  label: string;
-  startedAt: number;
-  background?: boolean;
-};
-
-const ACP_TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped', 'cancelled', 'canceled', 'removed', 'exited', 'idle', 'done', 'error']);
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-function isExplicitlyBackground(meta: unknown, rawInput: unknown): boolean {
-  const m = asRecord(meta);
-  if (m && (m.background === true || m.isBackground === true || m.is_background === true)) return true;
-  const input = asRecord(rawInput);
-  if (input && (input.background === true || input.run_in_background === true || input.isBackground === true)) return true;
-  return false;
-}
-
-function acpOngoingKind(rawKind: unknown, rawType: unknown): OngoingKind {
-  const s = String(rawKind ?? rawType ?? '').toLowerCase();
-  if (s.includes('subagent') || s.includes('agent') || s.includes('teammate')) return 'subagent';
-  if (s.includes('hook')) return 'hook';
-  return 'task';
-}
-
-function acpOngoingDetail(rawDetail: unknown, rawType: unknown): string | undefined {
-  const s = typeof rawDetail === 'string' && rawDetail.trim() ? rawDetail.trim() : typeof rawType === 'string' && rawType.trim() ? rawType.trim() : undefined;
-  if (!s) return undefined;
-  const lower = s.toLowerCase();
-  if (lower.includes('cron')) return 'cron';
-  if (lower.includes('schedule')) return 'schedule';
-  if (lower.includes('timer')) return 'timer';
-  if (lower.includes('bash') || lower.includes('shell') || lower.includes('command')) return 'local_bash';
-  if (lower.includes('workflow')) return 'local_workflow';
-  return s;
-}
-
-/** An ACP `available_commands_update` list as harness commands. v1 sends `input: { hint }`; the v2 draft adds a `type`. */
-export function acpHarnessCommands(raw: unknown): HarnessCommand[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((c): HarnessCommand[] => {
-    if (!c || typeof c !== 'object' || typeof (c as { name?: unknown }).name !== 'string') return [];
-    const { name, description, input } = c as { name: string; description?: unknown; input?: { hint?: unknown } | null };
-    return [{ name, description: typeof description === 'string' ? description : undefined, argumentHint: typeof input?.hint === 'string' ? input.hint : undefined, kind: 'command' }];
-  });
-}
 
 export class AcpAdapter implements HarnessAdapter {
   private child: ChildProcess | null = null;
@@ -114,33 +62,21 @@ export class AcpAdapter implements HarnessAdapter {
   private applyingMode = false;
   /** Clean ModelRef -> the agent's raw option value (tuple-advertising agents key choices by it). */
   private modelValues = new Map<string, string>();
-  /** Child/subagent ACP sessions reported via `session/update` with a non-parent `sessionId`. */
-  private childSessions = new Map<string, AcpChildSession>();
-  /** ACP v2 `terminal_update` live terminals (no exitStatus yet). */
-  private liveTerminals = new Map<string, AcpLiveTerminal>();
-  /** Explicitly backgrounded or out-of-turn tool calls still in progress. */
-  private backgroundTools = new Map<string, OngoingItem>();
-  /** Authoritative replace-list tasks from `background_tasks_changed` (when supported). */
-  private snapshotTasks = new Map<string, OngoingItem>();
-  /** Edge-tracked background tasks/subagents/schedules from extension notifications. */
-  private edgeTasks = new Map<string, OngoingItem>();
-  private lastEmittedThreads: OngoingItem[] = [];
-  private lastEmittedTasks: OngoingItem[] = [];
+  private readonly ongoing: AcpOngoingTracker;
 
   constructor(private readonly ctx: HarnessContext, readonly id: 'acp' | 'antigravity' = 'acp') {
     this.usage = new TurnUsageTracker(ctx.session().usage);
+    this.ongoing = new AcpOngoingTracker({
+      emit: (event) => this.ctx.emit(event),
+      log: (level, message) => this.ctx.log(level, message),
+      isTurnActive: () => this.prompt !== null,
+      sessionId: () => this.sessionId,
+      agentTag: () => this.preset?.id ?? this.id
+    });
   }
 
   get busy(): boolean {
     return this.prompt !== null;
-  }
-
-  private resolvePreset(): AcpAgentPreset {
-    const s = this.ctx.settings();
-    const id = this.ctx.session().config.acpAgent ?? 'dsh';
-    const preset = s.acpAgents.find((a) => a.id === id) ?? s.acpAgents[0];
-    if (!preset) throw new Error('No ACP agent preset configured.');
-    return preset;
   }
 
   private async killChild(): Promise<void> {
@@ -149,7 +85,7 @@ export class AcpAdapter implements HarnessAdapter {
     this.conn = null;
     this.child = null;
     this.pendingPermissions = 0;
-    this.clearOngoing();
+    this.ongoing.clear();
     if (!child) return;
     this.childShutdown = shutdownChild(child, 2000);
     try {
@@ -159,46 +95,9 @@ export class AcpAdapter implements HarnessAdapter {
     }
   }
 
-  private async resolveLaunch() {
-    if (this.id === 'antigravity') {
-      const binary = this.ctx.runtime.resolve('agy');
-      if (!binary) throw new Error('Install Antigravity CLI (agy) from Settings → Providers & keys → Harness logins.');
-      const preset = {
-        id: this.id, name: HARNESS_BY_ID[this.id].name, description: '',
-        command: binary.path, args: [...ANTIGRAVITY_ACP_ARGS]
-      };
-      return { preset, command: preset.command, args: preset.args, env: antigravityAccountEnv() };
-    }
-    const preset = this.resolvePreset();
-    const env: NodeJS.ProcessEnv = { ...process.env, ...(preset.env ?? {}) };
-    for (const [pid, envKey] of Object.entries(ACP_ENV_KEYS)) {
-      if (!env[envKey]) {
-        const key = await this.ctx.getApiKey(pid);
-        if (key) env[envKey] = key;
-      }
-    }
-    let command = preset.command;
-    let args = preset.args;
-    const explicit = (this.ctx.settings().binaries as Record<string, string | undefined>)[command];
-    if (explicit) command = explicit;
-    else {
-      const resolved = which(command, [this.ctx.runtime.runtimePaths.appRuntimeDir]);
-      if (resolved) command = resolved;
-      else if (command === 'dsh') {
-        // Fall back to npx when dsh is not installed globally.
-        const npx = which('npx');
-        if (npx) {
-          command = npx;
-          args = ['-y', '@deepseek-ai/dsh', ...preset.args];
-        }
-      }
-    }
-    return { preset, command, args, env };
-  }
-
   async start(): Promise<void> {
     const meta = this.ctx.session();
-    const { preset, command, args, env } = await this.resolveLaunch();
+    const { preset, command, args, env } = await resolveAcpLaunch(this.ctx, this.id);
     this.preset = preset;
     // Preset args are user-visible configuration, not secrets (keys travel in env).
     this.ctx.log('info', `spawning ACP agent ${preset.id}: ${command} ${args.join(' ')} in ${meta.cwd}`);
@@ -211,7 +110,7 @@ export class AcpAdapter implements HarnessAdapter {
       this.child = null;
       this.conn = null;
       this.pendingPermissions = 0;
-      this.clearOngoing();
+      this.ongoing.clear();
       const detail = `${preset.name} exited (${code})`;
       if (this.prompt) this.finishPrompt(this.prompt, 'failed', detail, false);
       this.discardQueue();
@@ -238,32 +137,7 @@ export class AcpAdapter implements HarnessAdapter {
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { resume?: unknown; list?: unknown };
       // HTTP and SSE entries are dropped unless the agent said it understands them.
       const mcpCaps = (this.caps.mcpCapabilities ?? {}) as { http?: boolean; sse?: boolean };
-      // ACP requires an absolute `command` and the agent rejects the whole handshake when one is
-      // relative — Windows' `cmd /c` shim wrapper is exactly that case. Resolve what we can and
-      // drop the rest: losing one server beats losing the session.
-      const mcpDefs: McpServerDef[] = [];
-      const skippedMcp: string[] = [];
-      for (const { def } of await this.ctx.mcpServers().catch((e) => {
-        this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
-        return [];
-      })) {
-        if (def.transport !== 'stdio' || !def.command) {
-          mcpDefs.push(def);
-          continue;
-        }
-        const command = path.isAbsolute(def.command) ? def.command : which(def.command, [this.ctx.runtime.runtimePaths.appRuntimeDir]);
-        if (!command) {
-          skippedMcp.push(def.id);
-          this.ctx.log('warn', `mcp ${def.id}: cannot resolve "${def.command}" to an absolute path; skipping`);
-          continue;
-        }
-        mcpDefs.push(command === def.command ? def : { ...def, command });
-      }
-      if (skippedMcp.length) {
-        const what = skippedMcp.length > 1 ? 'servers' : 'server';
-        this.info(`Skipped MCP ${what} with a command that is not an absolute path: ${skippedMcp.join(', ')}`, 'warn');
-      }
-      const mcpServers = toAcp(mcpDefs, mcpCaps) as unknown as acp.NewSessionRequest['mcpServers'];
+      const mcpServers = await resolveAcpMcpServers(this.ctx, mcpCaps, (msg) => this.info(msg, 'warn'));
       let res: { sessionId: string; configOptions?: unknown[] | null; modes?: acp.SessionModeState | null } | null = null;
       if (meta.harnessRef.acpSessionId && sessionCaps.resume) {
         try {
@@ -362,7 +236,7 @@ export class AcpAdapter implements HarnessAdapter {
       },
       extNotification: async (method: string, params: Record<string, unknown>) => {
         if (this.child !== child || this.prompt?.recovering) return;
-        this.onExtNotification(method, params);
+        this.ongoing.onExtNotification(method, params);
       },
       // ACP reads intentionally retain the adapter-wide read policy: an absolute path is allowed
       // even when it is outside the session workspace. Writes and commands still go through the
@@ -519,230 +393,13 @@ export class AcpAdapter implements HarnessAdapter {
   }
 
   private changesFromContent(content: unknown[] | undefined): FileChange[] | undefined {
-    if (!content) return undefined;
-    const out: FileChange[] = [];
-    for (const c of content as { type: string; path?: string; oldText?: string | null; newText?: string }[]) {
-      if (c.type === 'diff' && c.path) {
-        out.push(makeFileChange(this.ctx.session().cwd, c.path, c.oldText || null, c.newText ?? '', { addWhenEmpty: true }));
-      }
-    }
-    return out.length ? out : undefined;
-  }
-
-  private emitOngoingThreads(): void {
-    const items: OngoingItem[] = [...this.childSessions.values()].map((child) => ({
-      id: `thread:${child.id}`,
-      kind: 'subagent',
-      agent: child.agent,
-      label: child.label,
-      startedAt: child.startedAt,
-      ...(child.toolUses > 0 ? { toolUses: child.toolUses } : {})
-    }));
-    if (sameOngoingItems(this.lastEmittedThreads, items)) return;
-    this.lastEmittedThreads = items;
-    this.ctx.emit({ type: 'ongoing', source: 'threads', items });
-  }
-
-  private emitOngoingTasks(): void {
-    const merged = new Map<string, OngoingItem>();
-    for (const [k, item] of this.snapshotTasks) merged.set(k, item);
-    for (const [k, item] of this.edgeTasks) merged.set(k, item);
-    for (const [k, item] of this.backgroundTools) merged.set(k, item);
-    for (const term of this.liveTerminals.values()) {
-      // During an active foreground turn, regular terminals are already shown in tool cards;
-      // surface explicitly-backgrounded terminals immediately and all live terminals once idle.
-      if (this.prompt && !term.background) continue;
-      merged.set(`terminal:${term.id}`, {
-        id: `terminal:${term.id}`,
-        kind: 'task',
-        detail: 'terminal',
-        label: term.label,
-        startedAt: term.startedAt
-      });
-    }
-    const items = [...merged.values()];
-    if (sameOngoingItems(this.lastEmittedTasks, items)) return;
-    this.lastEmittedTasks = items;
-    this.ctx.emit({ type: 'ongoing', source: 'tasks', items });
-  }
-
-  private clearOngoing(): void {
-    this.childSessions.clear();
-    this.liveTerminals.clear();
-    this.backgroundTools.clear();
-    this.snapshotTasks.clear();
-    this.edgeTasks.clear();
-    this.emitOngoingThreads();
-    this.emitOngoingTasks();
-  }
-
-  private onChildSessionUpdate(childSessionId: string, u: Record<string, unknown> & { sessionUpdate: string }): void {
-    const existing = this.childSessions.get(childSessionId);
-    const meta = asRecord(u._meta);
-    const metaState = typeof meta?.state === 'string'
-      ? meta.state.toLowerCase()
-      : typeof meta?.status === 'string'
-        ? meta.status.toLowerCase()
-        : '';
-    if (metaState && ACP_TERMINAL_STATUSES.has(metaState)) {
-      if (this.childSessions.delete(childSessionId)) this.emitOngoingThreads();
-      return;
-    }
-    if (u.sessionUpdate === 'state_update') {
-      const state = typeof u.state === 'string' ? u.state.toLowerCase() : '';
-      if (ACP_TERMINAL_STATUSES.has(state)) {
-        if (this.childSessions.delete(childSessionId)) this.emitOngoingThreads();
-        return;
-      }
-      if (!existing) {
-        this.childSessions.set(childSessionId, {
-          id: childSessionId,
-          label: typeof meta?.title === 'string' && meta.title.trim() ? meta.title.trim() : 'Subagent',
-          agent: typeof meta?.agent === 'string' && meta.agent.trim() ? meta.agent.trim() : undefined,
-          startedAt: Date.now(),
-          toolUses: 0
-        });
-        this.emitOngoingThreads();
-      }
-      return;
-    }
-    if (u.sessionUpdate === 'session_info_update') {
-      const title = typeof u.title === 'string' ? u.title.trim() : '';
-      if (title) {
-        const next: AcpChildSession = existing
-          ? { ...existing, label: title }
-          : { id: childSessionId, label: title, startedAt: Date.now(), toolUses: 0 };
-        this.childSessions.set(childSessionId, next);
-        this.emitOngoingThreads();
-      }
-      return;
-    }
-    if (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update' || u.sessionUpdate === 'agent_message_chunk' || u.sessionUpdate === 'agent_thought_chunk') {
-      const next: AcpChildSession = existing
-        ? { ...existing }
-        : {
-            id: childSessionId,
-            label: typeof u.title === 'string' && u.title.trim() ? u.title.trim() : typeof meta?.title === 'string' && meta.title.trim() ? meta.title.trim() : 'Subagent',
-            agent: typeof meta?.agent === 'string' && meta.agent.trim() ? meta.agent.trim() : undefined,
-            startedAt: Date.now(),
-            toolUses: 0
-          };
-      if (u.sessionUpdate === 'tool_call') next.toolUses += 1;
-      this.childSessions.set(childSessionId, next);
-      this.emitOngoingThreads();
-    }
-  }
-
-  private onTerminalUpdate(raw: Record<string, unknown>): void {
-    const terminalId = typeof raw.terminalId === 'string' ? raw.terminalId : typeof raw.terminal_id === 'string' ? raw.terminal_id : '';
-    if (!terminalId) return;
-    if (raw.exitStatus !== undefined && raw.exitStatus !== null) {
-      if (this.liveTerminals.delete(terminalId)) this.emitOngoingTasks();
-      return;
-    }
-    const existing = this.liveTerminals.get(terminalId);
-    const label = typeof raw.command === 'string' && raw.command.trim() ? raw.command.trim() : existing?.label ?? 'Terminal command';
-    const background = existing?.background || isExplicitlyBackground(raw._meta, raw);
-    this.liveTerminals.set(terminalId, { id: terminalId, label, startedAt: existing?.startedAt ?? Date.now(), background });
-    this.emitOngoingTasks();
-  }
-
-  private applyBackgroundTasksSnapshot(rawTasks: unknown): void {
-    if (!Array.isArray(rawTasks)) return;
-    const prev = this.snapshotTasks;
-    const next = new Map<string, OngoingItem>();
-    const now = Date.now();
-    for (const entry of rawTasks) {
-      const rec = asRecord(entry);
-      if (!rec || rec.ambient === true) continue;
-      const id = String(rec.task_id ?? rec.taskId ?? rec.id ?? '').trim();
-      if (!id) continue;
-      const status = typeof rec.status === 'string' ? rec.status.toLowerCase() : '';
-      if (status && ACP_TERMINAL_STATUSES.has(status)) continue;
-      const key = `task:${id}`;
-      const existing = prev.get(key);
-      const kind = acpOngoingKind(rec.kind, rec.task_type ?? rec.taskType ?? rec.type);
-      const detail = acpOngoingDetail(rec.detail, rec.task_type ?? rec.taskType ?? rec.type);
-      const label = String(rec.description ?? rec.label ?? rec.title ?? rec.command ?? id).trim() || id;
-      const agent = typeof rec.agent === 'string' ? rec.agent : typeof rec.agent_type === 'string' ? rec.agent_type : undefined;
-      const startedAt = typeof rec.startedAt === 'number' && rec.startedAt > 0
-        ? rec.startedAt
-        : typeof rec.started_at === 'number' && rec.started_at > 0
-          ? rec.started_at
-          : existing?.startedAt ?? now;
-      next.set(key, { id: key, kind, ...(detail ? { detail } : {}), ...(agent ? { agent } : {}), label, startedAt });
-    }
-    this.snapshotTasks = next;
-    this.emitOngoingTasks();
-  }
-
-  private applyOngoingEdgeUpdate(eventName: string, raw: Record<string, unknown>): void {
-    if (raw.ambient === true) return;
-    const id = String(raw.task_id ?? raw.taskId ?? raw.scheduleId ?? raw.schedule_id ?? raw.subagentId ?? raw.subagent_id ?? raw.runId ?? raw.id ?? '').trim();
-    if (!id) return;
-    const lowerEvent = eventName.toLowerCase();
-    const isSubagentEvent = lowerEvent.includes('subagent');
-    const isScheduleEvent = lowerEvent.includes('schedule') || lowerEvent.includes('cron') || lowerEvent.includes('timer');
-    const key = isSubagentEvent ? `subagent:${id}` : isScheduleEvent ? `schedule:${id}` : `task:${id}`;
-    const status = typeof raw.status === 'string' ? raw.status.toLowerCase() : typeof raw.state === 'string' ? raw.state.toLowerCase() : '';
-    if (raw.active === false || raw.removed === true || (status && ACP_TERMINAL_STATUSES.has(status))) {
-      if (this.edgeTasks.delete(key)) this.emitOngoingTasks();
-      return;
-    }
-    const existing = this.edgeTasks.get(key);
-    const kind: OngoingKind = isSubagentEvent ? 'subagent' : acpOngoingKind(raw.kind, raw.task_type ?? raw.taskType ?? raw.type);
-    const detail = isScheduleEvent
-      ? acpOngoingDetail(raw.detail ?? 'schedule', raw.type ?? 'schedule')
-      : acpOngoingDetail(raw.detail, raw.task_type ?? raw.taskType ?? raw.type);
-    const label = String(raw.description ?? raw.label ?? raw.title ?? raw.prompt ?? raw.command ?? existing?.label ?? id).trim() || id;
-    const agent = typeof raw.agent === 'string' ? raw.agent : typeof raw.role === 'string' ? raw.role : existing?.agent;
-    const startedAt = typeof raw.startedAt === 'number' && raw.startedAt > 0
-      ? raw.startedAt
-      : typeof raw.started_at === 'number' && raw.started_at > 0
-        ? raw.started_at
-        : existing?.startedAt ?? Date.now();
-    this.edgeTasks.set(key, { id: key, kind, ...(detail ? { detail } : {}), ...(agent ? { agent } : {}), label, startedAt });
-    this.emitOngoingTasks();
-  }
-
-  private onExtNotification(method: string, params: Record<string, unknown>): void {
-    const rec = asRecord(params);
-    if (!rec) return;
-    const targetSession = typeof rec.sessionId === 'string' ? rec.sessionId : typeof rec.session_id === 'string' ? rec.session_id : undefined;
-    const suffix = method.split('/').pop()?.toLowerCase() ?? method.toLowerCase();
-    if (suffix === 'state_update' || suffix === 'stateupdate') {
-      if (targetSession && this.sessionId && targetSession !== this.sessionId) {
-        this.onChildSessionUpdate(targetSession, { ...rec, sessionUpdate: 'state_update' });
-      }
-      return;
-    }
-    if (targetSession && this.sessionId && targetSession !== this.sessionId) return;
-    if (suffix === 'terminal_update' || suffix === 'terminalupdate') {
-      this.onTerminalUpdate(rec);
-      return;
-    }
-    if (suffix === 'background_tasks_changed' || suffix === 'backgroundtaskschanged') {
-      this.applyBackgroundTasksSnapshot(rec.tasks ?? rec.items);
-      return;
-    }
-    if (
-      suffix === 'background_task_update' ||
-      suffix === 'backgroundtaskupdate' ||
-      suffix === 'subagent_update' ||
-      suffix === 'subagentupdate' ||
-      suffix === 'schedule_update' ||
-      suffix === 'scheduleupdate'
-    ) {
-      this.applyOngoingEdgeUpdate(suffix, rec);
-      return;
-    }
-    this.ctx.log('debug', `[acp:${this.preset?.id ?? this.id}] unhandled extNotification: ${method}`);
+    return acpChangesFromContent(this.ctx.session().cwd, content);
   }
 
   private onSessionUpdate(params: acp.SessionNotification): void {
     const u = params.update as unknown as Record<string, unknown> & { sessionUpdate: string };
     if (this.sessionId && params.sessionId && params.sessionId !== this.sessionId) {
-      this.onChildSessionUpdate(params.sessionId, u);
+      this.ongoing.onChildSessionUpdate(params.sessionId, u);
       return;
     }
     switch (u.sessionUpdate) {
@@ -768,68 +425,28 @@ export class AcpAdapter implements HarnessAdapter {
         return;
       case 'tool_call':
       case 'tool_call_update': {
-        const t = u as unknown as { toolCallId: string; name?: string | null; title?: string | null; kind?: string | null; status?: string | null; content?: unknown[] | null; locations?: { path: string }[] | null; rawInput?: unknown; rawOutput?: unknown; _meta?: Record<string, unknown> | null };
+        const t = u as unknown as AcpToolCallUpdate;
         let item = this.toolItems.get(t.toolCallId);
         if (!item) {
           this.closeAssistant();
-          item = { id: t.toolCallId, kind: 'tool', ts: Date.now(), name: t.kind ?? 'tool', title: t.title ?? undefined, hint: hintFor(t.kind), status: 'running', input: t.rawInput, summary: t.title ?? undefined };
+          item = { id: t.toolCallId, kind: 'tool', ts: Date.now(), name: t.kind ?? 'tool', title: t.title ?? undefined, hint: acpToolHint(t.kind), status: 'running', input: t.rawInput, summary: t.title ?? undefined };
           this.toolItems.set(t.toolCallId, item);
         }
-        if (t.title) item.title = t.title;
-        if (t.kind) {
-          item.name = t.kind;
-          item.hint = hintFor(t.kind);
-        }
-        if (t.rawInput !== undefined) {
-          item.input = t.rawInput;
-          const raw = t.rawInput as Record<string, unknown>;
-          if (typeof raw?.command === 'string') item.summary = raw.command;
-        }
-        if (t.status) item.status = t.status === 'completed' ? 'done' : t.status === 'failed' || t.status === 'cancelled' ? 'error' : 'running';
-        const changes = this.changesFromContent(t.content ?? undefined);
-        if (changes) item.changes = changes;
-        const textOut = (t.content ?? [])
-          .map((c) => {
-            const cc = c as { type: string; content?: { type: string; text?: string } };
-            return cc.type === 'content' && cc.content?.type === 'text' ? cc.content.text ?? '' : '';
-          })
-          .filter(Boolean)
-          .join('\n');
-        if (textOut) item.output = truncate(textOut, 40_000);
-        else if (t.rawOutput !== undefined && item.status !== 'running' && !item.output) item.output = truncate(typeof t.rawOutput === 'string' ? t.rawOutput : JSON.stringify(t.rawOutput, null, 2), 40_000);
-        if (!item.changes && t.locations?.length && (item.hint === 'edit')) item.changes = t.locations.map((l) => ({ path: l.path, kind: 'update' as const }));
+        applyAcpToolUpdate(this.ctx.session().cwd, item, t);
         this.ctx.emit({ type: 'item.upsert', item: { ...item } });
-        const bgKey = `tool:${t.toolCallId}`;
-        if (item.status !== 'running') {
-          if (this.backgroundTools.delete(bgKey)) this.emitOngoingTasks();
-        } else if (this.prompt === null || isExplicitlyBackground(t._meta, t.rawInput) || this.backgroundTools.has(bgKey)) {
-          const prev = this.backgroundTools.get(bgKey);
-          const meta = asRecord(t._meta);
-          const kind = acpOngoingKind(meta?.kind, t.name ?? t.kind);
-          const detail = acpOngoingDetail(meta?.detail, t.name ?? (t.kind === 'execute' ? 'local_bash' : undefined));
-          const label = (item.summary ?? item.title ?? t.name ?? item.name ?? t.toolCallId).trim();
-          this.backgroundTools.set(bgKey, {
-            id: bgKey,
-            kind,
-            ...(detail ? { detail } : {}),
-            ...(typeof meta?.agent === 'string' && meta.agent.trim() ? { agent: meta.agent.trim() } : {}),
-            label,
-            startedAt: prev?.startedAt ?? item.ts
-          });
-          this.emitOngoingTasks();
-        }
+        this.ongoing.syncBackgroundTool(item, t);
         return;
       }
       case 'terminal_update':
-        this.onTerminalUpdate(u);
+        this.ongoing.onTerminalUpdate(u);
         return;
       case 'background_tasks_changed':
-        this.applyBackgroundTasksSnapshot(u.tasks ?? u.items);
+        this.ongoing.applyBackgroundTasksSnapshot(u.tasks ?? u.items);
         return;
       case 'background_task_update':
       case 'subagent_update':
       case 'schedule_update':
-        this.applyOngoingEdgeUpdate(u.sessionUpdate, u);
+        this.ongoing.applyOngoingEdgeUpdate(u.sessionUpdate, u);
         return;
       case 'plan': {
         const p = u as unknown as { entries: { content: string; status: 'pending' | 'in_progress' | 'completed'; priority?: string }[] };
@@ -904,25 +521,19 @@ export class AcpAdapter implements HarnessAdapter {
       this.ctx.updateMeta({ queued: this.queue.length });
       return;
     }
-    const blocks: unknown[] = [];
-    if (input.text) blocks.push({ type: 'text', text: input.text });
     const promptCaps = (this.caps.promptCapabilities ?? {}) as { image?: boolean };
-    for (const img of input.images ?? []) {
-      if (promptCaps.image) blocks.push({ type: 'image', data: img.data, mimeType: img.mimeType });
-      else this.info('This ACP agent does not accept images; the attachment was dropped.', 'warn');
-    }
+    const blocks = buildAcpPromptBlocks(input, promptCaps, (msg) => this.info(msg, 'warn'));
     this.toolItems.clear();
     const turn: ActivePrompt = { startedAt: Date.now() };
     this.prompt = turn;
     this.usage.beginTurn();
-    this.emitOngoingTasks();
+    this.ongoing.emitTasks();
     this.ctx.emit({ type: 'status', status: 'running' });
     void this.conn.prompt({ sessionId: this.sessionId, prompt: blocks } as acp.PromptRequest).then(
       (res) => {
         if (this.prompt !== turn || turn.recovering) return;
-        const stop = res.stopReason;
-        this.finishPrompt(turn, stop === 'cancelled' ? 'interrupted' : stop === 'refusal' ? 'failed' : 'completed',
-          stop === 'refusal' ? 'The agent refused the request.' : stop === 'max_tokens' || stop === 'max_turn_requests' ? `Stopped: ${stop}` : undefined);
+        const { status, error } = mapAcpStopReason(res.stopReason);
+        this.finishPrompt(turn, status, error);
         this.drainQueue();
       },
       (e) => {
@@ -947,7 +558,7 @@ export class AcpAdapter implements HarnessAdapter {
     if (count) this.ctx.emit({ type: 'usage', totals: completed.totals });
     this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - turn.startedAt, error } });
     this.prompt = null;
-    this.emitOngoingTasks();
+    this.ongoing.emitTasks();
   }
 
   private drainQueue(): void {
@@ -1084,26 +695,5 @@ export class AcpAdapter implements HarnessAdapter {
     }
     await this.killChild();
     if (this.prompt) this.finishPrompt(this.prompt, 'interrupted', undefined, false);
-  }
-}
-
-function hintFor(kind: string | null | undefined): Extract<TranscriptItem, { kind: 'tool' }>['hint'] {
-  switch (kind) {
-    case 'read':
-      return 'read';
-    case 'edit':
-    case 'delete':
-    case 'move':
-      return 'edit';
-    case 'execute':
-      return 'execute';
-    case 'search':
-      return 'search';
-    case 'fetch':
-      return 'fetch';
-    case 'think':
-      return 'think';
-    default:
-      return 'other';
   }
 }
