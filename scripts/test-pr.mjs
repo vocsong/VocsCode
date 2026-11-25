@@ -5,11 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { resolveVitestBin } from './vitest-bin.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const files = JSON.parse(readFileSync(path.join(root, 'scripts/pr-test-files.json'), 'utf8'));
 const report = process.env.VOCS_CODE_TEST_REPORT ?? path.join(os.tmpdir(), `vocs-pr-tests-${process.pid}.json`);
-const vitest = path.join(root, 'node_modules', 'vitest', 'vitest.mjs');
+const vitest = resolveVitestBin(import.meta.url);
 // Parallelize only the reviewed PR suite. The broader offline/E2E runs stay serial.
 const run = spawnSync(process.execPath, [
   vitest, 'run', '--fileParallelism', '--maxWorkers=2', ...files,
