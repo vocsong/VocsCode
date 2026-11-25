@@ -1,31 +1,34 @@
 /** Prompt input: slash commands, @file mentions, and steer-vs-queue while a turn is running. */
 import React, { useEffect, useRef, useState } from 'react';
-import type { EffortLevel, FileAttachment, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
-import { formatDoctorReport } from '../../../shared/doctor';
-import { HARNESS_BY_ID, SLASH_COMMANDS, effortOptionsFor } from '../../../shared/harness-meta';
+import type { FileAttachment, ImageAttachment, ProviderConfig, SessionMeta } from '../../../shared/types';
+import { HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
 import { harnessRoutedText, slashEntries, type HarnessCommand, type SlashEntry } from '../../../shared/harness-commands';
 import { harnessCommandNote, useHarnessCommandList } from '../harness-commands';
 import { MAX_HOUSEKEEP_RECENT_DAYS } from '../../../shared/housekeep';
 import { hasOngoingWork } from '../../../shared/ongoing';
-import { modelName, parseTypedModel } from '../../../shared/model-names';
+import { modelName } from '../../../shared/model-names';
 import { missionSupport } from '../../../shared/mission-mode';
+import { insertTranscript } from '../../../shared/dictation';
 import { canInvoke, invoke, invokeErrorMessage } from '../api';
-import { FileAttachmentChips, readAttachments } from '../attachments';
-import { fmtCost, fmtTokens } from '../format';
+import { readAttachments } from '../attachments';
+import { fmtCost } from '../format';
 import { canHousekeepHere, openHousekeep } from '../housekeep';
 import { LEAD_HARNESS_NAMES, MISSION_ENDED_TEXT, missionEnded } from '../mission';
-import { ForkIntoDropdown } from './ForkInto';
 import { openSettings } from './SettingsView';
 import { useSessionModels } from '../models';
-import { setSessionEffort } from '../sessionActions';
 import { NO_COMPOSER_HISTORY, useStore } from '../store';
 import * as host from '../terminal/host';
-import { Button, Dropdown, Icon, MenuItem } from './ui';
-import { insertTranscript } from '../../../shared/dictation';
+import { useUiMode } from '../ui-mode';
+import { Dropdown, Icon, MenuItem } from './ui';
 import { DictationControl, type DictationHandle } from './DictationControl';
 import { SessionControls, SessionMeter } from './SessionControls';
 import { FastModeElectric } from './FastModeElectric';
-import { useUiMode } from '../ui-mode';
+import { ComposerAttachments, fileToAttachment } from './composer/ComposerAttachments';
+import { MentionPopover, SlashPopover, type MentionState, type SlashState } from './composer/ComposerPopovers';
+import { ComposerSendControls } from './composer/ComposerSendControls';
+import { runComposerSlashCommand } from './composer/slash-commands';
+
+export { fileToAttachment };
 
 /** With one pane the composer is the only one; in a split, only the active pane's takes focus and inserts. */
 function ownsComposerFocus(sessionId: string): boolean {
@@ -37,6 +40,7 @@ function ownsComposerFocus(sessionId: string): boolean {
 export type AttachFilesRef = React.MutableRefObject<((files: File[]) => void) | null>;
 
 const NO_HARNESS_COMMANDS: HarnessCommand[] = [];
+const NO_PROVIDERS: ProviderConfig[] = [];
 
 /** The idle prompt's hint, shorter in the minimalist Zen interface. */
 const IDLE_PLACEHOLDER = {
@@ -55,9 +59,9 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
   const [text, setText] = useState(() => useStore.getState().drafts[session.id] ?? '');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);
-  const [mention, setMention] = useState<{ query: string; start: number; results: string[]; index: number } | null>(null);
+  const [mention, setMention] = useState<MentionState | null>(null);
   const [mentionError, setMentionError] = useState<string | null>(null);
-  const [slash, setSlash] = useState<{ query: string; index: number } | null>(null);
+  const [slash, setSlash] = useState<SlashState | null>(null);
   // History lives in the store, not here: App mounts the composer with `key={session.id}`, so a local
   // copy would be thrown away the moment the user switched sessions and came back.
   const history = useStore((s) => s.composerHistory[session.id] ?? NO_COMPOSER_HISTORY);
@@ -68,7 +72,7 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
   const dictation = useRef<DictationHandle>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const toast = useStore((s) => s.toast);
-  const providers = useStore((s) => s.settings?.providers) ?? [];
+  const providers = useStore((s) => s.settings?.providers) ?? NO_PROVIDERS;
   const composerInsert = useStore((s) => s.composerInsert);
   const clearComposerInsert = useStore((s) => s.clearComposerInsert);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
@@ -270,7 +274,7 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
         await useStore.getState().setActive(leadId);
       } catch (e) {
         toast(invokeErrorMessage(e), 'error');
-        setText((current) => current ? `${t}\n\n${current}` : t);
+        setText((current) => (current ? `${t}\n\n${current}` : t));
         setImages((current) => [...sentImages, ...current]);
         setFiles((current) => [...sentFiles, ...current]);
       }
@@ -309,7 +313,16 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
       // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
       // composer looking frozen; their progress and outcome appear as info lines in the transcript.
       clearDraft();
-      void runSlash(typedCommand, args).catch((e) => toast(String((e as Error).message ?? e), 'error'));
+      void runComposerSlashCommand(typedCommand, args, {
+        session,
+        harness,
+        currentInfo,
+        providers,
+        harnessCommands,
+        harnessNote,
+        nativeGoal,
+        toast
+      }).catch((e) => toast(String((e as Error).message ?? e), 'error'));
       return;
     }
     if (t.startsWith('!')) {
@@ -331,167 +344,9 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
     } catch (e) {
       toast(String((e as Error).message ?? e), 'error');
       // Keep a newer draft intact if the rejected send settled after the user began typing again.
-      setText((current) => current ? `${t}${t ? '\n\n' : ''}${current}` : t);
+      setText((current) => (current ? `${t}${t ? '\n\n' : ''}${current}` : t));
       setImages((current) => [...images, ...current]);
       setFiles((current) => [...files, ...current]);
-    }
-  };
-
-  const runSlash = async (cmd: string, rest: string[]): Promise<boolean> => {
-    const arg = rest.join(' ').trim();
-    const store = useStore.getState();
-    switch (cmd) {
-      case 'help': {
-        // A transcript note, not a toast: with a harness's skills listed it runs to many lines.
-        const own = slashEntries({ query: '', app: SLASH_COMMANDS, harness: harnessCommands, delegated: ['compact'], nativeGoal }).filter((c) => c.source === 'harness');
-        const lines = [
-          `Vocs Code: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')}`,
-          own.length ? `${harness.name}: ${own.map((c) => '/' + c.insert).join(' ')}` : harnessNote ?? '',
-          ...(own.some((c) => c.shadowed) ? [`A doubled slash (//name) runs ${harness.name}'s own command where Vocs Code has one of the same name.`] : []),
-          'Enter send · Shift+Enter newline · Esc stop · ! shell · @ files · Ctrl+K palette'
-        ].filter(Boolean);
-        store.setLocalInfo(session.id, `local-help-${session.id}`, lines.join('\n'));
-        return true;
-      }
-      case 'doctor': {
-        // Runtimes are probed live (each probe can cost a process spawn), so the note shows up right
-        // away and is replaced by the report. Renderer-local like the other command notes: it is a
-        // reading of this machine at this moment, not part of the conversation.
-        const noteId = `local-doctor-${session.id}`;
-        store.setLocalInfo(session.id, noteId, 'Checking harness runtimes and provider keys…', { pending: true });
-        try {
-          const [info, report] = await Promise.all([invoke('app:info', undefined), invoke('app:doctor', undefined)]);
-          const { text, level } = formatDoctorReport(report, info);
-          store.setLocalInfo(session.id, noteId, text, { level });
-        } catch (e) {
-          store.setLocalInfo(session.id, noteId, `Doctor failed: ${String((e as Error).message ?? e)}`, { level: 'error' });
-        }
-        return true;
-      }
-      case 'model': {
-        if (!arg) {
-          toast('Usage: /model provider/model', 'error');
-          return true;
-        }
-        const ref = parseTypedModel(arg, providers.map((p) => p.id), session.activeModel?.provider ?? 'anthropic');
-        await invoke('sessions:setModel', { id: session.id, model: ref }).catch((e) => toast(String(e.message ?? e), 'error'));
-        return true;
-      }
-      case 'mode':
-        if (!caps.permissionModes.includes(arg as PermissionMode)) {
-          toast(`Modes: ${caps.permissionModes.join(', ')}`, 'error');
-          return true;
-        }
-        await invoke('sessions:setPermissionMode', { id: session.id, mode: arg as PermissionMode });
-        return true;
-      case 'effort': {
-        if (!caps.effort) {
-          toast(`${harness.name} does not support reasoning effort.`, 'error');
-          return true;
-        }
-        const efforts = effortOptionsFor(harness, currentInfo);
-        if (!efforts.length) {
-          toast(`${currentInfo?.displayName ?? 'This model'} does not support reasoning effort.`, 'error');
-          return true;
-        }
-        if (!efforts.includes(arg as EffortLevel)) {
-          toast(`Efforts: ${efforts.join(', ')}`, 'error');
-          return true;
-        }
-        await setSessionEffort(session.id, arg as EffortLevel, toast);
-        return true;
-      }
-      case 'goal': {
-        const sub = rest[0];
-        if (!sub || sub === 'status') {
-          const g = session.goal;
-          toast(g ? `Goal (${g.status}, ${g.iterations}/${g.maxIterations}): ${g.objective}` : 'No goal set. Use /goal <objective>.', 'info');
-          store.setPanelTab('goal');
-          return true;
-        }
-        if (['pause', 'resume', 'clear', 'complete'].includes(sub)) {
-          await invoke('sessions:goal', { id: session.id, action: sub as 'pause' | 'resume' | 'clear' | 'complete' });
-          return true;
-        }
-        await invoke('sessions:goal', { id: session.id, action: 'set', objective: arg });
-        store.setPanelTab('goal');
-        return true;
-      }
-      case 'diff':
-        store.setPanelTab('changes');
-        return true;
-      case 'mcp':
-        store.setPanelTab('mcp');
-        return true;
-      case 'usage':
-        store.setPanelTab('usage');
-        return true;
-      case 'cost':
-        toast(`${fmtCost(session.usage.costUsd)} · ${fmtTokens(session.usage.inputTokens)} in / ${fmtTokens(session.usage.outputTokens)} out · ${session.usage.turns} turns`, 'info');
-        store.setPanelTab('usage');
-        return true;
-      case 'compact': {
-        const noteId = `local-compact-${session.id}`;
-        store.setLocalInfo(session.id, noteId, 'Compacting context…', { pending: true });
-        const r = await invoke('sessions:compact', { id: session.id });
-        store.setLocalInfo(session.id, noteId, r.ok ? 'Context compacted' : r.detail ?? 'Not supported', { level: r.ok ? 'info' : 'error' });
-        return true;
-      }
-      case 'clear':
-        await invoke('sessions:clearTranscript', { id: session.id });
-        store.clearTranscriptLocal(session.id);
-        return true;
-      case 'rename':
-        if (arg) await invoke('sessions:rename', { id: session.id, title: arg });
-        return true;
-      case 'export': {
-        const r = await invoke('sessions:export', { id: session.id });
-        if (r.path) toast(`Exported to ${r.path}`, 'success');
-        return true;
-      }
-      case 'open':
-        if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd, sessionId: session.id }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
-        else if (arg === 'terminal') await invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
-        else await invoke('app:openPath', { path: session.cwd, sessionId: session.id });
-        return true;
-      case 'worktree':
-        toast(session.worktreeBranch ? `Worktree ${session.cwd} on branch ${session.worktreeBranch}` : 'This session runs directly in the project folder.', 'info');
-        return true;
-      case 'pr': {
-        if (!arg) {
-          toast('Usage: /pr <base branch> — pushes this branch and opens a PR into it.', 'error');
-          return true;
-        }
-        // Push + gh pr create can take tens of seconds; show progress here, then let the main
-        // process's persistent transcript note carry the outcome (it survives a restart).
-        const noteId = `local-pr-${session.id}`;
-        store.setLocalInfo(session.id, noteId, `Pushing this branch and opening a PR into ${arg}…`, { pending: true });
-        try {
-          await invoke('git:pr', { sessionId: session.id, base: arg });
-        } catch (e) {
-          store.setLocalInfo(session.id, noteId, `Failed to open the PR: ${String((e as Error).message ?? e)}`, { level: 'error' });
-          return true;
-        }
-        store.setLocalInfo(session.id, noteId, null);
-        return true;
-      }
-      case 'merge': {
-        const noteId = `local-merge-${session.id}`;
-        store.setLocalInfo(session.id, noteId, 'Merging the open PR for this branch…', { pending: true });
-        try {
-          await invoke('git:merge', { sessionId: session.id, base: arg || undefined });
-        } catch (e) {
-          store.setLocalInfo(session.id, noteId, `Failed to merge the PR: ${String((e as Error).message ?? e)}`, { level: 'error' });
-          return true;
-        }
-        store.setLocalInfo(session.id, noteId, null);
-        return true;
-      }
-      case 'stop':
-        await invoke('sessions:interrupt', { id: session.id });
-        return true;
-      default:
-        return false; // let the harness handle unknown slash commands (e.g. Claude Code's own)
     }
   };
 
@@ -655,71 +510,16 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
 
   return (
     <div className="composer">
-      {mention && (mention.results.length > 0 || mentionError) && (
-        <div className="popover">
-          {mentionError ? (
-            <div className="popover-item muted"><Icon name="alert" size={12} /> {mentionError}</div>
-          ) : mention.results.map((r, i) => (
-            <button key={r} type="button" className={`popover-item mono ${i === mention.index ? 'active' : ''}`} onMouseDown={(e) => { e.preventDefault(); pickMention(r); }}>
-              <Icon name="file" size={12} /> {r}
-            </button>
-          ))}
-        </div>
-      )}
-      {slash && slashMatches.length > 0 && (
-        <div className="popover slash-popover" ref={popoverRef} role="listbox" aria-label="Slash commands">
-          {slashMatches.map((c, i) => (
-            <React.Fragment key={`${c.source}:${c.insert}`}>
-              {(i === 0 || slashMatches[i - 1].source !== c.source) && (
-                <div className="slash-section" role="presentation">{c.source === 'app' ? 'Vocs Code' : harness.name}</div>
-              )}
-              <button
-                type="button"
-                role="option"
-                aria-selected={i === slash.index}
-                data-source={c.source}
-                className={`popover-item slash-item ${i === slash.index ? 'active' : ''}`}
-                title={c.shadowed ? `Vocs Code has its own /${c.insert.slice(1)}; //${c.insert.slice(1)} sends this one to ${harness.name}.` : undefined}
-                onMouseDown={(e) => { e.preventDefault(); pickSlash(c); }}
-              >
-                <span className="mono slash-name">/{c.insert}</span>
-                {c.args && <span className="muted slash-args">{c.args}</span>}
-                {c.kind && c.kind !== 'command' && <span className="slash-kind">{c.kind}</span>}
-                <span className="spacer" />
-                <span className="muted small slash-desc">{c.shadowed ? [`${harness.name}'s own`, c.description].filter(Boolean).join(' · ') : c.description}</span>
-              </button>
-            </React.Fragment>
-          ))}
-          {harnessNote && <div className="slash-note muted small" role="note">{harnessNote}</div>}
-        </div>
-      )}
-      {images.length > 0 && (
-        <>
-          {visionWarning && (
-            <div className="composer-warn">
-              <Icon name="alert" size={14} />
-              <span>
-                <strong>{visionWarning.model}</strong> is listed as text-only. {visionWarning.detail}
-              </span>
-              <span className="spacer" />
-              <Button size="sm" variant="ghost" onClick={() => void markVisionCapable()} title="Record an override in Settings → Providers so this model is treated as vision-capable">
-                It does accept images
-              </Button>
-            </div>
-          )}
-          <div className="attachments">
-            {images.map((im, i) => (
-              <div key={i} className="attachment">
-                <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
-                <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
-                  <Icon name="x" size={12} />
-                </button>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-      <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
+      <MentionPopover mention={mention} mentionError={mentionError} onPick={pickMention} />
+      <SlashPopover slash={slash} slashMatches={slashMatches} harnessName={harness.name} harnessNote={harnessNote} popoverRef={popoverRef} onPick={pickSlash} />
+      <ComposerAttachments
+        images={images}
+        files={files}
+        visionWarning={visionWarning}
+        onMarkVisionCapable={() => void markVisionCapable()}
+        onRemoveImage={(i) => setImages((current) => current.filter((_, j) => j !== i))}
+        onRemoveFile={(i) => setFiles((current) => current.filter((_, j) => j !== i))}
+      />
       <div className={`composer-box${armed ? ' is-mission' : ''}${ended ? ' is-ended' : ''}`}>
         {session.config.fastMode && <FastModeElectric />}
         <textarea
@@ -754,41 +554,18 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
               {secondaryItems}
             </Dropdown>
           )}
-          {ended ? (
-            <ForkIntoDropdown
-              session={session}
-              onForked={(fork) => void useStore.getState().setActive(fork.id)}
-              trigger={() => <Button size="sm" variant="primary" icon="fork" title="Fork this session to keep working on it">Fork to continue</Button>}
-            />
-          ) : shellDraft ? (
-            <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
-              Run
-            </Button>
-          ) : busy ? (
-            <>
-              <div className="composer-send-group">
-                <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now (Enter)' : 'Queue (Enter)'} aria-label={caps.steer ? 'Steer' : 'Queue'}>
-                  <span className="composer-send-label">{caps.steer ? 'Steer' : 'Queue'}</span>
-                </Button>
-                {caps.steer && caps.queue && <Dropdown align="right" width={240} trigger={() => <Button size="sm" variant="primary" className="composer-send-options" icon="chevron" title="Send options" aria-label="Send options" />}>
-                  {(close) => <MenuItem hint="After the current turn" onClick={() => { close(); void send('queue'); }}>Queue</MenuItem>}
-                </Dropdown>}
-              </div>
-              <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => void invoke('sessions:interrupt', { id: session.id })} title="Interrupt (Esc)" />
-            </>
-          ) : (
-            <Button size="sm" variant="primary" icon="arrowUp" className="send-btn" onClick={() => void send()} disabled={!text.trim() && !images.length && !files.length} title="Send (Enter) · Shift+Enter for a new line" aria-label="Send" />
-          )}
+          <ComposerSendControls
+            session={session}
+            ended={ended}
+            shellDraft={shellDraft}
+            busy={busy}
+            caps={caps}
+            text={text}
+            hasAttachments={images.length > 0 || files.length > 0}
+            onSend={(mode) => void send(mode)}
+          />
         </div>
       </div>
     </div>
   );
-}
-
-export async function fileToAttachment(f: File): Promise<ImageAttachment> {
-  const buf = await f.arrayBuffer();
-  let binary = '';
-  const bytes = new Uint8Array(buf);
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return { mimeType: f.type || 'image/png', data: btoa(binary), name: f.name };
 }
