@@ -36,11 +36,12 @@ it('uses the branch diff for fallback, but still sees local toolchain edits', ()
     git('commit', '-m', 'Branch source change');
 
     mkdirSync(file('scripts'));
-    for (const script of ['test-changed.mjs', 'test-changed-scope.mjs']) {
+    for (const script of ['test-changed.mjs', 'test-changed-scope.mjs', 'vitest-bin.mjs']) {
       copyFileSync(path.join(scripts, script), file('scripts', script));
     }
     // Observe the invocation without loading the real repo's hundreds of tests.
     mkdirSync(file('node_modules/vitest'), { recursive: true });
+    writeFileSync(file('node_modules/vitest/package.json'), JSON.stringify({ name: 'vitest', bin: { vitest: 'vitest.mjs' } }));
     writeFileSync(file('node_modules/vitest/vitest.mjs'), 'console.log(JSON.stringify(process.argv.slice(2)));');
     writeFileSync(file('.gitignore'), 'node_modules/\n');
 
@@ -65,5 +66,49 @@ it('uses the branch diff for fallback, but still sees local toolchain edits', ()
     expect(selected()).toEqual(['run', ...excludeLive]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+it('resolves vitest from a parent node_modules directory when the worktree has none', () => {
+  const outer = mkdtempSync(path.join(tmpdir(), 'vocs-test-changed-parent-'));
+  const worktree = path.join(outer, 'worktree');
+  const file = (...parts: string[]) => path.join(worktree, ...parts);
+  const git = (...args: string[]) => execFileSync('git', [
+    '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgSign=false',
+    '-c', 'core.hooksPath=.git/no-hooks', ...args,
+  ], { cwd: worktree, stdio: 'pipe' });
+
+  try {
+    mkdirSync(path.join(outer, 'node_modules', 'vitest'), { recursive: true });
+    writeFileSync(
+      path.join(outer, 'node_modules', 'vitest', 'package.json'),
+      JSON.stringify({ name: 'vitest', bin: { vitest: 'custom-bin.mjs' } })
+    );
+    writeFileSync(
+      path.join(outer, 'node_modules', 'vitest', 'custom-bin.mjs'),
+      'console.log(JSON.stringify({ resolved: "parent", args: process.argv.slice(2) }));'
+    );
+
+    mkdirSync(file('scripts'), { recursive: true });
+    for (const script of ['test-changed.mjs', 'test-changed-scope.mjs', 'vitest-bin.mjs']) {
+      copyFileSync(path.join(scripts, script), file('scripts', script));
+    }
+    git('init', '-b', 'develop');
+    writeFileSync(file('src.ts'), 'export const a = 1;');
+    git('add', 'src.ts');
+    git('commit', '-m', 'Base');
+
+    const run = spawnSync(process.execPath, [file('scripts/test-changed.mjs'), '--list'], {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: { ...process.env, VOCS_CODE_TEST_BASE: 'develop' },
+      timeout: 10_000,
+    });
+    expect(run.status, run.error?.message ?? run.stderr).toBe(0);
+    const parsed = JSON.parse(run.stdout.trim().split(/\r?\n/).at(-1)!);
+    expect(parsed.resolved).toBe('parent');
+    expect(parsed.args[0]).toBe('list');
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
   }
 });
