@@ -18,18 +18,9 @@ import { TurnUsageTracker } from '../util/turn-usage';
 import { ANTIGRAVITY_ACP_ARGS, ANTIGRAVITY_SIGN_IN_MESSAGE, antigravityAccountEnv, connectAcp, isAntigravityAuthRequired } from './antigravity';
 import { acpModelCatalog, decodeAcpModelValue, findEffortOption, findModelOption, flattenSelect, type ConfigOptionLike } from './acp-config';
 import { buildAcpElicitationResponse, planAcpFormElicitation } from './acp-elicitation';
+import { PROVIDER_ENV_KEYS } from './provider-env';
 
-const ACP_ENV_KEYS: Record<string, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  'opencode-go': 'OPENCODE_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-  groq: 'GROQ_API_KEY',
-  xai: 'XAI_API_KEY',
-  mistral: 'MISTRAL_API_KEY'
-};
+const ACP_ENV_KEYS = PROVIDER_ENV_KEYS;
 
 /** ACP's tool kinds (`ToolKind`), minus `other`. */
 const ACP_TOOL_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode']);

@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PiAdapter } from '../src/main/harness/pi';
+import { listPiModels, PiAdapter } from '../src/main/harness/pi';
 import type { HarnessContext } from '../src/main/harness/types';
 import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, vocsMemoryBaseDef } from '../src/main/mcp/memory';
 import type { ResolvedServer } from '../src/main/mcp/effective';
@@ -224,5 +224,28 @@ describe('Pi adapter startup capability boundary', () => {
     await expect(adapter.send({ text: 'must not reach new Pi' })).rejects.toThrow('Missing readiness: tools, subagents');
     expect(commands.filter((command) => command.type === 'prompt')).toHaveLength(0);
     expect(spawn.spawnTool.mock.calls[0][2].env.VOCS_CODE_PI_NONCE).not.toBe(spawn.spawnTool.mock.calls[1][2].env.VOCS_CODE_PI_NONCE);
+  });
+  it('treats a broken stdin pipe on a live Pi child as a transport error instead of an uncaught exception', async () => {
+    const { adapter, events, children } = await setup(['approvals', 'tools', 'subagents']);
+    await adapter.start();
+    const stdin = (children[0] as unknown as { stdin: Writable }).stdin;
+    stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+    expect(events.some((e) => e.type === 'error' && e.fatal && e.message.includes('write EPIPE'))).toBe(true);
+    await expect(adapter.compact()).rejects.toThrow('write EPIPE');
+    await adapter.dispose();
+  });
+  it('rejects listPiModels cleanly on a stdin EPIPE error and shuts down the probe child', async () => {
+    const child = new EventEmitter();
+    const stdin = new Writable({
+      write(_chunk, _encoding, done) {
+        queueMicrotask(() => stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })));
+        done();
+      }
+    });
+    Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), stdin });
+    spawn.spawnTool.mockReturnValueOnce(child);
+    spawn.shutdownChild.mockResolvedValueOnce(undefined);
+    await expect(listPiModels('/fake/pi')).rejects.toThrow('write EPIPE');
+    expect(spawn.shutdownChild).toHaveBeenCalledWith(child, 1000);
   });
 });
