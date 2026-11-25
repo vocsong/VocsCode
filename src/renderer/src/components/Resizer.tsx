@@ -33,20 +33,21 @@ const VAR: Record<Target, string> = { sidebar: '--sidebar', panel: '--panel' };
 
 export function Resizer({ target }: { target: Target }) {
   const [dragging, setDragging] = useState(false);
-  const settings = useStore((s) => s.settings);
+  const sidebarWidth = useStore((s) => s.settings?.sidebarWidth);
+  const panelWidth = useStore((s) => s.settings?.panelWidth);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const panelOpen = useStore((s) => s.panelOpen);
   const pins = useStore((s) => s.pins);
   const minimal = useMinimalUi();
-  if (!settings) return null;
+  if (sidebarWidth === undefined || panelWidth === undefined) return null;
 
-  const zenPanel = Math.max(ZEN_PANEL_MIN, settings.panelWidth);
-  const width = target === 'sidebar' ? settings.sidebarWidth : minimal ? zenPanel : settings.panelWidth;
+  const zenPanel = Math.max(ZEN_PANEL_MIN, panelWidth);
+  const width = target === 'sidebar' ? sidebarWidth : minimal ? zenPanel : panelWidth;
   const other = !minimal
-    ? target === 'sidebar' ? (panelOpen ? settings.panelWidth : 0) : sidebarOpen ? settings.sidebarWidth : 0
+    ? target === 'sidebar' ? (panelOpen ? panelWidth : 0) : sidebarOpen ? sidebarWidth : 0
     : target === 'sidebar'
       ? panelOpen ? ZEN_RAIL + (pins.right ? zenPanel : 0) : 0
-      : sidebarOpen ? (pins.left ? settings.sidebarWidth : ZEN_RAIL) : 0;
+      : sidebarOpen ? (pins.left ? sidebarWidth : ZEN_RAIL) : 0;
   const { max, def } = LIMITS[target];
   const min = minimal && target === 'panel' ? ZEN_PANEL_MIN : LIMITS[target].min;
   const clamp = (w: number) => Math.round(Math.min(Math.min(max, window.innerWidth - other - MAIN_MIN), Math.max(min, w)));
@@ -123,9 +124,10 @@ const SPLIT = { min: 0.2, max: 0.8, def: 0.62 };
  */
 export function SplitResizer() {
   const [dragging, setDragging] = useState(false);
-  const settings = useStore((s) => s.settings);
-  if (!settings) return null;
-  const current = Math.min(SPLIT.max, Math.max(SPLIT.min, settings.panelSplit ?? SPLIT.def));
+  const hasSettings = useStore((s) => s.settings !== null);
+  const panelSplit = useStore((s) => s.settings?.panelSplit);
+  if (!hasSettings) return null;
+  const current = Math.min(SPLIT.max, Math.max(SPLIT.min, panelSplit ?? SPLIT.def));
   const clamp = (fraction: number) => Math.min(SPLIT.max, Math.max(SPLIT.min, fraction));
 
   const paint = (fraction: number) => document.querySelector<HTMLElement>('.app')?.style.setProperty('--panel-split', String(fraction));

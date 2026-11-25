@@ -1,58 +1,17 @@
 /** Git panel tab: GitHub-style branch overview, worktree housekeeping and the repo's pull requests and issues (pulled via gh). */
-import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { GitBranchOverviewItem, GitComment, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitSetupStatus, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
+import React, { useEffect, useMemo, useState } from 'react';
+import type { GitBranchOverviewItem, GitIssue, GitPullRequest, GitSetupStatus, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { basename, relTime } from '../format';
-import type { GitPanelCache, GitPanelRead, GitPanelReadOptions } from '../git-panel-cache';
-import { installMarkdownHandlers, renderMarkdown } from '../markdown';
-import { useStore, type GitPanelView } from '../store';
+import type { GitPanelCache } from '../git-panel-cache';
+import { useStore } from '../store';
 import { GitSetup, remoteWebUrl } from './GitSetup';
-import { askConfirm, askPrompt, Badge, Button, Dropdown, Icon, MenuItem, Modal, Spinner } from './ui';
-
-/** Branches untouched for this long land in the Stale filter. */
-const STALE_DAYS = 14;
-
-/** Git panel background poll cadence: GitHub cannot push PR/issue changes to a desktop app, so ask on a timer. */
-const POLL_MS = 60_000;
-/** A refresh scheduled by a finished turn waits at least this long after the last poll, so a chatty session cannot hammer gh. */
-const ACTIVITY_REFRESH_MIN_MS = 20_000;
-
-type Filter = 'all' | 'stale' | 'merged';
-
-const FILTERS: { id: Filter; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'stale', label: 'Stale' },
-  { id: 'merged', label: 'Merged' }
-];
-
-type View = GitPanelView;
-type PrFilter = 'open' | 'merged' | 'closed' | 'all';
-type IssueFilter = 'open' | 'closed' | 'all';
-
-const PR_FILTERS: { id: PrFilter; label: string }[] = [
-  { id: 'open', label: 'Open' },
-  { id: 'merged', label: 'Merged' },
-  { id: 'closed', label: 'Closed' },
-  { id: 'all', label: 'All' }
-];
-
-const ISSUE_FILTERS: { id: IssueFilter; label: string }[] = [
-  { id: 'open', label: 'Open' },
-  { id: 'closed', label: 'Closed' },
-  { id: 'all', label: 'All' }
-];
-
-/** Trailing-separator/case-insensitive path comparison for worktree paths. */
-function pathEq(a: string, b: string): boolean {
-  const norm = (p: string) => p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
-  return norm(a) === norm(b);
-}
-
-/** True when `dir` is `cwd` itself or an ancestor of it. */
-function underPath(dir: string, cwd: string): boolean {
-  const norm = (p: string) => p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
-  return norm(cwd) === norm(dir) || norm(cwd).startsWith(`${norm(dir)}/`);
-}
+import { BranchList, type BranchFilter } from './git/BranchList';
+import { IssueList, PrList, type IssueFilter, type PrFilter } from './git/GitHubLists';
+import { IssueDialog, ListedPrDialog, PrDialog } from './git/GitItemDialogs';
+import { useGitPanelPolling } from './git/useGitPanelPolling';
+import { WorktreeList } from './git/WorktreeList';
+import { askConfirm, askPrompt, Button, Dropdown, MenuItem, Spinner } from './ui';
 
 export function BranchesTab({ session, cache }: { session: SessionMeta; cache: GitPanelCache }) {
   const preview = useStore((s) => s.gitPullRequestPreview?.sessionId === session.id ? s.gitPullRequestPreview : null);
@@ -79,20 +38,31 @@ export function BranchesTab({ session, cache }: { session: SessionMeta; cache: G
 
 function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: GitPanelCache }) {
   const toast = useStore((s) => s.toast);
-  const sessions = useStore((s) => s.sessions);
   const setActive = useStore((s) => s.setActive);
-  const { id: sessionId, cwd } = session;
-  const setupKey = `${sessionId}:${cwd}`;
-  const reads = useMemo(() => cache.checkout(cwd), [cache, cwd]);
-  const { data } = useSyncExternalStore(reads.overview.subscribe, reads.overview.getSnapshot);
-  const { data: prData = null, loading: prLoading } = useSyncExternalStore(reads.prs.subscribe, reads.prs.getSnapshot);
-  const { data: issueData = null, loading: issueLoading } = useSyncExternalStore(reads.issues.subscribe, reads.issues.getSnapshot);
-  /** Guided-setup state reported by GitSetup, for the housekeeping menu's "Set up GitHub" entry. */
-  const [setup, setSetup] = useState<GitSetupStatus | null>(null);
   // The selected view survives a panel remount, including when a PR row starts a new session.
   const view = useStore((s) => s.gitPanelView);
   const setView = useStore((s) => s.setGitPanelView);
-  const [filter, setFilter] = useState<Filter>('all');
+  const { id: sessionId, cwd } = session;
+  const setupKey = `${sessionId}:${cwd}`;
+
+  const {
+    data,
+    prData,
+    prLoading,
+    issueData,
+    issueLoading,
+    visit,
+    liveVisit,
+    isCurrentVisit,
+    refresh,
+    refreshPrs,
+    refreshIssues,
+    refreshAll
+  } = useGitPanelPolling({ sessionId, cwd, status: session.status, cache });
+
+  /** Guided-setup state reported by GitSetup, for the housekeeping menu's "Set up GitHub" entry. */
+  const [setup, setSetup] = useState<GitSetupStatus | null>(null);
+  const [filter, setFilter] = useState<BranchFilter>('all');
   const [query, setQuery] = useState('');
   const [prFilter, setPrFilter] = useState<PrFilter>('open');
   const [prQuery, setPrQuery] = useState('');
@@ -100,129 +70,16 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
   const [issueQuery, setIssueQuery] = useState('');
   const [selectedIssue, setSelectedIssue] = useState<GitIssue | null>(null);
   const [selectedPr, setSelectedPr] = useState<GitPullRequest | null>(null);
-  const visit = useMemo(() => ({ sessionId, cwd }), [sessionId, cwd]);
-  const liveVisit = useRef<typeof visit | null>(null);
-  const isCurrentVisit = liveVisit.current === visit;
-  const reportSetup = (status: GitSetupStatus) => {
-    if (liveVisit.current === visit) setSetup(status);
-  };
-  const pollInFlight = useRef<typeof visit | null>(null);
-  const lastPollAt = useRef(0);
-  const activityTimer = useRef<number | null>(null);
-  /** Previous turn status, so the panel can refresh once a turn ends (the app-level "git hook"). */
-  const prevStatus = useRef(session.status);
-
-  /**
-   * `background` refreshes stay silent: no spinner and no toast, so a transient gh failure leaves the last list on screen.
-   * `remote` re-syncs remote-tracking refs first (`fetch --prune`). The list is the repo's LOCAL branches, which a
-   * server-side delete never touches: without the prune, a branch deleted on GitHub keeps its stale `origin/<name>`
-   * ref and reads as live, so re-reading alone looks like a refresh that did nothing. Only an explicit refresh pays
-   * for the round trip; the minute poll stays local.
-   */
-  const load = async <T extends { error?: string }>(read: GitPanelRead<T>, fetch: () => Promise<T>, opts: GitPanelReadOptions) => {
-    try {
-      await read.load(fetch, opts);
-    } catch (e) {
-      if (liveVisit.current === visit && !opts.background) toast(String((e as Error).message ?? e), 'error');
-    }
-  };
-  const refresh = async (opts: GitPanelReadOptions & { remote?: boolean } = { force: true }) => {
-    if (opts.remote) {
-      try {
-        const f = await invoke('git:fetchPrune', { sessionId });
-        if (liveVisit.current !== visit) return;
-        // The branch list is still worth showing, so a failed fetch reports itself instead of aborting the refresh.
-        if (!f.ok) toast(f.output || 'Could not reach the remote — showing local branch state.', 'error');
-      } catch (e) {
-        if (liveVisit.current !== visit) return;
-        toast(String((e as Error).message ?? e), 'error');
-      }
-    }
-    await load(reads.overview, () => invoke('git:branchesOverview', { sessionId }), opts);
-  };
-  const refreshPrs = (opts: GitPanelReadOptions = { force: true }) =>
-    load(reads.prs, () => invoke('git:pullRequests', { sessionId }), opts);
-  const refreshIssues = (opts: GitPanelReadOptions = { force: true }) =>
-    load(reads.issues, () => invoke('git:issues', { sessionId }), opts);
-
-  /**
-   * GitHub-side PR/issue changes cannot be pushed to a desktop app, so the only way to see them
-   * is to ask again. One silent round over everything the panel has loaded; a hidden window or a
-   * non-repo folder skips it, and gh-less folders skip the two GitHub calls.
-   */
-  const poll = async () => {
-    if (liveVisit.current !== visit || pollInFlight.current === visit || document.visibilityState === 'hidden' || !data?.isRepo) return;
-    pollInFlight.current = visit;
-    lastPollAt.current = Date.now();
-    try {
-      const jobs = [refresh({ background: true })];
-      const ghMissing = data.ghMissing || prData?.ghMissing || issueData?.ghMissing;
-      if (!ghMissing) jobs.push(refreshPrs({ background: true }), refreshIssues({ background: true }));
-      await Promise.all(jobs);
-    } finally {
-      if (pollInFlight.current === visit) pollInFlight.current = null;
-    }
-  };
-  const latestPoll = useRef(poll);
-  latestPoll.current = poll;
 
   useEffect(() => {
-    liveVisit.current = visit;
-    prevStatus.current = session.status;
     setSetup(null);
     setSelectedIssue(null);
     setSelectedPr(null);
-    return () => { liveVisit.current = null; };
-  }, [visit]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visit]);
 
-  useEffect(() => {
-    cache.remember(cwd, reads);
-    lastPollAt.current = Date.now();
-    void refresh({ background: !!data });
-    void refreshPrs({ background: !!prData, reuseFor: POLL_MS });
-    void refreshIssues({ background: !!issueData, reuseFor: POLL_MS });
-  }, [cache, cwd, reads, visit]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Remote changes arrive between turns, so poll every minute while the tab is open. A hidden
-  // window skips the tick and catches up on focus/visibility instead, like the sidebar's folder branch.
-  useEffect(() => {
-    const onWake = () => void latestPoll.current();
-    const timer = window.setInterval(onWake, POLL_MS);
-    window.addEventListener('focus', onWake);
-    document.addEventListener('visibilitychange', onWake);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', onWake);
-      document.removeEventListener('visibilitychange', onWake);
-      if (activityTimer.current !== null) {
-        window.clearTimeout(activityTimer.current);
-        activityTimer.current = null;
-      }
-    };
-  }, [reads]);
-
-  // The app-level equivalent of a git hook: a finished turn is when the agent's commit / push /
-  // `gh pr create` has settled, so refresh shortly after — throttled so a chatty session cannot
-  // hammer gh between the timer's own ticks.
-  useEffect(() => {
-    const prev = prevStatus.current;
-    prevStatus.current = session.status;
-    if (prev === 'idle' || session.status !== 'idle') return;
-    if (activityTimer.current !== null) window.clearTimeout(activityTimer.current);
-    const wait = Math.max(2_000, ACTIVITY_REFRESH_MIN_MS - (Date.now() - lastPollAt.current));
-    activityTimer.current = window.setTimeout(() => {
-      activityTimer.current = null;
-      void latestPoll.current();
-    }, wait);
-  }, [session.status]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /** Sessions rooted inside a worktree — removals must respect them. */
-  const sessionsIn = (wtPath: string) => sessions.filter((s) => underPath(wtPath, s.cwd)).length;
-  const branchSessionCount = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const s of sessions) if (s.worktreeBranch) map.set(s.worktreeBranch, (map.get(s.worktreeBranch) ?? 0) + 1);
-    return map;
-  }, [sessions]);
+  const reportSetup = (status: GitSetupStatus) => {
+    if (liveVisit.current === visit) setSetup(status);
+  };
 
   const act = async (p: Promise<{ ok: boolean; error?: string; output?: string }>, done: string) => {
     const r = await p;
@@ -294,17 +151,14 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
     return true;
   };
 
-  /** Seeds the review dialog: the PR table's New session action sends this once it is confirmed. */
-  const prReviewPrompt = (pr: GitPullRequest) =>
-    `Review pull request #${pr.number} "${pr.title}" (${pr.url})${pr.headRefName ? `, branch \`${pr.headRefName}\`` : ''}${pr.baseRefName ? ` into \`${pr.baseRefName}\`` : ''}. Run \`gh pr diff ${pr.number}\` for the patch: summarize what it changes, flag risks, and say whether it is ready to merge.`;
-
   /** Starts a review session on this repo: the PR table's New session action, no folder picker. */
   const reviewPrInNewSession = async (pr: GitPullRequest) => {
+    const initial = `Review pull request #${pr.number} "${pr.title}" (${pr.url})${pr.headRefName ? `, branch \`${pr.headRefName}\`` : ''}${pr.baseRefName ? ` into \`${pr.baseRefName}\`` : ''}. Run \`gh pr diff ${pr.number}\` for the patch: summarize what it changes, flag risks, and say whether it is ready to merge.`;
     const prompt = await askPrompt({
       title: `Start a session to review PR #${pr.number}?`,
       body: `New session in ${session.config.projectRoot}, on its current checkout.`,
       confirmLabel: 'Start session',
-      input: { label: 'First message', value: prReviewPrompt(pr), rows: 6, testId: 'pr-review-prompt', submitOnEnter: true }
+      input: { label: 'First message', value: initial, rows: 6, testId: 'pr-review-prompt', submitOnEnter: true }
     });
     if (prompt === null) return;
     const firstMessage = prompt.trim();
@@ -321,17 +175,14 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
     }
   };
 
-  /** Seeds the fix dialog: the issue table's New session action sends this once it is confirmed. */
-  const issueSessionPrompt = (issue: GitIssue) =>
-    `Fix issue #${issue.number} "${issue.title}" (${issue.url}): figure out the cause and implement a fix.`;
-
   /** Starts a session on this repo: the issue table's New session action, no folder picker. */
   const fixIssueInNewSession = async (issue: GitIssue) => {
+    const initial = `Fix issue #${issue.number} "${issue.title}" (${issue.url}): figure out the cause and implement a fix.`;
     const prompt = await askPrompt({
       title: `Start a session on issue #${issue.number}?`,
       body: `New session in ${session.config.projectRoot}, on its current checkout.`,
       confirmLabel: 'Start session',
-      input: { label: 'First message', value: issueSessionPrompt(issue), rows: 6, testId: 'issue-prompt', submitOnEnter: true }
+      input: { label: 'First message', value: initial, rows: 6, testId: 'issue-prompt', submitOnEnter: true }
     });
     if (prompt === null) return;
     const firstMessage = prompt.trim();
@@ -369,28 +220,8 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
     void navigator.clipboard.writeText(b.name).then(() => toast(`Copied ${b.name}`, 'success'));
   };
 
-  const removeWorktree = async (wt: GitWorktreeInfo) => {
-    const n = sessionsIn(wt.path);
-    if (n > 0) {
-      toast(`${n} session(s) still live in ${basename(wt.path)} — delete them first`, 'error');
-      return;
-    }
-    const ok = await askConfirm({
-      title: `Remove worktree ${basename(wt.path)}?`,
-      body: `${wt.path}\n\nThe directory is deleted; its branch stays and can be removed from the Branches list.`,
-      confirmLabel: 'Remove worktree',
-      danger: true
-    });
-    if (ok) void act(invoke('git:removeWorktree', { sessionId: session.id, path: wt.path }), `Removed ${basename(wt.path)}`);
-  };
-
-  const staleAt = Date.now() - STALE_DAYS * 86_400_000;
-  const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return (data?.branches ?? [])
-      .filter((b) => !q || b.name.toLowerCase().includes(q))
-      .filter((b) => (filter === 'stale' ? !b.isBase && (b.lastCommitAt ?? 0) < staleAt : filter === 'merged' ? b.merged && !b.isBase : true));
-  }, [data, filter, query, staleAt]);
+  const openPrCount = useMemo(() => prData?.prs.filter((p) => p.state === 'OPEN').length, [prData]);
+  const openIssueCount = useMemo(() => issueData?.issues.filter((i) => i.state === 'OPEN').length, [issueData]);
 
   if (data && !data.isRepo) {
     return (
@@ -406,11 +237,6 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
       </div>
     );
   }
-
-  const staleCount = data.branches.filter((b) => !b.isBase && (b.lastCommitAt ?? 0) < staleAt).length;
-  const mergedCount = data.branches.filter((b) => b.merged && !b.isBase).length;
-  const openPrCount = prData?.prs.filter((p) => p.state === 'OPEN').length;
-  const openIssueCount = issueData?.issues.filter((i) => i.state === 'OPEN').length;
 
   return (
     <div className="branches">
@@ -499,12 +325,7 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
           size="sm"
           icon="refresh"
           disabled={prLoading || issueLoading}
-          onClick={() => {
-            lastPollAt.current = Date.now();
-            void refresh({ remote: true, force: true });
-            void refreshPrs();
-            void refreshIssues();
-          }}
+          onClick={refreshAll}
           title={view === 'prs' ? 'Pull the PR list from GitHub again' : view === 'issues' ? 'Pull the issue list from GitHub again' : 'Refresh — re-syncs with the remote, then re-reads the branch list'}
         />
       </div>
@@ -536,76 +357,24 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
           onNewSession={reviewPrInNewSession}
         />
       ) : view === 'branches' ? (
-        <>
-          <div className="branches-toolbar">
-            <div className="branches-search">
-              <Icon name="search" size={13} />
-              <input placeholder="Search branches…" value={query} onChange={(e) => setQuery(e.target.value)} />
-            </div>
-            <div className="branches-filters">
-              {FILTERS.map((f) => (
-                <button key={f.id} type="button" className={filter === f.id ? 'active' : ''} onClick={() => setFilter(f.id)}>
-                  {f.label}
-                  {f.id === 'stale' && staleCount > 0 && <span className="count">{staleCount}</span>}
-                  {f.id === 'merged' && mergedCount > 0 && <span className="count">{mergedCount}</span>}
-                </button>
-              ))}
-            </div>
-          </div>
-          {data.ghMissing && (
-            <div className="muted small pad" title="PR actions need the GitHub CLI">
-              GitHub CLI (gh) not found — PR actions are hidden. Install gh and run `gh auth login`.
-            </div>
-          )}
-          <div className="branches-table">
-            <div className="branches-cols">
-              <span>Branch</span>
-              <span>Updated</span>
-              <span>Behind/Ahead</span>
-              <span>Status</span>
-              <span className="num">Actions</span>
-            </div>
-            {visible.map((b) => (
-              <BranchRow
-                key={b.name}
-                b={b}
-                sessionId={session.id}
-                base={data.base}
-                ghMissing={data.ghMissing}
-                onDelete={() => void deleteBranch(b)}
-                onOpenPr={() => runPr(b)}
-                onViewPr={() => b.pr && void invoke('app:openExternal', { url: b.pr.url })}
-                onMergePr={() => void mergePr(b)}
-                onUpdate={() => void act(invoke('git:updateBranch', { sessionId: session.id, branch: b.name }), `Updated ${b.name}`)}
-                onCopy={() => copyName(b)}
-                onNewSession={() => void newSessionOnBranch(b)}
-                onAskAgent={() => askAgent(b)}
-              />
-            ))}
-            {visible.length === 0 && <div className="muted pad">No branches match.</div>}
-          </div>
-        </>
+        <BranchList
+          data={data}
+          sessionId={session.id}
+          filter={filter}
+          setFilter={setFilter}
+          query={query}
+          setQuery={setQuery}
+          onDelete={(b) => void deleteBranch(b)}
+          onOpenPr={runPr}
+          onViewPr={(b) => b.pr && void invoke('app:openExternal', { url: b.pr.url })}
+          onMergePr={(b) => void mergePr(b)}
+          onUpdate={(b) => void act(invoke('git:updateBranch', { sessionId: session.id, branch: b.name }), `Updated ${b.name}`)}
+          onCopy={copyName}
+          onNewSession={(b) => void newSessionOnBranch(b)}
+          onAskAgent={askAgent}
+        />
       ) : (
-        <div className="branches-table">
-          <div className="branches-cols">
-            <span>Worktree</span>
-            <span>Branch</span>
-            <span>Sessions</span>
-            <span>Status</span>
-            <span className="num">Actions</span>
-          </div>
-          {data.worktrees.map((wt) => (
-            <WorktreeRow
-              key={wt.path}
-              wt={wt}
-              current={pathEq(wt.path, session.cwd)}
-              sessions={sessionsIn(wt.path)}
-              branchSessions={wt.branch ? branchSessionCount.get(wt.branch) ?? 0 : 0}
-              onOpen={() => void invoke('app:openInEditor', { path: wt.path, sessionId: session.id })}
-              onRemove={() => void removeWorktree(wt)}
-            />
-          ))}
-        </div>
+        <WorktreeList sessionId={session.id} cwd={session.cwd} worktrees={data.worktrees} onAct={act} />
       )}
       {isCurrentVisit && selectedIssue && (
         <IssueDialog
@@ -636,787 +405,6 @@ function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: Git
           }}
         />
       )}
-    </div>
-  );
-}
-
-function BranchRow({
-  b,
-  sessionId,
-  base,
-  ghMissing,
-  onDelete,
-  onOpenPr,
-  onViewPr,
-  onMergePr,
-  onUpdate,
-  onCopy,
-  onNewSession,
-  onAskAgent
-}: {
-  b: GitBranchOverviewItem;
-  sessionId: string;
-  base?: string;
-  ghMissing?: boolean;
-  onDelete: () => void;
-  onOpenPr: () => void;
-  onViewPr: () => void;
-  onMergePr: () => void;
-  onUpdate: () => void;
-  onCopy: () => void;
-  onNewSession: () => void;
-  onAskAgent: () => void;
-}) {
-  const pr = b.pr;
-  const hasOpenPr = pr?.state === 'OPEN';
-  return (
-    <div className="branch-row">
-      <div className="branch-name">
-        <span className="mono" title={b.lastCommitSubject}>{b.name}</span>
-        {b.isBase && <Badge tone="blue">Base</Badge>}
-        {b.current && <Badge tone="green">Current</Badge>}
-        {b.worktreePath && (
-          <span className="branch-wt" title={`Worktree: ${b.worktreePath}`}>
-            <Icon name="folder" size={11} /> {basename(b.worktreePath)}
-          </span>
-        )}
-      </div>
-      <span className="muted small">{b.lastCommitAt ? relTime(b.lastCommitAt) : '—'}</span>
-      <span className="small mono">
-        {b.isBase ? (
-          <span className="muted">—</span>
-        ) : (
-          <>
-            {b.behind ? <span className="behind">↓{b.behind}</span> : <span className="muted">0</span>}
-            <span className="muted"> / </span>
-            {b.ahead ? <span className="ahead">↑{b.ahead}</span> : <span className="muted">0</span>}
-          </>
-        )}
-      </span>
-      <span className="branch-status">
-        {b.upstreamGone && (
-          <Badge tone="red" title={`${b.upstream} is gone from the server — this branch exists only in this checkout. Its work is not lost; delete it here when it is merged.`}>
-            Deleted on origin
-          </Badge>
-        )}
-        {pr ? (
-          <Badge
-            tone={pr.state === 'OPEN' ? 'blue' : pr.state === 'MERGED' ? 'purple' : 'neutral'}
-            title={pr.title ? `#${pr.number}: ${pr.title}` : `#${pr.number}`}
-          >
-            {pr.state === 'OPEN' ? `PR #${pr.number}` : pr.state === 'MERGED' ? 'PR merged' : 'PR closed'}
-          </Badge>
-        ) : b.merged ? (
-          <Badge tone="purple">Merged</Badge>
-        ) : (
-          <Badge tone="amber">Unmerged</Badge>
-        )}
-        {b.upstream && b.upstreamBehind !== undefined && <span className="muted small" title={`Behind ${b.upstream}`}>↓{b.upstreamBehind}</span>}
-        {b.upstream && b.upstreamAhead !== undefined && <span className="muted small" title={`Ahead of ${b.upstream}`}>↑{b.upstreamAhead}</span>}
-        {b.upstream && !b.upstreamGone && b.upstreamAhead === undefined && b.upstreamBehind === undefined && <span className="muted small" title={b.upstream}>synced</span>}
-      </span>
-      <div className="branch-actions">
-        <span className="branch-inline">
-          {b.worktreePath && (
-            <Button variant="ghost" size="sm" icon="external" title={`Open worktree ${basename(b.worktreePath)}`} onClick={() => void invoke('app:openInEditor', { path: b.worktreePath!, sessionId })} />
-          )}
-          {!ghMissing && !b.isBase &&
-            (hasOpenPr ? (
-              <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr!.number} on GitHub`} onClick={onViewPr} />
-            ) : (
-              <Button variant="ghost" size="sm" icon="pr" title={`Open a PR from ${b.name} into ${base ?? 'the base branch'}`} onClick={onOpenPr} />
-            ))}
-          {!b.isBase && !b.current && (
-            <Button
-              variant="ghost"
-              size="sm"
-              icon="trash"
-              title={b.worktreePath ? 'Remove the worktree first' : b.merged ? 'Delete branch (merged — safe)' : 'Force-delete branch (unmerged)'}
-              onClick={onDelete}
-            />
-          )}
-        </span>
-        <Dropdown
-          align="right"
-          width={260}
-          trigger={() => <Button variant="ghost" size="sm" icon="more" title="Branch actions" aria-label={`Actions for ${b.name}`} />}
-        >
-          {(close) => (
-            <>
-              {b.worktreePath && (
-                <MenuItem
-                  onClick={() => {
-                    close();
-                    void invoke('app:openInEditor', { path: b.worktreePath!, sessionId });
-                  }}
-                  hint={basename(b.worktreePath)}
-                >
-                  Open worktree in editor
-                </MenuItem>
-              )}
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onAskAgent();
-                }}
-                hint="Prefill the composer"
-              >
-                Ask the agent about this branch
-              </MenuItem>
-              {!ghMissing && !b.isBase && (
-                <MenuItem
-                  onClick={() => {
-                    close();
-                    onOpenPr();
-                  }}
-                  hint={`into ${base ?? 'base'}`}
-                >
-                  Open PR
-                </MenuItem>
-              )}
-              <MenuItem
-                disabled={!hasOpenPr}
-                onClick={() => {
-                  close();
-                  onViewPr();
-                }}
-                hint={hasOpenPr ? `#${pr!.number}` : undefined}
-              >
-                View PR on GitHub
-              </MenuItem>
-              <MenuItem
-                disabled={!hasOpenPr}
-                onClick={() => {
-                  close();
-                  void onMergePr();
-                }}
-              >
-                Merge PR
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onUpdate();
-                }}
-                hint="git fetch + fast-forward"
-              >
-                Update from origin
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onCopy();
-                }}
-              >
-                Copy branch name
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  void onNewSession();
-                }}
-                hint="isolated worktree"
-              >
-                New session on this branch
-              </MenuItem>
-              {!b.isBase && !b.current && (
-                <MenuItem
-                  danger
-                  disabled={!!b.worktreePath}
-                  onClick={() => {
-                    close();
-                    onDelete();
-                  }}
-                  hint={b.worktreePath ? 'remove worktree first' : undefined}
-                >
-                  Delete branch
-                </MenuItem>
-              )}
-            </>
-          )}
-        </Dropdown>
-      </div>
-    </div>
-  );
-}
-
-function PrList({
-  data,
-  loading,
-  filter,
-  setFilter,
-  query,
-  setQuery,
-  onRefresh,
-  onOpen,
-  onView,
-  onNewSession
-}: {
-  data: GitPullRequestList | null;
-  loading: boolean;
-  filter: PrFilter;
-  setFilter: (f: PrFilter) => void;
-  query: string;
-  setQuery: (q: string) => void;
-  onRefresh: () => void;
-  onOpen: (pr: GitPullRequest) => void;
-  onView: (pr: GitPullRequest) => void;
-  onNewSession: (pr: GitPullRequest) => void;
-}) {
-  const prs = data?.prs ?? [];
-  const counts = {
-    open: prs.filter((p) => p.state === 'OPEN').length,
-    merged: prs.filter((p) => p.state === 'MERGED').length,
-    closed: prs.filter((p) => p.state === 'CLOSED').length,
-    all: prs.length
-  };
-  const q = query.trim().toLowerCase();
-  const visible = prs
-    .filter((p) => (filter === 'all' ? true : p.state === filter.toUpperCase()))
-    .filter((p) => !q || p.title.toLowerCase().includes(q) || `#${p.number}`.includes(q) || (p.headRefName ?? '').toLowerCase().includes(q) || (p.author ?? '').toLowerCase().includes(q));
-
-  return (
-    <>
-      <div className="branches-toolbar">
-        <div className="branches-search">
-          <Icon name="search" size={13} />
-          <input placeholder="Search PRs (title, #number, branch, author)…" value={query} onChange={(e) => setQuery(e.target.value)} />
-        </div>
-        <div className="branches-filters">
-          {PR_FILTERS.map((f) => (
-            <button key={f.id} type="button" className={filter === f.id ? 'active' : ''} onClick={() => setFilter(f.id)}>
-              {f.label}
-              {data && counts[f.id] > 0 && <span className="count">{counts[f.id]}</span>}
-            </button>
-          ))}
-        </div>
-        {data && !data.error && !data.ghMissing && (
-          <span className="pr-pulled" title={`${new Date(data.fetchedAt).toLocaleString()} — refreshed automatically every minute`}>
-            {loading ? 'Pulling from GitHub…' : `Pulled ${relTime(data.fetchedAt)}`}
-          </span>
-        )}
-      </div>
-      {data?.ghMissing && (
-        <div className="muted small pad">GitHub CLI (gh) not found — the PR list needs it. Install gh and run `gh auth login`.</div>
-      )}
-      {data?.error && (
-        <div className="pad small">
-          <div className="muted" style={{ whiteSpace: 'pre-wrap' }}>
-            Could not pull the PR list from GitHub: {data.error}
-          </div>
-          <Button variant="ghost" size="sm" icon="refresh" onClick={onRefresh}>
-            Try again
-          </Button>
-        </div>
-      )}
-      {!data && (
-        <div className="pad">
-          <Spinner />
-        </div>
-      )}
-      {data && !data.error && !data.ghMissing && (
-        <div className="branches-table">
-          <div className="branches-cols pr-cols">
-            <span>#</span>
-            <span>Pull request</span>
-            <span>Author</span>
-            <span>Updated</span>
-            <span>Status</span>
-            <span className="num">Actions</span>
-          </div>
-          {visible.map((pr) => (
-            <PrRow
-              key={pr.number}
-              pr={pr}
-              onOpen={() => onOpen(pr)}
-              onView={() => onView(pr)}
-              onNewSession={() => onNewSession(pr)}
-            />
-          ))}
-          {visible.length === 0 && <div className="muted pad">{prs.length === 0 ? 'No pull requests on GitHub for this repo.' : 'No pull requests match.'}</div>}
-        </div>
-      )}
-    </>
-  );
-}
-
-function PrRow({
-  pr,
-  onOpen,
-  onView,
-  onNewSession
-}: {
-  pr: GitPullRequest;
-  onOpen: () => void;
-  onView: () => void;
-  onNewSession: () => void;
-}) {
-  const open = pr.state === 'OPEN';
-  const review = pr.reviewDecision === 'APPROVED' ? 'approved' : pr.reviewDecision === 'CHANGES_REQUESTED' ? 'changes requested' : undefined;
-  const diffStat = pr.additions !== undefined || pr.deletions !== undefined ? `+${pr.additions ?? 0} −${pr.deletions ?? 0}` : undefined;
-  // Clicking anywhere but the actions opens the detail dialog, same as an issue row.
-  const onRowClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    if (target.closest('.branch-actions') || target.closest('.pr-open')) return;
-    onOpen();
-  };
-  return (
-    <div className="branch-row pr-row" onClick={onRowClick}>
-      <span className="pr-num mono" title={`Pull request #${pr.number}`}>
-        #{pr.number}
-      </span>
-      <button type="button" className="pr-title pr-open" aria-label={`Read pull request #${pr.number}: ${pr.title}`} onClick={onOpen}>
-        <span className="pr-head">
-          <span title={pr.title}>{pr.title}</span>
-        </span>
-        <span className="pr-refs mono" title={`${pr.headRefName ?? '?'} → ${pr.baseRefName ?? '?'}`}>
-          {pr.headRefName ?? '?'} → {pr.baseRefName ?? '?'}
-          {diffStat && <span className="muted"> · {diffStat}</span>}
-        </span>
-      </button>
-      <span className="pr-author muted small" title={pr.author}>
-        {pr.author ?? '—'}
-      </span>
-      <span className="muted small" title={pr.updatedAt ? new Date(pr.updatedAt).toLocaleString() : undefined}>
-        {pr.updatedAt ? relTime(pr.updatedAt) : '—'}
-      </span>
-      <span className="branch-status">
-        {open ? (
-          pr.isDraft ? (
-            <Badge tone="neutral">Draft</Badge>
-          ) : (
-            <Badge tone="blue">Open</Badge>
-          )
-        ) : pr.state === 'MERGED' ? (
-          <Badge tone="purple">Merged</Badge>
-        ) : (
-          <Badge tone="neutral">Closed</Badge>
-        )}
-        {open && review && (
-          <span className={`small ${pr.reviewDecision === 'APPROVED' ? 'ahead' : 'behind'}`} title={`Review: ${review}`}>
-            {review}
-          </span>
-        )}
-      </span>
-      <div className="branch-actions">
-        <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr.number} on GitHub`} onClick={onView} />
-        <Button
-          variant="ghost"
-          size="sm"
-          icon="sessionPlus"
-          title={`Start a new session on this repo to review PR #${pr.number}`}
-          aria-label={`New session to review PR #${pr.number}`}
-          onClick={onNewSession}
-        />
-      </div>
-    </div>
-  );
-}
-
-function IssueList({
-  data,
-  loading,
-  filter,
-  setFilter,
-  query,
-  setQuery,
-  onRefresh,
-  onOpen,
-  onViewExternal,
-  onNewSession
-}: {
-  data: GitIssueList | null;
-  loading: boolean;
-  filter: IssueFilter;
-  setFilter: (f: IssueFilter) => void;
-  query: string;
-  setQuery: (q: string) => void;
-  onRefresh: () => void;
-  onOpen: (issue: GitIssue) => void;
-  onViewExternal: (issue: GitIssue) => void;
-  onNewSession: (issue: GitIssue) => void;
-}) {
-  const issues = data?.issues ?? [];
-  const counts = {
-    open: issues.filter((i) => i.state === 'OPEN').length,
-    closed: issues.filter((i) => i.state === 'CLOSED').length,
-    all: issues.length
-  };
-  const q = query.trim().toLowerCase();
-  const visible = issues
-    .filter((i) => (filter === 'all' ? true : i.state === filter.toUpperCase()))
-    .filter((i) => !q || i.title.toLowerCase().includes(q) || `#${i.number}`.includes(q) || (i.author ?? '').toLowerCase().includes(q) || (i.labels ?? []).some((l) => l.name.toLowerCase().includes(q)));
-
-  return (
-    <>
-      <div className="branches-toolbar">
-        <div className="branches-search">
-          <Icon name="search" size={13} />
-          <input placeholder="Search issues (title, #number, author, label)…" value={query} onChange={(e) => setQuery(e.target.value)} />
-        </div>
-        <div className="branches-filters">
-          {ISSUE_FILTERS.map((f) => (
-            <button key={f.id} type="button" className={filter === f.id ? 'active' : ''} onClick={() => setFilter(f.id)}>
-              {f.label}
-              {data && counts[f.id] > 0 && <span className="count">{counts[f.id]}</span>}
-            </button>
-          ))}
-        </div>
-        {data && !data.error && !data.ghMissing && (
-          <span className="pr-pulled" title={`${new Date(data.fetchedAt).toLocaleString()} — refreshed automatically every minute`}>
-            {loading ? 'Pulling from GitHub…' : `Pulled ${relTime(data.fetchedAt)}`}
-          </span>
-        )}
-      </div>
-      {data?.ghMissing && (
-        <div className="muted small pad">GitHub CLI (gh) not found — the issue list needs it. Install gh and run `gh auth login`.</div>
-      )}
-      {data?.error && (
-        <div className="pad small">
-          <div className="muted" style={{ whiteSpace: 'pre-wrap' }}>
-            Could not pull the issue list from GitHub: {data.error}
-          </div>
-          <Button variant="ghost" size="sm" icon="refresh" onClick={onRefresh}>
-            Try again
-          </Button>
-        </div>
-      )}
-      {!data && (
-        <div className="pad">
-          <Spinner />
-        </div>
-      )}
-      {data && !data.error && !data.ghMissing && (
-        <div className="branches-table">
-          <div className="branches-cols issue-cols">
-            <span>#</span>
-            <span>Issue</span>
-            <span>Author</span>
-            <span className="num">Actions</span>
-          </div>
-          {visible.map((issue) => (
-            <IssueRow
-              key={issue.number}
-              issue={issue}
-              onOpen={() => onOpen(issue)}
-              onViewExternal={() => onViewExternal(issue)}
-              onNewSession={() => onNewSession(issue)}
-            />
-          ))}
-          {visible.length === 0 && <div className="muted pad">{issues.length === 0 ? 'No issues on GitHub for this repo.' : 'No issues match.'}</div>}
-        </div>
-      )}
-    </>
-  );
-}
-
-function IssueRow({ issue, onOpen, onViewExternal, onNewSession }: { issue: GitIssue; onOpen: () => void; onViewExternal: () => void; onNewSession: () => void }) {
-  const onRowClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    if (target.closest('.branch-actions') || target.closest('.issue-open')) return;
-    onOpen();
-  };
-  return (
-    <div className="branch-row pr-row issue-row" onClick={onRowClick}>
-      <span className="issue-num mono" title={`Issue #${issue.number}`}>
-        #{issue.number}
-      </span>
-      <button type="button" className="pr-title issue-open" aria-label={`Read issue #${issue.number}: ${issue.title}`} onClick={onOpen}>
-        <span className="pr-head">
-          <span className="issue-title" title={issue.title}>
-            {issue.title}
-          </span>
-        </span>
-        {(issue.labels?.length || issue.comments) && (
-          <span className="pr-refs">
-            {(issue.labels ?? []).slice(0, 4).map((l) => (
-              <Badge key={l.name} tone="neutral" title={`Label: ${l.name}`}>
-                {l.name}
-              </Badge>
-            ))}
-            {!!issue.comments && <span className="muted small">{issue.comments} comment{issue.comments === 1 ? '' : 's'}</span>}
-          </span>
-        )}
-      </button>
-      <span className="pr-author muted small" title={issue.author}>
-        {issue.author ?? '—'}
-      </span>
-      <div className="branch-actions">
-        <Button variant="ghost" size="sm" icon="external" title={`Open issue #${issue.number} on GitHub`} onClick={onViewExternal} />
-        <Button
-          variant="ghost"
-          size="sm"
-          icon="sessionPlus"
-          title={`Start a new session on this repo to fix issue #${issue.number}`}
-          aria-label={`New session on issue #${issue.number}`}
-          onClick={onNewSession}
-        />
-      </div>
-    </div>
-  );
-}
-
-/**
- * Pulls one issue's or PR's conversation comments when its preview opens. The list payload only
- * carries the count, so bodies are fetched on demand; `null` means the fetch is still in flight.
- */
-function useGitComments(channel: 'git:issueComments' | 'git:prComments', sessionId: string, number: number) {
-  const [comments, setComments] = useState<GitComment[] | null>(null);
-  const [error, setError] = useState<string | undefined>();
-  useEffect(() => {
-    let live = true;
-    setComments(null);
-    setError(undefined);
-    invoke(channel, { sessionId, number })
-      .then((r) => {
-        if (!live) return;
-        setComments(r.comments ?? []);
-        setError(r.error ?? (r.ghMissing ? 'GitHub CLI (gh) is not available, so comments cannot be shown.' : undefined));
-      })
-      .catch((e: unknown) => {
-        if (!live) return;
-        setComments([]);
-        setError(String((e as Error).message ?? e));
-      });
-    return () => {
-      live = false;
-    };
-  }, [channel, sessionId, number]);
-  return { comments, error };
-}
-
-/** One conversation comment with GitHub's markdown rendered; links open in the OS browser. */
-function CommentRow({ comment }: { comment: GitComment }) {
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const bodyHtml = useMemo(() => renderMarkdown(comment.body ?? ''), [comment.body]);
-  useEffect(() => {
-    if (!bodyRef.current || !bodyHtml) return;
-    return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
-  }, [bodyHtml]);
-  const association = comment.authorAssociation && comment.authorAssociation !== 'NONE' ? comment.authorAssociation.toLowerCase().replace(/_/g, ' ') : undefined;
-  return (
-    <article className="git-comment">
-      <header className="git-comment-head">
-        <strong>{comment.author ?? 'unknown'}</strong>
-        {association && <Badge tone="neutral">{association}</Badge>}
-        {comment.createdAt !== undefined && (
-          <span className="muted small" title={new Date(comment.createdAt).toLocaleString()}>
-            {relTime(comment.createdAt)}
-          </span>
-        )}
-      </header>
-      {bodyHtml ? (
-        <div ref={bodyRef} className="md git-comment-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} />
-      ) : (
-        <p className="muted small git-comment-body">(no text)</p>
-      )}
-    </article>
-  );
-}
-
-/** The conversation below an issue or PR preview: a loading note until the fetch settles, then the comments (or a note when there are none). */
-function CommentsSection({ comments, error, loading }: { comments: GitComment[] | null; error?: string; loading: boolean }) {
-  return (
-    <section className="git-comments" aria-label="Comments">
-      <h4 className="git-comments-title">Comments{comments && comments.length > 0 ? ` (${comments.length})` : ''}</h4>
-      {error && <p className="muted small git-comments-note">{error}</p>}
-      {!error && loading && <p className="muted small git-comments-note">Loading comments…</p>}
-      {!error && !loading && comments && comments.length === 0 && <p className="muted small git-comments-note">No comments yet.</p>}
-      {comments?.map((c, i) => (
-        <CommentRow key={c.url ?? i} comment={c} />
-      ))}
-    </section>
-  );
-}
-
-function IssueDialog({
-  issue,
-  sessionId,
-  onClose,
-  onViewExternal,
-  onNewSession
-}: {
-  issue: GitIssue;
-  sessionId: string;
-  onClose: () => void;
-  onViewExternal: () => void;
-  onNewSession: () => void;
-}) {
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const bodyHtml = useMemo(() => renderMarkdown(issue.body ?? ''), [issue.body]);
-  const { comments, error } = useGitComments('git:issueComments', sessionId, issue.number);
-  useEffect(() => {
-    if (!bodyRef.current || !bodyHtml) return;
-    return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
-  }, [bodyHtml]);
-  const stateLabel = issue.state === 'OPEN' ? 'Open' : 'Closed';
-
-  return (
-    <Modal
-      title={<><span className="mono muted">#{issue.number}</span> {issue.title}</>}
-      onClose={onClose}
-      width={760}
-      footer={
-        <>
-          <Button variant="ghost" icon="external" onClick={onViewExternal}>
-            Open on GitHub
-          </Button>
-          <Button variant="primary" icon="plus" onClick={onNewSession}>
-            Start session
-          </Button>
-        </>
-      }
-    >
-      <div className="issue-dialog-meta">
-        <Badge tone={issue.state === 'OPEN' ? 'green' : 'neutral'}>{stateLabel}</Badge>
-        {issue.author && <span>Opened by <strong>{issue.author}</strong></span>}
-        {issue.comments !== undefined && <span>{issue.comments} comment{issue.comments === 1 ? '' : 's'}</span>}
-        {issue.createdAt !== undefined && <span title={new Date(issue.createdAt).toLocaleString()}>Opened {relTime(issue.createdAt)}</span>}
-        {issue.updatedAt !== undefined && <span title={new Date(issue.updatedAt).toLocaleString()}>Updated {relTime(issue.updatedAt)}</span>}
-        {issue.state === 'CLOSED' && issue.closedAt !== undefined && <span title={new Date(issue.closedAt).toLocaleString()}>Closed {relTime(issue.closedAt)}</span>}
-        {issue.labels?.map((label) => (
-          <Badge key={label.name} tone="neutral" title={`Label: ${label.name}`}>
-            {label.name}
-          </Badge>
-        ))}
-      </div>
-      {bodyHtml ? <div ref={bodyRef} className="md issue-dialog-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} /> : <p className="muted issue-dialog-empty">No description provided.</p>}
-      <CommentsSection comments={comments} error={error} loading={comments === null} />
-    </Modal>
-  );
-}
-
-function ListedPrDialog({ pr, sessionId, onClose, onViewExternal, onMerge }: {
-  pr: GitPullRequest;
-  sessionId: string;
-  onClose: () => void;
-  onViewExternal: () => void;
-  onMerge: () => void;
-}) {
-  const { comments, error } = useGitComments('git:prComments', sessionId, pr.number);
-  return <PrDialog number={pr.number} pr={pr} comments={comments} commentsError={error} onClose={onClose} onViewExternal={onViewExternal} onMerge={onMerge} />;
-}
-
-function PrDialog({
-  number,
-  pr,
-  comments,
-  commentsError,
-  loadError,
-  onClose,
-  onViewExternal,
-  onMerge
-}: {
-  number: number;
-  pr?: GitPullRequest;
-  comments: GitComment[] | null;
-  commentsError?: string;
-  loadError?: string;
-  onClose: () => void;
-  onViewExternal: () => void;
-  onMerge?: () => void;
-}) {
-  const mergeable = pr?.state === 'OPEN' && !pr.isDraft && !!pr.headRefName;
-  return (
-    <Modal
-      title={<><span className="mono muted">#{number}</span> {pr?.title}</>}
-      onClose={onClose}
-      width={760}
-      footer={
-        <>
-          <Button variant="ghost" icon="external" onClick={onViewExternal}>
-            Open on GitHub
-          </Button>
-          {pr && onMerge && (
-            <Button
-              variant="primary"
-              icon="check"
-              disabled={!mergeable}
-              title={mergeable ? `Merge ${pr.headRefName} into ${pr.baseRefName ?? 'its target branch'}` : pr.isDraft ? 'Draft pull requests cannot be merged' : 'Only open pull requests can be merged'}
-              onClick={onMerge}
-            >
-              Merge PR
-            </Button>
-          )}
-        </>
-      }
-    >
-      {pr ? <PrDetails pr={pr} comments={comments} error={commentsError} /> : loadError ? (
-        <div className="callout warn" role="status">{loadError}</div>
-      ) : (
-        <div className="muted" role="status"><Spinner /> Loading pull request…</div>
-      )}
-    </Modal>
-  );
-}
-
-function PrDetails({ pr, comments, error }: { pr: GitPullRequest; comments: GitComment[] | null; error?: string }) {
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const bodyHtml = useMemo(() => renderMarkdown(pr.body ?? ''), [pr.body]);
-  useEffect(() => {
-    if (!bodyRef.current || !bodyHtml) return;
-    return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
-  }, [bodyHtml]);
-  const stateLabel = pr.state === 'MERGED' ? 'Merged' : pr.state === 'CLOSED' ? 'Closed' : pr.isDraft ? 'Draft' : 'Open';
-  const stateTone = pr.state === 'MERGED' ? 'purple' : pr.state === 'CLOSED' ? 'neutral' : pr.isDraft ? 'neutral' : 'green';
-  const review = pr.reviewDecision === 'APPROVED' ? 'Approved' : pr.reviewDecision === 'CHANGES_REQUESTED' ? 'Changes requested' : undefined;
-  const diffStat = pr.additions !== undefined || pr.deletions !== undefined ? `+${pr.additions ?? 0} −${pr.deletions ?? 0}` : undefined;
-  return (
-    <>
-      <div className="pr-dialog-meta">
-        <Badge tone={stateTone}>{stateLabel}</Badge>
-        {review && <Badge tone={pr.reviewDecision === 'APPROVED' ? 'green' : 'red'} title={`Review: ${review}`}>{review}</Badge>}
-        {pr.author && <span>Opened by <strong>{pr.author}</strong></span>}
-        {(pr.headRefName || pr.baseRefName) && <span className="mono">{pr.headRefName ?? '?'} → {pr.baseRefName ?? '?'}</span>}
-        {diffStat && <span title="Changed lines">{diffStat}</span>}
-        {pr.comments !== undefined && <span>{pr.comments} comment{pr.comments === 1 ? '' : 's'}</span>}
-        {pr.createdAt !== undefined && <span title={new Date(pr.createdAt).toLocaleString()}>Opened {relTime(pr.createdAt)}</span>}
-        {pr.updatedAt !== undefined && <span title={new Date(pr.updatedAt).toLocaleString()}>Updated {relTime(pr.updatedAt)}</span>}
-        {pr.state === 'MERGED' && pr.mergedAt !== undefined && <span title={new Date(pr.mergedAt).toLocaleString()}>Merged {relTime(pr.mergedAt)}</span>}
-        {pr.labels?.map((label) => (
-          <Badge key={label.name} tone="neutral" title={`Label: ${label.name}`}>
-            {label.name}
-          </Badge>
-        ))}
-      </div>
-      {bodyHtml ? <div ref={bodyRef} className="md pr-dialog-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} /> : <p className="muted pr-dialog-empty">No description provided.</p>}
-      <CommentsSection comments={comments} error={error} loading={comments === null} />
-    </>
-  );
-}
-
-function WorktreeRow({
-  wt,
-  current,
-  sessions,
-  branchSessions,
-  onOpen,
-  onRemove
-}: {
-  wt: GitWorktreeInfo;
-  current: boolean;
-  sessions: number;
-  branchSessions: number;
-  onOpen: () => void;
-  onRemove: () => void;
-}) {
-  const busy = sessions > 0 || branchSessions > 0;
-  return (
-    <div className="branch-row">
-      <div className="branch-name">
-        <Icon name="folder" size={12} />
-        <span className="mono" title={wt.path}>{basename(wt.path)}</span>
-        {current && <Badge tone="green">This session</Badge>}
-      </div>
-      <span className="muted small mono">{wt.detached ? 'detached' : wt.branch ?? '—'}</span>
-      <span className="small">{sessions + branchSessions || <span className="muted">0</span>}</span>
-      <span className="branch-status">{busy ? <Badge tone="blue">In use</Badge> : <Badge tone="neutral">Idle</Badge>}</span>
-      <div className="branch-actions">
-        <Button variant="ghost" size="sm" icon="external" title="Open worktree folder in editor" onClick={onOpen} />
-        {!current && !wt.detached && (
-          <Button variant="ghost" size="sm" icon="trash" title={busy ? 'Sessions still use this worktree' : 'Remove worktree (branch stays)'} disabled={busy} onClick={onRemove} />
-        )}
-      </div>
     </div>
   );
 }
