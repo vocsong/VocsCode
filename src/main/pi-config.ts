@@ -16,15 +16,9 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 import type {
-  PiAgentInfo,
   PiCommandResult,
-  PiPackageItem,
-  PiPackageKind,
-  PiPreferences,
   PiPreferencesPatch,
-  PiPromptFile,
   PiPromptName,
   PiResourceItem,
   PiResourceType,
@@ -33,24 +27,59 @@ import type {
   PiSubagentsSettings
 } from '../shared/types';
 import { piAgentDir } from './pi-agents';
-import { parseFrontmatter } from './skills';
 import { spawnTool, killTree } from './harness/spawn';
 import { errorMessage } from './util/async';
 import { isSubPath, writeJson } from './util/fs';
 import type { Logger } from './log';
+import {
+  configuredResources,
+  DISCOVERERS,
+  listPiAgents,
+  PI_PROMPT_NAMES,
+  PI_RESOURCE_TYPES,
+  PROMPT_FILE_LIMIT,
+  readPackages,
+  readPromptFiles,
+  readSettingsFile,
+  type FoundResource
+} from './pi/discovery';
+import {
+  applyPatternsToFiles,
+  matchPiGlob,
+  normalizePattern,
+  packageLocation,
+  packageResourceEnabled,
+  piResourceEnabled,
+  stringArray,
+  toPosix
+} from './pi/patterns';
+import {
+  deleteNested,
+  normalizePreference,
+  normalizeSubagentValue,
+  object,
+  PREFERENCE_PATHS,
+  readPreferences,
+  sanitizeSubagents,
+  setNested,
+  str,
+  SUBAGENT_KEYS,
+  type FlatKey
+} from './pi/preferences';
 
-export const PI_RESOURCE_TYPES: PiResourceType[] = ['extensions', 'skills', 'prompts', 'themes'];
-export const PI_PROMPT_NAMES: PiPromptName[] = ['SYSTEM.md', 'APPEND_SYSTEM.md', 'AGENTS.md'];
+export {
+  applyPatternsToFiles,
+  matchPiGlob,
+  packageLocation,
+  packageResourceEnabled,
+  PI_PROMPT_NAMES,
+  PI_RESOURCE_TYPES,
+  piResourceEnabled
+};
 
-/** UTF-8 byte budget for global prompt files; also bounds the IPC payload. */
-const PROMPT_FILE_LIMIT = 512 * 1024;
 /** Package installs can take a while (git clone + npm install); the handler waits, then kills. */
 const PI_COMMAND_TIMEOUT_MS = 300_000;
 const PI_COMMAND_LOG_LIMIT = 64 * 1024;
-
-const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const TRANSPORTS = new Set(['auto', 'sse', 'websocket', 'websocket-cached']);
-const TRUST_LEVELS = new Set(['ask', 'always', 'never']);
 
 export interface PiPaths {
   agentDir: string;
@@ -76,651 +105,6 @@ export function piPaths(env: NodeJS.ProcessEnv = process.env, home?: string): Pi
 function homeDirFor(env: NodeJS.ProcessEnv): string {
   return env.USERPROFILE ?? env.HOME ?? os.homedir();
 }
-
-interface SettingsRead {
-  settings: Record<string, unknown>;
-  error?: string;
-}
-
-/**
- * Reads settings.json without the quarantining readJson helper: a malformed pi settings file must
- * be surfaced to the user and left alone, not copied to a `.corrupt-*` artifact pi never wrote.
- */
-async function readSettingsFile(settingsPath: string): Promise<SettingsRead> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(settingsPath, 'utf8');
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { settings: {} };
-    return { settings: {}, error: `Could not read ${settingsPath}: ${errorMessage(e)}` };
-  }
-  try {
-    const parsed: unknown = JSON.parse(raw.replace(/^\uFEFF/, ''));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { settings: {}, error: `${settingsPath} is not a JSON object` };
-    return { settings: parsed as Record<string, unknown> };
-  } catch (e) {
-    return { settings: {}, error: `${settingsPath} is not valid JSON: ${errorMessage(e)}` };
-  }
-}
-
-function str(v: unknown): string | undefined {
-  return typeof v === 'string' && v.trim() ? v.trim() : undefined;
-}
-
-function bool(v: unknown): boolean | undefined {
-  return typeof v === 'boolean' ? v : undefined;
-}
-
-function positiveInt(v: unknown): number | undefined {
-  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
-}
-
-function object(v: unknown): Record<string, unknown> {
-  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
-}
-
-/** The curated subset of global settings, read defensively: a hand-edited value is ignored, not echoed. */
-function readPreferences(settings: Record<string, unknown>): PiPreferences {
-  const compaction = object(settings.compaction);
-  const retry = object(settings.retry);
-  const level = str(settings.defaultThinkingLevel);
-  const transport = str(settings.transport);
-  const trust = str(settings.defaultProjectTrust);
-  return {
-    ...(level && THINKING_LEVELS.has(level) ? { defaultThinkingLevel: level } : {}),
-    ...(transport && TRANSPORTS.has(transport) ? { transport } : {}),
-    showCacheMissNotices: bool(settings.showCacheMissNotices),
-    ...(trust && TRUST_LEVELS.has(trust) ? { defaultProjectTrust: trust } : {}),
-    httpProxy: str(settings.httpProxy),
-    enableSkillCommands: bool(settings.enableSkillCommands),
-    compactionEnabled: bool(compaction.enabled),
-    compactionReserveTokens: positiveInt(compaction.reserveTokens),
-    compactionKeepRecentTokens: positiveInt(compaction.keepRecentTokens),
-    retryEnabled: bool(retry.enabled),
-    retryMaxRetries: retry.maxRetries === 0 ? 0 : positiveInt(retry.maxRetries),
-    retryBaseDelayMs: positiveInt(retry.baseDelayMs)
-  };
-}
-
-type FlatKey = keyof PiPreferences;
-
-/** Nested target for each flat preference; delete removes the key so pi's default returns. */
-const PREFERENCE_PATHS: Record<FlatKey, string[]> = {
-  defaultThinkingLevel: ['defaultThinkingLevel'],
-  transport: ['transport'],
-  showCacheMissNotices: ['showCacheMissNotices'],
-  defaultProjectTrust: ['defaultProjectTrust'],
-  httpProxy: ['httpProxy'],
-  enableSkillCommands: ['enableSkillCommands'],
-  compactionEnabled: ['compaction', 'enabled'],
-  compactionReserveTokens: ['compaction', 'reserveTokens'],
-  compactionKeepRecentTokens: ['compaction', 'keepRecentTokens'],
-  retryEnabled: ['retry', 'enabled'],
-  retryMaxRetries: ['retry', 'maxRetries'],
-  retryBaseDelayMs: ['retry', 'baseDelayMs']
-};
-
-/** Rejects a hand-edited or stale value at the boundary rather than writing something pi ignores. */
-function normalizePreference(key: FlatKey, value: unknown): string | number | boolean {
-  const reject = (): never => {
-    throw new Error(`Invalid value for ${key}: ${JSON.stringify(value)}`);
-  };
-  switch (key) {
-    case 'defaultThinkingLevel':
-      return typeof value === 'string' && THINKING_LEVELS.has(value) ? value : reject();
-    case 'transport':
-      return typeof value === 'string' && TRANSPORTS.has(value) ? value : reject();
-    case 'defaultProjectTrust':
-      return typeof value === 'string' && TRUST_LEVELS.has(value) ? value : reject();
-    case 'httpProxy': {
-      if (typeof value !== 'string' || value.length > 500) return reject();
-      return value.trim();
-    }
-    case 'showCacheMissNotices':
-    case 'enableSkillCommands':
-    case 'compactionEnabled':
-    case 'retryEnabled':
-      return typeof value === 'boolean' ? value : reject();
-    case 'compactionReserveTokens':
-    case 'compactionKeepRecentTokens':
-      return typeof value === 'number' && Number.isInteger(value) && value >= 1024 && value <= 1_000_000 ? value : reject();
-    case 'retryMaxRetries':
-      return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 10 ? value : reject();
-    case 'retryBaseDelayMs':
-      return typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 60_000 ? value : reject();
-  }
-}
-
-function setNested(target: Record<string, unknown>, keys: string[], value: unknown): void {
-  let node = target;
-  for (const key of keys.slice(0, -1)) {
-    const child = node[key];
-    const next: Record<string, unknown> = child && typeof child === 'object' && !Array.isArray(child) ? { ...(child as Record<string, unknown>) } : {};
-    node[key] = next;
-    node = next;
-  }
-  node[keys[keys.length - 1]] = value;
-}
-
-function deleteNested(target: Record<string, unknown>, keys: string[]): void {
-  const parents: Record<string, unknown>[] = [];
-  let node: Record<string, unknown> | undefined = target;
-  for (const key of keys.slice(0, -1)) {
-    parents.push(node);
-    node = object(node[key]);
-  }
-  if (!node) return;
-  delete node[keys[keys.length - 1]];
-  for (let i = parents.length - 1; i >= 0; i--) {
-    const parent = parents[i];
-    const key = keys[i];
-    if (Object.keys(object(parent[key])).length === 0) delete parent[key];
-  }
-}
-
-function toPosix(p: string): string {
-  return p.split(path.sep).join('/');
-}
-
-/** Same normalization pi applies before comparing an exact `+`/`-` pattern. */
-function normalizePattern(pattern: string): string {
-  const stripped = pattern.startsWith('./') || pattern.startsWith('.\\') ? pattern.slice(2) : pattern;
-  return toPosix(stripped);
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-}
-
-/** A compact glob matcher for pi's `!` patterns: `**` crosses separators, `*`/`?` stay in one. */
-export function matchPiGlob(pattern: string, candidate: string): boolean {
-  let re = '';
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]!;
-    if (c === '*') {
-      if (pattern[i + 1] === '*') {
-        i++;
-        if (pattern[i + 1] === '/') {
-          i++;
-          re += '(?:.*/)?';
-        } else re += '.*';
-      } else re += '[^/]*';
-    } else if (c === '?') re += '[^/]';
-    else re += escapeRegExp(c);
-  }
-  try {
-    return new RegExp(`^${re}$`).test(candidate);
-  } catch {
-    return false;
-  }
-}
-
-interface FoundResource {
-  type: PiResourceType;
-  name: string;
-  description?: string;
-  path: string;
-}
-
-function stringArray(v: unknown): string[] {
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && !!x) : [];
-}
-
-/** Candidate strings a pattern may name for one file: its path and, for skills, its folder. */
-function patternTargets(filePath: string, baseDir: string, skill: boolean): string[] {
-  const targets = [toPosix(path.relative(baseDir, filePath)), toPosix(path.resolve(filePath))];
-  if (skill) {
-    targets.push(toPosix(path.relative(baseDir, path.dirname(filePath))), toPosix(path.dirname(path.resolve(filePath))));
-  }
-  return targets;
-}
-
-function matchesExactTarget(filePath: string, pattern: string, baseDir: string, skill = false): boolean {
-  return patternTargets(filePath, baseDir, skill).includes(normalizePattern(pattern));
-}
-
-function matchesGlobTarget(filePath: string, pattern: string, baseDir: string, skill = false): boolean {
-  return patternTargets(filePath, baseDir, skill).some((t) => matchPiGlob(normalizePattern(pattern), t));
-}
-
-/**
- * Mirrors pi's `applyPatterns` for a list of resource files: plain entries are an include
- * allowlist, `!` excludes with globs, `+` force-includes exact paths, `-` force-excludes them.
- */
-export function applyPatternsToFiles(files: string[], patterns: string[], baseDir: string): Set<string> {
-  const includes = patterns.filter((p) => !/^[!+-]/.test(p));
-  const excludes = patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1));
-  const forceIncludes = patterns.filter((p) => p.startsWith('+')).map((p) => p.slice(1));
-  const forceExcludes = patterns.filter((p) => p.startsWith('-')).map((p) => p.slice(1));
-  let result = includes.length ? files.filter((f) => includes.some((p) => matchesGlobTarget(f, p, baseDir))) : [...files];
-  if (excludes.length) result = result.filter((f) => !excludes.some((p) => matchesGlobTarget(f, p, baseDir)));
-  if (forceIncludes.length) for (const f of files) if (!result.includes(f) && forceIncludes.some((p) => matchesExactTarget(f, p, baseDir))) result.push(f);
-  if (forceExcludes.length) result = result.filter((f) => !forceExcludes.some((p) => matchesExactTarget(f, p, baseDir)));
-  return new Set(result);
-}
-
-/**
- * Whether pi would load `filePath`, mirroring package-manager's `isEnabledByOverrides`: plain
- * settings entries do not filter auto-discovered resources — only `!` excludes by glob, then `+`
- * force-includes by exact path, then `-` force-excludes. Skill patterns may name the SKILL.md or
- * its containing folder, as pi allows.
- */
-export function piResourceEnabled(type: PiResourceType, filePath: string, agentDir: string, settings: Record<string, unknown>): { enabled: boolean; forced: boolean } {
-  const entries = stringArray(settings[type]);
-  const skill = type === 'skills';
-  const excludes = entries.filter((e) => e.startsWith('!')).map((e) => e.slice(1));
-  const forceIncludes = entries.filter((e) => e.startsWith('+')).map((e) => e.slice(1));
-  const forceExcludes = entries.filter((e) => e.startsWith('-')).map((e) => e.slice(1));
-  const excluded = excludes.some((p) => matchesGlobTarget(filePath, p, agentDir, skill));
-  const forcedIn = forceIncludes.some((p) => matchesExactTarget(filePath, p, agentDir, skill));
-  const forcedOut = forceExcludes.some((p) => matchesExactTarget(filePath, p, agentDir, skill));
-  let enabled = true;
-  if (excluded) enabled = false;
-  if (forcedIn) enabled = true;
-  if (forcedOut) enabled = false;
-  return { enabled, forced: excluded || forcedIn || forcedOut };
-}
-
-/**
- * One file inside a package, mirroring package-manager's package filter rules:
- * no array at all means every resource loads (unless `autoload:false` means only explicit filters
- * do); an explicit empty array disables the type; otherwise `applyPatterns` decides, and under
- * `autoload:false` the patterns are a delta where the last match wins.
- */
-export function packageResourceEnabled(filePath: string, patterns: string[] | undefined, baseDir: string, autoload: boolean): boolean {
-  if (patterns === undefined) return autoload;
-  if (!autoload) {
-    let enabled = false;
-    for (const entry of patterns) {
-      const kind = entry.startsWith('+') ? '+' : entry.startsWith('-') ? '-' : entry.startsWith('!') ? '!' : '';
-      const target = entry.slice(kind ? 1 : 0);
-      const matched = kind === '+' || kind === '-' ? matchesExactTarget(filePath, target, baseDir) : matchesGlobTarget(filePath, target, baseDir);
-      if (matched) enabled = kind !== '-' && kind !== '!';
-    }
-    return enabled;
-  }
-  if (patterns.length === 0) return false;
-  return applyPatternsToFiles([filePath], patterns, baseDir).has(filePath);
-}
-
-/** How a package source string is materialized on disk, following pi's own conventions. */
-export function packageLocation(source: string, agentDir: string, home: string): { kind: PiPackageKind; path: string } {
-  const source0 = source.trim();
-  if (source0.startsWith('npm:')) {
-    const spec = source0.slice('npm:'.length).trim();
-    const at = spec.lastIndexOf('@');
-    const name = at > 0 ? spec.slice(0, at) : spec;
-    return { kind: 'npm', path: path.join(agentDir, 'npm', 'node_modules', ...name.split('/')) };
-  }
-  const bare = source0.startsWith('git:') ? source0.slice('git:'.length).trim() : source0;
-  const gitPath = gitHostPath(bare);
-  if (gitPath) return { kind: 'git', path: path.join(agentDir, 'git', ...gitPath.split('/')) };
-  const expanded = bare.startsWith('~/') || bare.startsWith('~\\') ? path.join(home, bare.slice(2)) : bare;
-  return { kind: 'local', path: path.resolve(agentDir, expanded) };
-}
-
-/** `host/owner/repo` for the git URL spellings pi accepts, or null when it is not a git source. */
-function gitHostPath(source: string): string | null {
-  let host: string;
-  let repoPath: string;
-  const scp = /^git@([^:/]+):(.+)$/.exec(source);
-  if (scp) {
-    host = scp[1]!;
-    repoPath = scp[2]!;
-  } else if (/^(?:https?|ssh|git):\/\//i.test(source)) {
-    try {
-      const url = new URL(source);
-      host = url.hostname;
-      repoPath = url.pathname;
-    } catch {
-      return null;
-    }
-  } else if (/^[\w.-]+\.[a-z]{2,}\//i.test(source)) {
-    const slash = source.indexOf('/');
-    host = source.slice(0, slash);
-    repoPath = source.slice(slash + 1);
-  } else {
-    return null;
-  }
-  repoPath = repoPath.replace(/^\/+/, '').replace(/\.git$/i, '').replace(/@[^/]+$/, '').replace(/\/+$/, '');
-  if (!host || !repoPath || /[\\\0]/.test(repoPath) || repoPath.split('/').some((s) => !s || s === '..' || s === '.')) return null;
-  return `${host}/${repoPath}`;
-}
-
-async function statFile(p: string): Promise<import('node:fs').Stats | null> {
-  try {
-    return await fs.stat(p);
-  } catch {
-    return null;
-  }
-}
-
-async function readdirSafe(dir: string): Promise<import('node:fs').Dirent[]> {
-  try {
-    return await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-}
-
-/** Names and descriptions the way pi's config UI shows them for one resource file. */
-async function describeFile(type: PiResourceType, file: string): Promise<FoundResource> {
-  const base = path.basename(file);
-  if (type === 'extensions') {
-    const parent = path.basename(path.dirname(file));
-    return { type, name: parent === 'extensions' ? base : `${parent}/${base}`, path: file };
-  }
-  if (type === 'skills') {
-    let description: string | undefined;
-    let name = path.basename(path.dirname(file));
-    try {
-      const fm = parseFrontmatter(await fs.readFile(file, 'utf8'));
-      if (fm.name?.trim()) name = fm.name.trim();
-      if (fm.description?.trim()) description = fm.description.trim();
-    } catch {
-      /* unreadable SKILL.md still lists, with the folder name */
-    }
-    return { type, name, description, path: file };
-  }
-  if (type === 'prompts') {
-    let description: string | undefined;
-    try {
-      const fm = parseFrontmatter(await fs.readFile(file, 'utf8'));
-      if (fm.description?.trim()) description = fm.description.trim();
-    } catch {
-      /* unreadable template still lists by filename */
-    }
-    return { type, name: base, description, path: file };
-  }
-  let name = base;
-  try {
-    const parsed: unknown = JSON.parse(await fs.readFile(file, 'utf8'));
-    const themeName = parsed && typeof parsed === 'object' ? str((parsed as Record<string, unknown>).name) : undefined;
-    if (themeName) name = themeName;
-  } catch {
-    /* malformed themes are pi's to report; list by filename */
-  }
-  return { type, name, path: file };
-}
-
-async function discoverExtensions(dir: string): Promise<FoundResource[]> {
-  const out: FoundResource[] = [];
-  for (const entry of await readdirSafe(dir)) {
-    if (entry.name.startsWith('.')) continue;
-    const full = path.join(dir, entry.name);
-    if (entry.isFile() && /\.(m?[jt]s|cjs)$/.test(entry.name)) {
-      out.push(await describeFile('extensions', full));
-    } else if (entry.isDirectory()) {
-      for (const index of ['index.ts', 'index.js', 'index.mjs', 'index.cjs']) {
-        const file = path.join(full, index);
-        if (await statFile(file)) {
-          out.push(await describeFile('extensions', file));
-          break;
-        }
-      }
-    }
-  }
-  return out;
-}
-
-async function discoverSkills(dir: string): Promise<FoundResource[]> {
-  const out: FoundResource[] = [];
-  for (const entry of await readdirSafe(dir)) {
-    if (entry.name.startsWith('.')) continue;
-    // Symlinked skill folders are common (dotfile managers), so isSymbolicLink counts too.
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-    const file = path.join(dir, entry.name, 'SKILL.md');
-    if (!(await statFile(file))) continue;
-    out.push(await describeFile('skills', file));
-  }
-  return out;
-}
-
-async function discoverPrompts(dir: string): Promise<FoundResource[]> {
-  const out: FoundResource[] = [];
-  for (const entry of await readdirSafe(dir)) {
-    if (entry.name.startsWith('.') || !entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
-    out.push(await describeFile('prompts', path.join(dir, entry.name)));
-  }
-  return out;
-}
-
-async function discoverThemes(dir: string): Promise<FoundResource[]> {
-  const out: FoundResource[] = [];
-  for (const entry of await readdirSafe(dir)) {
-    if (entry.name.startsWith('.') || !entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue;
-    out.push(await describeFile('themes', path.join(dir, entry.name)));
-  }
-  return out;
-}
-
-const DISCOVERERS: Record<PiResourceType, (dir: string) => Promise<FoundResource[]>> = {
-  extensions: discoverExtensions,
-  skills: discoverSkills,
-  prompts: discoverPrompts,
-  themes: discoverThemes
-};
-
-/** Also surfaces exact files a plain settings entry adds from outside the default dirs (no globs). */
-async function configuredResources(type: PiResourceType, agentDir: string, settings: Record<string, unknown>, found: FoundResource[]): Promise<FoundResource[]> {
-  const seen = new Set(found.map((r) => path.resolve(r.path)));
-  for (const entry of stringArray(settings[type])) {
-    if (/^[!+-]/.test(entry) || /[*?]/.test(entry)) continue;
-    const target = path.resolve(agentDir, entry);
-    if (seen.has(target)) continue;
-    const stat = await statFile(target);
-    if (!stat) continue;
-    if (stat.isFile()) {
-      found.push({ type, name: path.basename(target), path: target });
-      seen.add(target);
-    } else if (stat.isDirectory()) {
-      for (const r of await DISCOVERERS[type](target)) {
-        const abs = path.resolve(r.path);
-        if (seen.has(abs)) continue;
-        found.push(r);
-        seen.add(abs);
-      }
-    }
-  }
-  return found;
-}
-
-async function readPromptFiles(agentDir: string): Promise<PiPromptFile[]> {
-  return Promise.all(
-    PI_PROMPT_NAMES.map(async (name): Promise<PiPromptFile> => {
-      const file = path.join(agentDir, name);
-      try {
-        const buf = await fs.readFile(file);
-        const truncated = buf.length > PROMPT_FILE_LIMIT;
-        // Do not flush a partial UTF-8 sequence at the byte boundary as a replacement character.
-        const content = truncated ? new StringDecoder('utf8').write(buf.subarray(0, PROMPT_FILE_LIMIT)) : buf.toString('utf8');
-        return { name, path: file, exists: true, content, ...(truncated ? { truncated: true } : {}) };
-      } catch {
-        return { name, path: file, exists: false, content: '' };
-      }
-    })
-  );
-}
-
-// ---------------------------------------------------------------------------------------------
-// Packages
-
-const PACKAGE_WALK_SKIP = new Set(['node_modules', '.git']);
-const PACKAGE_WALK_LIMIT = 5000;
-
-/** Bounded recursive file listing for manifest globs; package trees with a node_modules are deep. */
-async function walkPackageFiles(root: string): Promise<string[]> {
-  const out: string[] = [];
-  const queue: { dir: string; depth: number }[] = [{ dir: root, depth: 0 }];
-  while (queue.length && out.length < PACKAGE_WALK_LIMIT) {
-    const { dir, depth } = queue.shift()!;
-    if (depth > 8) continue;
-    for (const entry of await readdirSafe(dir)) {
-      if (entry.name.startsWith('.') || PACKAGE_WALK_SKIP.has(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) queue.push({ dir: full, depth: depth + 1 });
-      else if (entry.isFile()) out.push(full);
-      if (out.length >= PACKAGE_WALK_LIMIT) break;
-    }
-  }
-  return out;
-}
-
-/** Resolves one non-override manifest entry: a file, a directory of resources, or a glob. */
-async function expandPackageEntry(entry: string, pkgRoot: string, type: PiResourceType): Promise<string[]> {
-  if (/[*?]/.test(entry)) {
-    const pattern = normalizePattern(entry);
-    return (await walkPackageFiles(pkgRoot)).filter((f) => matchPiGlob(pattern, toPosix(path.relative(pkgRoot, f))));
-  }
-  const target = path.resolve(pkgRoot, entry);
-  const stat = await statFile(target);
-  if (!stat) return [];
-  if (stat.isFile()) return [target];
-  return (await DISCOVERERS[type](target)).map((r) => r.path);
-}
-
-/** The package.json `pi` manifest, or null when it is absent or malformed. */
-async function readPiManifest(pkgRoot: string): Promise<Record<string, unknown> | null> {
-  const pkg = await readPackageJson(pkgRoot);
-  const pi = pkg?.pi;
-  return pi && typeof pi === 'object' && !Array.isArray(pi) ? (pi as Record<string, unknown>) : null;
-}
-
-async function readPackageJson(pkgRoot: string): Promise<Record<string, unknown> | null> {
-  try {
-    const parsed: unknown = JSON.parse(await fs.readFile(path.join(pkgRoot, 'package.json'), 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Every file of one resource type a package provides, with the manifest's own filters applied. */
-async function packageFilesForType(pkgRoot: string, type: PiResourceType, manifest: Record<string, unknown> | null): Promise<FoundResource[]> {
-  const entries = stringArray(manifest?.[type]);
-  if (entries.length) {
-    const files: string[] = [];
-    for (const entry of entries) {
-      if (/^[!+-]/.test(entry)) continue;
-      files.push(...(await expandPackageEntry(entry, pkgRoot, type)));
-    }
-    const unique = [...new Set(files.map((f) => path.resolve(f)))];
-    const overrides = entries.filter((e) => /^[!+-]/.test(e));
-    const enabled = applyPatternsToFiles(unique, overrides, pkgRoot);
-    return Promise.all(unique.filter((f) => enabled.has(f)).map((f) => describeFile(type, f)));
-  }
-  return DISCOVERERS[type](path.join(pkgRoot, type));
-}
-
-/** Every package declared in global settings.json.packages, with its resources and filter state. */
-async function readPackages(agentDir: string, settings: Record<string, unknown>, home: string): Promise<PiPackageItem[]> {
-  const raw = Array.isArray(settings.packages) ? settings.packages : [];
-  const out: PiPackageItem[] = [];
-  for (const entry of raw) {
-    const record = entry && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Record<string, unknown>) : null;
-    const source = typeof entry === 'string' ? entry : typeof record?.source === 'string' ? record.source : '';
-    if (!source.trim()) continue;
-    const loc = packageLocation(source, agentDir, home);
-    const autoload = record?.autoload !== false;
-    const item: PiPackageItem = { source, kind: loc.kind, path: loc.path, installed: false, autoload, resources: [] };
-    const stat = await statFile(loc.path);
-    if (!stat?.isDirectory()) {
-      item.error = 'Not installed yet — use Update to fetch it.';
-      out.push(item);
-      continue;
-    }
-    item.installed = true;
-    try {
-      const manifest = await readPiManifest(loc.path);
-      const pkgName = str((await readPackageJson(loc.path))?.name);
-      if (pkgName) item.name = pkgName;
-      for (const type of PI_RESOURCE_TYPES) {
-        const patterns = record && Array.isArray(record[type]) ? stringArray(record[type]) : undefined;
-        for (const f of await packageFilesForType(loc.path, type, manifest)) {
-          item.resources.push({
-            type,
-            name: f.name,
-            ...(f.description ? { description: f.description } : {}),
-            path: f.path,
-            enabled: packageResourceEnabled(f.path, patterns, loc.path, autoload),
-            forced: patterns !== undefined
-          });
-        }
-      }
-      item.resources.sort((a, b) => PI_RESOURCE_TYPES.indexOf(a.type) - PI_RESOURCE_TYPES.indexOf(b.type) || a.name.localeCompare(b.name));
-    } catch (e) {
-      item.error = errorMessage(e);
-    }
-    out.push(item);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------------------------
-// pi-subagents (agents on disk + global subagents.json)
-
-async function listPiAgents(agentDir: string): Promise<PiAgentInfo[]> {
-  const out: PiAgentInfo[] = [];
-  for (const entry of await readdirSafe(path.join(agentDir, 'agents'))) {
-    if (entry.name.startsWith('.') || !entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
-    const file = path.join(agentDir, 'agents', entry.name);
-    let name = entry.name.replace(/\.md$/i, '');
-    let description: string | undefined;
-    let model: string | undefined;
-    try {
-      const fm = parseFrontmatter(await fs.readFile(file, 'utf8'));
-      if (fm.name?.trim()) name = fm.name.trim();
-      if (fm.description?.trim()) description = fm.description.trim();
-      if (fm.model?.trim()) model = fm.model.trim();
-    } catch {
-      /* unreadable agent still lists by filename */
-    }
-    out.push({ name, ...(description ? { description } : {}), ...(model ? { model } : {}), path: file });
-  }
-  return out.sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/** Bounds mirror pi-subagents' own sanitize() so a stale value cannot survive here either. */
-const SUBAGENT_LIMITS: Partial<Record<keyof PiSubagentsSettings, [number, number]>> = {
-  maxConcurrent: [1, 1024],
-  maxConcurrentForeground: [0, 1024],
-  defaultMaxTurns: [0, 10_000],
-  maxSubagentDepth: [0, 16]
-};
-const SUBAGENT_BOOL_KEYS: (keyof PiSubagentsSettings)[] = ['reportUsage', 'showCost', 'showModel', 'backgroundByDefault', 'worktreeIsolation', 'rememberAgents', 'strictAgentFiles', 'disableDefaultAgents'];
-const SUBAGENT_KEYS = new Set<string>([...SUBAGENT_BOOL_KEYS, ...Object.keys(SUBAGENT_LIMITS), 'fallbackSubagent']);
-
-/** Rejects a patch value pi-subagents would silently drop, rather than writing it. */
-function normalizeSubagentValue(key: string, value: unknown): boolean | number | string {
-  if (SUBAGENT_BOOL_KEYS.includes(key as keyof PiSubagentsSettings)) {
-    if (typeof value !== 'boolean') throw new Error(`Invalid value for ${key}: ${JSON.stringify(value)}`);
-    return value;
-  }
-  const limits = SUBAGENT_LIMITS[key as keyof PiSubagentsSettings];
-  if (limits) {
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < limits[0] || value > limits[1]) throw new Error(`Invalid value for ${key}: ${JSON.stringify(value)}`);
-    return value;
-  }
-  if (typeof value !== 'string' || !value.trim() || value.trim().length > 100) throw new Error(`Invalid value for ${key}: ${JSON.stringify(value)}`);
-  return value.trim();
-}
-
-/** Keeps only well-formed curated keys, the way pi-subagents' own sanitize() does. */
-function sanitizeSubagents(raw: unknown): PiSubagentsSettings {
-  const r = object(raw);
-  const out: Record<string, unknown> = {};
-  for (const key of SUBAGENT_BOOL_KEYS) if (typeof r[key] === 'boolean') out[key] = r[key];
-  for (const [key, [min, max]] of Object.entries(SUBAGENT_LIMITS) as [string, [number, number]][]) {
-    const v = r[key];
-    if (typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max) out[key] = v;
-  }
-  const fallback = str(r.fallbackSubagent);
-  if (fallback) out.fallbackSubagent = fallback;
-  return out as PiSubagentsSettings;
-}
-
-// ---------------------------------------------------------------------------------------------
-// The pi CLI runner
 
 export type PiRunner = (args: string[]) => Promise<PiCommandResult>;
 
