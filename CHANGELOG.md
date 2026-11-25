@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.13.0](https://github.com/vocsong/VocsCode/compare/v0.12.0...v0.13.0) (2026-11-25)
+
+
+### Features
+
+* **acp:** render Antigravity ask_question options via ACP form elicitation ([#663](https://github.com/vocsong/VocsCode/issues/663)) ([4cffa8f](https://github.com/vocsong/VocsCode/commit/4cffa8ff295891e7da1cbc85db927ece56be48ad))
+* add Lead and Builder Mission mode ([0de8722](https://github.com/vocsong/VocsCode/commit/0de8722211aa5b498384861dda9ebad1d8c32d78))
+* add wheel zoom and drag to image previews ([#659](https://github.com/vocsong/VocsCode/issues/659)) ([4d8bc92](https://github.com/vocsong/VocsCode/commit/4d8bc923c685920a455eeb482ff26d952bbcdbc1))
+* **knowledge:** measure local usage and usefulness ([#660](https://github.com/vocsong/VocsCode/issues/660)) ([e45a8ba](https://github.com/vocsong/VocsCode/commit/e45a8ba6b38dafa0bb0e2c4564e038adf691c274))
+* **sessions:** surface subprocess PIDs, detached processes, and ACP ongoing activity ([#664](https://github.com/vocsong/VocsCode/issues/664)) ([07d1966](https://github.com/vocsong/VocsCode/commit/07d19667f4bf73bcaac253abc9820d88602b6eeb))
+* **usage:** show subscription limits inline ([#666](https://github.com/vocsong/VocsCode/issues/666)) ([9758be9](https://github.com/vocsong/VocsCode/commit/9758be90652ba9f90f720ea927597594ee4b90fb))
+* **web:** align the analytics dashboard with Vocs UI ([#672](https://github.com/vocsong/VocsCode/issues/672)) ([8546d6b](https://github.com/vocsong/VocsCode/commit/8546d6bce00aea9c115d005290d0068804b785ac))
+
+
+### Bug Fixes
+
+* match the file editor gutter to the app theme ([#658](https://github.com/vocsong/VocsCode/issues/658)) ([a820d13](https://github.com/vocsong/VocsCode/commit/a820d137f4a1145b200d3abead38c24476cb21e7))
+* **release:** contain mobile charts and repair gate fixtures ([#685](https://github.com/vocsong/VocsCode/issues/685)) ([476f0ae](https://github.com/vocsong/VocsCode/commit/476f0ae23986bc5175de9e0501e36239762b7780))
+* **test:** resolve vitest bin dynamically in runner scripts and complete tsconfig paths ([#682](https://github.com/vocsong/VocsCode/issues/682)) ([1c4ad94](https://github.com/vocsong/VocsCode/commit/1c4ad949339f81bea82dbf0bdc0861f0eb856707))
+* **ui:** flow Fast mode lightning around the composer ([#662](https://github.com/vocsong/VocsCode/issues/662)) ([2f0ae42](https://github.com/vocsong/VocsCode/commit/2f0ae42203ae588c21d38d3f43a4152bddc92a35))
+* **ui:** make Fast mode sparks bolder and keep them apart ([#668](https://github.com/vocsong/VocsCode/issues/668)) ([29725cf](https://github.com/vocsong/VocsCode/commit/29725cf5939802156a7d54d333dfdc5b4008dcbd))
+* **ui:** move Mission toggle beside the first prompt ([#670](https://github.com/vocsong/VocsCode/issues/670)) ([1235a87](https://github.com/vocsong/VocsCode/commit/1235a87fc858294181a1feee7af69e8157f7134b))
+* **ui:** randomize Fast mode lightning discharges ([#667](https://github.com/vocsong/VocsCode/issues/667)) ([b32e51f](https://github.com/vocsong/VocsCode/commit/b32e51f2b9d3f5c05045138a102d57abf378dc0e))
+* **ui:** run Fast mode lightning along the composer border ([#675](https://github.com/vocsong/VocsCode/issues/675)) ([2317420](https://github.com/vocsong/VocsCode/commit/2317420211d4ef33b2c5d49228ceaf7bc463b655))
+* **ui:** use Creeping current for Fast mode lightning ([#669](https://github.com/vocsong/VocsCode/issues/669)) ([7f8fb7e](https://github.com/vocsong/VocsCode/commit/7f8fb7e053cf464689f01c272617fbe29c4ce368))
+* **usage:** show quota values before provider actions ([#671](https://github.com/vocsong/VocsCode/issues/671)) ([428829b](https://github.com/vocsong/VocsCode/commit/428829b8b4a48db31110f9a98f39e889b0dd8e09))
+
 ## [0.12.0](https://github.com/vocsong/VocsCode/compare/v0.11.0...v0.12.0) (2026-11-24)
 
 
