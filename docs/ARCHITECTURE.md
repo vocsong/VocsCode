@@ -8,11 +8,12 @@ Technical reference moved out of the README. For the friendly overview, read the
 src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette, interface modes (no runtime deps)
 src/main
   harness/        adapters → normalized SessionEvent stream
-    claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
+    claude.ts + claude-{provider,gateway-mcp,subscription,ongoing,usage,tools,subagents}.ts   Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
     codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
     codex-exec.ts SDK fallback
     cursor.ts     @cursor/sdk, local runtime; sandbox + plan-mode allowlist instead of approvals
-    pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
+    pi.ts + pi-{models,launch,subagents,usage}.ts   pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
+    provider-env.ts  shared provider-id → API-key env var map used by Pi, ACP, and registry model discovery
     acp.ts        Agent Client Protocol client (Google Antigravity and generic ACP agents)
     antigravity.ts  Antigravity CLI settings, account probe and quota decoding
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
