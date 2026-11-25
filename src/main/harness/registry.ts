@@ -16,6 +16,7 @@ import { CursorAdapter, listCursorModels } from './cursor';
 import { CodexExecAdapter } from './codex-exec';
 import { NativeAdapter } from './native';
 import { PiAdapter, listPiModels } from './pi';
+import { PROVIDER_ENV_KEYS } from './provider-env';
 import type { HarnessAdapter, HarnessContext } from './types';
 
 export function createAdapter(id: HarnessId, ctx: HarnessContext): HarnessAdapter {
@@ -96,7 +97,7 @@ async function listHarnessModelsRaw(opts: {
         const bin = runtime.resolve('pi');
         if (!bin) return { models: [], error: 'pi is not installed.' };
         const env: NodeJS.ProcessEnv = {};
-        for (const [pid, envKey] of Object.entries({ anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', deepseek: 'DEEPSEEK_API_KEY', openrouter: 'OPENROUTER_API_KEY', 'opencode-go': 'OPENCODE_API_KEY', gemini: 'GEMINI_API_KEY', groq: 'GROQ_API_KEY', xai: 'XAI_API_KEY', mistral: 'MISTRAL_API_KEY' })) {
+        for (const [pid, envKey] of Object.entries(PROVIDER_ENV_KEYS)) {
           if (!process.env[envKey]) {
             const k = await opts.getApiKey(pid);
             if (k) env[envKey] = k;

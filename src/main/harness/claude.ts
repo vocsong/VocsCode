@@ -3,212 +3,62 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   query,
-  createSdkMcpServer,
   type CanUseTool,
   type HookCallback,
-  type McpSdkServerConfigWithInstance,
   type ModelUsage,
   type Options,
-  type PermissionMode as SdkPermissionMode,
   type PermissionResult,
   type Query,
   type SDKMessage,
-  type SDKRateLimitEvent,
   type SDKUserMessage,
-  type SettingSource,
   type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
-import type { AppSettings, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, OngoingItem, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { isBuiltinMissionMcpName, isBuiltinTrustedMcpName } from '../../shared/builtin-tools';
 import { fastModeSupport } from '../../shared/fast-mode';
-import { assertEndpointUrl } from '../../shared/endpoint-policy';
-import type { ObservedSubscriptionWindow } from '../../shared/subscription-usage';
-import { hasClaudeAgentPins } from '../claude-agents';
-import { toClaude } from '../mcp/effective';
-import { MEMORY_GATEWAY_TOKEN_ENV, MEMORY_GATEWAY_URL_ENV, VOCS_MEMORY_SERVER_ID } from '../mcp/memory';
-import { MISSION_GATEWAY_TOKEN_ENV, MISSION_GATEWAY_URL_ENV, VOCS_MISSION_SERVER_ID } from '../mcp/mission';
-import { claudeSdkCatalog } from '../models/claude-catalog';
-import { resolveProviderApiKey } from '../models/providers';
-import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
-import { subagentDir } from '../subagents';
+import { isClaudeGatewayProvider } from '../../shared/providers';
 import { subagentSupport, type AgentTypeInfo } from '../../shared/subagents';
-import { anthropicAuthFor, anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
+import type { ObservedSubscriptionWindow } from '../../shared/subscription-usage';
+import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UserInput } from '../../shared/types';
+import { toClaude } from '../mcp/effective';
+import { claudeSdkCatalog } from '../models/claude-catalog';
+import { modelsForProvider } from '../models/static-models';
+import { subagentDir } from '../subagents';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
-import { exists } from '../util/fs';
-import { TurnUsageTracker } from '../util/turn-usage';
-import { UsageReporter } from '../util/usage-reporter';
+import { ClaudeGatewayBridges, GATEWAY_BRIDGES, GATEWAY_ENV_NAMES, gatewayBridgeFor } from './claude-gateway-mcp';
+import { ClaudeOngoingTracker } from './claude-ongoing';
+import {
+  claudeHarnessCommands,
+  claudeProjectInstructions,
+  claudeProviderEnv,
+  claudeProviderFor,
+  listClaudeModels,
+  MAX_CONCURRENT_SUBAGENTS,
+  resolveClaudeProviderEnv,
+  scrubClaudeLaunchEnv,
+  subagentModelEnv
+} from './claude-provider';
 import { SUBAGENT_TOOLS, ClaudeSubagentRuns, type NestedAssistantLike, type TaskNotificationLike, type TaskProgressLike, type TaskStartedLike, type TaskUpdatedLike } from './claude-subagents';
+import { allowsSubscriptionObservation, ClaudeSubscriptionTracker } from './claude-subscription';
+import {
+  askClaudeUserQuestion,
+  DELEGATION_TOOLS,
+  EDIT_TOOLS,
+  extractText,
+  previewClaudeChange,
+  READ_ONLY_TOOLS,
+  SESSION_CONTROL_TOOLS,
+  summarizeInput,
+  toolHint,
+  toSdkMode
+} from './claude-tools';
+import { ClaudeUsageTracker } from './claude-usage';
+import { reportHarnessCommands } from './commands';
 import { gateAction, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL, requiresPathApproval, type GateVerdict } from './permissions';
-import { isBuiltinMissionMcpName, isBuiltinTrustedMcpName } from '../../shared/builtin-tools';
-import { projectInstructionBlock } from './project-instructions';
-import { questionAnswerWithNote } from './question-answers';
 import { missionPrompt, sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext } from './types';
-import { reportHarnessCommands } from './commands';
-import type { HarnessCommand } from '../../shared/harness-commands';
 
-/** Delay before surfacing a Claude hook as ongoing work, so fast hooks never flicker in the UI. */
-const HOOK_VISIBILITY_DELAY_MS = 250;
-
-/** Records a live Claude background task (from `background_tasks_changed` or edge fallback). */
-interface LiveBackgroundTask {
-  taskId: string;
-  taskType: string;
-  description: string;
-  startedAt: number;
-}
-
-/** Records a live user/project Claude hook between `hook_started` and `hook_response`. */
-interface LiveHookRun {
-  hookId: string;
-  hookName: string;
-  hookEvent: string;
-  startedAt: number;
-  visible: boolean;
-  timer?: NodeJS.Timeout;
-}
-
-function isInternalHookName(hookName: string | undefined): boolean {
-  if (!hookName) return true;
-  return hookName === 'callback' || hookName.endsWith(':callback');
-}
-const APP_ID = 'vocs-code/0.1.0';
-/**
- * How many subagents one session may run at once. Claude Code's own default is 20, a number tuned
- * for a single terminal; a session here fans out deliberately (a review spread across thirty
- * areas), and a spawn past the cap is refused outright, so the tail of that fan-out is lost. Each
- * concurrent run is its own conversation, so cost is the real brake, not this number.
- */
-const MAX_CONCURRENT_SUBAGENTS = 32;
-
-/**
- * Claude Code's own project-document names. With `'project'` in `settingSources` its engine
- * discovers these itself (following `@` imports), so the adapter must leave them to it: handing the
- * same instructions over again costs context and buries the file that was actually missing. The
- * bundled CLI reads no other instruction file, so a project whose rules live only in `AGENTS.md` —
- * the convention pi, Codex and the native loop follow — would otherwise run unprimed.
- */
-const CLAUDE_PROJECT_DOC_FILES = ['CLAUDE.md', '.claude/CLAUDE.md', 'CLAUDE.local.md'];
-
-/**
- * The project instructions the Claude engine does not read. `AGENTS.md` is added only where the
- * directory has no Claude document, matching the engine's own fallback rule (never both for one
- * directory) so a repo that maintains `CLAUDE.md` — e.g. `@AGENTS.md` — is not duplicated.
- * `.vocs-code/INSTRUCTIONS.md` has no engine equivalent, so it is added whenever it exists.
- */
-export async function claudeProjectInstructions(cwd: string): Promise<string | undefined> {
-  let agents = true;
-  for (const name of CLAUDE_PROJECT_DOC_FILES) {
-    if (await exists(path.join(cwd, name))) {
-      agents = false;
-      break;
-    }
-  }
-  const names = [...(agents ? ['AGENTS.md'] : []), '.vocs-code/INSTRUCTIONS.md'];
-  return (await projectInstructionBlock(cwd, names)) || undefined;
-}
-
-const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
-const READ_ONLY_TOOLS = new Set([
-  'Read',
-  'Glob',
-  'Grep',
-  'LS',
-  'WebSearch',
-  'WebFetch',
-  'TodoWrite',
-  'TodoRead',
-  'TaskCreate',
-  'TaskUpdate',
-  'TaskList',
-  'TaskGet',
-  'ToolSearch',
-  'AskUserQuestion',
-  'ListMcpResourcesTool',
-  'ReadMcpResourceTool',
-  'Skill'
-]);
-/**
- * Tools that steer the Claude session itself (questions, subagents, plan mode, background-task
- * control) rather than the project, the shell or the network. The PreToolUse gate leaves them to
- * Claude Code's own pipeline, which reaches canUseTool when it would ask: AskUserQuestion needs
- * canUseTool to collect its answers, and what a subagent does is gated call by call in its own run.
- */
-const SESSION_CONTROL_TOOLS = new Set(['AskUserQuestion', 'Agent', 'Task', 'TaskOutput', 'TaskStop', 'KillShell', 'BashOutput', 'EnterPlanMode']);
-
-/** Claude Code's own delegation tools. A mission session delegates through its Builders instead. */
-const DELEGATION_TOOLS = ['Agent', 'Task'];
-
-/**
- * The app's token-bearing stdio servers. The SDK flattens process MCP configs (stdio env included)
- * into `--mcp-config` argv, so these are run by this host and relayed to Claude in-process, where
- * Claude reports them with the source `sdk`.
- */
-const GATEWAY_BRIDGES = [
-  { id: VOCS_MEMORY_SERVER_ID, urlEnv: MEMORY_GATEWAY_URL_ENV, tokenEnv: MEMORY_GATEWAY_TOKEN_ENV, label: 'memory', title: 'Memory' },
-  { id: VOCS_MISSION_SERVER_ID, urlEnv: MISSION_GATEWAY_URL_ENV, tokenEnv: MISSION_GATEWAY_TOKEN_ENV, label: 'mission', title: 'Mission' }
-] as const;
-type GatewayBridge = (typeof GATEWAY_BRIDGES)[number];
-
-function gatewayBridgeFor(def: McpServerDef): GatewayBridge | undefined {
-  return GATEWAY_BRIDGES.find((kind) => def.id === kind.id && (def.env?.[kind.urlEnv] !== undefined || def.env?.[kind.tokenEnv] !== undefined));
-}
-
-const GATEWAY_ENV_NAMES = new Set<string>(GATEWAY_BRIDGES.flatMap((kind) => [kind.urlEnv, kind.tokenEnv]));
-
-/**
- * The CLI's command rows as the composer offers them. Rows can share a name; `/name` runs the
- * built-in one when a built-in row has it, so that is the row kept. Anything not built in is a user,
- * project, plugin or MCP command — all of which Claude Code now loads as skills.
- */
-export function claudeHarnessCommands(commands: readonly SlashCommand[]): HarnessCommand[] {
-  const builtin = new Set(commands.filter((c) => c.builtin).map((c) => c.name.trim().toLowerCase()));
-  return commands
-    .filter((c) => c.builtin || !builtin.has(c.name.trim().toLowerCase()))
-    .map((c) => ({ name: c.name, description: c.description, argumentHint: c.argumentHint, aliases: c.aliases, kind: c.builtin ? 'command' : 'skill' }));
-}
-
-function toSdkMode(mode: PermissionMode): SdkPermissionMode {
-  switch (mode) {
-    case 'ask':
-      return 'default';
-    case 'accept-edits':
-      return 'acceptEdits';
-    case 'plan':
-      return 'plan';
-    case 'auto':
-    case 'full-auto':
-      // The app gate decides every call (PreToolUse, then canUseTool), so the CLI stays in its
-      // prompting mode and is never handed `bypassPermissions`: Full access is the gate allowing
-      // everything, which applies live and needs no `allowDangerouslySkipPermissions`.
-      return 'default';
-  }
-}
-
-function summarizeInput(toolName: string, input: Record<string, unknown>): string {
-  const i = input as Record<string, unknown>;
-  if (typeof i.command === 'string') return i.command;
-  if (typeof i.file_path === 'string') return i.file_path as string;
-  if (typeof i.path === 'string') return i.path as string;
-  if (typeof i.pattern === 'string') return `${i.pattern}${typeof i.path === 'string' ? ` in ${i.path}` : ''}`;
-  if (typeof i.url === 'string') return i.url as string;
-  if (typeof i.query === 'string') return i.query as string;
-  if (typeof i.description === 'string') return i.description as string;
-  if (typeof i.prompt === 'string') return truncate(i.prompt as string, 200, '…');
-  const s = JSON.stringify(i);
-  return s.length > 200 ? s.slice(0, 200) + '…' : s;
-}
-
-function toolHint(toolName: string): TranscriptItem extends infer _ ? 'read' | 'edit' | 'execute' | 'search' | 'fetch' | 'think' | 'mcp' | 'agent' | 'other' : never {
-  if (toolName === 'Bash' || toolName === 'PowerShell') return 'execute';
-  if (EDIT_TOOLS.has(toolName)) return 'edit';
-  if (toolName === 'Read') return 'read';
-  if (toolName === 'Glob' || toolName === 'Grep' || toolName === 'LS') return 'search';
-  if (toolName === 'WebFetch' || toolName === 'WebSearch') return 'fetch';
-  if (toolName === 'Agent' || toolName === 'Task') return 'agent';
-  if (toolName.startsWith('mcp__')) return 'mcp';
-  return 'other';
-}
+export { claudeHarnessCommands, claudeProjectInstructions, claudeProviderEnv, claudeProviderFor, listClaudeModels, resolveClaudeProviderEnv };
 
 interface ContentBlockLike {
   type: string;
@@ -222,49 +72,10 @@ interface ContentBlockLike {
   is_error?: boolean;
 }
 
-function finiteCounter(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : undefined;
-}
-
-function counterDelta(previous: number, current: number): number {
-  return current >= previous ? current - previous : current;
-}
-
-const SUBSCRIPTION_WINDOW_TTL_MS = 10 * 60_000;
-const SUBSCRIPTION_WINDOWS = {
-  five_hour: { name: '5-hour limit', durationMs: 5 * 60 * 60_000 },
-  seven_day: { name: 'Weekly limit', durationMs: 7 * 24 * 60 * 60_000 }
-} as const;
-type SubscriptionWindowType = keyof typeof SUBSCRIPTION_WINDOWS;
-
-const NON_SUBSCRIPTION_ENV = new Set([
-  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_UNIX_SOCKET',
-  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
-  'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_GATEWAY', '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL'
-]);
-
-/** The final launch env after the app's provider overlay, not a second source of credentials. */
-function allowsSubscriptionObservation(env: NonNullable<Options['env']>): boolean {
-  return Object.entries(env).every(([key, value]) => {
-    if (!value) return true;
-    const name = process.platform === 'win32' ? key.toUpperCase() : key;
-    if (name === 'ANTHROPIC_BASE_URL') return value.replace(/\/+$/, '') === ANTHROPIC_DEFAULT_BASE_URL;
-    return !NON_SUBSCRIPTION_ENV.has(name);
-  });
-}
-
-interface ClaudeSubscriptionObservation {
-  query: Query;
-  sessionId?: string;
-  account: 'unchecked' | 'checking' | 'verified' | 'refused';
-  windows: Map<SubscriptionWindowType, ObservedSubscriptionWindow>;
-}
-
 export class ClaudeAdapter implements HarnessAdapter {
   readonly id = 'claude' as const;
   private q: Query | null = null;
-  private subscription: ClaudeSubscriptionObservation | undefined;
+  private readonly subscription = new ClaudeSubscriptionTracker();
   private fastMode = false;
   private fastModeModel: ModelRef | undefined;
   private input = new AsyncQueue<SDKUserMessage>();
@@ -285,12 +96,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private fileSnapshots = new Map<string, string | null>();
   private turnStartedAt = 0;
-  private readonly usage: TurnUsageTracker;
-  private readonly usageReporter: UsageReporter;
-  /** Output usage is cumulative within the current Anthropic streaming response. */
-  private streamOutputTokens = 0;
-  private streamReasoningTokens = 0;
-  private streamInputReported = false;
+  private readonly usage: ClaudeUsageTracker;
   private started = false;
   private modelsEmitted = false;
   private compactionWaiter: Deferred<void> | null = null;
@@ -298,20 +104,17 @@ export class ClaudeAdapter implements HarnessAdapter {
   private autoCompactionWindow: number | null | undefined;
   /** Records the delegated runs Claude Code spawns, so the Subagents panel can show them. */
   private readonly subagents: ClaudeSubagentRuns;
-  /** Live non-ambient background tasks from `background_tasks_changed` (or edge fallback on older CLIs). */
-  private readonly backgroundTasks = new Map<string, LiveBackgroundTask>();
-  /** True once this CLI process has emitted the authoritative `background_tasks_changed` level signal. */
-  private seenBackgroundTasksSnapshot = false;
-  /** Live user/project hooks between `hook_started` and `hook_response`. */
-  private readonly activeHooks = new Map<string, LiveHookRun>();
-  /** Depth of Vocs Code's own SDK hook callbacks (`preToolUse` / `postToolUse`), never surfaced as user hooks. */
-  private internalHookDepth = 0;
-  /** One closer per in-process gateway bridge (memory, Mission) this launch opened. */
-  private gatewayClosers: (() => Promise<void>)[] = [];
+  private readonly ongoing: ClaudeOngoingTracker;
+  /** Manages in-process gateway bridges (memory, Mission) opened for this launch. */
+  private readonly gatewayBridges = new ClaudeGatewayBridges();
 
   constructor(private readonly ctx: HarnessContext) {
-    this.usage = new TurnUsageTracker(ctx.session().usage);
-    this.usageReporter = new UsageReporter((event) => this.ctx.emit(event));
+    this.usage = new ClaudeUsageTracker(ctx.session().usage, {
+      emit: (event) => this.ctx.emit(event),
+      providerId: () => this.providerId,
+      activeModel: () => this.ctx.session().activeModel?.model,
+      providers: () => this.ctx.settings().providers
+    });
     this.subagents = new ClaudeSubagentRuns({
       // Recording is a side feature: a context without a session directory turns it off rather
       // than making the adapter unconstructible.
@@ -321,6 +124,10 @@ export class ClaudeAdapter implements HarnessAdapter {
       models: () => modelsForProvider(this.ctx.settings().providers, this.providerId),
       emit: (event) => this.ctx.emit(event),
       log: (level, message) => this.ctx.log(level, message)
+    });
+    this.ongoing = new ClaudeOngoingTracker({
+      emit: (event) => this.ctx.emit(event),
+      lookupSubagentByTaskId: (taskId) => this.subagents.lookupByTaskId(taskId)
     });
   }
 
@@ -341,14 +148,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     // Windows cannot launch a batch shim through the SDK's shell-free spawn. If the resolver
     // found no native executable, fail before query() instead of falling into an opaque SDK error.
     if (process.platform === 'win32' && !bin) throw new Error('Claude Agent SDK needs a native Claude Code executable. Reinstall Vocs Code (or run npm install --include=dev in a dev checkout), or select a native .exe; npm .cmd/.bat shims cannot be spawned.');
-    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
-    // Never let this app's own Claude Code host variables leak into a nested session.
-    for (const k of Object.keys(env)) {
-      if (k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_CODE_USE_BEDROCK' && k !== 'CLAUDE_CODE_USE_VERTEX' && k !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[k];
-      const name = process.platform === 'win32' ? k.toUpperCase() : k;
-      if (GATEWAY_ENV_NAMES.has(name) || name === 'VOCS_CODE_MCP_EPHEMERAL') delete env[k];
-    }
-    delete env.CLAUDECODE;
+    const env = scrubClaudeLaunchEnv(process.env, GATEWAY_ENV_NAMES);
     // After the scrub, which would otherwise drop it with every other CLAUDE_CODE_* variable. The
     // SDK reads the cap from the child's environment and, left alone, applies its own default.
     env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = String(MAX_CONCURRENT_SUBAGENTS);
@@ -430,27 +230,26 @@ export class ClaudeAdapter implements HarnessAdapter {
       options.env = { ...(options.env ?? {}), ...overlay };
       auth = overlay.ANTHROPIC_BASE_URL ? 'configured-endpoint' : 'stored-key';
     }
-    options.env = { ...(options.env ?? {}), ...(await this.subagentModelEnv(options.model)) };
+    options.env = { ...(options.env ?? {}), ...(await subagentModelEnv(meta.config.projectRoot, options.model)) };
     this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
     for (const kind of GATEWAY_BRIDGES) {
       const defs = gatewayDefs.filter((def) => def.id === kind.id);
       if (!defs.length) continue;
-      const bridge = defs.length === 1 ? await this.gatewayMcpBridge(defs[0]!, kind, meta.cwd) : undefined;
+      const bridge = defs.length === 1 ? await this.gatewayBridges.open(defs[0]!, kind, meta.cwd, this.abort.signal) : undefined;
       this.abort.signal.throwIfAborted();
       if (bridge) {
         options.mcpServers = { ...options.mcpServers, [kind.id]: bridge };
         if (defs[0]!.builtin === kind.id) this.builtinServers.set(kind.id, 'sdk');
-      }
-      else this.ctx.log('warn', `[claude] ${kind.label} gateway MCP unavailable; skipping it for this launch`);
+      } else this.ctx.log('warn', `[claude] ${kind.label} gateway MCP unavailable; skipping it for this launch`);
     }
     try {
       this.q = query({ prompt: this.input, options });
     } catch (error) {
-      await this.closeGatewayBridges();
+      await this.gatewayBridges.closeAll();
       throw error;
     }
     if (!this.abort.signal.aborted && !s.claude.useProviderKey && !this.gateway && allowsSubscriptionObservation(options.env)) {
-      this.subscription = { query: this.q, account: 'unchecked', windows: new Map() };
+      this.subscription.attach(this.q);
     }
     // This CLI counts the tokens and dollars of the process that is starting, not of the session:
     // a resumed process opens at zero, so without this the first turn after every resume would be
@@ -466,62 +265,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'error', message: `Claude harness stopped: ${errorMessage(e)}`, fatal: true });
       this.ctx.emit({ type: 'status', status: 'error', detail: errorMessage(e) });
     });
-    if (this.gatewayClosers.length) this.pump = this.pump.finally(() => this.closeGatewayBridges());
+    if (this.gatewayBridges.hasOpen) this.pump = this.pump.finally(() => this.gatewayBridges.closeAll());
     this.ctx.emit({ type: 'status', status: 'idle' });
-  }
-
-  private async closeGatewayBridges(): Promise<void> {
-    await Promise.all(this.gatewayClosers.splice(0).map((close) => close()));
-  }
-
-  /** Run an app-owned, token-bearing stdio child (memory, Mission) from the SDK host, not from Claude Code. */
-  private async gatewayMcpBridge(def: McpServerDef, kind: GatewayBridge, cwd: string): Promise<McpSdkServerConfigWithInstance | undefined> {
-    if (def.builtin !== kind.id || def.transport !== 'stdio' || !def.command
-      || !def.env?.[kind.urlEnv] || !def.env?.[kind.tokenEnv]) return;
-    let close: (() => Promise<void>) | undefined;
-    try {
-      const [{ Client }, { StdioClientTransport }, { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode }] = await Promise.all([
-        import('@modelcontextprotocol/sdk/client/index.js'),
-        import('@modelcontextprotocol/sdk/client/stdio.js'),
-        import('@modelcontextprotocol/sdk/types.js')
-      ]);
-      this.abort.signal.throwIfAborted();
-      const client = new Client({ name: 'vocs-code', version: '0.1.0' });
-      // Ignore child stderr: a failed handshake can otherwise surface snippets of launch secrets.
-      const transport = new StdioClientTransport({ command: def.command, args: def.args, env: def.env, cwd, stderr: 'ignore' });
-      let closing: Promise<void> | undefined;
-      const closer = () => closing ??= client.close().catch(() => undefined);
-      close = closer;
-      this.gatewayClosers.push(closer);
-      await client.connect(transport, { signal: this.abort.signal, timeout: 10_000 });
-      const timeout = def.timeoutMs && def.timeoutMs >= 1000 ? def.timeoutMs : undefined;
-      const bridge = createSdkMcpServer({
-        name: kind.id,
-        version: client.getServerVersion()?.version,
-        instructions: client.getInstructions(),
-        timeout
-      });
-      // Relay the tool protocol directly: reconstructing via sdkTool() would change the stdio
-      // server's JSON Schemas, annotations and returned content.
-      bridge.instance.server.registerCapabilities({ tools: {} });
-      bridge.instance.server.setRequestHandler(ListToolsRequestSchema, async ({ params }, { signal }) => {
-        try { return await client.listTools(params, { signal, timeout: 10_000 }); }
-        catch { throw new McpError(ErrorCode.InternalError, `${kind.title} gateway MCP tool discovery failed.`); }
-      });
-      bridge.instance.server.setRequestHandler(CallToolRequestSchema, async ({ params }, { signal }) => {
-        // The gateway can take up to 90 seconds before local fallback starts.
-        try { return await client.callTool(params, undefined, { signal, timeout: timeout ?? 120_000 }); }
-        catch { throw new McpError(ErrorCode.InternalError, `${kind.title} gateway MCP request failed.`); }
-      });
-      return bridge;
-    } catch {
-      if (close) {
-        this.gatewayClosers = this.gatewayClosers.filter((entry) => entry !== close);
-        await close();
-      }
-      // No inline fallback and no error detail from the credential-bearing child.
-      return undefined;
-    }
   }
 
   private canUseTool: CanUseTool = (toolName, input, { mcpServer }) => this.authorizeTool(toolName, input, mcpServer);
@@ -558,14 +303,14 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   private async authorizeTool(toolName: string, input: Record<string, unknown>, mcpServer?: { name: string; source: string }): Promise<PermissionResult> {
-    if (toolName === 'AskUserQuestion') return this.askUserQuestion(input);
+    if (toolName === 'AskUserQuestion') return askClaudeUserQuestion(this.ctx, input);
 
     const cwd = this.ctx.session().cwd;
     const { verdict, isEdit, command, outsideWorkspace } = await this.gateTool(toolName, input, mcpServer);
     if (verdict === 'allow') return { behavior: 'allow', updatedInput: input };
     if (verdict === 'deny') return { behavior: 'deny', message: PLAN_MODE_DENIAL };
 
-    const changes = isEdit ? await this.previewChange(toolName, input) : undefined;
+    const changes = isEdit ? await previewClaudeChange(cwd, toolName, input) : undefined;
     const decision = await this.ctx.requestApproval({
       kind: command ? 'command' : isEdit ? 'file_change' : 'tool',
       title: command ? 'Run command?' : isEdit ? `Allow ${toolName}?` : `Allow ${toolName}?`,
@@ -588,74 +333,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     return { behavior: 'deny', message: decision.note?.trim() || 'The user declined this action.' };
   }
 
-  private async askUserQuestion(input: Record<string, unknown>): Promise<PermissionResult> {
-    const qs = Array.isArray(input.questions) ? (input.questions as Record<string, unknown>[]) : [];
-    const decision = await this.ctx.requestApproval({
-      kind: 'question',
-      title: 'Claude has a question',
-      toolName: 'AskUserQuestion',
-      input,
-      options: [
-        { id: 'allow', label: 'Answer', kind: 'allow' },
-        { id: 'deny', label: 'Skip', kind: 'deny' }
-      ],
-      questions: qs.map((q, i) => ({
-        id: String(i),
-        header: typeof q.header === 'string' ? q.header : undefined,
-        question: String(q.question ?? ''),
-        options: Array.isArray(q.options)
-          ? (q.options as Record<string, unknown>[]).map((o) => ({ label: String(o.label ?? ''), description: typeof o.description === 'string' ? o.description : undefined }))
-          : undefined,
-        allowOther: true
-      }))
-    });
-    if (decision.optionId !== 'allow') return { behavior: 'deny', message: decision.note?.trim() || 'The user skipped the question.' };
-    const answers: Record<string, string> = {};
-    qs.forEach((q, i) => {
-      const a = questionAnswerWithNote(decision.answers?.[String(i)], decision.note);
-      if (a !== undefined) answers[String(q.question ?? '')] = a;
-    });
-    return { behavior: 'allow', updatedInput: { ...input, answers } };
-  }
-
-  private async previewChange(toolName: string, input: Record<string, unknown>): Promise<FileChange[] | undefined> {
-    try {
-      const file = String(input.file_path ?? input.path ?? '');
-      if (!file) return undefined;
-      const abs = path.isAbsolute(file) ? file : path.join(this.ctx.session().cwd, file);
-      let before: string | null = null;
-      try {
-        before = await fs.readFile(abs, 'utf8');
-      } catch {
-        before = null;
-      }
-      let after = before ?? '';
-      if (toolName === 'Write') after = String(input.content ?? '');
-      else if (toolName === 'Edit') {
-        const oldS = String(input.old_string ?? '');
-        const newS = String(input.new_string ?? '');
-        after = input.replace_all ? (before ?? '').split(oldS).join(newS) : (before ?? '').replace(oldS, newS);
-      } else if (toolName === 'MultiEdit' && Array.isArray(input.edits)) {
-        for (const e of input.edits as Record<string, unknown>[]) {
-          const oldS = String(e.old_string ?? '');
-          const newS = String(e.new_string ?? '');
-          after = e.replace_all ? after.split(oldS).join(newS) : after.replace(oldS, newS);
-        }
-      } else return undefined;
-      return [makeFileChange(this.ctx.session().cwd, file, before, after, { newFileHeader: '(new file)' })];
-    } catch {
-      return undefined;
-    }
-  }
-
-  private preToolUse: HookCallback = async (input) => {
-    this.internalHookDepth++;
-    try {
-      return await this.runPreToolUse(input);
-    } finally {
-      this.internalHookDepth = Math.max(0, this.internalHookDepth - 1);
-    }
-  };
+  private preToolUse: HookCallback = (input) => this.ongoing.withInternalHook(() => this.runPreToolUse(input));
 
   private async runPreToolUse(input: Parameters<HookCallback>[0]): Promise<Awaited<ReturnType<HookCallback>>> {
     let tierDecision: 'allow' | 'ask' | undefined;
@@ -684,14 +362,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     return { continue: true };
   }
 
-  private postToolUse: HookCallback = async (input) => {
-    this.internalHookDepth++;
-    try {
-      return await this.runPostToolUse(input);
-    } finally {
-      this.internalHookDepth = Math.max(0, this.internalHookDepth - 1);
-    }
-  };
+  private postToolUse: HookCallback = (input) => this.ongoing.withInternalHook(() => this.runPostToolUse(input));
 
   private async runPostToolUse(input: Parameters<HookCallback>[0]): Promise<Awaited<ReturnType<HookCallback>>> {
     if (input.hook_event_name === 'PostToolUse' && EDIT_TOOLS.has(input.tool_name)) {
@@ -718,178 +389,6 @@ export class ClaudeAdapter implements HarnessAdapter {
     return { continue: true };
   }
 
-  private emitBackgroundTasks(): void {
-    const items: OngoingItem[] = [];
-    for (const task of this.backgroundTasks.values()) {
-      const run = this.subagents.lookupByTaskId(task.taskId);
-      if (run || task.taskType === 'local_agent') {
-        items.push({
-          id: run ? `subagent:${run.runId}` : `task:${task.taskId}`,
-          kind: 'subagent',
-          label: run?.description || task.description || 'Subagent',
-          ...(run?.agent ? { agent: run.agent } : {}),
-          ...(run?.runId ? { runId: run.runId } : {}),
-          ...(run?.turns !== undefined ? { turns: run.turns } : {}),
-          ...(run?.toolUses !== undefined ? { toolUses: run.toolUses } : {}),
-          startedAt: run?.startedAt ?? task.startedAt,
-          canStop: false
-        });
-      } else {
-        items.push({
-          id: `task:${task.taskId}`,
-          kind: 'task',
-          label: task.description || task.taskType || 'Background task',
-          ...(task.taskType ? { detail: task.taskType } : {}),
-          startedAt: task.startedAt,
-          canStop: false
-        });
-      }
-    }
-    this.ctx.emit({ type: 'ongoing', source: 'tasks', items });
-  }
-
-  private emitHooks(): void {
-    const items: OngoingItem[] = [];
-    for (const hook of this.activeHooks.values()) {
-      if (!hook.visible) continue;
-      items.push({
-        id: `hook:${hook.hookId}`,
-        kind: 'hook',
-        label: hook.hookName || hook.hookEvent || 'Hook',
-        ...(hook.hookEvent ? { detail: hook.hookEvent } : {}),
-        startedAt: hook.startedAt,
-        canStop: false
-      });
-    }
-    this.ctx.emit({ type: 'ongoing', source: 'hooks', items });
-  }
-
-  private onBackgroundTasksChanged(tasks: readonly { task_id: string; task_type?: string; description?: string; ambient?: boolean }[]): void {
-    this.seenBackgroundTasksSnapshot = true;
-    const prev = new Map(this.backgroundTasks);
-    this.backgroundTasks.clear();
-    const now = Date.now();
-    for (const t of tasks) {
-      if (!t || typeof t.task_id !== 'string' || !t.task_id || t.ambient === true) continue;
-      const existing = prev.get(t.task_id);
-      this.backgroundTasks.set(t.task_id, {
-        taskId: t.task_id,
-        taskType: typeof t.task_type === 'string' ? t.task_type : '',
-        description: typeof t.description === 'string' ? t.description : '',
-        startedAt: existing?.startedAt ?? now
-      });
-    }
-    this.emitBackgroundTasks();
-  }
-
-  private onHookStarted(msg: { hook_id?: string; hook_name?: string; hook_event?: string }): void {
-    const hookId = typeof msg.hook_id === 'string' ? msg.hook_id : '';
-    const hookName = typeof msg.hook_name === 'string' ? msg.hook_name : '';
-    const hookEvent = typeof msg.hook_event === 'string' ? msg.hook_event : '';
-    if (!hookId) return;
-    // Skip Vocs Code's own internal SDK callbacks (permission gating / file snapshots).
-    if (isInternalHookName(hookName)) return;
-    if (this.internalHookDepth > 0 && (hookEvent === 'PreToolUse' || hookEvent === 'PostToolUse') && !hookName) return;
-    const existing = this.activeHooks.get(hookId);
-    if (existing?.timer) clearTimeout(existing.timer);
-    const entry: LiveHookRun = { hookId, hookName, hookEvent, startedAt: Date.now(), visible: false };
-    entry.timer = setTimeout(() => {
-      entry.timer = undefined;
-      if (this.activeHooks.get(hookId) !== entry) return;
-      entry.visible = true;
-      this.emitHooks();
-    }, HOOK_VISIBILITY_DELAY_MS);
-    entry.timer.unref?.();
-    this.activeHooks.set(hookId, entry);
-  }
-
-  private onHookResponse(msg: { hook_id?: string }): void {
-    const hookId = typeof msg.hook_id === 'string' ? msg.hook_id : '';
-    if (!hookId) return;
-    const entry = this.activeHooks.get(hookId);
-    if (!entry) return;
-    if (entry.timer) clearTimeout(entry.timer);
-    this.activeHooks.delete(hookId);
-    if (entry.visible) this.emitHooks();
-  }
-
-  private clearOngoing(): void {
-    const hadTasks = this.backgroundTasks.size > 0;
-    this.backgroundTasks.clear();
-    this.seenBackgroundTasksSnapshot = false;
-    let hadVisibleHooks = false;
-    for (const entry of this.activeHooks.values()) {
-      if (entry.timer) clearTimeout(entry.timer);
-      if (entry.visible) hadVisibleHooks = true;
-    }
-    this.activeHooks.clear();
-    if (hadTasks) this.ctx.emit({ type: 'ongoing', source: 'tasks', items: [] });
-    if (hadVisibleHooks) this.ctx.emit({ type: 'ongoing', source: 'hooks', items: [] });
-  }
-
-  private reportStreamUsage(ev: {
-    type: string;
-    message?: { model?: string; usage?: Record<string, unknown> };
-    usage?: Record<string, unknown>;
-  }): void {
-    if (ev.type === 'message_start') {
-      this.streamOutputTokens = 0;
-      this.streamReasoningTokens = 0;
-      this.streamInputReported = false;
-      const usage = ev.message?.usage;
-      if (!usage) return;
-      const input = finiteCounter(usage.input_tokens);
-      const cacheRead = finiteCounter(usage.cache_read_input_tokens);
-      const cacheWrite = finiteCounter(usage.cache_creation_input_tokens);
-      const output = finiteCounter(usage.output_tokens);
-      const sample: Partial<UsageTotals> = {
-        ...(input !== undefined ? { inputTokens: input } : {}),
-        ...(cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {}),
-        ...(cacheWrite !== undefined ? { cacheWriteTokens: cacheWrite } : {}),
-        ...(output !== undefined ? { outputTokens: output } : {})
-      };
-      this.streamInputReported = input !== undefined || cacheRead !== undefined || cacheWrite !== undefined;
-      this.streamOutputTokens = output ?? 0;
-      if (Object.keys(sample).length === 0) return;
-      this.usage.addUsage(sample);
-      const contextTokens = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
-      const model = ev.message?.model ?? this.ctx.session().activeModel?.model;
-      const contextWindow = model ? findContextWindow(this.providerId ?? 'anthropic', model) : undefined;
-      if (contextTokens > 0 || contextWindow) this.usage.setCumulative({ contextTokens: contextTokens > 0 ? contextTokens : undefined, contextWindow });
-      this.usageReporter.report(this.usage.snapshot());
-      return;
-    }
-    if (ev.type !== 'message_delta' || !ev.usage) return;
-    const usage = ev.usage;
-    const output = finiteCounter(usage.output_tokens);
-    const details = usage.output_tokens_details;
-    const reasoning = details && typeof details === 'object' && !Array.isArray(details) ? finiteCounter((details as Record<string, unknown>).thinking_tokens) : undefined;
-    const sample: Partial<UsageTotals> = {};
-    if (output !== undefined) {
-      sample.outputTokens = counterDelta(this.streamOutputTokens, output);
-      this.streamOutputTokens = output;
-    }
-    if (reasoning !== undefined) {
-      sample.reasoningTokens = counterDelta(this.streamReasoningTokens, reasoning);
-      this.streamReasoningTokens = reasoning;
-    }
-    // Newer Anthropic-compatible endpoints may send input counters only on message_delta.
-    // Prefer message_start when both are present so one request is never counted twice.
-    if (!this.streamInputReported) {
-      const input = finiteCounter(usage.input_tokens);
-      const cacheRead = finiteCounter(usage.cache_read_input_tokens);
-      const cacheWrite = finiteCounter(usage.cache_creation_input_tokens);
-      if (input !== undefined) sample.inputTokens = input;
-      if (cacheRead !== undefined) sample.cacheReadTokens = cacheRead;
-      if (cacheWrite !== undefined) sample.cacheWriteTokens = cacheWrite;
-      this.streamInputReported = input !== undefined || cacheRead !== undefined || cacheWrite !== undefined;
-    }
-    if (Object.values(sample).some((value) => typeof value === 'number' && value > 0)) {
-      this.usage.addUsage(sample);
-      this.usageReporter.report(this.usage.snapshot());
-    }
-  }
-
   /**
    * Publishes the slash commands this CLI accepts, so `/goal` can be handed to the harness when it has
    * a goal of its own (see shared/goal-driver.ts). Init reports the list on every process start and
@@ -899,113 +398,18 @@ export class ClaudeAdapter implements HarnessAdapter {
     reportHarnessCommands(this.ctx, claudeHarnessCommands(commands));
   }
 
-  /**
-   * Sums the cumulative per-model counters the CLI reports, re-deriving the cost of every model it
-   * could not price itself. Claude Code flags them `costBasis: 'unknown'` and charges its default
-   * model's rate — $5/$25/$0.50 per Mtok for a model it has no row for — which overstates a cheap
-   * third-party model by two orders of magnitude (a DeepSeek V4.1 Flash session at $203 instead of
-   * the catalog's $2.38). List and managed rates are the CLI's own and are kept as reported.
-   */
-  private modelUsageTotals(mu: Record<string, ModelUsage>): UsageTotals {
-    const totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
-    for (const [model, v] of Object.entries(mu)) {
-      totals.inputTokens += v.inputTokens;
-      totals.outputTokens += v.outputTokens;
-      totals.cacheReadTokens += v.cacheReadInputTokens;
-      totals.cacheWriteTokens += v.cacheCreationInputTokens;
-      totals.costUsd += (v.costBasis === 'unknown' ? this.catalogCostUsd(model, v) : undefined) ?? v.costUSD;
-      if (v.contextWindow) totals.contextWindow = v.contextWindow;
-    }
-    return totals;
-  }
-
-  /** What this app's catalog says a model costs; undefined when it has no row, leaving the CLI's number. */
-  private catalogCostUsd(model: string, v: ModelUsage): number | undefined {
-    const provider = this.providerId ?? 'anthropic';
-    // The gateway's own cached list first: a vendor-named id like OpenRouter's `z-ai/glm-5.3-flash`
-    // exists only there, so without it a model this app can price perfectly well falls back to the
-    // CLI's default rate — the exact overstatement this method exists to undo.
-    const models = modelsForProvider(this.ctx.settings().providers, this.providerId);
-    const pricing = findPricing(provider, model, models) ?? (v.canonicalModel ? findPricing(provider, v.canonicalModel, models) : undefined);
-    if (!pricing) return undefined;
-    return estimateCostUsd(pricing, {
-      inputTokens: v.inputTokens,
-      outputTokens: v.outputTokens,
-      cacheReadTokens: v.cacheReadInputTokens,
-      cacheWriteTokens: v.cacheCreationInputTokens
-    });
-  }
-
   observedSubscriptionWindows(): ObservedSubscriptionWindow[] {
-    const observation = this.subscription;
-    if (observation?.account !== 'verified') return [];
-    const now = Date.now();
-    const fresh: ObservedSubscriptionWindow[] = [];
-    for (const type of ['five_hour', 'seven_day'] as const) {
-      const window = observation.windows.get(type);
-      if (!window) continue;
-      if (window.observedAt <= now && now < window.expiresAt) fresh.push({ ...window });
-      else observation.windows.delete(type);
-    }
-    return fresh;
-  }
-
-  private observeSubscriptionWindow(msg: SDKRateLimitEvent, q: Query): void {
-    const observation = this.subscription;
-    if (observation?.query !== q || observation.account === 'refused' || !observation.sessionId || observation.sessionId !== msg.session_id) return;
-    const info = msg.rate_limit_info;
-    const type = info?.rateLimitType;
-    if (type !== 'five_hour' && type !== 'seven_day') return;
-    // A newer report for this window without usable plan data supersedes the old reading.
-    observation.windows.delete(type);
-    if (info.isUsingOverage || info.overageInUse || info.limitScope !== undefined || info.errorCode !== undefined) return;
-    if (info.status !== 'allowed' && info.status !== 'allowed_warning' && info.status !== 'rejected') return;
-    const { utilization, resetsAt } = info;
-    if (typeof utilization !== 'number' || !Number.isFinite(utilization) || utilization < 0 || utilization > 1) return;
-    const { name, durationMs } = SUBSCRIPTION_WINDOWS[type];
-    const now = Date.now();
-    let resetMs: number | undefined;
-    if (resetsAt !== undefined) {
-      if (typeof resetsAt !== 'number') return;
-      resetMs = Math.trunc(resetsAt * 1_000); // The SDK reports Unix seconds.
-      if (!Number.isFinite(resetMs) || resetMs <= now || resetMs > now + durationMs) return;
-    }
-    observation.windows.set(type, {
-      name, remainingFraction: 1 - utilization,
-      ...(resetMs !== undefined ? { resetAt: new Date(resetMs).toISOString() } : {}),
-      observedAt: now, expiresAt: Math.min(now + SUBSCRIPTION_WINDOW_TTL_MS, resetMs ?? Infinity)
-    });
-    if (observation.account === 'unchecked') {
-      observation.account = 'checking';
-      void this.verifySubscriptionAccount(q);
-    }
-  }
-
-  private async verifySubscriptionAccount(q: Query): Promise<void> {
-    let verified = false;
-    try {
-      // accountInfo() only reads the SDK's cached initialization response. The rate-limit event
-      // is subscription-only; the cache supplies independent evidence of the login and backend.
-      const account = await q.accountInfo();
-      verified = account?.apiProvider === 'firstParty' && !!account.subscriptionType?.trim()
-        && (account.apiKeySource === undefined || account.apiKeySource === 'none');
-    } catch {
-      // Missing or unreadable provenance must not affect the turn or be published.
-    }
-    const observation = this.subscription;
-    if (observation?.query !== q) return;
-    observation.account = verified ? 'verified' : 'refused';
-    if (!verified) observation.windows.clear();
+    return this.subscription.observedWindows();
   }
 
   private async consume(q: Query): Promise<void> {
     try {
       for await (const msg of q) this.handle(msg, q);
     } finally {
-      if (this.subscription?.query === q) this.subscription = undefined;
+      this.subscription.detach(q);
     }
     this.closeOpenTurn();
-    this.clearOngoing();
+    this.ongoing.clear();
     this.compactionWaiter?.reject(new Error('Claude Code stopped during context compaction.'));
     this._busy = false;
     this.ctx.emit({ type: 'status', status: 'stopped', detail: 'Claude Code process ended' });
@@ -1013,7 +417,7 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   private handle(msg: SDKMessage, q: Query): void {
     if (msg.type === 'rate_limit_event') {
-      this.observeSubscriptionWindow(msg, q);
+      this.subscription.observe(msg, q);
       return;
     }
     // State is reported on init, status and result messages. A request is not proof of activation.
@@ -1026,94 +430,14 @@ export class ClaudeAdapter implements HarnessAdapter {
       } });
     }
     switch (msg.type) {
-      case 'system': {
-        const subtype = (msg as { subtype?: string }).subtype;
-        if (msg.subtype === 'init') {
-          const observation = this.subscription;
-          if (observation?.query === q) {
-            // 'none' is not proof of subscription, but anything else may be a key (including
-            // one from the CLI's own settings). Do not carry readings across /clear or a new ID.
-            const sessionId = msg.apiKeySource === 'none' ? msg.session_id : undefined;
-            if (observation.sessionId !== sessionId) observation.windows.clear();
-            observation.sessionId = sessionId;
-          }
-          this.sessionId = msg.session_id;
-          this.ctx.updateRef({ claudeSessionId: msg.session_id });
-          if (msg.model) this.ctx.updateMeta({ activeModel: { provider: this.providerId ?? 'anthropic', model: msg.model } });
-          if (!this.modelsEmitted && !this.gateway) {
-            this.modelsEmitted = true;
-            q.supportedModels()
-              .then((models) => this.ctx.emit({ type: 'models', models: claudeSdkCatalog(models) }))
-              .catch((e) => {
-                // Retry on the next init so the model picker is not permanently empty.
-                this.modelsEmitted = false;
-                this.ctx.log('debug', `supportedModels failed (${errorMessage(e)}); retrying on the next init`);
-              });
-          }
-          q.supportedCommands()
-            .then((commands) => this.reportCommands(commands))
-            .catch((e) => this.ctx.log('debug', `supportedCommands failed: ${errorMessage(e)}`));
-        } else if (msg.subtype === 'commands_changed') {
-          this.reportCommands(msg.commands);
-        } else if (msg.subtype === 'compact_boundary') {
-          const { trigger, pre_tokens, post_tokens } = msg.compact_metadata;
-          // A manual boundary answers the request this app is waiting on and is reported by the
-          // completion message. The CLI's own boundary has no app-side caller, so without a note
-          // the context would shrink with nothing in the transcript to explain it.
-          if (trigger === 'manual') this.compactionWaiter?.resolve();
-          else this.info(`Claude compacted the conversation context (${pre_tokens}${post_tokens ? ` → ${post_tokens}` : ''} tokens).`);
-        } else if (subtype === 'status') {
-          const m = msg as { compact_result?: 'success' | 'failed'; compact_error?: string };
-          if (m.compact_result) {
-            this.info(`Context compaction ${m.compact_result}.`, m.compact_result === 'failed' ? 'warn' : 'info');
-            if (m.compact_result === 'failed') this.compactionWaiter?.reject(new Error(m.compact_error || 'Claude context compaction failed.'));
-            else this.compactionWaiter?.resolve();
-          }
-        } else if (subtype === 'permission_denied') {
-          const m = msg as { tool_name: string };
-          this.info(`Tool ${m.tool_name} was auto-denied by the harness.`, 'warn');
-        } else if (subtype === 'background_tasks_changed') {
-          const m = msg as { tasks?: { task_id: string; task_type?: string; description?: string; ambient?: boolean }[] };
-          this.onBackgroundTasksChanged(Array.isArray(m.tasks) ? m.tasks : []);
-        } else if (subtype === 'hook_started') {
-          this.onHookStarted(msg as unknown as { hook_id?: string; hook_name?: string; hook_event?: string });
-        } else if (subtype === 'hook_response') {
-          this.onHookResponse(msg as unknown as { hook_id?: string });
-        } else if (subtype === 'task_started') {
-          const t = msg as unknown as TaskStartedLike & { task_type?: string };
-          this.subagents.onTaskStarted(t);
-          // Re-enrich if `background_tasks_changed` arrived before this `task_started` bookend.
-          if (this.seenBackgroundTasksSnapshot && t.task_id && this.backgroundTasks.has(t.task_id)) {
-            this.emitBackgroundTasks();
-          } else if (!this.seenBackgroundTasksSnapshot && t.is_backgrounded && !t.ambient && !t.skip_transcript && t.task_type !== 'local_agent' && typeof t.task_id === 'string' && t.task_id) {
-            this.backgroundTasks.set(t.task_id, { taskId: t.task_id, taskType: t.task_type ?? '', description: t.description ?? '', startedAt: Date.now() });
-            this.emitBackgroundTasks();
-          }
-        } else if (subtype === 'task_progress') {
-          this.subagents.onTaskProgress(msg as unknown as TaskProgressLike);
-        } else if (subtype === 'task_updated') {
-          const t = msg as unknown as TaskUpdatedLike;
-          this.subagents.onTaskUpdated(t);
-          if (!this.seenBackgroundTasksSnapshot && t.task_id) {
-            const st = t.patch?.status;
-            if ((st === 'completed' || st === 'failed' || st === 'killed') && this.backgroundTasks.delete(t.task_id)) {
-              this.emitBackgroundTasks();
-            }
-          }
-        } else if (subtype === 'task_notification') {
-          const t = msg as unknown as TaskNotificationLike;
-          this.subagents.onTaskNotification(t);
-          if (!this.seenBackgroundTasksSnapshot && t.task_id && this.backgroundTasks.delete(t.task_id)) {
-            this.emitBackgroundTasks();
-          }
-        }
+      case 'system':
+        this.handleSystem(msg, q);
         return;
-      }
       case 'stream_event': {
         this.markTurnStarted();
         if (msg.parent_tool_use_id) return; // nested subagent streams are summarized via tool items
         const ev = msg.event as { type: string; index?: number; content_block?: ContentBlockLike; delta?: { type: string; text?: string; thinking?: string }; message?: { model?: string; usage?: Record<string, unknown> }; usage?: Record<string, unknown>; output_tokens?: number };
-        if (!msg.parent_tool_use_id) this.reportStreamUsage(ev);
+        if (!msg.parent_tool_use_id) this.usage.reportStreamUsage(ev);
         // The bubble opens on its first text or thinking: a message can be a bare tool call (its
         // input streams as input_json_delta, omitted thinking as signature_delta) with nothing to show.
         if (ev.type === 'content_block_delta' && ev.delta) {
@@ -1199,33 +523,11 @@ export class ClaudeAdapter implements HarnessAdapter {
       case 'result': {
         this.finishAssistant();
         this._busy = false;
-        let usage: Partial<UsageTotals> | undefined;
-        const mu = (msg as { modelUsage?: Record<string, ModelUsage> }).modelUsage;
-        const cumulative = mu && Object.keys(mu).length > 0 ? this.modelUsageTotals(mu) : undefined;
-        // Cost is settled in one step: the CLI's `total_cost_usd` is the same figure modelUsage breaks
-        // down, and reporting the guess first would seed the tracker with exactly the value the catalog
-        // override replaces — its counters only move up, so the higher number would stick.
-        const costUsd = cumulative ? cumulative.costUsd : typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : undefined;
-        if (costUsd !== undefined) this.usage.setCumulative({ costUsd });
-        if (cumulative) {
-          const u = (msg as { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }).usage;
-          this.usage.setCumulative({
-            inputTokens: cumulative.inputTokens,
-            outputTokens: cumulative.outputTokens,
-            cacheReadTokens: cumulative.cacheReadTokens,
-            cacheWriteTokens: cumulative.cacheWriteTokens,
-            contextWindow: cumulative.contextWindow,
-            contextTokens: u ? (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) : undefined
-          });
-        }
-        // Finish even when the SDK omitted modelUsage: total_cost_usd is still useful, and the
-        // tracker must close its baseline so the next streamed turn starts cleanly.
-        const trackerTurn = this.usage.finishTurn();
-        const turnUsage = trackerTurn.usage;
-        if (cumulative) usage = turnUsage ? { inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens } : undefined;
-        this.usageReporter.report(trackerTurn.totals);
-        this.usageReporter.flush();
-        const turnCost = turnUsage?.costUsd ?? 0;
+        const { usage, turnCost } = this.usage.settleResult(msg as {
+          modelUsage?: Record<string, ModelUsage>;
+          total_cost_usd?: number;
+          usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+        });
         const turnMsg = msg as { is_error?: boolean; terminal_reason?: string };
         const isError = turnMsg.is_error || msg.subtype !== 'success';
         const errors = msg as { result?: string; errors?: string[]; fast_mode_state?: string; fast_mode_disabled_reason?: string };
@@ -1260,6 +562,69 @@ export class ClaudeAdapter implements HarnessAdapter {
       }
       default:
         return;
+    }
+  }
+
+  private handleSystem(msg: Extract<SDKMessage, { type: 'system' }>, q: Query): void {
+    const subtype = (msg as { subtype?: string }).subtype;
+    if (msg.subtype === 'init') {
+      this.subscription.onInit(q, msg.apiKeySource, msg.session_id);
+      this.sessionId = msg.session_id;
+      this.ctx.updateRef({ claudeSessionId: msg.session_id });
+      if (msg.model) this.ctx.updateMeta({ activeModel: { provider: this.providerId ?? 'anthropic', model: msg.model } });
+      if (!this.modelsEmitted && !this.gateway) {
+        this.modelsEmitted = true;
+        q.supportedModels()
+          .then((models) => this.ctx.emit({ type: 'models', models: claudeSdkCatalog(models) }))
+          .catch((e) => {
+            // Retry on the next init so the model picker is not permanently empty.
+            this.modelsEmitted = false;
+            this.ctx.log('debug', `supportedModels failed (${errorMessage(e)}); retrying on the next init`);
+          });
+      }
+      q.supportedCommands()
+        .then((commands) => this.reportCommands(commands))
+        .catch((e) => this.ctx.log('debug', `supportedCommands failed: ${errorMessage(e)}`));
+    } else if (msg.subtype === 'commands_changed') {
+      this.reportCommands(msg.commands);
+    } else if (msg.subtype === 'compact_boundary') {
+      const { trigger, pre_tokens, post_tokens } = msg.compact_metadata;
+      // A manual boundary answers the request this app is waiting on and is reported by the
+      // completion message. The CLI's own boundary has no app-side caller, so without a note
+      // the context would shrink with nothing in the transcript to explain it.
+      if (trigger === 'manual') this.compactionWaiter?.resolve();
+      else this.info(`Claude compacted the conversation context (${pre_tokens}${post_tokens ? ` → ${post_tokens}` : ''} tokens).`);
+    } else if (subtype === 'status') {
+      const m = msg as { compact_result?: 'success' | 'failed'; compact_error?: string };
+      if (m.compact_result) {
+        this.info(`Context compaction ${m.compact_result}.`, m.compact_result === 'failed' ? 'warn' : 'info');
+        if (m.compact_result === 'failed') this.compactionWaiter?.reject(new Error(m.compact_error || 'Claude context compaction failed.'));
+        else this.compactionWaiter?.resolve();
+      }
+    } else if (subtype === 'permission_denied') {
+      const m = msg as { tool_name: string };
+      this.info(`Tool ${m.tool_name} was auto-denied by the harness.`, 'warn');
+    } else if (subtype === 'background_tasks_changed') {
+      const m = msg as { tasks?: { task_id: string; task_type?: string; description?: string; ambient?: boolean }[] };
+      this.ongoing.onBackgroundTasksChanged(Array.isArray(m.tasks) ? m.tasks : []);
+    } else if (subtype === 'hook_started') {
+      this.ongoing.onHookStarted(msg as unknown as { hook_id?: string; hook_name?: string; hook_event?: string });
+    } else if (subtype === 'hook_response') {
+      this.ongoing.onHookResponse(msg as unknown as { hook_id?: string });
+    } else if (subtype === 'task_started') {
+      const t = msg as unknown as TaskStartedLike & { task_type?: string };
+      this.subagents.onTaskStarted(t);
+      this.ongoing.onTaskStarted(t);
+    } else if (subtype === 'task_progress') {
+      this.subagents.onTaskProgress(msg as unknown as TaskProgressLike);
+    } else if (subtype === 'task_updated') {
+      const t = msg as unknown as TaskUpdatedLike;
+      this.subagents.onTaskUpdated(t);
+      this.ongoing.onTaskUpdated(t);
+    } else if (subtype === 'task_notification') {
+      const t = msg as unknown as TaskNotificationLike;
+      this.subagents.onTaskNotification(t);
+      this.ongoing.onTaskNotification(t);
     }
   }
 
@@ -1298,10 +663,7 @@ export class ClaudeAdapter implements HarnessAdapter {
    */
   private closeOpenTurn(): void {
     if (!this._busy) return;
-    const trackerTurn = this.usage.finishTurn();
-    this.usageReporter.report(trackerTurn.totals);
-    this.usageReporter.flush();
-    const u = trackerTurn.usage;
+    const { usage, costUsd } = this.usage.settleInterrupted();
     this.ctx.emit({
       type: 'item.upsert',
       item: {
@@ -1310,8 +672,8 @@ export class ClaudeAdapter implements HarnessAdapter {
         ts: Date.now(),
         status: 'interrupted',
         durationMs: this.turnStartedAt > 0 ? Math.max(0, Date.now() - this.turnStartedAt) : 0,
-        costUsd: u?.costUsd ?? 0,
-        usage: u ? { inputTokens: u.inputTokens, outputTokens: u.outputTokens, cacheReadTokens: u.cacheReadTokens, cacheWriteTokens: u.cacheWriteTokens } : undefined
+        costUsd,
+        usage
       }
     });
     this.turnStartedAt = 0;
@@ -1452,33 +814,12 @@ export class ClaudeAdapter implements HarnessAdapter {
     return agents.map(({ name, description, model }) => ({ name, description, ...(model ? { model } : {}) }));
   }
 
-  /**
-   * Make a delegated agent run on the session's own model.
-   *
-   * Claude Code resolves a subagent's model from its definition before anything else, and its
-   * built-ins (`Explore`, `Plan`) declare `inherit` — which on a provider that is not Anthropic does
-   * not mean the session's model but Claude's own default, an Anthropic id the endpoint answers with
-   * a 401. So naming the model here is what makes "a subagent runs on the model this session runs
-   * on" true rather than merely intended.
-   *
-   * `_FORCE` is required as well, not belt-and-braces: the built-ins' `inherit` is resolved before
-   * the plain variable and wins over it. It is withheld exactly when the project pins a model of its
-   * own, because FORCE outranks a definition's `model:` line too and would silently ignore the pin.
-   */
-  private async subagentModelEnv(model: string | undefined): Promise<Record<string, string | undefined>> {
-    if (!model) return {};
-    const env: Record<string, string | undefined> = { CLAUDE_CODE_SUBAGENT_MODEL: model };
-    const pinned = await hasClaudeAgentPins(this.ctx.session().config.projectRoot).catch(() => false);
-    if (!pinned) env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1';
-    return env;
-  }
-
   async dispose(): Promise<void> {
-    this.subscription = undefined;
+    this.subscription.detach();
     // Before the reporter closes: the turn being abandoned is reported through it.
     this.closeOpenTurn();
-    this.clearOngoing();
-    this.usageReporter.close();
+    this.ongoing.clear();
+    this.usage.close();
     this.compactionWaiter?.reject(new Error('Claude context compaction was cancelled.'));
     this.input.close();
     this.abort.abort();
@@ -1488,123 +829,9 @@ export class ClaudeAdapter implements HarnessAdapter {
       /* ignore */
     }
     this.q = null;
-    await this.closeGatewayBridges();
+    await this.gatewayBridges.closeAll();
     // A run still open when the process goes away has no end record and no owner left to write one,
     // so close it as interrupted rather than leaving it spinning as `running` in an open app.
     await this.subagents.settle();
   }
-}
-
-/** The Claude-capable provider that backs a session: the provider its model came from when that
- *  provider can host Claude Code, else the built-in Anthropic provider. */
-export function claudeProviderFor(settings: AppSettings, model: ModelRef | undefined): ProviderConfig | undefined {
-  const capable = settings.providers.filter(isClaudeCapableProvider);
-  return capable.find((p) => p.id === model?.provider) ?? capable.find((p) => p.id === 'anthropic') ?? capable[0];
-}
-
-/**
- * Env overlay that points Claude Code at a provider's Anthropic-format endpoint. Every non-Anthropic
- * route is wired from that base URL automatically, with the stored key sent in the header that route
- * reads (a bearer token for most gateways, `x-api-key` for OpenCode Zen) and an inherited Anthropic
- * x-api-key cleared so it is never sent to the gateway. Anthropic's own endpoint passes the stored
- * key only when the user opted in, and otherwise keeps the login.
- */
-export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, apiKey: string | undefined): Record<string, string | undefined> {
-  if (!provider) return {};
-  const baseUrl = anthropicBaseUrlFor(provider);
-  if (baseUrl) assertEndpointUrl(baseUrl);
-  if (baseUrl && baseUrl !== ANTHROPIC_DEFAULT_BASE_URL) {
-    // Zen's Anthropic route reads x-api-key and answers a bearer token with "Missing API key".
-    if (anthropicAuthFor(provider) === 'api-key') {
-      return { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_BASE_URL: baseUrl };
-    }
-    const overlay: Record<string, string | undefined> = { ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: baseUrl };
-    if (apiKey) overlay.ANTHROPIC_AUTH_TOKEN = apiKey;
-    return overlay;
-  }
-  return settings.claude.useProviderKey && apiKey ? { ANTHROPIC_API_KEY: apiKey } : {};
-}
-
-/**
- * claudeProviderEnv with the provider's stored key or, failing that, the key in its env var. That
- * key still has to be handed over explicitly: the child inherits the process env, but a gateway
- * reads a header this app has to set. Sessions and the pre-session model probe both resolve their
- * credentials here, so the probe starts with the endpoint and key of the session it lists models for.
- */
-export async function resolveClaudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, getApiKey: (id: string) => Promise<string | undefined>): Promise<Record<string, string | undefined>> {
-  const baseUrl = provider && anthropicBaseUrlFor(provider);
-  if (baseUrl) assertEndpointUrl(baseUrl);
-  // The default route does not overlay the child's base URL. Before injecting an app key,
-  // validate the inherited endpoint too; external CLI-owned config remains the CLI's responsibility.
-  if (provider && settings.claude.useProviderKey && baseUrl === ANTHROPIC_DEFAULT_BASE_URL && process.env.ANTHROPIC_BASE_URL) assertEndpointUrl(process.env.ANTHROPIC_BASE_URL);
-  const key = provider ? await resolveProviderApiKey(provider, getApiKey) : undefined;
-  return claudeProviderEnv(settings, provider, key);
-}
-
-/**
- * Discover the models the selected Claude Code runtime offers to its current login. The streaming
- * input stays open only long enough for the SDK initialization handshake; no user turn is sent.
- * `settingSources` are the ones sessions load (`settings.claude.settingSources`).
- */
-export async function listClaudeModels(
-  pathToClaudeCodeExecutable: string,
-  envOverlay: Record<string, string | undefined> = {},
-  settingSources: SettingSource[] = []
-): Promise<ModelInfo[]> {
-  const input = new AsyncQueue<SDKUserMessage>();
-  const abortController = new AbortController();
-  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
-  // A desktop app launched from a Claude terminal must not look like a nested Claude Code process.
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('CLAUDE_CODE_') && key !== 'CLAUDE_CODE_USE_BEDROCK' && key !== 'CLAUDE_CODE_USE_VERTEX' && key !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[key];
-  }
-  delete env.CLAUDECODE;
-  Object.assign(env, envOverlay);
-
-  const q = query({
-    prompt: input,
-    options: {
-      // Model discovery is global to the runtime/login. Do not let an IPC-provided project path load
-      // project settings, hooks or MCP servers into this short-lived process.
-      cwd: process.cwd(),
-      pathToClaudeCodeExecutable,
-      permissionMode: 'plan',
-      // ~/.claude/settings.json decides what a session runs against: its env (base URL, Bedrock or
-      // Vertex), apiKeyHelper and model. Read it whenever sessions do, or the list describes a
-      // different endpoint. Project and local settings resolve against cwd, which here is this app's
-      // own directory rather than any project, so they stay out.
-      settingSources: settingSources.filter((source) => source === 'user'),
-      // User settings also declare hooks and MCP servers; this process only answers supportedModels().
-      settings: { disableAllHooks: true },
-      strictMcpConfig: true,
-      persistSession: false,
-      env,
-      abortController
-    }
-  });
-  try {
-    return claudeSdkCatalog(await withTimeout(q.supportedModels(), 20_000, 'Claude supportedModels'));
-  } finally {
-    input.close();
-    abortController.abort();
-    q.close();
-  }
-}
-
-function extractText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => {
-        if (typeof c === 'string') return c;
-        if (c && typeof c === 'object') {
-          const o = c as { type?: string; text?: string };
-          if (o.type === 'text' && o.text) return o.text;
-          if (o.type === 'image') return '[image]';
-        }
-        return '';
-      })
-      .join('\n');
-  }
-  return '';
 }
