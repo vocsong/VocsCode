@@ -1,54 +1,38 @@
-import React, { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
-import { parseGitHubPullRequestUrl } from '../../../shared/github-pull-request';
-import { imageMimeType } from '../../../shared/image-files';
-import { missionToolOf, type MissionMessageKind, type MissionTool } from '../../../shared/mission-mode';
-import { invoke, isWeb, platform } from '../api';
-import {
-  builderIndexOf,
-  finishReportSections,
-  isHandoffTool,
-  missionMessageLabel,
-  missionToolLabel,
-  missionToolSummary,
-  startedBuilderIndex,
-  toolArg
-} from '../mission';
-import { renderMarkdown } from '../markdown';
-import { fileManagerName } from '../file-open';
-import { workspaceRelativePath } from '../file-refs';
-import { useCanInvoke, useTranscriptCapabilities } from '../capabilities';
-import { fmtCost, fmtDuration, fmtRate, fmtStamp, fmtStampFull, fmtTokens } from '../format';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { SessionMeta } from '../../../shared/types';
+import { invoke, isWeb } from '../api';
+import { useTranscriptCapabilities } from '../capabilities';
 import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
-import { chunkKey, estimateChunkHeight, windowRange, type RenderChunk } from '../transcript-window';
-import { useStreamingMarkdown } from '../use-streaming-markdown';
-import { validateQuestionResponse } from '../../../shared/question-response';
-import { useMarkdownImages } from '../use-markdown-images';
+import { chunkKey, estimateChunkHeight, windowRange } from '../transcript-window';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
-import { DiffView } from './DiffView';
 import { ImageLightbox, type LightboxImage } from './ImageLightbox';
-import { HarnessPill } from './SessionTitle';
-import { TranscriptFind } from './TranscriptFind';
-import { askConfirm, Badge, Button, Icon, Spinner } from './ui';
 import { OngoingActivityStrip } from './OngoingActivityStrip';
+import { TranscriptFind } from './TranscriptFind';
+import { ApprovalCard } from './transcript/ApprovalCard';
+import {
+  canOpenTranscriptPullRequest,
+  groupCommands,
+  groupTranscript,
+  imageSrc,
+  isRunningEntry,
+  isTerminalEventTarget,
+  isWorkItem,
+  pinnedPromptIndex,
+  PROMPT_JUMP_MARGIN
+} from './transcript/grouping';
+import { ToolGroup, TranscriptRow, WorkGroup } from './transcript/Groups';
+import { PinnedPrompt, UserMessage } from './transcript/MessageViews';
+import { Stamp, TranscriptSessionContext, type OnImageExpand } from './transcript/shared';
+import { Button, Icon, Spinner } from './ui';
 import './transcript-links.css';
+
+export { ApprovalCard, groupCommands, groupTranscript, imageSrc, isRunningEntry, isTerminalEventTarget, isWorkItem, Stamp, ToolGroup, UserMessage, WorkGroup };
+export type { OnImageExpand };
 
 interface ImageLightboxState {
   images: LightboxImage[];
   index: number;
-}
-
-export type OnImageExpand = (images: LightboxImage[], index: number) => void;
-
-/** Terminal key events are handled by the terminal find bar, not the transcript finder. */
-export function isTerminalEventTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && !!target.closest('.term, .term-view');
-}
-
-/** Data-URL rendering for a transcript image attachment. */
-export function imageSrc(im: { mimeType: string; data: string }): string {
-  return `data:${im.mimeType};base64,${im.data}`;
 }
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
@@ -56,44 +40,6 @@ const EMPTY: never[] = [];
 
 /** Below this many chunks the reconciliation cost is small enough to skip windowing entirely. */
 const VIRTUALIZE_MIN = 150;
-
-/** Space left above a message the pinned prompt jumps to, so it lands just under the top edge. */
-const PROMPT_JUMP_MARGIN = 12;
-
-/**
- * Which of your messages the pinned prompt shows: the one whose stretch of the transcript is at
- * the top of the viewport, once that message itself has scrolled out of view. While any of it is
- * still on screen there is nothing to pin, so jumping to a message makes the bar give way to it.
- * Offsets are content coordinates: `base` is where the first row starts, `tops` the row offsets.
- */
-function pinnedPromptIndex(userChunks: number[], tops: number[], base: number, scrollTop: number): number {
-  let at = -1;
-  for (const i of userChunks) {
-    if (base + tops[i]! > scrollTop + PROMPT_JUMP_MARGIN + 4) break;
-    at = i;
-  }
-  if (at < 0) return -1;
-  return base + tops[at + 1]! <= scrollTop + 24 ? at : -1;
-}
-
-function canOpenTranscriptPullRequest(session: SessionMeta | undefined, activeId: string | null): boolean {
-  return !isWeb && !!session && session.id === activeId;
-}
-
-/** Mirrors revealFile's routing without reading or resolving files ahead of a click. */
-function transcriptFileKind(path: string, root: string, canRevealOutside: boolean) {
-  const target = path.trim();
-  if (!target || /^[\\/]{2}/.test(target)) return;
-  const relative = workspaceRelativePath(root, target);
-  if (relative === null) {
-    const drivePath = /^[A-Za-z]:[\\/]/.test(target);
-    const local = platform === 'win32' ? drivePath : target.startsWith('/') || (platform === 'unknown' && drivePath);
-    if (canRevealOutside && local) return 'explorer';
-    return;
-  }
-  if (relative === '' || /[\\/]$/.test(target)) return 'folder';
-  return imageMimeType(relative) ? 'image-file' : 'file';
-}
 
 /** `active` is false for a split pane the user is not working in: it keeps streaming, but window-wide keys skip it. */
 export function Transcript({ session, active = true }: { session: SessionMeta; active?: boolean }) {
@@ -107,6 +53,11 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   const transcriptStart = useStore((s) => s.transcriptStarts[session.id] ?? 0);
   const showThinking = useStore((s) => s.showThinking);
   const jump = useStore((s) => s.searchJump);
+  // Subscribe once at the transcript level with primitive selectors so individual AssistantMessage
+  // rows never run `s.sessions.find(...)` on every session status/usage push.
+  const storeCwd = useStore((s) => s.sessions.find((candidate) => candidate.id === session.id)?.cwd);
+  const canOpenPr = useStore((s) => !isWeb && s.activeId === session.id && s.sessions.some((candidate) => candidate.id === session.id));
+  const sessionCtx = useMemo(() => ({ cwd: storeCwd, canOpenPr }), [storeCwd, canOpenPr]);
   const caps = useTranscriptCapabilities();
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
@@ -397,10 +348,10 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
     // A message's own body, not its meta row: the timestamp and the action buttons are chrome.
     const body = block?.querySelector<HTMLElement>('.msg-text, .md, .info-text') ?? block;
     const blockText = body ? (body.innerText ?? body.textContent ?? '').trim() : '';
-    const items: ContextMenuItem[] = [];
-    if (selection.trim()) items.push({ label: 'Copy selection', icon: 'copy', hint: 'Ctrl+C', onSelect: () => void copyText(selection, 'Selection') });
-    if (blockText) items.push({ label: 'Copy message', icon: 'copy', onSelect: () => void copyText(blockText, 'Message') });
-    items.push(
+    const menuItems: ContextMenuItem[] = [];
+    if (selection.trim()) menuItems.push({ label: 'Copy selection', icon: 'copy', hint: 'Ctrl+C', onSelect: () => void copyText(selection, 'Selection') });
+    if (blockText) menuItems.push({ label: 'Copy message', icon: 'copy', onSelect: () => void copyText(blockText, 'Message') });
+    menuItems.push(
       { separator: true },
       { label: 'Find in transcript', icon: 'search', hint: 'Ctrl+F', onSelect: () => setFindOpen(true) },
       { label: 'Jump to latest', icon: 'chevron', disabled: stick, onSelect: () => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; } },
@@ -414,48 +365,50 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
             .catch((err) => useStore.getState().toast(err instanceof Error ? err.message : String(err), 'error'))
       }
     );
-    showContextMenu(e, items);
+    showContextMenu(e, menuItems);
   };
 
   return (
     <div className="transcript-wrap">
-      <div className={`transcript ${virtual ? 'virtual' : ''} ${caps.openFile ? '' : 'no-file-links'}`} ref={ref} onScroll={onScroll} onContextMenu={caps.contextMenu ? onContextMenu : undefined}>
-        {!loaded && !transcriptError && <div className="transcript-loading"><Spinner /> Loading…</div>}
-        {!loaded && transcriptError && (
-          <div className="transcript-error callout warn" role="alert">
-            <div>Could not load this transcript.</div>
-            <div className="muted small">{transcriptError}</div>
-            <Button size="sm" variant="ghost" icon="refresh" onClick={() => void loadTranscript(session.id)}>
-              Retry
-            </Button>
-          </div>
-        )}
-        {loaded && items.length === 0 && (
-          <div className="transcript-empty">
-            <Icon name="sparkles" size={28} />
-            <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
-          </div>
-        )}
-        {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
-        {caps.header}
-        {loaded && transcriptStart > 0 && (
-          <div className="transcript-more">
-            <Button size="sm" variant="ghost" icon="chevron" onClick={() => void loadEarlier(session.id)}>
-              Load earlier
-            </Button>
-          </div>
-        )}
-        {visible.map((chunk) => (
-          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} live={chunk.kind === 'work' && chunk.id === liveWorkId} />
-        ))}
-        {virtual && range.end < chunks.length && <div className="transcript-spacer" style={{ height: tops[chunks.length]! - tops[range.end]! }} aria-hidden />}
-        {(session.status === 'running' || session.status === 'starting') && (
-          <div className="working">
-            <Spinner size={12} /> {session.status === 'starting' ? session.statusDetail ?? 'Starting…' : 'Working…'}
-          </div>
-        )}
-        <OngoingActivityStrip session={session} />
-      </div>
+      <TranscriptSessionContext.Provider value={sessionCtx}>
+        <div className={`transcript ${virtual ? 'virtual' : ''} ${caps.openFile ? '' : 'no-file-links'}`} ref={ref} onScroll={onScroll} onContextMenu={caps.contextMenu ? onContextMenu : undefined}>
+          {!loaded && !transcriptError && <div className="transcript-loading"><Spinner /> Loading…</div>}
+          {!loaded && transcriptError && (
+            <div className="transcript-error callout warn" role="alert">
+              <div>Could not load this transcript.</div>
+              <div className="muted small">{transcriptError}</div>
+              <Button size="sm" variant="ghost" icon="refresh" onClick={() => void loadTranscript(session.id)}>
+                Retry
+              </Button>
+            </div>
+          )}
+          {loaded && items.length === 0 && (
+            <div className="transcript-empty">
+              <Icon name="sparkles" size={28} />
+              <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
+            </div>
+          )}
+          {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
+          {caps.header}
+          {loaded && transcriptStart > 0 && (
+            <div className="transcript-more">
+              <Button size="sm" variant="ghost" icon="chevron" onClick={() => void loadEarlier(session.id)}>
+                Load earlier
+              </Button>
+            </div>
+          )}
+          {visible.map((chunk) => (
+            <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} live={chunk.kind === 'work' && chunk.id === liveWorkId} />
+          ))}
+          {virtual && range.end < chunks.length && <div className="transcript-spacer" style={{ height: tops[chunks.length]! - tops[range.end]! }} aria-hidden />}
+          {(session.status === 'running' || session.status === 'starting') && (
+            <div className="working">
+              <Spinner size={12} /> {session.status === 'starting' ? session.statusDetail ?? 'Starting…' : 'Working…'}
+            </div>
+          )}
+          <OngoingActivityStrip session={session} />
+        </div>
+      </TranscriptSessionContext.Provider>
       {lightbox && (
         <ImageLightbox
           images={lightbox.images}
@@ -470,975 +423,6 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
           <Icon name="chevron" size={14} /> {pendingApprovals ? `${pendingApprovals} approval pending` : unseen ? `${unseen} new · Jump to latest` : 'Jump to latest'}
         </button>
       )}
-    </div>
-  );
-}
-
-/** Your message for the part of the transcript on screen, floating at the top; a click goes back to it. */
-function PinnedPrompt({ item, onJump }: { item: Extract<TranscriptItem, { kind: 'user' }>; onJump: () => void }) {
-  const text = item.text.trim() || (item.images?.length ? (item.images.length === 1 ? 'Image' : `${item.images.length} images`) : 'Attachment');
-  const time = new Date(item.ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  return (
-    <button type="button" className="pinned-prompt" onClick={onJump} title="Go to this message" aria-label={`Go to your message: ${text}`}>
-      <span className="pinned-prompt-text">{text}</span>
-      <span className="pinned-prompt-meta">
-        <time dateTime={new Date(item.ts).toISOString()}>{time}</time>
-        <Icon name="arrowUp" size={12} />
-      </span>
-    </button>
-  );
-}
-
-/**
- * When a message, step or thought happened. Standard shows it quietly on every row; Zen keeps it
- * out of sight until the row is pointed at (ui-zen.css). The tooltip carries the full date to the
- * second, plus whatever `detail` the row adds (how long a step took, when an approval was answered).
- */
-export function Stamp({ ts, className = '', detail }: { ts: number; className?: string; detail?: string }) {
-  if (!Number.isFinite(ts) || ts <= 0) return null;
-  const full = fmtStampFull(ts);
-  return (
-    <time className={`stamp ${className}`} dateTime={new Date(ts).toISOString()} title={detail ? `${full} · ${detail}` : full}>
-      {fmtStamp(ts)}
-    </time>
-  );
-}
-
-/** One transcript row; `dataItemId` anchors deep-search jumps to the exact item. */
-const Item = memo(function Item({ item, sessionId, canEdit, showThinking, onImageExpand, dataItemId }: { item: TranscriptItem; sessionId: string; canEdit: boolean; showThinking: boolean; onImageExpand: OnImageExpand; dataItemId?: string }) {
-  return (
-    <div data-item-id={dataItemId}>
-      {renderItem(item, sessionId, canEdit, showThinking, onImageExpand)}
-    </div>
-  );
-});
-
-/**
- * Measured wrapper around one chunk. When windowing is off it is a plain row; when on, its
- * height feeds the offset table so off-screen chunks can stay unmounted.
- */
-const TranscriptRow = memo(function TranscriptRow({
-  chunk,
-  sessionId,
-  canEdit,
-  showThinking,
-  onImageExpand,
-  measureRow,
-  live = false
-}: {
-  chunk: RenderChunk;
-  sessionId: string;
-  canEdit: boolean;
-  showThinking: boolean;
-  onImageExpand: OnImageExpand;
-  measureRow: (key: string, el: HTMLElement) => () => void;
-  live?: boolean;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const key = chunkKey(chunk);
-  useEffect(() => {
-    const el = ref.current;
-    return el ? measureRow(key, el) : undefined;
-  }, [key, measureRow]);
-  return (
-    <div className="transcript-row" ref={ref}>
-      {chunk.kind === 'work' ? (
-        <WorkGroup chunk={chunk} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} live={live} />
-      ) : chunk.kind === 'group' ? (
-        <ToolGroup entries={chunk.entries} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} />
-      ) : (
-        <Item item={chunk.item} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
-      )}
-    </div>
-  );
-}, (a, b) => a.sessionId === b.sessionId && a.canEdit === b.canEdit && a.showThinking === b.showThinking && a.live === b.live &&
-  a.onImageExpand === b.onImageExpand && a.measureRow === b.measureRow && sameChunk(a.chunk, b.chunk));
-
-/** Grouping recreates wrappers; unchanged constituent items still have stable store identities. */
-function sameChunk(a: RenderChunk, b: RenderChunk): boolean {
-  if (a.kind === 'single' && b.kind === 'single') return a.item === b.item;
-  if (a.kind === 'group' && b.kind === 'group') return a.id === b.id && sameEntries(a.entries, b.entries);
-  return a.kind === 'work' && b.kind === 'work' && a.id === b.id && sameEntries(a.entries, b.entries) &&
-    a.turn?.status === b.turn?.status && a.turn?.durationMs === b.turn?.durationMs;
-}
-
-function sameEntries(a: TranscriptItem[], b: TranscriptItem[]): boolean {
-  return a.length === b.length && a.every((item, i) => item === b[i]);
-}
-
-function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, showThinking: boolean, onImageExpand: OnImageExpand) {
-  switch (item.kind) {
-    case 'user':
-      return item.origin === 'mission'
-        ? <MissionMessageCard item={item} sessionId={sessionId} onImageExpand={onImageExpand} />
-        : <UserMessage item={item} sessionId={sessionId} canEdit={canEdit} onImageExpand={onImageExpand} />;
-    case 'assistant':
-      return <AssistantMessage item={item} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} />;
-    case 'tool': {
-      const tool = missionToolOf(item.name);
-      return tool ? <MissionToolCard item={item} tool={tool} sessionId={sessionId} /> : <ToolCard item={item} sessionId={sessionId} />;
-    }
-    case 'approval':
-      return <ApprovalCard item={item} sessionId={sessionId} />;
-    case 'info':
-      return (
-        <div className={`info-line info-${item.level}`}>
-          {item.pending ? <Spinner size={13} /> : <Icon name={item.level === 'error' ? 'alert' : item.level === 'warn' ? 'alert' : 'info'} size={13} />} <span className="info-text">{item.text}</span>
-          <Stamp ts={item.ts} className="info-time" />
-        </div>
-      );
-    case 'turn':
-      return (
-        <div className={`turn-footer turn-${item.status}`}>
-          <Icon name={item.status === 'completed' ? 'check' : 'alert'} size={12} />
-          <span className="turn-label">{item.status === 'completed' ? 'Turn complete' : item.status === 'interrupted' ? 'Interrupted' : `Failed${item.error ? `: ${item.error}` : ''}`}</span>
-          <span className="turn-time">· <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{new Date(item.ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</time></span>
-          {item.durationMs ? <span className="turn-duration">· {fmtDuration(item.durationMs)}</span> : null}
-          {item.costUsd ? <span className="turn-cost">· {fmtCost(item.costUsd)}</span> : null}
-          {/* Token detail is for the curious: it shows when the row is hovered. */}
-          {item.usage && (item.usage.inputTokens || item.usage.outputTokens) ? <span className="turn-detail">· {fmtTokens(item.usage.inputTokens)} in / {fmtTokens(item.usage.outputTokens)} out</span> : null}
-          {item.status === 'completed' && fmtRate(item.usage?.outputTokens, item.durationMs) ? (
-            <span className="turn-detail" title="Output tokens per second of turn wall time (includes tool execution)">· {fmtRate(item.usage?.outputTokens, item.durationMs)}</span>
-          ) : null}
-        </div>
-      );
-    case 'plan':
-      return <PlanCard item={item} />;
-    default:
-      return null;
-  }
-}
-
-/** A plan as a checklist: done steps stay readable (no strike-through), the live one is marked. */
-function PlanCard({ item }: { item: Extract<TranscriptItem, { kind: 'plan' }> }) {
-  const done = item.entries.filter((e) => e.status === 'completed').length;
-  const total = item.entries.length;
-  return (
-    <div className="plan-card">
-      <div className="plan-title">
-        <Icon name="list" size={13} /> Plan
-        {total > 0 && <span className="plan-progress">{done} of {total} done</span>}
-        {total > 0 && (
-          <span className="plan-bar" aria-hidden>
-            <span style={{ width: `${Math.round((done / total) * 100)}%` }} />
-          </span>
-        )}
-        <Stamp ts={item.ts} className="plan-time" />
-      </div>
-      <ul>
-        {item.entries.map((e, i) => (
-          <li key={i} className={`plan-${e.status}`}>
-            <span className="plan-check" aria-label={e.status.replace('_', ' ')}>
-              {e.status === 'completed' ? <Icon name="check" size={11} /> : e.status === 'in_progress' ? <span className="plan-live" /> : null}
-            </span>
-            <span className="plan-text">{e.content}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; sessionId?: string; canEdit?: boolean; onImageExpand?: OnImageExpand }) {
-  const images = item.images ?? [];
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(item.text);
-  const [rerunning, setRerunning] = useState(false);
-  const toast = useStore((s) => s.toast);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(item.text);
-      toast('Message copied', 'success');
-    } catch {
-      toast('Could not copy message', 'error');
-    }
-  };
-
-  const rerun = async () => {
-    const text = draft.trim();
-    if (!text && !images.length && !item.files?.length) return;
-    if (!sessionId) return;
-    const confirmed = await askConfirm({
-      title: 'Edit and rerun this message?',
-      body: 'All transcript items after this message will be discarded. Files changed by those turns are not rolled back.',
-      confirmLabel: 'Rerun message',
-      danger: true
-    });
-    if (!confirmed) return;
-    setRerunning(true);
-    try {
-      const items = await invoke('sessions:editAndResend', { id: sessionId, userItemId: item.id, input: { text, images: images.length ? images : undefined, mode: 'now' } });
-      useStore.getState().replaceTranscript(sessionId, items);
-      setEditing(false);
-      toast('Message rerun from here', 'success');
-    } catch (e) {
-      toast((e as Error).message || 'Could not rerun message', 'error');
-    } finally {
-      setRerunning(false);
-    }
-  };
-
-  return (
-    <div className="msg msg-user">
-      <div className="msg-bubble">
-        {item.queuedAs && item.queuedAs !== 'now' && <Badge tone="blue">{item.queuedAs}</Badge>}
-        {editing ? (
-          <div className="msg-edit">
-            <textarea aria-label="Edit message" value={draft} onChange={(e) => setDraft(e.target.value)} rows={Math.max(2, Math.min(8, draft.split('\n').length))} autoFocus />
-            <div className="msg-edit-actions">
-              <Button size="sm" onClick={() => { setDraft(item.text); setEditing(false); }} disabled={rerunning}>Cancel</Button>
-              <Button size="sm" variant="primary" icon="refresh" onClick={() => void rerun()} disabled={rerunning || (!draft.trim() && !images.length && !item.files?.length)}>{rerunning ? 'Rerunning…' : 'Save & rerun'}</Button>
-            </div>
-          </div>
-        ) : (
-          <div className="msg-text">{item.text}</div>
-        )}
-        {images.length ? (
-          <div className="msg-images">
-            {images.map((im, i) =>
-              onImageExpand ? (
-                <button
-                  key={i}
-                  type="button"
-                  className="msg-image-btn"
-                  aria-label={`Preview ${im.name ?? 'image'}`}
-                  onClick={() => onImageExpand(images.map((att) => ({ src: imageSrc(att), name: att.name })), i)}
-                >
-                  <img src={imageSrc(im)} alt={im.name ?? 'attachment'} draggable={false} />
-                </button>
-              ) : (
-                <img key={i} src={imageSrc(im)} alt={im.name ?? 'attachment'} />
-              )
-            )}
-          </div>
-        ) : null}
-        {item.files?.length ? <div className="msg-files" aria-label="Attached files">{item.files.map((file) => <Badge key={file.path} tone="neutral">{file.name}</Badge>)}</div> : null}
-        {!images.length && item.imagesOmitted ? (
-          <Badge tone="neutral" title="Images are too large to send to a paired browser">
-            {item.imagesOmitted === 1 ? '1 image not shown' : `${item.imagesOmitted} images not shown`}
-          </Badge>
-        ) : null}
-      </div>
-      <div className="msg-user-meta">
-        <Stamp ts={item.ts} />
-        <button type="button" className="msg-action" title="Copy message" aria-label="Copy message" onClick={() => void copy()}><Icon name="copy" size={14} /></button>
-        {sessionId && canEdit && <button type="button" className="msg-action" title="Edit and rerun message" aria-label="Edit and rerun message" onClick={() => setEditing(true)} disabled={rerunning}><Icon name="edit" size={14} /></button>}
-      </div>
-    </div>
-  );
-}
-
-const MISSION_KIND_ICON: Record<MissionMessageKind, string> = {
-  kickoff: 'flag', from_lead: 'arrowRight', from_builder: 'arrowLeft', report: 'check', question: 'info',
-  approval: 'shield', failed: 'alert', stopped: 'stop', resume: 'play', note: 'info'
-};
-
-/** Past either, a mission message folds to its first lines until it is opened. */
-const MISSION_FOLD_CHARS = 600;
-const MISSION_FOLD_LINES = 8;
-
-/**
- * A row Mission mode wrote into this transcript (a kickoff, a Lead↔Builder message, a report): a
- * compact labelled card rather than a bubble that reads as if you had typed it.
- */
-function MissionMessageCard({ item, sessionId, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; sessionId: string; onImageExpand?: OnImageExpand }) {
-  const meta = item.mission;
-  const kind = meta?.kind ?? 'note';
-  const builderIndex = useStore((s) => builderIndexOf(meta?.builderId, s.missionViews, s.sessions));
-  const jumpHere = useStore((s) => !!s.searchJump && s.searchJump.sessionId === sessionId && s.searchJump.itemId === item.id);
-  const [open, setOpen] = useState(false);
-  const long = item.text.length > MISSION_FOLD_CHARS || item.text.split('\n').length > MISSION_FOLD_LINES;
-  const expanded = !long || open || jumpHere;
-  const markup = useMemo(() => ({ __html: renderMarkdown(item.text) }), [item.text]);
-  const images = item.images ?? [];
-  return (
-    <div className={`mission-card mission-msg${expanded ? '' : ' folded'}`} data-kind={kind}>
-      <div className="mission-card-head">
-        <span className="mission-card-glyph"><Icon name={MISSION_KIND_ICON[kind] ?? 'info'} size={13} /></span>
-        <span className="mission-card-label">{missionMessageLabel(meta, builderIndex)}</span>
-        {builderIndex && kind !== 'from_builder' ? <span className="mission-card-who">Builder {builderIndex}</span> : null}
-        <span className="spacer" />
-        {long && (
-          <button type="button" className="link-btn mission-card-toggle" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
-            {expanded ? 'Show less' : 'Show more'}
-          </button>
-        )}
-        <Stamp ts={item.ts} className="mission-card-time" />
-      </div>
-      {item.text && <div className="md mission-card-body" dangerouslySetInnerHTML={markup} />}
-      {images.length > 0 && (
-        <div className="msg-images">
-          {images.map((im, i) => (
-            <button key={i} type="button" className="msg-image-btn" aria-label={`Preview ${im.name ?? 'image'}`} onClick={() => onImageExpand?.(images.map((att) => ({ src: imageSrc(att), name: att.name })), i)}>
-              <img src={imageSrc(im)} alt={im.name ?? 'attachment'} draggable={false} />
-            </button>
-          ))}
-        </div>
-      )}
-      {item.files?.length ? <div className="msg-files" aria-label="Attached files">{item.files.map((file) => <Badge key={file.path} tone="neutral">{file.name}</Badge>)}</div> : null}
-    </div>
-  );
-}
-
-const MISSION_TOOL_ICON: Record<MissionTool, string> = {
-  start_builder: 'play', message_builder: 'send', answer_request: 'shield', list_builders: 'list', wait_for_builders: 'clock',
-  builder_diff: 'diff', builder_log: 'branch', record_check: 'check', accept_builder: 'check', stop_builder: 'stop',
-  finish_mission: 'flag', ask_lead: 'info', report_done: 'check', report_blocked: 'alert', land_on_lead: 'branch'
-};
-
-/**
- * A Mission tool call as the handoff it is ("Started Builder 2: …", "Asked the Lead"). The raw
- * arguments and result stay one click away; `finish_mission` shows its report as the PR body reads.
- */
-function MissionToolCard({ item, tool, sessionId, dataItemId }: { item: ToolItem; tool: MissionTool; sessionId: string; dataItemId?: string }) {
-  const [open, setOpen] = useState(false);
-  const builderId = toolArg(item.input, 'builderId');
-  const builderIndex = useStore((s) =>
-    builderId ? builderIndexOf(builderId, s.missionViews, s.sessions)
-      : tool === 'start_builder' ? startedBuilderIndex(item.output, toolArg(item.input, 'title'), s.missionViews)
-      : undefined);
-  const jumpHere = useStore((s) => !!s.searchJump && s.searchJump.sessionId === sessionId && s.searchJump.itemId === item.id);
-  const expanded = open || jumpHere;
-  const running = item.status === 'running';
-  const failed = item.status === 'error' || item.status === 'declined';
-  const label = missionToolLabel(tool, item.input, builderIndex ? `Builder ${builderIndex}` : undefined);
-  const summary = missionToolSummary(tool, item.input);
-  const report = tool === 'finish_mission' ? finishReportSections(item.input) : [];
-  return (
-    <div data-item-id={dataItemId} className={`mission-card mission-tool tool-${item.status}`} data-tool={tool}>
-      <button type="button" className="mission-card-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)} title={expanded ? 'Hide the call details' : 'Show the call details'}>
-        <span className="mission-card-glyph"><Icon name={MISSION_TOOL_ICON[tool]} size={13} /></span>
-        <span className="mission-card-label">{label}</span>
-        {summary && tool !== 'finish_mission' && <span className="mission-card-summary" title={summary}>{summary}</span>}
-        <span className="spacer" />
-        {running ? <Spinner size={12} /> : failed ? <Badge tone={item.status === 'error' ? 'red' : 'amber'}>{toolStatus(item)}</Badge> : null}
-        <Stamp ts={item.ts} className="mission-card-time" detail={item.durationMs ? `took ${fmtDuration(item.durationMs)}` : undefined} />
-        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
-      </button>
-      {report.length > 0 && (
-        <div className="mission-report" aria-label="Mission report">
-          {report.map((section) => (
-            <div key={section.title} className="mission-report-section">
-              <div className="mission-report-title">{section.title}</div>
-              {section.title === 'Task' ? <p>{section.lines[0]}</p> : <ul>{section.lines.map((line, i) => <li key={i}>{line}</li>)}</ul>}
-            </div>
-          ))}
-        </div>
-      )}
-      {expanded && (
-        <div className="tool-body mission-tool-body">
-          <div className="mission-tool-name muted small mono">{item.name}</div>
-          {item.input !== undefined && <pre className="tool-input mono">{typeof item.input === 'string' ? item.input : JSON.stringify(item.input, null, 2).slice(0, 4000)}</pre>}
-          {item.output && <pre className="tool-output mono">{item.output.length > 12_000 ? item.output.slice(-12_000) : item.output}</pre>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AssistantMessage({ item, sessionId, showThinking, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
-  // open === null means the user has not toggled; then reasoning shows only while it is being written.
-  const [open, setOpen] = useState<boolean | null>(null);
-  const html = useStreamingMarkdown(item.text, item.streaming);
-  // React must leave the hydrated DOM alone when only the active pane or link capability changes.
-  const markup = useMemo(() => ({ __html: html }), [html]);
-  const session = useStore((s) => s.sessions.find((candidate) => candidate.id === sessionId));
-  const canOpenPr = useStore((s) => canOpenTranscriptPullRequest(session, s.activeId));
-  const { openFile } = useTranscriptCapabilities();
-  const canRevealOutside = useCanInvoke('app:showInFolder');
-  const root = !isWeb && openFile && session ? session.cwd : undefined;
-  const cwd = session?.cwd;
-  const body = useMarkdownImages(html, sessionId, cwd, onImageExpand);
-  useLayoutEffect(() => {
-    // Use only the sanitized targets, not labels or Markdown-supplied link-kind attributes.
-    // Reclassify cached HTML in place when the session or capability changes.
-    for (const el of body.current?.querySelectorAll<HTMLElement>('a[href], [data-file]') ?? []) {
-      const path = el.getAttribute('data-file');
-      const href = el.getAttribute('href');
-      const kind = path && root !== undefined ? transcriptFileKind(path, root, canRevealOutside)
-        : path === null && href && /^https?:\/\//i.test(href) ? (canOpenPr && parseGitHubPullRequestUrl(href) ? 'pr' : 'external')
-        : undefined;
-      if (kind) el.dataset.linkKind = kind;
-      else delete el.dataset.linkKind;
-      if (path && el.classList.contains('file-ref')) {
-        if (kind) {
-          el.setAttribute('role', 'link');
-          el.tabIndex = 0;
-          const line = el.getAttribute('data-line');
-          el.title = kind === 'explorer' ? `Show ${path} in ${fileManagerName()}`
-            : kind === 'folder' ? `Show ${path} in the Files panel`
-            : `Preview ${path}${line ? ` at line ${line}` : ''}`;
-        } else {
-          el.removeAttribute('role');
-          el.removeAttribute('tabindex');
-          el.removeAttribute('title');
-        }
-      }
-    }
-  }, [body, markup, cwd, root, canOpenPr, canRevealOutside]);
-  // A deep-search jump into a row that is only reasoning matched that reasoning: show it.
-  const jumpHere = useStore((s) => !!s.searchJump && s.searchJump.sessionId === sessionId && s.searchJump.itemId === item.id);
-  const proseless = !item.text;
-  useEffect(() => { if (jumpHere && proseless) setOpen(true); }, [jumpHere, proseless]);
-  // With thinking hidden a thinking-only item has nothing left to show; rendering it anyway would
-  // leave an empty row in the transcript.
-  if (!item.text && !(item.thinking && showThinking)) return null;
-  // Reasoning is the same control wherever a harness puts it — on a message's row or a row of its
-  // own: open while it streams with no prose yet, one collapsed toggle once it is done.
-  const thinkingLive = !item.text && !!item.thinking && !!item.streaming;
-  const expanded = open ?? thinkingLive;
-  return (
-    <div className={`msg msg-assistant ${item.phase === 'plan' ? 'msg-plan' : ''}`}>
-      {/* One time per row, floated into the right-hand column the step times share, so it costs no
-          height: on the reasoning toggle's line when there is one, else beside the first line of prose. */}
-      <Stamp ts={item.ts} className="msg-stamp" />
-      {item.thinking && showThinking && (
-        <div className={`thinking ${expanded ? 'open' : ''}`}>
-          <button type="button" className="thinking-toggle" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
-            <Icon name="brain" size={13} /> {thinkingLive ? 'Thinking…' : 'Thinking'} <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
-          </button>
-          {expanded && <div className="thinking-body">{item.thinking}</div>}
-        </div>
-      )}
-      {item.text && <div key={`${sessionId}:${cwd}`} ref={body} className={`md ${item.streaming ? 'streaming' : ''}`} dangerouslySetInnerHTML={markup} />}
-      {item.phase === 'plan' && <Badge tone="purple">plan</Badge>}
-    </div>
-  );
-}
-
-const HINT_ICON: Record<string, string> = { execute: 'terminal', edit: 'edit', read: 'file', search: 'search', fetch: 'external', think: 'brain', mcp: 'bolt', agent: 'fork', other: 'bolt' };
-
-type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
-
-export const isRunningEntry = (item: TranscriptItem): boolean =>
-  (item.kind === 'tool' && item.status === 'running') || (item.kind === 'assistant' && !!item.streaming);
-
-/** An assistant row that carries no prose: reasoning only, or a stream that has not produced text yet. */
-const isThinkingOnly = (item: TranscriptItem): boolean => item.kind === 'assistant' && item.text.trim() === '';
-
-/** A step the agent took, as opposed to a line that merely sits beside the steps. */
-const isStep = (item: TranscriptItem): boolean => item.kind === 'tool' || item.kind === 'approval' || item.kind === 'plan';
-
-/**
- * Whether an item is machinery (it may collapse behind a work header) rather than something
- * written for the reader. Everything the model says in prose is a message and stays on screen,
- * whatever phase the harness gave it and whether or not more tool calls follow: only tool calls,
- * reasoning with no prose, info-level notices, approvals and plans are work. Approvals keep their
- * header open while undecided; plans are work that `WorkGroup` keeps on screen as one card under
- * its header, so a plan update does not split a stretch of work in two.
- */
-export function isWorkItem(item: TranscriptItem): boolean {
-  // A Mission handoff (a Builder started, a report filed, a branch landed) is the story of the
-  // mission, so it stays on screen; the Lead's read-only checks fold away like any other step.
-  if (item.kind === 'tool' && isHandoffTool(missionToolOf(item.name))) return false;
-  if (isStep(item)) return true;
-  // Warnings and errors are signals, not work: they stay on screen when the group is collapsed.
-  if (item.kind === 'info') return item.level === 'info';
-  return isThinkingOnly(item);
-}
-
-/**
- * Collapses each stretch of steps between two messages into a `work` chunk, together with the
- * thinking and notices that sit among them, and keeps every message, warning and turn row
- * standalone. Harnesses differ in what they emit — some label prose as commentary or final, some
- * do not; some put reasoning on the message's own row, some on a row of its own — and none of
- * that changes what is shown, so a turn reads the same on all of them: message, work, message,
- * work, answer.
- *
- * A header needs a step behind it. Thinking or a notice with no step beside it stays a row of its
- * own (the same collapsed "Thinking" toggle a message carries; a one-line notice) instead of a
- * "Worked" header over nothing. With `showThinking` off a thinking-only row has nothing to render,
- * so it makes no row at all.
- */
-export function groupTranscript(items: TranscriptItem[], showThinking = true): RenderChunk[] {
-  const chunks: RenderChunk[] = [];
-  let work: TranscriptItem[] = [];
-  /** Where the current turn's chunks begin: just past the last user or turn row. */
-  let turnStart = 0;
-  const flush = (closedBy?: TranscriptItem) => {
-    if (!work.length) return;
-    // Reasoning that leads straight into a message belongs with that message, not with the steps
-    // before it: a harness that reasons on a row of its own then reads like one that reasons on
-    // the message's row. Until the message arrives it stays with the live work.
-    let end = work.length;
-    if (closedBy?.kind === 'assistant') while (end > 0 && isThinkingOnly(work[end - 1]!)) end--;
-    const entries = work.slice(0, end);
-    if (entries.some(isStep)) chunks.push({ kind: 'work', id: entries[0]!.id, entries });
-    else end = 0;
-    for (const item of work.slice(end)) chunks.push({ kind: 'single', item });
-    work = [];
-  };
-  /**
-   * A turn's duration belongs on a work header only when that header stands for the whole turn's
-   * work. With several stretches of work in one turn no single header can claim it, and the turn
-   * row carries it instead.
-   */
-  const attachTurn = (turn: Extract<TranscriptItem, { kind: 'turn' }>) => {
-    const stretches = chunks.slice(turnStart).filter((c): c is Extract<RenderChunk, { kind: 'work' }> => c.kind === 'work');
-    if (stretches.length === 1) stretches[0]!.turn = { status: turn.status, durationMs: turn.durationMs };
-  };
-  for (const item of items) {
-    if (item.kind === 'assistant' && isThinkingOnly(item) && !(showThinking && item.thinking)) continue;
-    if (isWorkItem(item)) {
-      work.push(item);
-      continue;
-    }
-    flush(item);
-    if (item.kind === 'turn') attachTurn(item);
-    chunks.push({ kind: 'single', item });
-    if (item.kind === 'turn' || item.kind === 'user') turnStart = chunks.length;
-  }
-  flush();
-  return chunks;
-}
-
-/** One row of a work body: a collapsed command run, or a single entry of any kind. */
-type CommandChunk = { kind: 'run'; id: string; entries: ToolItem[] } | { kind: 'single'; item: TranscriptItem };
-
-/**
- * Consecutive shell commands become one "Ran n commands" row (per nesting parent); every other
- * entry keeps its own row. Thinking or a notice breaks a run: it belongs beside the commands, not inside.
- */
-export function groupCommands(entries: TranscriptItem[]): CommandChunk[] {
-  const isCmd = (item: TranscriptItem): item is ToolItem => item.kind === 'tool' && item.hint === 'execute';
-  const chunks: CommandChunk[] = [];
-  let run: ToolItem[] = [];
-  let runParent: string | null = null;
-  const flush = () => {
-    if (run.length > 1) chunks.push({ kind: 'run', id: run[0]!.id, entries: run });
-    else if (run.length === 1) chunks.push({ kind: 'single', item: run[0]! });
-    run = [];
-  };
-  for (const item of entries) {
-    if (isCmd(item)) {
-      const parent = item.parentId ?? null;
-      if (run.length && parent !== runParent) flush();
-      if (!run.length) runParent = parent;
-      run.push(item);
-    } else {
-      flush();
-      chunks.push({ kind: 'single', item });
-    }
-  }
-  flush();
-  return chunks;
-}
-
-/** One stretch of work behind a "Worked …" header; the messages around it stay outside. */
-export function WorkGroup({ chunk, sessionId, canEdit = false, showThinking, onImageExpand, live = false }: { chunk: Extract<RenderChunk, { kind: 'work' }>; sessionId: string; canEdit?: boolean; showThinking: boolean; onImageExpand: OnImageExpand; live?: boolean }) {
-  // open === null means the user has not toggled; then follow the turn so live activity stays visible.
-  const [open, setOpen] = useState<boolean | null>(null);
-  // A deep-search jump into one of these entries forces the group open so the anchor exists.
-  const jump = useStore((s) => s.searchJump);
-  const jumpHere = !!jump && jump.sessionId === sessionId && chunk.entries.some((e) => e.id === jump.itemId);
-  useEffect(() => { if (jumpHere) setOpen(true); }, [jumpHere]);
-  const running = live || chunk.entries.some(isRunningEntry);
-  // An undecided approval is a gate the user has to answer: it keeps the work open no matter what.
-  const pendingApproval = chunk.entries.some((e) => e.kind === 'approval' && !e.decision);
-  const expanded = pendingApproval || jumpHere || (open ?? running);
-  const failed = chunk.entries.filter((e) => e.kind === 'tool' && (e.status === 'error' || e.status === 'declined')).length;
-  const durationMs = chunk.turn?.durationMs;
-  // Every plan update replaces the last one, so only the latest is shown — and it stays on screen
-  // while the work around it is collapsed.
-  const plan = [...chunk.entries].reverse().find((e): e is Extract<TranscriptItem, { kind: 'plan' }> => e.kind === 'plan');
-  const entries = plan ? chunk.entries.filter((e) => e.kind !== 'plan') : chunk.entries;
-  const tools = entries.filter((e): e is ToolItem => e.kind === 'tool');
-  const files = new Set(tools.flatMap((t) => t.changes?.map((c) => c.path) ?? []));
-  if (!entries.length) return plan ? <div className="work-group"><PlanCard item={plan} /></div> : null;
-  return (
-    <div className={`work-group ${running ? 'work-running' : ''} ${expanded ? 'work-open' : ''}`}>
-      <button type="button" className="work-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
-        <Icon name={running ? 'activity' : 'layers'} size={13} className="work-icon" />
-        {/* data-short carries the same facts without the words, for the Zen interface. */}
-        <span className="work-label" data-short={running ? '…' : durationMs ? fmtDuration(durationMs) : '✓'}>{running ? 'Working…' : durationMs ? `Worked for ${fmtDuration(durationMs)}` : 'Worked'}</span>
-        {tools.length > 0 && <span className="work-stat work-steps" data-short={String(tools.length)}>{tools.length} step{tools.length === 1 ? '' : 's'}</span>}
-        {files.size > 0 && <span className="work-stat work-files" data-short={`±${files.size}`}>{files.size} file{files.size === 1 ? '' : 's'} changed</span>}
-        <Stamp ts={entries[0]!.ts} className="work-time" />
-        {running ? <Spinner size={12} /> : null}
-        {failed ? <Badge tone="red">{failed} failed</Badge> : null}
-        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} className="work-chevron" />
-      </button>
-      {plan && <PlanCard item={plan} />}
-      {expanded && (
-        <div className="work-body">
-          {groupCommands(entries).map((c) =>
-            c.kind === 'run' ? (
-              <ToolGroup key={c.id} entries={c.entries} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} />
-            ) : (
-              <Item key={c.item.id} item={c.item} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={c.item.id} />
-            )
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Collapsed "Ran n commands" header for a run of shell commands. */
-export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, onImageExpand }: { entries: TranscriptItem[]; sessionId: string; canEdit?: boolean; showThinking: boolean; onImageExpand: OnImageExpand }) {
-  // open === null means the user has not toggled; then follow running state so live output stays visible.
-  const [open, setOpen] = useState<boolean | null>(null);
-  // A deep-search jump into one of these commands forces the group open so the anchor exists.
-  const jump = useStore((s) => s.searchJump);
-  const jumpHere = !!jump && jump.sessionId === sessionId && entries.some((e) => e.id === jump.itemId);
-  // Consuming the navigation request must not immediately hide its matched command.
-  useEffect(() => { if (jumpHere) setOpen(true); }, [jumpHere]);
-  const commands = entries.filter((e): e is ToolItem => e.kind === 'tool');
-  const running = commands.some((i) => i.status === 'running');
-  const expanded = jumpHere || (open ?? running);
-  const failed = commands.filter((i) => i.status === 'error' || i.status === 'declined').length;
-  const totalMs = commands.reduce((sum, i) => sum + (i.durationMs ?? 0), 0);
-  return (
-    <div className={`tool-group ${running ? 'tool-group-running' : ''}`}>
-      <button type="button" className="tool-group-head" onClick={() => setOpen(!expanded)}>
-        <span className="tool-glyph"><Icon name="terminal" size={13} className="tool-icon" /></span>
-        <span className="tool-name">{running ? 'Running' : 'Ran'} {commands.length} command{commands.length === 1 ? '' : 's'}</span>
-        <span className="spacer" />
-        {failed ? <Badge tone="red">{failed} failed</Badge> : null}
-        {running ? <Spinner size={12} /> : totalMs ? <span className="muted small">{fmtDuration(totalMs)}</span> : null}
-        {commands[0] && <Stamp ts={commands[0].ts} className="tool-time" />}
-        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
-      </button>
-      {expanded && (
-        <div className="tool-group-body">
-          {entries.map((e) =>
-            e.kind === 'tool' ? (
-              <ToolCard key={e.id} item={e} sessionId={sessionId} dataItemId={e.id} />
-            ) : (
-              <Item key={e.id} item={e} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={e.id} />
-            )
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Status badge text for a tool row: an exit code says more than "error" when there is one. */
-function toolStatus(item: ToolItem): string {
-  if (item.exitCode !== undefined && item.exitCode !== null && (item.status === 'done' || item.status === 'error')) return `exit ${item.exitCode}`;
-  return item.status === 'done' ? 'done' : item.status;
-}
-
-/** Lines added and removed across a tool call's diffs; null when it carried none. */
-function diffStat(changes: FileChange[] | undefined): { add: number; del: number } | null {
-  const diffs = changes?.filter((c) => c.diff) ?? [];
-  if (!diffs.length) return null;
-  let add = 0;
-  let del = 0;
-  for (const c of diffs) {
-    for (const line of c.diff!.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) add++;
-      else if (line.startsWith('-') && !line.startsWith('---')) del++;
-    }
-  }
-  return { add, del };
-}
-
-function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptItem, { kind: 'tool' }>; sessionId: string; dataItemId?: string }) {
-  const [open, setOpen] = useState(false);
-  const revealSubagentRun = useStore((s) => s.revealSubagentRun);
-  const command = item.hint === 'execute';
-  const running = item.status === 'running';
-  const failed = item.status === 'error' || item.status === 'declined';
-  const hasBody = !!item.output || !!(item.changes && item.changes.length) || item.input !== undefined;
-  const statusTone = running ? 'blue' : item.status === 'error' ? 'red' : item.status === 'declined' ? 'amber' : 'green';
-  // A running command streams its output into view; every other body waits for a click.
-  const showBody = open || (running && command && !!item.output);
-  const commandText = item.summary ?? (typeof item.input === 'string' ? item.input : '');
-  const stat = diffStat(item.changes);
-  return (
-    <div data-item-id={dataItemId} className={`tool-card tool-${item.status} ${command ? 'tool-command' : ''} ${item.parentId ? 'tool-nested' : ''}`}>
-      <button type="button" className="tool-head" onClick={() => hasBody && setOpen((o) => !o)}>
-        <span className="tool-glyph"><Icon name={HINT_ICON[item.hint ?? 'other']} size={13} className="tool-icon" /></span>
-        <span className="tool-name">{command ? (running ? 'Running' : 'Ran') : item.title ?? item.name}</span>
-        {item.summary && <span className="tool-summary mono" title={item.summary}>{item.summary}</span>}
-        <span className="spacer" />
-        {stat ? (
-          <span className="tool-changes diff-stat"><span className="add">+{stat.add}</span> <span className="del">−{stat.del}</span></span>
-        ) : item.changes?.length ? <span className="tool-changes">{item.changes.length} file{item.changes.length === 1 ? '' : 's'}</span> : null}
-        {/* Success is the expected outcome, so only a failure, a refusal or live work earns a badge. */}
-        {running ? <Spinner size={12} /> : failed ? <Badge tone={statusTone}>{toolStatus(item)}</Badge> : null}
-        {!command && item.durationMs ? <span className="muted small">{fmtDuration(item.durationMs)}</span> : null}
-        {item.runId ? (
-          <span
-            className="chip"
-            role="button"
-            tabIndex={0}
-            title="Open this run in the Subagents panel"
-            onClick={(e) => {
-              e.stopPropagation();
-              revealSubagentRun(sessionId, item.runId!);
-            }}
-            onKeyDown={(e) => {
-              if (e.key !== 'Enter' && e.key !== ' ') return;
-              e.preventDefault();
-              e.stopPropagation();
-              revealSubagentRun(sessionId, item.runId!);
-            }}
-          >
-            open run
-          </span>
-        ) : null}
-        <Stamp ts={item.ts} className="tool-time" detail={item.durationMs ? `took ${fmtDuration(item.durationMs)}` : undefined} />
-        {/* Held in place without a body too, so the times line up in one column down the steps. */}
-        <Icon name={open ? 'chevron' : 'chevronRight'} size={12} className={hasBody ? undefined : 'tool-chevron-none'} />
-      </button>
-      {showBody && (
-        <div className="tool-body">
-          {command ? (
-            <div className="shell-card">
-              <div className="shell-bar">Shell</div>
-              {commandText ? <pre className="shell-cmd mono"><span className="shell-prompt">$ </span>{commandText}</pre> : null}
-              {item.output && <pre className="tool-output mono">{item.output.length > 12_000 && !open ? item.output.slice(-12_000) : item.output}</pre>}
-              {open && (
-                <div className={`shell-foot ${failed ? 'shell-foot-failed' : ''}`}>
-                  <Icon name={failed ? 'alert' : 'check'} size={12} /> {toolStatus(item)}{item.durationMs ? ` · ${fmtDuration(item.durationMs)}` : ''}
-                </div>
-              )}
-            </div>
-          ) : (
-            <>
-              {open && item.input !== undefined && (
-                <pre className="tool-input mono">{typeof item.input === 'string' ? item.input : JSON.stringify(item.input, null, 2).slice(0, 4000)}</pre>
-              )}
-              {item.changes?.some((c) => c.diff) && <DiffView diff={item.changes.filter((c) => c.diff).map((c) => c.diff!).join('\n')} compact />}
-              {item.output && <pre className="tool-output mono">{item.output.length > 12_000 && !open ? item.output.slice(-12_000) : item.output}</pre>}
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem, { kind: 'approval' }>; sessionId: string }) {
-  const req = item.request;
-  // A view-only or browser client cannot answer: it says where the decision has to be made.
-  const canRespond = useCanInvoke('approvals:respond');
-  const toast = useStore((s) => s.toast);
-  const [note, setNote] = useState('');
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [multiAnswers, setMultiAnswers] = useState<Record<string, string[]>>({});
-  const [editedCommand, setEditedCommand] = useState<string | null>(null);
-  const [responseState, setResponseState] = useState<'idle' | 'sending' | 'sent'>('idle');
-  const [validationError, setValidationError] = useState<string | null>(null);
-  useEffect(() => setValidationError(null), [answers, multiAnswers, note]);
-  const responding = useRef(false);
-  const fieldId = useId();
-  const decided = !!item.decision;
-  const locked = decided || !canRespond || responseState !== 'idle';
-  const questionComment = req.kind === 'question' && req.supportsQuestionComment !== false;
-  const hasMultiAnswer = Object.values(multiAnswers).some((selected) => selected.length > 0);
-  const emptyQuestion = questionComment && !Object.values(answers).some((answer) => answer.trim()) && !hasMultiAnswer && !note.trim();
-  const noteLabel = req.kind === 'question' ? 'Additional context (optional)' : 'Note for the agent (sent with Deny only)';
-  const decisionKind = req.options.find((o) => o.id === item.decision?.optionId)?.kind ?? item.decision?.optionId ?? '';
-  // Mission mode: a Builder's request goes to its Lead first. The Lead's copy of the card answers the
-  // Builder's own request, so the response names the session that asked, not the one being viewed.
-  const route = req.mission;
-  const target = route && req.sessionId ? req.sessionId : sessionId;
-  const askingBuilder = useStore((s) => (route && req.sessionId && req.sessionId !== sessionId ? builderIndexOf(req.sessionId, s.missionViews, s.sessions) : undefined));
-  const recommendation = route?.recommendation;
-  const respond = (optionId: string) => {
-    if (locked || responding.current) return;
-    const option = req.options.find((o) => o.id === optionId);
-    const sendsNote = questionComment || (req.kind !== 'question' && (option?.kind === 'deny' || option?.kind === 'deny_always'));
-    const decision: ApprovalDecision = { optionId, note: sendsNote ? note.trim() || undefined : undefined };
-    if (req.questions?.length) {
-      decision.answers = answers;
-      if (req.questions.some((q) => q.multiSelect)) decision.multiAnswers = multiAnswers;
-    }
-    if (editedCommand !== null && editedCommand !== req.command && req.input && typeof req.input === 'object') decision.updatedInput = { ...(req.input as Record<string, unknown>), command: editedCommand };
-    try {
-      validateQuestionResponse(req, decision);
-    } catch (error) {
-      setValidationError(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    responding.current = true;
-    setResponseState('sending');
-    void invoke('approvals:respond', { sessionId: target, requestId: req.id, decision }).then(() => {
-      // Keep the draft locked until the persisted decision arrives, not just until IPC resolves.
-      setResponseState('sent');
-    }).catch((e: unknown) => {
-      responding.current = false;
-      setResponseState('idle');
-      toast(`Approval could not be sent: ${e instanceof Error ? e.message : String(e)}`, 'error');
-    });
-  };
-  return (
-    <div className={`approval ${decided ? 'decided' : 'pending'}`}>
-      <div className="approval-head">
-        <span className="approval-glyph"><Icon name="shield" size={14} /></span>
-        <span className="approval-heading">
-          <span className="approval-title">{req.title}</span>
-          {req.description && <span className="approval-desc">{req.description}</span>}
-        </span>
-        <Stamp ts={item.ts} className="approval-time" detail={item.decidedAt ? `answered ${fmtStampFull(item.decidedAt)}` : undefined} />
-        <HarnessPill harness={req.harness} />
-        {decided && <Badge tone={/deny|reject|cancel/.test(decisionKind) ? 'red' : 'green'}>{labelFor(req, item.decision!.optionId)}</Badge>}
-      </div>
-      {(route || item.decidedBy === 'lead') && (
-        <div className="approval-mission" data-status={route?.status}>
-          <Icon name="flag" size={12} />
-          {askingBuilder ? <span className="approval-mission-who">Builder {askingBuilder}</span> : null}
-          {decided ? (
-            <span>{item.decidedBy === 'lead' ? 'Answered by the Lead' : 'Answered by you'}</span>
-          ) : route?.status === 'with_lead' ? (
-            <span>With the Lead — it answers first; you can still decide here.</span>
-          ) : (
-            <span>Needs you{route?.reason ? `: ${route.reason}` : ''}</span>
-          )}
-        </div>
-      )}
-      {route && recommendation && (
-        <div className="approval-recommendation" data-verdict={recommendation.verdict}>
-          <span className="approval-note-label">The Lead recommends: {recommendation.verdict === 'allow' ? 'Allow' : 'Deny'}</span>
-          {recommendation.note && <div>{recommendation.note}</div>}
-        </div>
-      )}
-      {req.command !== undefined && (
-        decided ? (
-          <pre className="approval-cmd mono">{req.command}</pre>
-        ) : (
-          <textarea className="approval-cmd mono editable" aria-label="Command" disabled={locked} value={editedCommand ?? req.command} onChange={(e) => setEditedCommand(e.target.value)} rows={Math.min(6, (req.command.match(/\n/g)?.length ?? 0) + 1)} spellCheck={false} />
-        )
-      )}
-      {req.cwd && req.command !== undefined && <div className="approval-cwd muted small">in {req.cwd}</div>}
-      {req.changes?.length ? <ChangesPreview changes={req.changes} /> : null}
-      {req.questions?.map((q, qi) => {
-        const questionId = `${fieldId}-question-${qi}`;
-        const skipped = /deny|reject|cancel/.test(decisionKind);
-        const savedAnswer = skipped ? undefined : item.decision?.answers?.[q.id]?.trim() || undefined;
-        const savedMulti = skipped ? undefined : item.decision?.multiAnswers?.[q.id]?.filter(Boolean);
-        const savedOption = !q.secret && !q.multiSelect && q.options?.find((o) => o.label === savedAnswer);
-        const savedMultiOptions = !q.secret && q.multiSelect && savedMulti?.length
-          ? savedMulti.map((label) => ({ label, description: q.options?.find((o) => o.label === label)?.description }))
-          : [];
-        const hasSaved = Boolean(savedAnswer || savedMulti?.length);
-        return (
-          <div key={q.id} className="approval-question" role="group" aria-labelledby={questionId}>
-            {q.header && <div className="approval-qhead">{q.header}</div>}
-            <div className="approval-qtext" id={questionId}>{q.question}</div>
-            {decided ? (
-              hasSaved ? (
-                q.secret ? (
-                  <div className="approval-answer"><span>Answer hidden</span></div>
-                ) : q.multiSelect ? (
-                  <div className="approval-answer">
-                    {savedMultiOptions.map((opt) => (
-                      <div key={opt.label} className="approval-answer-item">
-                        <span>{opt.label}</span>
-                        {opt.description && <span className="approval-choice-desc">{opt.description}</span>}
-                      </div>
-                    ))}
-                    {savedAnswer && <div className="approval-answer-item"><span>{savedAnswer}</span></div>}
-                  </div>
-                ) : (
-                  <div className="approval-answer">
-                    <span>{savedAnswer}</span>
-                    {savedOption && savedOption.description && <span className="approval-choice-desc">{savedOption.description}</span>}
-                  </div>
-                )
-              ) : <div className="muted small">No answer provided</div>
-            ) : (
-              <>
-                {q.multiSelect && q.options?.length ? <div className="approval-qhint muted small">Select one or more</div> : null}
-                {q.options?.length ? (
-                  <div className="approval-qopts">
-                    {q.options.map((o, oi) => {
-                      const descriptionId = `${questionId}-option-${oi}`;
-                      const selected = q.multiSelect ? (multiAnswers[q.id]?.includes(o.label) ?? false) : answers[q.id] === o.label;
-                      return (
-                        <button
-                          key={o.label}
-                          type="button"
-                          className={`approval-choice ${selected ? 'active' : ''}`}
-                          disabled={locked}
-                          onClick={() => {
-                            if (q.multiSelect) {
-                              const prev = multiAnswers[q.id] ?? [];
-                              const next = prev.includes(o.label) ? prev.filter((label) => label !== o.label) : [...prev, o.label];
-                              setMultiAnswers(next.length ? { ...multiAnswers, [q.id]: next } : Object.fromEntries(Object.entries(multiAnswers).filter(([id]) => id !== q.id)));
-                            } else {
-                              setAnswers(answers[q.id] === o.label ? Object.fromEntries(Object.entries(answers).filter(([id]) => id !== q.id)) : { ...answers, [q.id]: o.label });
-                            }
-                          }}
-                          aria-label={o.label}
-                          aria-pressed={selected}
-                          aria-describedby={o.description ? descriptionId : undefined}
-                        >
-                          <span className="approval-choice-label">{o.label}{selected && <Icon name="check" size={14} />}</span>
-                          {o.description && <span className="approval-choice-desc" id={descriptionId}>{o.description}</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : null}
-                {(q.allowOther || !q.options?.length) && (
-                  <label className="approval-field">
-                    <span>Type an answer</span>
-                    <input
-                      type={q.secret ? 'password' : 'text'}
-                      placeholder="Type an answer"
-                      aria-describedby={questionId}
-                      disabled={locked}
-                      value={q.multiSelect ? (answers[q.id] ?? '') : (answers[q.id] && !q.options?.some((o) => o.label === answers[q.id]) ? answers[q.id] : '')}
-                      onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })}
-                    />
-                  </label>
-                )}
-              </>
-            )}
-          </div>
-        );
-      })}
-      {decided && item.decision?.note && (
-        <div className="approval-saved-note">
-          <div className="approval-note-label">{req.kind === 'question' ? 'Additional context' : 'Note for the agent'}</div>
-          <div>{item.decision.note}</div>
-        </div>
-      )}
-      {!decided && (req.kind !== 'question' || questionComment) && (
-        <label className="approval-field">
-          <span>{noteLabel}</span>
-          <textarea className="approval-note" rows={2} disabled={locked} value={note} onChange={(e) => setNote(e.target.value)} />
-        </label>
-      )}
-      {!decided && validationError && <div className="callout warn small" role="alert">{validationError}</div>}
-      {!decided && emptyQuestion && <div className="muted small" id={`${fieldId}-response-hint`}>Choose an option, type an answer, or add context to continue.</div>}
-      {!decided && canRespond && (
-        <div className="approval-actions">
-          {req.options.map((o) => (
-            <Button key={o.id} className={`approval-opt opt-${o.kind}`} variant={o.kind === 'allow' ? 'primary' : o.kind === 'allow_session' || o.kind === 'allow_always' ? 'default' : 'ghost'} size="sm" disabled={locked || (emptyQuestion && o.kind === 'allow')} aria-describedby={emptyQuestion && o.kind === 'allow' ? `${fieldId}-response-hint` : undefined} onClick={() => respond(o.id)} title={o.description}>
-              {o.label}
-            </Button>
-          ))}
-          {responseState !== 'idle' && <span className="muted small" role="status">{responseState === 'sending' ? 'Sending response…' : 'Response sent'}</span>}
-        </div>
-      )}
-      {!decided && !canRespond && <div className="approval-remote muted small">Decide on your computer</div>}
-    </div>
-  );
-}
-
-function labelFor(req: ApprovalRequest, optionId: string): string {
-  return req.options.find((o) => o.id === optionId)?.label ?? optionId;
-}
-
-function ChangesPreview({ changes }: { changes: FileChange[] }) {
-  const withDiff = changes.filter((c) => c.diff);
-  return (
-    <div className="approval-changes">
-      <div className="approval-files">
-        {changes.map((c) => (
-          <span key={c.path} className={`file-chip kind-${c.kind}`}>
-            {c.kind === 'add' ? '+' : c.kind === 'delete' ? '−' : '~'} {c.path}
-          </span>
-        ))}
-      </div>
-      {withDiff.length > 0 && <DiffView diff={withDiff.map((c) => c.diff!).join('\n')} compact />}
     </div>
   );
 }

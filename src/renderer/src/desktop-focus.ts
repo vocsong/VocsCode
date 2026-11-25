@@ -32,7 +32,14 @@ export function useSessionViewing(): void {
   const windowFocused = useStore((s) => s.desktopFocus?.windowFocused === true);
   const key = visible.join('\n');
   // Sessions on screen that carry a mark: one that gains a mark while counted is counted again.
-  const unseenKey = useStore((s) => s.sessions.filter((x) => x.unseenAt !== undefined && s.visibleSessionIds.includes(x.id)).map((x) => x.id).join('\n'));
+  const unseenKey = useStore((s) => {
+    let out = '';
+    for (const x of s.sessions) {
+      if (x.unseenAt === undefined || !s.visibleSessionIds.includes(x.id)) continue;
+      out = out ? `${out}\n${x.id}` : x.id;
+    }
+    return out;
+  });
 
   // A session leaving the screen is reported at once, so a turn ending just after it left is
   // marked; additions are debounced to where a fast switch settles.
