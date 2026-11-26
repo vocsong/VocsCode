@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.0](https://github.com/vocsong/VocsCode/compare/v0.13.0...v0.14.0) (2026-11-26)
+
+
+### Features
+
+* **relay:** support isolated self-service Code accounts ([#692](https://github.com/vocsong/VocsCode/issues/692)) ([4e37b0f](https://github.com/vocsong/VocsCode/commit/4e37b0fb1da0f05d873d02399accb718fe851985))
+
+
+### Bug Fixes
+
+* **acp:** record Antigravity token usage from prompt responses ([#688](https://github.com/vocsong/VocsCode/issues/688)) ([f021c22](https://github.com/vocsong/VocsCode/commit/f021c22a2e943139f231077e517a0e1c4faff763))
+
 ## [0.13.0](https://github.com/vocsong/VocsCode/compare/v0.12.0...v0.13.0) (2026-11-25)
 
 
