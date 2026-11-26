@@ -247,9 +247,18 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
 
       // Leave visible output in the first shell before reloading; the main-process PTY must
       // reattach its screen, not merely restore the tab metadata.
+      const composer = win.locator('.composer textarea');
       const screenText = async (): Promise<string> => {
         await win.click('button[aria-label="Send output to agent"]');
-        return win.locator('.composer textarea').inputValue();
+        return composer.inputValue();
+      };
+      const clearCopiedOutput = async (): Promise<void> => {
+        // After a copy, the composer's next-frame caret move can undo fill's select-all before
+        // Delete. Verify the draft actually cleared, rather than carrying the copy to another view.
+        await expect.poll(async () => {
+          await composer.fill('');
+          return composer.inputValue();
+        }, { timeout: 10_000 }).toBe('');
       };
       await win.locator('.xterm-helper-textarea').focus();
       await win.keyboard.type('echo VOCS_RELOAD_RETAINED');
@@ -291,14 +300,31 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('.term-new button[aria-label="New terminal"]');
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(1);
       await win.waitForSelector('.term-view .xterm .xterm-helper-textarea', { timeout: 20_000 });
+      const sessionId = await sessionRow.getAttribute('data-session-id');
+      if (!sessionId) throw new Error('The session row has no id');
+      const sessionTerminals = () => win.evaluate(
+        async (id) => (await window.harness.invoke('terminal:list', undefined)).filter((term) => term.sessionId === id),
+        sessionId
+      );
+      const onlyTerminalId = async () => {
+        const terminals = await sessionTerminals();
+        expect(terminals).toHaveLength(1);
+        return terminals[0].id;
+      };
+      // IPC returns physical rows: join them so a line wrap cannot hide a marker.
+      const mainScreen = (terminalId: string) => win.evaluate(async (id) => (await window.harness.invoke('terminal:screen', { terminalId: id })).lines.join(''), terminalId);
+      const archiveTerminalId = await onlyTerminalId();
+      const archiveMarker = 'VOCS_ARCHIVE_MARKER';
+
       // The composer sends to the PTY even while the renderer is attaching; wait for an
       // observable shell response rather than assuming a fixed prompt startup time.
-      await win.fill('.composer textarea', '!echo VOCS_ARCHIVE_MARKER > archive-marker.txt');
-      await win.press('.composer textarea', 'Enter');
-      expect((await waitForFile(path.join(project, 'archive-marker.txt'), 20_000)).replace(/\0|﻿|�/g, '')).toMatch(/VOCS_ARCHIVE_MARKER/);
+      await composer.fill(`!echo ${archiveMarker} > archive-marker.txt`);
+      await composer.press('Enter');
+      expect((await waitForFile(path.join(project, 'archive-marker.txt'), 20_000)).replace(/\0|﻿|�/g, '')).toContain(archiveMarker);
+      await expect.poll(() => mainScreen(archiveTerminalId), { timeout: 20_000 }).toContain(archiveMarker);
       // “Send output to agent” reads the renderer's own xterm buffer, so it is the screen itself.
-      await expect.poll(screenText, { timeout: 20_000 }).toContain('VOCS_ARCHIVE_MARKER');
-      await win.fill('.composer textarea', '');
+      await expect.poll(screenText, { timeout: 20_000 }).toContain(archiveMarker);
+      await clearCopiedOutput();
 
       // Pin/unpin is not a lifecycle action, so an archived session keeps the same leading toggle
       // instead of degrading to a read-only indicator. Archive the session, open the Archived view,
@@ -312,6 +338,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       // rather than keeping the archived session's transcript on screen.
       await win.waitForSelector('.main-empty', { timeout: 20_000 });
       expect(await win.locator('.main-empty').innerText()).toContain('Welcome to Vocs Code');
+      expect(await sessionTerminals()).toEqual([]);
       await win.click('[data-testid="sidebar-archived"]');
       const archivedRow = win.locator('[data-testid="session-row"]').first();
       await archivedRow.waitFor({ timeout: 20_000 });
@@ -331,12 +358,25 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('[data-testid="sidebar-archived"]'); // pressed again: back to active sessions
       const restoredRow = win.locator('[data-testid="session-row"]').first();
       await restoredRow.waitFor({ timeout: 20_000 });
+      expect(await restoredRow.getAttribute('data-session-id')).toBe(sessionId);
       await restoredRow.click();
       await win.click('.panel-tab:has-text("Terminal")');
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(1);
-      await expect.poll(screenText, { timeout: 20_000 }).toMatch(/^Terminal output \(/);
-      expect(await screenText(), 'the restored session starts a fresh shell, not the archived screen').not.toContain('VOCS_ARCHIVE_MARKER');
-      await win.fill('.composer textarea', '');
+      const freshTerminalId = await onlyTerminalId();
+      expect(freshTerminalId).not.toBe(archiveTerminalId);
+
+      // Copy appends to the draft. Start empty and assert against the same populated copy that
+      // satisfied the poll, not another click whose insertion may not have arrived yet.
+      await clearCopiedOutput();
+      let restoredOutput = '';
+      await expect.poll(async () => (restoredOutput = await screenText()), { timeout: 20_000 }).toMatch(/^Terminal output \([^\n]*\):\n```\n[\s\S]+\n```/);
+      expect(restoredOutput, 'the restored session starts a fresh shell, not the archived screen').not.toContain(archiveMarker);
+      const restoredScreen = await mainScreen(freshTerminalId);
+      expect(restoredScreen).toMatch(/\S/);
+      expect(restoredScreen, 'the new terminal’s main-process screen excludes the archived output').not.toContain(archiveMarker);
+      const transcript = await win.evaluate((id) => window.harness.invoke('sessions:transcript', { id }), sessionId);
+      expect(JSON.stringify(transcript), 'the terminal marker never became a chat transcript item').not.toContain(archiveMarker);
+      await clearCopiedOutput();
 
       // A killed renderer must not leave a blank window: main logs it and reloads automatically,
       // and the reloaded page paints the app again — without restarting the main process. The
