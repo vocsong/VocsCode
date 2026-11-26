@@ -556,17 +556,23 @@ describe.runIf(enabled)('workspace file previews and editing', () => {
     // Use the keyboard to follow the covered link. Repeated misses keep the same editor and line
     // in view, with one inline alert and no error toasts.
     const originalEditor = await editor.elementHandle({ timeout: 10_000 });
-    const expectMissingWithEditor = async () => {
-      await expectMissing();
-      await expectHelloLine(300);
-      expect(await originalEditor.evaluate((el) => el.isConnected)).toBe(true);
+    const expectMissingWithEditor = async (startLookup: () => Promise<void>) => {
+      const [previousAlert] = await alert.elementHandles();
+      try {
+        await startLookup();
+        // The old alert can still be visible when the action returns. Wait on that node,
+        // not the locator, so a fast lookup that already replaced it also works.
+        await previousAlert?.waitForElementState('hidden', { timeout: 10_000 });
+        await expectMissing();
+        await expectHelloLine(300);
+        expect(await originalEditor.evaluate((el) => el.isConnected)).toBe(true);
+      } finally {
+        await previousAlert?.dispose();
+      }
     };
-    await missingLink.press('Enter');
-    await expectMissingWithEditor();
-    await missingLink.press('Enter');
-    await expectMissingWithEditor();
-    await retry.click();
-    await expectMissingWithEditor();
+    await expectMissingWithEditor(() => missingLink.press('Enter'));
+    await expectMissingWithEditor(() => missingLink.press('Enter'));
+    await expectMissingWithEditor(() => retry.click());
     await originalEditor.dispose();
 
     // Read the clipboard write without modifying the system clipboard.
