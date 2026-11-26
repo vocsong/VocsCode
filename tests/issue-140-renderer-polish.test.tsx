@@ -4,7 +4,7 @@ import { act, cleanup, render, screen, fireEvent } from '@testing-library/react'
 import type { AppSettings, SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32', canInvoke: () => true, isWeb: false }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32', canInvoke: () => true }));
 vi.mock('../src/renderer/src/models', () => ({ useSessionModels: () => ({ models: [], loading: false }) }));
 vi.mock('../src/renderer/src/terminal/host', () => ({
   clearFind: vi.fn(),
@@ -162,10 +162,10 @@ describe('issue 140 renderer error states', () => {
 });
 
 describe('settings navigation icons', () => {
-  it('distinguishes provider credentials from remote access with key and globe icons', () => {
+  it('distinguishes provider credentials from MCP control with key and plug icons', () => {
     render(<SettingsView />);
     const icon = (name: string): string | null => screen.getByRole('button', { name }).querySelector('svg')?.getAttribute('data-icon') ?? null;
     expect(icon('Providers & keys')).toBe('key');
-    expect(icon('Remote access')).toBe('globe');
+    expect(icon('MCP control')).toBe('plug');
   });
 });

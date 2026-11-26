@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { HarnessId } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { harnessStatus, type HarnessSetupStatus, type LoginHarnessId } from '../../../shared/harness-setup';
-import { canInvoke, invoke, invokeErrorMessage, isWeb } from '../api';
+import { canInvoke, invoke, invokeErrorMessage } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Icon, Spinner } from './ui';
 
@@ -27,7 +27,7 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
   const change = useRef(onChange);
   change.current = onChange;
   const canOpenUsage = harness === 'antigravity' && status?.availability.available === true &&
-    status.availability.authenticated === true && !awaitingLogin && !isWeb && canInvoke('subscriptions:openUsage');
+    status.availability.authenticated === true && !awaitingLogin && canInvoke('subscriptions:openUsage');
 
   const check = async () => {
     const request = ++generation.current;

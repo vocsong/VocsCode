@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { INLINE_SUBSCRIPTION_PROVIDERS, SUBSCRIPTION_PROVIDERS, type ObservedSubscriptionWindow, type SubscriptionLimits, type SubscriptionProvider } from '../../../shared/subscription-usage';
 import type { HarnessAvailability, SessionMeta } from '../../../shared/types';
-import { canInvoke, invoke, invokeErrorMessage, isWeb } from '../api';
+import { canInvoke, invoke, invokeErrorMessage } from '../api';
 import { useStore } from '../store';
 import { Meter } from './analytics/charts';
 import { Badge, Button } from './ui';
@@ -25,7 +25,7 @@ function subscriptionStatus(availability: HarnessAvailability | undefined) {
 }
 
 function canShowSubscriptions() {
-  return !isWeb && !!window.harness && canInvoke('subscriptions:openUsage');
+  return !!window.harness && canInvoke('subscriptions:openUsage');
 }
 
 function inlineProviders(session: SessionMeta): readonly SubscriptionProvider[] {

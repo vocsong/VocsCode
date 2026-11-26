@@ -105,4 +105,4 @@ for strings, comments, config and docs, and for anything newer than the index.
 | [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | Language and formatting, file layout, commit messages, GitHub text, what never gets committed |
 | [docs/RELEASING.md](docs/RELEASING.md) | Branch model, PR titles and squash rules, release-please, CI build |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Logs and environment variables |
-| [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md), [docs/REMOTE-ACCESS-ROADMAP.md](docs/REMOTE-ACCESS-ROADMAP.md) | Remote-access design and decisions of record; the working backlog — what is live, what is not, what is next |
+| [docs/RELAY.md](docs/RELAY.md) | The desktop's relay connection: Connect with Vocs, credentials, MCP control transport, analytics upload, deploy and secrets |

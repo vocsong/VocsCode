@@ -130,7 +130,7 @@ describe.runIf(enabled)('shell layout', () => {
     const groups = ['Workspace', 'Agent behavior', 'Connections', 'System'];
     const sections = [
       'General', 'Appearance', 'Shortcuts', 'Terminal', 'Voice', 'Session defaults', 'Instructions',
-      'Vesta & utility', 'Vocs account', 'Providers & keys', 'Harnesses', 'Pi', 'ACP agents', 'Import chats', 'Housekeep', 'Remote access', 'About & doctor'
+      'Vesta & utility', 'Vocs account', 'MCP control', 'Providers & keys', 'Harnesses', 'Pi', 'ACP agents', 'Import chats', 'Housekeep', 'About & doctor'
     ];
     expect(await win.locator('.settings-nav-label').allTextContents()).toEqual(groups);
     expect(await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button').allTextContents()).toEqual(sections);

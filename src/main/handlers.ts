@@ -1,9 +1,9 @@
 /**
  * Transport-agnostic handler registry: every invoke channel, bound once, Electron-free.
  *
- * `ipc.ts` binds it to Electron's `ipcMain`; the remote host (`docs/REMOTE-ACCESS.md`) binds the
- * same registry to its WebSocket transport. Electron affordances arrive via `DesktopBridge`, push
- * delivery via `deps.push`, and domain channels live under `src/main/handlers/`.
+ * `ipc.ts` binds it to Electron's `ipcMain`; agent tools invoke it with the `agent` actor. Electron
+ * affordances arrive via `DesktopBridge`, push delivery via `deps.push`, and domain channels live
+ * under `src/main/handlers/`.
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';

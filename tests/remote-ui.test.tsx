@@ -1,11 +1,11 @@
-// P4 remote-access settings panel: the view-only toggle, the paired-device list with per-device
-// revoke, and the recent-activity (audit) feed. The panel is driven through window.harness.invoke
+// Settings → MCP control: the Vocs relay connection (Connect with Vocs, status, analytics sharing,
+// the account's computers and the kill switch). The panel is driven through window.harness.invoke
 // so the test asserts the exact channels the renderer calls.
 /** @vitest-environment jsdom */
 const invokeMock = vi.fn().mockResolvedValue({});
 (window as unknown as { harness: unknown }).harness = {
   platform: 'win32',
-  // The separate automation panel has its own contract, not a browser-remote response.
+  // The separate automation panel has its own contract, not a relay-connection response.
   invoke: (channel: string, args: unknown) => channel === 'control:get'
     ? Promise.resolve({ instanceId: '30e4d8a1-cb8b-40bc-aa03-0c7ace255174', enabled: false, projects: [], grants: [] })
     : invokeMock(channel, args),
@@ -17,8 +17,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { SettingsView } from '../src/renderer/src/components/SettingsView';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
-import type { AppSettings, RemoteAuditEntry, RemoteState } from '../src/shared/types';
-import { decodeQrPath } from './support/qr-decode';
+import type { AppSettings, RemoteDeviceInfo, RemoteState } from '../src/shared/types';
 
 const baseSettings = {
   theme: 'system',
@@ -37,30 +36,28 @@ const baseSettings = {
   remote: { enabled: true }
 } as unknown as AppSettings;
 
-function remoteResult(viewOnly: boolean, audit: RemoteAuditEntry[] = [], extra: Partial<RemoteState> = {}) {
-  const state: RemoteState = { status: 'online', onlineClients: ['w_1'], viewOnly, ...extra };
+const computers: RemoteDeviceInfo[] = [
+  { deviceId: 'h_1', kind: 'host', name: 'Work PC', platform: 'win32 x64', lastSeen: Date.now(), online: true },
+  { deviceId: 'h_2', kind: 'host', name: 'Laptop', platform: 'darwin arm64', lastSeen: Date.now() - 60_000 }
+];
+
+function remoteResult(over: { state?: Partial<RemoteState>; devices?: RemoteDeviceInfo[]; registered?: boolean; signInAvailable?: boolean; enabled?: boolean } = {}) {
   return {
-    config: { enabled: true, viewOnly },
-    state,
-    devices: [
-      { deviceId: 'h_1', kind: 'host', name: 'Work PC', platform: 'win32', lastSeen: Date.now() },
-      { deviceId: 'w_1', kind: 'web', name: 'Chrome', platform: 'web', lastSeen: Date.now() }
-    ],
-    audit,
+    config: { enabled: over.enabled ?? true },
+    state: { status: 'online', registered: true, ...over.state } as RemoteState,
+    devices: over.devices ?? computers,
     // The relay main reports; the panel offers no way to change it.
     relayUrl: 'https://relay.example',
-    registered: true
+    registered: over.registered ?? true,
+    signInAvailable: over.signInAvailable ?? true
   };
 }
 
-function renderRemote(audit: RemoteAuditEntry[] = [], viewOnly = false, extra: Partial<RemoteState> = {}): void {
-  invokeMock.mockImplementation((channel: string) => {
-    if (channel === 'remote:get') return Promise.resolve(remoteResult(viewOnly, audit, extra));
-    return Promise.resolve({});
-  });
-  useStore.setState({ settings: { ...baseSettings } as AppSettings });
-  render(<SettingsView />);
-  fireEvent.click(screen.getByText('Remote access'));
+function renderPanel(result = remoteResult(), settings: Partial<AppSettings> = {}): void {
+  invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? result : {}));
+  useStore.setState({ settings: { ...baseSettings, ...settings } as AppSettings });
+  render(<><SettingsView /><ConfirmHost /></>);
+  fireEvent.click(screen.getByText('MCP control'));
 }
 
 beforeEach(() => {
@@ -75,203 +72,119 @@ afterEach(() => {
   cleanup();
 });
 
-describe('remote access settings (P4)', () => {
-  it('connects a new computer with only the enrollment secret and shows a pairing code right away', async () => {
-    invokeMock.mockImplementation((channel: string) => {
-      if (channel === 'remote:get') return Promise.resolve({ config: { enabled: false }, state: { status: 'off' }, devices: [], audit: [], relayUrl: 'https://code.vocs.io', registered: false });
-      return Promise.resolve({ status: 'connecting' });
-    });
-    useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
+describe('Settings → MCP control', () => {
+  it('groups the relay connection with external and local MCP control, and offers no browser access', async () => {
+    renderPanel();
+    await screen.findByText('Vocs relay connection');
+    expect(screen.getAllByText('External MCP control').length).toBeGreaterThan(0);
+    expect(screen.getByText(/MCP clients such as Dots and Muse can then reach it/)).toBeTruthy();
+    // Nothing of the retired paired-browser access is left on the page.
+    for (const gone of [/pair a browser/i, /view-only/i, /offline mirror/i, /QR code/, /Recent activity/, /enrollment secret/i]) {
+      expect(screen.queryByText(gone)).toBeNull();
+    }
+    expect(invokeMock.mock.calls.map(([channel]) => channel)).not.toContain('remote:pairStart');
+  });
+
+  it('is found by searching for MCP, Dots or the relay, and no longer for browser pairing', async () => {
+    useStore.setState({ settings: { ...baseSettings } as AppSettings });
+    invokeMock.mockImplementation(() => Promise.resolve(remoteResult()));
     render(<SettingsView />);
-    fireEvent.click(screen.getByText('Remote access'));
-    await vi.waitFor(() => expect(screen.getByTestId('remote-relay').textContent).toBe('code.vocs.io'));
-    // The three steps say what happens on which device, starting with this one.
-    expect(screen.getByTestId('remote-steps').textContent).toContain('Connect this computer (the first time, with the enrollment secret)');
-    // There is no relay URL to type: the secret alone enables Connect.
-    expect(screen.queryByTestId('remote-relay-url')).toBeNull();
-    const connect = screen.getByTestId('remote-connect') as HTMLButtonElement;
-    expect(connect.disabled).toBe(true);
-    fireEvent.change(screen.getByTestId('remote-enroll'), { target: { value: ' enroll-secret ' } });
-    expect(connect.disabled).toBe(false);
-    fireEvent.click(connect);
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:enable', { enrollToken: 'enroll-secret' }));
-    // No browser is paired yet, so the code a phone scans is requested without another click.
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:pairStart', { hostName: undefined }));
+    const search = screen.getByLabelText('Search settings');
+    for (const [query, topic] of [['dots', 'External MCP control'], ['relay', 'Vocs relay connection'], ['local cli', 'Local CLI & MCP discovery']] as const) {
+      fireEvent.change(search, { target: { value: query } });
+      expect(screen.getByRole('button', { name: new RegExp(topic) }).textContent).toContain('MCP control');
+    }
+    fireEvent.change(search, { target: { value: 'qr pair' } });
+    expect(screen.getByRole('status').textContent).toMatch(/^0 results/);
   });
 
-  it('connects a registered computer without the secret and skips the code when a browser is paired', async () => {
-    invokeMock.mockImplementation((channel: string) => {
-      if (channel === 'remote:get') {
-        return Promise.resolve({
-          config: { enabled: false },
-          state: { status: 'off', onlineClients: [], viewOnly: false },
-          devices: [{ deviceId: 'w_1', kind: 'web', name: 'Phone', platform: 'web', lastSeen: Date.now() }],
-          audit: [],
-          relayUrl: 'https://code.vocs.io',
-          registered: true
-        });
-      }
-      return Promise.resolve({ status: 'online' });
-    });
-    useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
-    render(<SettingsView />);
-    fireEvent.click(screen.getByText('Remote access'));
-    // Wait for main's answer (the paired phone is listed) before judging the secret field.
-    await screen.findByText(/Browser: Phone/);
-    expect(screen.queryByTestId('remote-enroll')).toBeNull();
-    expect(screen.getByTestId('remote-steps').textContent).toContain('Connect this computer.');
-    const connect = screen.getByTestId('remote-connect') as HTMLButtonElement;
-    expect(connect.disabled).toBe(false);
-    fireEvent.click(connect);
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:enable', { enrollToken: undefined }));
-    await vi.waitFor(() => expect(invokeMock.mock.calls.filter(([c]) => c === 'remote:get').length).toBeGreaterThan(2));
-    expect(invokeMock).not.toHaveBeenCalledWith('remote:pairStart', expect.anything());
+  it('lists the account computers and removes one by its device id', async () => {
+    renderPanel();
+    await screen.findByText('Your computers');
+    expect(screen.getByText('Work PC')).toBeTruthy();
+    expect(screen.getByText(/win32 x64 · connected now/)).toBeTruthy();
+    fireEvent.click(screen.getAllByText('Remove')[1]);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:revoke', { deviceId: 'h_2' }));
   });
 
-  it('renders the audit feed and clears it on demand', async () => {
-    renderRemote([
-      { at: Date.now(), action: 'pair-approve', device: 'w_1' },
-      { at: Date.now(), action: 'view-only-blocked', detail: 'sessions:send' }
-    ]);
-    await screen.findByText('Recent activity');
-    expect(screen.getByText(/pair-approve/)).toBeTruthy();
-    expect(screen.getByText(/view-only-blocked · sessions:send/)).toBeTruthy();
-
-    fireEvent.click(screen.getByText('Clear activity'));
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:clearAudit', undefined));
-  });
-
-  it('revokes an individual paired device', async () => {
-    renderRemote();
-    await screen.findByText('Paired devices');
-    // The connected browser is marked, and its own Revoke button carries its device id.
-    expect(screen.getByText(/Chrome/)).toBeTruthy();
-    fireEvent.click(screen.getAllByText('Revoke')[1]);
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:revoke', { deviceId: 'w_1' }));
-  });
-
-  it('toggles view-only mode through remote:setViewOnly', async () => {
-    renderRemote();
-    await screen.findByText('View-only mode');
-    const toggle = screen.getByText('Only allow reading from paired browsers').closest('.toggle')?.querySelector('input') as HTMLInputElement;
-    expect(toggle.checked).toBe(false);
-    fireEvent.click(toggle);
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setViewOnly', { viewOnly: true }));
-  });
-
-  it('shows a live pairing code as a link and a QR code that both open this relay', async () => {
-    renderRemote([], false, { pairing: { code: 'ABCD2345', expiresAt: Date.now() + 120_000 } });
-    const link = (await screen.findByTestId('remote-pair-link')) as HTMLInputElement;
-    // The page claims against its own origin, so the link must be the relay main reports.
-    expect(link.value).toBe('https://relay.example/app?code=ABCD2345');
-    const qr = screen.getByTestId('remote-pair-qr');
-    const extent = Number(qr.getAttribute('viewBox')?.split(' ')[2]);
-    expect(decodeQrPath(qr.querySelector('path')!.getAttribute('d')!, extent)).toBe(link.value);
-  });
-
-  it('opens the web client in the default browser from the relay name and the pairing hint', async () => {
-    renderRemote([], false, { pairing: { code: 'ABCD2345', expiresAt: Date.now() + 120_000 } });
-    const opened = () => invokeMock.mock.calls.filter(([channel]) => channel === 'app:openExternal');
-    const relay = await screen.findByTestId('remote-relay');
-    // The name follows the relay main reports, and so does where it leads.
-    await vi.waitFor(() => expect(relay.textContent).toBe('relay.example'));
-    fireEvent.click(relay);
-    await vi.waitFor(() => expect(opened()).toEqual([['app:openExternal', { url: 'https://relay.example/app' }]]));
-    fireEvent.click(await screen.findByTestId('remote-web-app'));
-    await vi.waitFor(() => expect(opened()).toHaveLength(2));
-    expect(opened()[1]).toEqual(['app:openExternal', { url: 'https://relay.example/app' }]);
+  it('tells the owner about browsers an earlier version paired, without listing them as computers', async () => {
+    renderPanel(remoteResult({ devices: [computers[0], { deviceId: 'w_1', kind: 'web', name: 'Chrome', platform: 'web', lastSeen: Date.now() }] }));
+    expect((await screen.findByTestId('remote-legacy-browsers')).textContent).toMatch(/A browser paired by an earlier version is still\s+on your account/);
+    expect(screen.queryByText('Chrome')).toBeNull();
+    expect(screen.getAllByText('Remove')).toHaveLength(1);
   });
 
   it('pulls the kill switch only after the confirmation dialog', async () => {
-    invokeMock.mockImplementation((channel: string) => (channel === 'remote:get' ? Promise.resolve(remoteResult(false)) : Promise.resolve({})));
-    useStore.setState({ settings: { ...baseSettings } as AppSettings });
-    render(<><SettingsView /><ConfirmHost /></>);
-    fireEvent.click(screen.getByText('Remote access'));
+    renderPanel();
     fireEvent.click(await screen.findByTestId('remote-revoke-all'));
-    await screen.findByText('Revoke every paired device?');
+    await screen.findByText('Remove every other device?');
     expect(invokeMock).not.toHaveBeenCalledWith('remote:revokeAll', undefined);
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    await vi.waitFor(() => expect(screen.queryByText('Revoke every paired device?')).toBeNull());
+    await vi.waitFor(() => expect(screen.queryByText('Remove every other device?')).toBeNull());
     expect(invokeMock).not.toHaveBeenCalledWith('remote:revokeAll', undefined);
 
     fireEvent.click(screen.getByTestId('remote-revoke-all'));
-    await screen.findByText('Revoke every paired device?');
-    const confirm = screen.getAllByRole('button', { name: 'Revoke all' }).find((b) => !b.hasAttribute('data-testid'))!;
+    await screen.findByText('Remove every other device?');
+    const confirm = screen.getAllByRole('button', { name: 'Remove all' }).find((b) => !b.hasAttribute('data-testid'))!;
     fireEvent.click(confirm);
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:revokeAll', undefined));
   });
 
-  it('toggles the offline mirror through remote:setMirror', async () => {
-    renderRemote();
-    await screen.findByText('Offline mirror');
-    fireEvent.click(screen.getByText('Let paired browsers read history while this computer is off'));
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setMirror', { mirror: true }));
-  });
-
   it('shares analytics with code.vocs.io by default, and turns it off through remote:setShareAnalytics', async () => {
-    renderRemote();
+    renderPanel();
     await screen.findByText('Analytics dashboard');
     const toggle = screen.getByLabelText('Share analytics with code.vocs.io') as HTMLInputElement;
     expect(toggle.checked).toBe(true);
     fireEvent.click(screen.getByText('Share analytics with code.vocs.io'));
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setShareAnalytics', { share: false }));
   });
+
+  it('disconnects through remote:disable', async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByTestId('remote-disconnect'));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:disable', undefined));
+  });
 });
 
-describe('Connect with Vocs in remote access settings', () => {
-  const offline = (over: Record<string, unknown> = {}) => ({
-    config: { enabled: false },
-    state: { status: 'off', onlineClients: [], viewOnly: false },
-    devices: [],
-    audit: [],
-    relayUrl: 'https://code.vocs.io',
-    registered: false,
-    signInAvailable: true,
-    ...over
-  });
+describe('Connect with Vocs', () => {
+  const offline = (over: { registered?: boolean; signInAvailable?: boolean } = {}) =>
+    remoteResult({ enabled: false, state: { status: 'off', registered: over.registered ?? false }, devices: [], registered: over.registered ?? false, signInAvailable: over.signInAvailable });
 
-  it('uses Connect with Vocs when an account gate is available and hides the shared legacy secret', async () => {
-    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? offline() : { status: 'connecting' }));
-    useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
-    render(<SettingsView />);
-    fireEvent.click(screen.getByText('Remote access'));
+  it('registers a new computer through Connect with Vocs', async () => {
+    renderPanel(offline(), { remote: { enabled: false } });
     const signIn = await screen.findByTestId('remote-sign-in');
-    expect(screen.queryByTestId('remote-enroll')).toBeNull();
-    expect(screen.getByTestId('remote-steps').textContent).toContain('Connect with Vocs: your browser opens; sign in and click Add this computer.');
+    await vi.waitFor(() => expect(signIn.textContent).toBe('Connect with Vocs'));
+    expect(screen.queryByTestId('remote-disconnect')).toBeNull();
     fireEvent.click(signIn);
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:signIn', undefined));
+  });
 
-    expect(screen.queryByTestId('remote-use-secret')).toBeNull();
-    expect(screen.queryByTestId('remote-enroll')).toBeNull();
+  it('reconnects a registered computer with one click and no secret', async () => {
+    renderPanel(offline({ registered: true }), { remote: { enabled: false } });
+    const connect = await screen.findByTestId('remote-sign-in');
+    await vi.waitFor(() => expect(connect.textContent).toBe('Connect'));
+    fireEvent.click(connect);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:signIn', undefined));
+  });
+
+  it('cannot register a new computer on a relay without Vocs sign-in', async () => {
+    renderPanel(offline({ signInAvailable: false }), { remote: { enabled: false } });
+    const signIn = (await screen.findByTestId('remote-sign-in')) as HTMLButtonElement;
+    await vi.waitFor(() => expect(signIn.disabled).toBe(true));
+    expect(signIn.title).toMatch(/has no Vocs sign-in/);
   });
 
   it('shows the check code while the browser finishes, reopens the page, and cancels', async () => {
-    const waiting = offline({
-      config: { enabled: true },
-      state: { status: 'connecting', onlineClients: [], viewOnly: false, detail: 'finish in your browser', signIn: { link: 'https://code.vocs.io/app?connect=' + 'ab'.repeat(32), checkCode: 'K7M2-XQ9P' } }
-    });
-    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? waiting : {}));
-    useStore.setState({ settings: { ...baseSettings, remote: { enabled: true } } as AppSettings });
-    render(<SettingsView />);
-    fireEvent.click(screen.getByText('Remote access'));
+    const link = 'https://relay.example/dashboard?connect=' + 'ab'.repeat(32);
+    renderPanel(remoteResult({ state: { status: 'connecting', registered: false, detail: 'finish in your browser', signIn: { link, checkCode: 'K7M2-XQ9P' } }, devices: [], registered: false }));
     expect((await screen.findByTestId('remote-sign-in-code')).textContent).toBe('K7M2-XQ9P');
-    // Neither the secret nor a second sign-in is offered while one is in flight.
-    expect(screen.queryByTestId('remote-enroll')).toBeNull();
+    // No second sign-in is offered while one is in flight.
     expect(screen.queryByTestId('remote-sign-in')).toBeNull();
     fireEvent.click(screen.getByText('Open the page again'));
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('app:openExternal', { url: 'https://code.vocs.io/app?connect=' + 'ab'.repeat(32) }));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('app:openExternal', { url: link }));
     const cancel = screen.getByTestId('remote-disconnect');
     expect(cancel.textContent).toBe('Cancel');
     fireEvent.click(cancel);
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:disable', undefined));
-  });
-
-  it('keeps the secret flow where the relay has no sign-in', async () => {
-    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? offline({ signInAvailable: false }) : {}));
-    useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
-    render(<SettingsView />);
-    fireEvent.click(screen.getByText('Remote access'));
-    await screen.findByTestId('remote-enroll');
-    expect(screen.queryByTestId('remote-sign-in')).toBeNull();
   });
 });

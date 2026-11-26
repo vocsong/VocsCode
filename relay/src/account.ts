@@ -1,4 +1,4 @@
-/** Tenant identity and relay-only account assertions (docs/REMOTE-ACCESS.md). The landing Worker
+/** Tenant identity and relay-only account assertions (docs/RELAY.md). The landing Worker
  *  proves the signed-in Vocs account with a short-lived HMAC assertion; device ids carry a
  *  separately keyed account routing tag so an unauthenticated caller cannot create arbitrary
  *  Durable Objects by choosing account names. Neither value replaces device-token proof of

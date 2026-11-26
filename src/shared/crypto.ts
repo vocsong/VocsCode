@@ -1,4 +1,4 @@
-/** End-to-end crypto for remote access (docs/REMOTE-ACCESS.md §6): P-256 identities,
+/** End-to-end crypto for remote access (docs/RELAY.md): P-256 identities,
  *  an ECDH handshake whose signatures bind the full transcript, HKDF-SHA-256 →
  *  AES-256-GCM frames with per-direction counters. WebCrypto only, so the same module
  *  runs in the desktop main process (Node's global crypto) and in the browser. */
@@ -249,7 +249,7 @@ export async function importAesKey(b64: string): Promise<CryptoKey> {
 
 /** A blob sealed to a symmetric key: random 96-bit IV + AES-256-GCM ciphertext, both base64url.
  *  Used for the offline transcript mirror, where the relay stores the ciphertext and can never
- *  open it (docs/REMOTE-ACCESS.md P4). */
+ *  open it (docs/RELAY.md). */
 export interface SealedBlob {
   iv: string;
   ct: string;

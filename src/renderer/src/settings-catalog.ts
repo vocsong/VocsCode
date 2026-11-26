@@ -60,6 +60,11 @@ export const SETTINGS_PAGES = [
     { label: 'Vocs sign-in', description: 'Connect your Vocs identity using the system browser, or sign out.', keywords: 'login auth identity account cancel logout staging production keep signed in remember persistent device', anchor: 'vocs-account-login' },
     { label: 'Hub connections', description: 'Connect your account’s MCP Hub connections so new agent sessions get their tools, or disconnect them.', keywords: 'mcp catalog cloud staging refresh connect disconnect openrouter hub oauth tools', anchor: 'vocs-account-catalog' },
   ] },
+  { id: 'remote', label: 'MCP control', icon: 'plug', group: 'Connections', description: 'Let MCP clients such as Dots and Muse work with this computer, only through what you grant.', saveHint: 'Connection and grant changes require explicit actions', topics: [
+    { label: 'Vocs relay connection', description: 'Connect this computer with Vocs, share analytics and manage your computers.', keywords: 'connect vocs sign in relay remote computers devices revoke analytics dashboard code.vocs.io', anchor: 'remote-connection' },
+    { label: 'External MCP control', description: 'Grant MCP controllers such as Dots and Muse access to chosen projects.', keywords: 'control controller mcp dots muse oauth grants permissions access remote', anchor: 'remote-controllers' },
+    { label: 'Local CLI & MCP discovery', description: 'Let local command-line and MCP tools discover chosen projects on this computer.', keywords: 'local cli mcp discovery pipe windows control' },
+  ] },
   { id: 'providers', label: 'Providers & keys', icon: 'key', group: 'Connections', description: 'Connect your models. Keep credentials in the OS keychain, not in configuration.', saveHint: 'Keys and new providers have explicit Save actions', topics: [
     { label: 'Providers & API keys', description: 'Enable providers, save or test keys and configure endpoints.', keywords: 'openai anthropic openrouter deepseek ollama lmstudio api key secrets base url custom', anchor: 'providers-catalog' },
     { label: 'Harness logins', description: 'Refresh models, check agent login status and available CLI updates.', keywords: 'login authentication credentials updates codex claude pi catalog reload google antigravity gemini quota', anchor: 'providers-logins' },
@@ -80,10 +85,6 @@ export const SETTINGS_PAGES = [
   ] },
   { id: 'housekeep', label: 'Housekeep', icon: 'archive', group: 'System', description: 'Choose how recently used sessions are protected when you run /housekeep.', saveHint: 'Changes save when you leave the field or press Enter', topics: [
     { label: 'Recent session protection', description: 'Keep recently used sessions out of cleanup.', keywords: '/housekeep archive age guard protect sessions days', anchor: 'housekeep-recent' },
-  ] },
-  { id: 'remote', label: 'Remote access', icon: 'globe', group: 'System', description: 'Your workspace, wherever you are. You stay in control of who can connect.', saveHint: 'Access changes require explicit actions', topics: [
-    { label: 'Browser access & pairing', description: 'Connect this computer, pair a browser and manage devices.', keywords: 'phone mobile qr github login relay pair remote devices view only offline mirror', anchor: 'remote-browser' },
-    { label: 'External controllers', description: 'Manage desktop grants and remote MCP control.', keywords: 'control controller mcp oauth grants permissions access', anchor: 'remote-controllers' },
   ] },
   { id: 'about', label: 'About & doctor', icon: 'info', group: 'System', description: 'Version details, updates and a health check for your setup.', saveHint: 'Diagnostics are read-only', topics: [
     { label: 'About & updates', description: 'App version, runtime versions, data folder and updates.', keywords: 'electron node version upgrade restart data folder' },

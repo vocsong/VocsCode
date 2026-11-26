@@ -1,4 +1,4 @@
-/** The landing's signed-in session, when there is one (docs/REMOTE-ACCESS.md §6.3.1). The account
+/** The landing's signed-in session, when there is one (docs/RELAY.md). The account
  *  id partitions the browser vault, so an identity is resolved before the RelayClient exists:
  *  503/404 is the local or pre-gate preview (the legacy dev account), a 401 or a network failure is
  *  no identity at all, and only a 200 with a login and a valid account id is signed in. */

@@ -10,11 +10,6 @@ import { singlePaneLayout } from '../src/renderer/src/panes';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { WorkspaceImage } from '../src/shared/image-files';
 
-const platform = vi.hoisted(() => ({ web: false }));
-vi.mock('../src/renderer/src/api', async (original) => ({
-  ...await original<typeof import('../src/renderer/src/api')>(),
-  get isWeb() { return platform.web; }
-}));
 const invoke = vi.fn();
 const image: WorkspaceImage = { mimeType: 'image/png', data: 'aGVsbG8=', size: 5, tooLarge: false };
 const session = (id = 'worktree', cwd = 'G:/project/.vocs-code/worktrees/fast mode') => ({
@@ -31,7 +26,6 @@ function update(text: string, scope = session(), streaming = false) {
 const reads = () => invoke.mock.calls.filter(([channel]) => channel === 'fs:readImage');
 
 beforeEach(() => {
-  platform.web = false;
   invoke.mockReset().mockResolvedValue(image);
   Object.defineProperty(window, 'harness', { configurable: true, value: { platform: 'win32', invoke, on: () => () => undefined } });
 });
@@ -174,14 +168,6 @@ describe('assistant workspace markdown images', () => {
     expect(container.querySelector('img')).toBeNull();
     expect(container.textContent).toContain('denied 0');
     expect(container.textContent).toContain('unavailable');
-  });
-
-  it('drops all web images and never reads even inert raw markup', async () => {
-    platform.web = true;
-    const { container } = mount('![web](shot.png)\n\n<img src="https://example.com/a.png">\n\n<svg><image href="https://example.com/tracker.png"/><filter><feImage href="https://example.com/filter.png"/></filter></svg>\n\n<span data-local-image="shot.png">raw</span>');
-    await act(async () => {});
-    expect(reads()).toHaveLength(0);
-    expect(container.querySelector('img, image, feImage')).toBeNull();
   });
 
   it.each([

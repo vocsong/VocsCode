@@ -48,7 +48,6 @@ import type {
   PiSetup,
   PiSubagentsPatch,
   ProviderConfig,
-  RemoteAuditEntry,
   RemoteConfig,
   RemoteDeviceInfo,
   RemoteState,
@@ -76,7 +75,6 @@ import type { ProjectAgentInfo } from './agent-info';
 import type { ClaudeAgentFileInfo } from './claude-agent-files';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 import type { DictationLocalStatus, DictationResult, LocalModelId } from './dictation';
-import type { RemoteTerminalFrame, RemoteTerminalSnapshot } from './remote-terminal';
 import type { WorkspaceImage } from './image-files';
 import type { MissionView } from './mission-mode';
 import type { ProcessEndResult, ProcessList, ProcessSummary, ProcessTarget } from './processes';
@@ -150,7 +148,7 @@ export interface IpcContract {
   'desktop:setFocus': [{ sessionId: string | null }, void];
   /** The sessions in the panes on screen; local-only, so main can tell whether a finished turn was seen. */
   'desktop:setVisible': [{ sessionIds: string[] }, void];
-  /** The session the desktop is on, for a paired browser to open by default. */
+  /** The session the desktop is on, and whether its window is foregrounded. */
   'desktop:focus': [void, DesktopFocus];
 
   /** Local desktop owner only; no tokens, URLs or client configuration accepted. */
@@ -378,28 +376,20 @@ export interface IpcContract {
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
-  /** Remote access (docs/REMOTE-ACCESS.md). Enrollment + device tokens live in the secret store. */
-  /** `relayUrl` is the relay this desktop uses (code.vocs.io unless VOCS_CODE_RELAY_URL is set);
-   *  `registered` means this computer already has its own relay credential and needs no secret. */
-  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string; registered: boolean; signInAvailable: boolean }];
-  /** Connect with Vocs: opens the relay's page in the browser to add this computer; no secret. */
+  /** The relay connection (docs/CONTROL-MCP.md, docs/WEB-DASHBOARD.md). The device credential lives
+   *  in the secret store. `relayUrl` is the relay this desktop uses (code.vocs.io unless
+   *  VOCS_CODE_RELAY_URL is set); `registered` means this computer has its own relay credential. */
+  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[]; relayUrl: string; registered: boolean; signInAvailable: boolean }];
+  /** Connect with Vocs: opens the relay's page in the browser to add this computer, or reconnects
+   *  a computer that is already registered. */
   'remote:signIn': [void, RemoteState];
-  /** `enrollToken` is needed only for this computer's first registration; the stored one is reused. */
-  'remote:enable': [{ enrollToken?: string }, RemoteState];
   'remote:disable': [void, RemoteState];
-  'remote:pairStart': [{ hostName?: string }, { code: string; expiresAt: number }];
-  'remote:pairRespond': [{ decision: 'approve' | 'deny' }, void];
   'remote:revoke': [{ deviceId: string }, void];
-  /** Kill switch: revoke every other device of the account (browsers and other computers). */
+  /** Kill switch: revoke every other device of the account. */
   'remote:revokeAll': [void, RemoteState];
-  /** P4: view-only mode is a desktop policy, persisted in settings and pushed to paired browsers. */
-  'remote:setViewOnly': [{ viewOnly: boolean }, RemoteState];
-  /** P4: the offline mirror is opt-in; enabling it syncs the existing sessions, disabling clears it. */
-  'remote:setMirror': [{ mirror: boolean }, RemoteState];
   /** Analytics sharing for the code.vocs.io dashboard: on by default; off deletes the relay copy. */
   'remote:setShareAnalytics': [{ share: boolean }, RemoteState];
-  'remote:clearAudit': [void, void];
-  /** Local desktop owner only: never in the remote browser manifest or agent invocation origin. */
+  /** Local desktop owner only: never in the agent invocation origin. */
   'control:get': [void, ControlOwnerState];
   'control:enable': [{ enabled: boolean }, ControlOwnerState];
   'control:grant': [ControlGrantInput, ControlOwnerState];
@@ -532,7 +522,7 @@ export interface IpcContract {
   'intelligence:graph:clear': [{ sessionId: string }, IntelligenceView];
 
   'terminal:list': [void, TerminalInfo[]];
-  /** Read-only plain-text screen of one terminal (remote P3.5): never attaches, pauses or resizes it. */
+  /** Read-only plain-text screen of one terminal: never attaches, pauses or resizes it. */
   'terminal:screen': [{ terminalId: string; lines?: number }, { info: TerminalInfo; lines: string[]; seq: number }];
   'terminal:shells': [void, ShellOption[]];
   'terminal:create': [{ sessionId: string; shell?: ShellKind; cols?: number; rows?: number }, TerminalInfo];
@@ -548,13 +538,6 @@ export interface IpcContract {
   'terminal:close': [{ terminalId: string }, void];
   'terminal:clear': [{ terminalId: string }, void];
   'terminal:rename': [{ terminalId: string; title: string }, TerminalInfo];
-  /** Remote P3.5, served by the remote host (it needs the caller): stream one terminal to this
-   *  browser. Answers the current screen; output follows as `push:remoteTerminal` frames. */
-  'terminal:watch': [{ terminalId: string }, RemoteTerminalSnapshot];
-  'terminal:unwatch': [{ terminalId: string }, void];
-  /** The browser consumed `chars` of streamed output and, with `snapshot`, applied the snapshot of
-   *  that seq; past its window it gets a fresh snapshot once it has acknowledged both. */
-  'terminal:watchAck': [{ terminalId: string; chars: number; snapshot?: number }, void];
 }
 
 export type IpcChannel = keyof IpcContract;
@@ -589,12 +572,8 @@ export type PushPayloads = {
   /** Vesta's whole transcript; the list is short, so state is replaced rather than patched. */
   'push:agentState': AgentState;
   'push:remoteState': RemoteState;
-  /** Where the desktop's own window is looking, so a paired browser can open the same session. */
+  /** Where the desktop's own window is looking. */
   'push:desktopFocus': DesktopFocus;
-  /** Remote-only: the view-only policy, pushed to paired browsers over the e2e session. */
-  'push:remotePolicy': { viewOnly: boolean };
-  /** Remote-only: output of a terminal this browser watches, sealed to it alone (never broadcast). */
-  'push:remoteTerminal': RemoteTerminalFrame;
   'push:updateState': UpdateState;
   /** Tracked process counts for the Processes tab badge, sent with every background sample. */
   'push:processSummary': ProcessSummary;
@@ -606,16 +585,12 @@ export type PushPayloads = {
 
 export type PushChannel = keyof PushPayloads;
 
-/** Transport-agnostic renderer bridge: how the renderer reaches its host process.
- *  The preload script binds it to Electron IPC; web/remote builds (docs/REMOTE-ACCESS.md)
- *  bind the same interface to a WebSocket carrying the identical channel contract. */
+/** The renderer bridge to its host process; the preload script binds it to Electron IPC. */
 export interface Transport {
   invoke<K extends IpcChannel>(channel: K, request: IpcRequest<K>): Promise<IpcResponse<K>>;
   on<K extends PushChannel>(channel: K, listener: (payload: PushPayloads[K]) => void): () => void;
   platform: string;
-  /** Whether this transport can serve a channel. Absent means everything is allowed (desktop IPC).
-   *  A remote transport refuses channels off its allowlist and, in view-only mode, writes — so the
-   *  renderer can hide a control it would be refused instead of provoking an audited refusal. */
+  /** Whether this transport can serve a channel. Absent means everything is allowed (desktop IPC). */
   can?<K extends IpcChannel>(channel: K): boolean;
 }
 

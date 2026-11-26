@@ -3,8 +3,8 @@ import React, { useContext, useEffect, useLayoutEffect, useMemo, useState } from
 import { parseGitHubPullRequestUrl } from '../../../../shared/github-pull-request';
 import type { MissionMessageKind } from '../../../../shared/mission-mode';
 import type { TranscriptItem } from '../../../../shared/types';
-import { invoke, isWeb } from '../../api';
-import { useCanInvoke, useTranscriptCapabilities } from '../../capabilities';
+import { invoke } from '../../api';
+import { useCanInvoke } from '../../capabilities';
 import { fileManagerName } from '../../file-open';
 import { renderMarkdown } from '../../markdown';
 import { builderIndexOf, missionMessageLabel } from '../../mission';
@@ -105,11 +105,6 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
           </div>
         ) : null}
         {item.files?.length ? <div className="msg-files" aria-label="Attached files">{item.files.map((file) => <Badge key={file.path} tone="neutral">{file.name}</Badge>)}</div> : null}
-        {!images.length && item.imagesOmitted ? (
-          <Badge tone="neutral" title="Images are too large to send to a paired browser">
-            {item.imagesOmitted === 1 ? '1 image not shown' : `${item.imagesOmitted} images not shown`}
-          </Badge>
-        ) : null}
       </div>
       <div className="msg-user-meta">
         <Stamp ts={item.ts} />
@@ -188,7 +183,7 @@ export function AssistantMessage(props: AssistantMessageProps) {
 /** Fallback when a WorkGroup/ToolGroup is rendered outside `<Transcript>` (such as unit tests). */
 function StandaloneAssistantMessage(props: AssistantMessageProps) {
   const cwd = useStore((s) => s.sessions.find((candidate) => candidate.id === props.sessionId)?.cwd);
-  const canOpenPr = useStore((s) => !isWeb && s.activeId === props.sessionId && s.sessions.some((candidate) => candidate.id === props.sessionId));
+  const canOpenPr = useStore((s) => s.activeId === props.sessionId && s.sessions.some((candidate) => candidate.id === props.sessionId));
   return <AssistantMessageBody {...props} cwd={cwd} canOpenPr={canOpenPr} />;
 }
 
@@ -203,11 +198,9 @@ function AssistantMessageBody({
   // open === null means the user has not toggled; then reasoning shows only while it is being written.
   const [open, setOpen] = useState<boolean | null>(null);
   const html = useStreamingMarkdown(item.text, item.streaming);
-  // React must leave the hydrated DOM alone when only the active pane or link capability changes.
+  // React must leave the hydrated DOM alone when only the active pane changes.
   const markup = useMemo(() => ({ __html: html }), [html]);
-  const { openFile } = useTranscriptCapabilities();
   const canRevealOutside = useCanInvoke('app:showInFolder');
-  const root = !isWeb && openFile && cwd !== undefined ? cwd : undefined;
   const body = useMarkdownImages(html, sessionId, cwd, onImageExpand);
   useLayoutEffect(() => {
     // Use only the sanitized targets, not labels or Markdown-supplied link-kind attributes.
@@ -215,7 +208,7 @@ function AssistantMessageBody({
     for (const el of body.current?.querySelectorAll<HTMLElement>('a[href], [data-file]') ?? []) {
       const path = el.getAttribute('data-file');
       const href = el.getAttribute('href');
-      const kind = path && root !== undefined ? transcriptFileKind(path, root, canRevealOutside)
+      const kind = path && cwd !== undefined ? transcriptFileKind(path, cwd, canRevealOutside)
         : path === null && href && /^https?:\/\//i.test(href) ? (canOpenPr && parseGitHubPullRequestUrl(href) ? 'pr' : 'external')
         : undefined;
       if (kind) el.dataset.linkKind = kind;
@@ -235,7 +228,7 @@ function AssistantMessageBody({
         }
       }
     }
-  }, [body, markup, cwd, root, canOpenPr, canRevealOutside]);
+  }, [body, markup, cwd, canOpenPr, canRevealOutside]);
   // A deep-search jump into a row that is only reasoning matched that reasoning: show it.
   const jumpHere = useStore((s) => !!s.searchJump && s.searchJump.sessionId === sessionId && s.searchJump.itemId === item.id);
   const proseless = !item.text;

@@ -10,7 +10,6 @@ import { AGENT_CAPABILITIES, agentChannels, resolveSessionModel, type Capability
 import { defaultSettings, normalizeSettings } from '../src/main/settings';
 import type { AppSettings, ImageAttachment, ModelInfo, ProviderConfig, SessionConfig, SessionMeta } from '../src/shared/types';
 import type { VestaRuntime, VestaToolCall, PiAgentOptions } from '../src/main/agents/pi-runtime';
-import { isRemoteBlocked } from '../src/main/web-server';
 
 const { Vesta } = await import('../src/main/agents');
 
@@ -525,13 +524,5 @@ describe('robustness', () => {
     agent.reset();
     expect(agent.state().items).toEqual([]);
     expect(runtime().disposed).toBe(true);
-  });
-});
-
-describe('remote transport', () => {
-  it('keeps Vesta off the WebSocket bridge, which has no other channel allowlist', () => {
-    expect(isRemoteBlocked('agent:send')).toBe(true);
-    expect(isRemoteBlocked('agent:resolve')).toBe(true);
-    expect(isRemoteBlocked('sessions:list')).toBe(false);
   });
 });

@@ -22,7 +22,6 @@ function makeTargets(overrides: Partial<ShutdownTargets> = {}) {
     keepAwake: { quit: track('keepAwake.quit') },
     mission: { dispose: track('mission.dispose') },
     updater: { stopChecking: track('updater.stopChecking') },
-    remoteMirror: { stop: track('remoteMirror.stop') },
     analyticsSync: { stop: track('analyticsSync.stop') },
     remoteHost: { close: track('remoteHost.close') },
     sessions: {
@@ -43,7 +42,6 @@ function makeTargets(overrides: Partial<ShutdownTargets> = {}) {
     passiveLearning: { close: trackAsync('passiveLearning.close') },
     memoryStore: { close: trackAsync('memoryStore.close') },
     knowledgeUsage: { close: trackAsync('knowledgeUsage.close') },
-    webServer: { stop: trackAsync('webServer.stop') },
     registry: { shutdown: trackAsync('registry.shutdown') },
     sharedGitnexus: { stop: track('sharedGitnexus.stop') },
     processes: { close: trackAsync('processes.close') },
@@ -61,7 +59,7 @@ describe('runGracefulShutdown', () => {
     const result = await runGracefulShutdown(targets);
 
     expect(result.timedOut).toBe(false);
-    // All synchronous pre-stop hooks (including remoteMirror, analyticsSync, remoteHost) run before sessions.stopAll.
+    // All synchronous pre-stop hooks (including analyticsSync, remoteHost) run before sessions.stopAll.
     const stopIdx = order.indexOf('sessions.stopAll');
     expect(stopIdx).toBeGreaterThan(0);
     for (const hook of [
@@ -69,7 +67,6 @@ describe('runGracefulShutdown', () => {
       'keepAwake.quit',
       'mission.dispose',
       'updater.stopChecking',
-      'remoteMirror.stop',
       'analyticsSync.stop',
       'remoteHost.close'
     ]) {
@@ -93,7 +90,6 @@ describe('runGracefulShutdown', () => {
       'graphScheduler.close',
       'graphify.cancel',
       'knowledgeUsage.close',
-      'webServer.stop',
       'registry.shutdown',
       'sharedGitnexus.stop',
       'processes.close'
@@ -158,22 +154,19 @@ describe('runGracefulShutdown', () => {
     expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('shutdown exceeded the 40ms cap'));
   });
 
-  it('RemoteHost.close tears down without recording a user disable audit entry or pushing state', () => {
+  it('RemoteHost.close tears down without logging a user disconnect or pushing state', () => {
     const pushState = vi.fn();
-    const record = vi.fn();
+    const log = vi.fn();
     const host = new RemoteHost({
-      registry: () => ({ channels: () => [], invoke: async () => undefined, shutdown: async () => undefined }),
       secrets: { get: async () => undefined, set: async () => undefined },
       pushState,
-      broadcast: vi.fn(),
-      audit: { record } as never,
-      log: vi.fn()
+      log
     });
 
     host.close();
 
     expect(host.state().status).toBe('off');
-    expect(record).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
     expect(pushState).not.toHaveBeenCalled();
   });
 });

@@ -41,7 +41,7 @@ does not: the sidebar's ordering falls back to `updatedAt` and viewing must not 
 - `DesktopFocusTracker` (`src/main/desktop-focus.ts`) already owns window focus (from the window's
   focus/blur) and the active session. It gains a private **visible set**: `setVisible(ids)` and
   `isViewing(id) = windowFocused && visible.has(id)`. The visible set is not added to the
-  `DesktopFocus` payload pushed to paired browsers. The window's `closed` event reports unfocused.
+  pushed `DesktopFocus` payload. The window's `closed` event reports unfocused.
 - New local-only IPC `desktop:setVisible { sessionIds: string[] }` (zod-validated; not on the
   remote surface).
 - `SessionManager` gets an optional dep `isViewing(id)`. In `onTurnFinished`: for a `completed` or

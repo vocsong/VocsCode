@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 /** The approval card answers with the harness's real option ids, carries question answers and
- *  edited input, and degrades honestly when the host refuses the answer (view-only or a browser). */
+ *  edited input, and goes read-only when the transport would refuse the answer. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ApprovalCard } from '../src/renderer/src/components/Transcript';
@@ -16,7 +16,7 @@ beforeEach(() => {
   can.mockReset();
   can.mockReturnValue(true);
   (window as unknown as { harness: unknown }).harness = { platform: 'win32', invoke, on: () => () => undefined, can };
-  useStore.setState({ remoteAccess: { viewOnly: false }, toasts: [] });
+  useStore.setState({ toasts: [] });
 });
 
 afterEach(() => {
@@ -109,10 +109,9 @@ it('does not present stale selected answers as accepted on a skipped question', 
   expect(screen.getByText('Wait for review.')).toBeTruthy();
 });
 
-it('tells the user to decide on the computer when the answer would be refused', () => {
+it('offers no answer buttons when the answer would be refused', () => {
   can.mockImplementation((channel: string) => channel !== 'approvals:respond');
   render(<ApprovalCard item={item(request)} sessionId="s1" />);
-  expect(screen.getByText('Decide on your computer')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Allow once' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull();
 });
@@ -290,7 +289,6 @@ describe('structured questions', () => {
     expect((screen.getByRole('textbox', { name: contextLabel }) as HTMLTextAreaElement).disabled).toBe(true);
     expect((screen.getByRole('textbox', { name: 'Command' }) as HTMLTextAreaElement).disabled).toBe(true);
     expect(screen.queryByRole('button', { name: 'Answer' })).toBeNull();
-    expect(screen.getByText('Decide on your computer')).toBeTruthy();
     expect(invoke).not.toHaveBeenCalled();
   });
 

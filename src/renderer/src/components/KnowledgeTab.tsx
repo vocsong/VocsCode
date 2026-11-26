@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 import { resolveIntelligenceSettings } from '../../../shared/intelligence';
 import { authorityOf, isPendingStatus, isServable, pageIdFromPath, pathForProposal, type KnowledgeGraph, type KnowledgeJobState, type KnowledgePageDetail, type KnowledgePageSummary, type KnowledgeView } from '../../../shared/knowledge';
 import type { SessionMeta } from '../../../shared/types';
-import { canInvoke, invoke, isWeb } from '../api';
+import { canInvoke, invoke } from '../api';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
 import { HighlightedSnippet } from './HighlightedSnippet';
@@ -28,13 +28,13 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
   const [active, setActive] = useState<KnowledgeSection>('knowledge');
   const [focused, setFocused] = useState<KnowledgeSection>('knowledge');
   const scope = JSON.stringify([session.id, session.config.projectRoot, session.cwd, session.worktreeBranch]);
-  // The web bridge omits these local-only channels. Desktop and mock renderers have no gate.
+  // Desktop and mock renderers have no gate; a bridge that binds `can` may omit these channels.
   if (window.harness && !canInvoke('intelligence:view')) return (
     <div className="knowledge-workspace" data-testid="knowledge-tab">
       <WikiView key={scope} session={session} active intelligence={null} />
     </div>
   );
-  const showUsage = !isWeb && canInvoke('intelligence:usage:view');
+  const showUsage = canInvoke('intelligence:usage:view');
   const sections = showUsage ? SECTIONS : SECTIONS.filter(([section]) => section !== 'usage');
   const activeSection = !showUsage && active === 'usage' ? 'knowledge' : active;
   const focusSection = !showUsage && focused === 'usage' ? activeSection : focused;

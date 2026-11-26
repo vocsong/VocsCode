@@ -1,5 +1,5 @@
-/** Test devices that authenticate to the relay the way real clients do (docs/REMOTE-ACCESS.md
- *  §6.2): a registered identity, its refresh credential, and an access token obtained by signing
+/** Test devices that authenticate to the relay the way real clients do (docs/RELAY.md): a
+ *  registered identity, its refresh credential, and an access token obtained by signing
  *  the relay's one-time challenge. Nothing here reaches around the proof of possession. */
 import { issueAccessToken, issueChallenge, registerHostDevice, registerWebDevice, type RelayStore } from '../../relay/src/core';
 import { generateIdentity, publicOf, sign, tokenProofPayload, type AnyIdentity, type Identity } from '../../src/shared/crypto';

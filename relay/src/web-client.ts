@@ -1,4 +1,4 @@
-/** The web client core (code.vocs.io, docs/REMOTE-ACCESS.md §6): the pairing flow and the
+/** The web client core (code.vocs.io, docs/RELAY.md): the pairing flow and the
  *  e2e Transport a browser uses to drive a paired desktop through the relay. Framework-
  *  free and DOM-free — the page (relay/public) mounts it; tests run it in Node.
  *

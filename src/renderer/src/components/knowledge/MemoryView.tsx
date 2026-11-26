@@ -3,7 +3,7 @@ import {
   canTransition, isRecallableState, isServableState,
   type MemoryExportBundle, type MemoryRecord, type MemoryState, type MemoryVerification
 } from '../../../../shared/intelligence';
-import { invoke, isWeb, on } from '../../api';
+import { invoke, on } from '../../api';
 import { Badge, Button } from '../ui';
 import { ConfirmAction, LOCAL_RECALL_NOTE, LOCAL_RECALL_PRIVACY_NOTICE, LOCAL_REFLECTION_NOTE, PromoteControl, REFLECTION_PRIVACY_NOTICE, shortDate } from './controls';
 import { readIntelligence, useScopeGuard, type IntelligenceController, type IntelligenceSectionProps } from './useIntelligence';
@@ -152,7 +152,7 @@ export function MemoryRefresh({ sessionId, busy, run }: Pick<IntelligenceSection
   const [changed, setChanged] = useState(false);
   const capture = useScopeGuard();
   useLayoutEffect(() => {
-    if (isWeb || !window.harness?.on) return;
+    if (!window.harness?.on) return;
     return on('push:projectMemoryChanged', (event) => {
       if (event.sessionId === sessionId && document.visibilityState !== 'hidden') setChanged(true);
     });

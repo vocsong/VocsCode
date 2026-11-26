@@ -164,7 +164,7 @@ export function registerAppHandlers(ctx: HandlerContext): void {
   });
   handle('window:edit', ({ command }) => deps.desktop.edit(command));
 
-  // The renderer reports where the desktop is; a paired browser reads it and follows the push.
+  // The renderer reports where the desktop is; main uses it for unseen-turn marks.
   handle('desktop:setFocus', ({ sessionId }) => deps.desktopFocus?.setSession(sessionId));
   handle('desktop:setVisible', (input) => deps.desktopFocus?.setVisible(z.strictObject({ sessionIds: z.array(z.string()).max(32) }).parse(input).sessionIds));
   handle('desktop:focus', () => deps.desktopFocus?.state() ?? { sessionId: null, at: 0, windowFocused: false });

@@ -10,7 +10,6 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import { FILE_PREVIEW_MAX_BYTES, PUSH_CHANNELS } from '../src/shared/ipc';
 import { agentChannels } from '../src/shared/agent-manifest';
-import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-channels';
 import type { AnalyticsStore } from '../src/main/analytics';
 import * as runtime from '../src/main/runtime';
 import type { RuntimeResolver } from '../src/main/runtime';
@@ -145,7 +144,6 @@ describe('handler registry', () => {
     const list = vi.spyOn(deps.sessions, 'list');
     for (const channel of ['housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory']) {
       expect(registry.channels()).toContain(channel);
-      expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels()).not.toContain(channel);
       await expect(registry.invoke(channel, {}, 'agent')).rejects.toThrow(/desktop owner/);
       await expect(registry.invoke(channel, {}, 'user')).rejects.toThrow(/desktop owner/);
@@ -218,7 +216,7 @@ describe('handler registry', () => {
     expect(forget).not.toHaveBeenCalled();
     const channels = registry.channels().filter((channel) => channel.startsWith('intelligence:'));
     expect(channels).toContain('intelligence:view');
-    expect(channels.every((channel) => !isRemoteChannel(channel) && !agentChannels().includes(channel))).toBe(true);
+    expect(channels.every((channel) => !agentChannels().includes(channel))).toBe(true);
     const session = deps.sessions.get('s_test')!;
     session.cwd = path.join(ws, 'worktree');
     session.worktreeBranch = 'vocs/test';
@@ -243,7 +241,6 @@ describe('handler registry', () => {
       expect(account[action]).not.toHaveBeenCalled();
       await expect(registry.invoke(channel, undefined, 'desktop')).resolves.toEqual(snapshot);
       expect(account[action]).toHaveBeenCalledTimes(1);
-      expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels().includes(channel as never)).toBe(false);
     }
     // Sign-in takes exactly one renderer choice, whether to keep the sign-in; nothing else.
@@ -269,7 +266,6 @@ describe('handler registry', () => {
       expect(account[action]).not.toHaveBeenCalled();
       await expect(registry.invoke(channel, { connectionId: 'openrouter' }, 'desktop')).resolves.toEqual(snapshot);
       expect(account[action]).toHaveBeenCalledExactlyOnceWith('openrouter');
-      expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels().includes(channel as never)).toBe(false);
     }
   });
@@ -285,7 +281,6 @@ describe('handler registry', () => {
     await expect(registry.invoke('harness:login', { harness: 'codex', device: true }, 'desktop')).resolves.toEqual({ ok: true });
     expect(login).toHaveBeenCalledOnce();
     expect(login.mock.calls[0]!.slice(1)).toEqual(['codex', true]);
-    expect(isRemoteChannel('harness:login')).toBe(false);
     expect(agentChannels().includes('harness:login' as never)).toBe(false);
   });
 
@@ -295,7 +290,6 @@ describe('handler registry', () => {
     const launch = vi.mocked(openAntigravityUsage).mockReset();
     for (const channel of ['subscriptions:read', 'subscriptions:openUsage'] as const) {
       expect(registry.channels()).toContain(channel);
-      expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels().includes(channel as never)).toBe(false);
       for (const actor of ['user', 'agent'] as const) {
         await expect(registry.invoke(channel, { provider: 'codex' }, actor)).rejects.toThrow(/desktop owner/);
@@ -316,7 +310,6 @@ describe('handler registry', () => {
     const { registry, pushes, calls } = stubDeps({ sessions: { claudeSubscriptionWindows: observe } as unknown as SessionManager });
     const channel = 'subscriptions:claudeObserved';
     const request = { sessionId: 's_claude' };
-    expect(isRemoteChannel(channel)).toBe(false);
     expect(agentChannels().includes(channel as never)).toBe(false);
     for (const actor of ['user', 'agent'] as const) {
       await expect(registry.invoke(channel, request, actor)).rejects.toThrow(/desktop owner/);
@@ -405,7 +398,6 @@ describe('handler registry', () => {
     await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['unlisted'] })).rejects.toThrow('Scan again');
     expect(importChats).not.toHaveBeenCalled();
     for (const channel of ['sessions:importList', 'sessions:import']) {
-      expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels().includes(channel as never)).toBe(false);
     }
   });
@@ -548,7 +540,6 @@ describe('handler registry', () => {
       await expect(registry.invoke(channel, { sessionId: archived.id, url: `${url}?source=chat#issuecomment-1` }, 'desktop'))
         .resolves.toEqual({ pr: { ...pr, comments: 1 }, comments: [comment] });
       expect(capture).toHaveBeenCalledExactlyOnceWith('fake-gh', ['pr', 'view', url, '--json', expect.stringContaining('comments')], expect.objectContaining({ cwd: undefined }));
-      expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels()).not.toContain(channel);
     } finally {
       capture.mockRestore();
@@ -566,21 +557,6 @@ describe('handler registry', () => {
     expect(setFastMode).not.toHaveBeenCalled();
     await expect(registry.invoke('sessions:setFastMode', { id: 's_test', enabled: true })).resolves.toEqual({ id: 's_test' });
     expect(setFastMode.mock.calls).toEqual([['s_test', true]]);
-  });
-
-  it('returns the transcript page with its event floor, and rejects an unknown session', async () => {
-    const items: TranscriptItem[] = [{ id: 'a', kind: 'info', ts: 1, level: 'info', text: 'hi' }];
-    const { registry } = stubDeps({
-      sessions: {
-        transcriptSnapshot: async (id: string) => {
-          if (id !== 's_test') throw new Error('Session not found');
-          return { items, seq: 7 };
-        }
-      } as unknown as SessionManager
-    });
-    // The floor travels beside the window so a remote client can follow with seq-filtered events.
-    await expect(registry.invoke('sessions:transcriptPage', { id: 's_test' })).resolves.toEqual({ items, start: 0, total: 1, seq: 7 });
-    await expect(registry.invoke('sessions:transcriptPage', { id: 'nope' })).rejects.toThrow('Session not found');
   });
 
   it('writes the app instruction layer under userData and refuses an unknown scope', async () => {
@@ -662,9 +638,6 @@ describe('handler registry', () => {
     await registry.invoke('processes:end', { targets: [{ pid: 42, startedAt: 7 }, { pid: -1, startedAt: 7 }, { pid: 1.5, startedAt: 7 }, { pid: 43 }, null] });
     expect(end).toHaveBeenCalledWith([{ pid: 42, startedAt: 7 }]);
     // Ending processes is a local action: a paired browser can neither list nor end them.
-    expect(isRemoteChannel('processes:list')).toBe(false);
-    expect(isRemoteChannel('processes:end')).toBe(false);
-    expect(isRemotePushChannel(PUSH_CHANNELS.processSummary)).toBe(false);
     expect(agentChannels()).not.toContain('processes:end');
     // Without a tracker (tests, a host that does not sample) the panel says so instead of failing.
     const bare = stubDeps().registry;
@@ -867,7 +840,6 @@ describe('handler registry', () => {
     const preview = await r.registry.invoke('fs:read', { ...target, maxBytes: FILE_PREVIEW_MAX_BYTES });
     expect(preview).toEqual({ content: before, truncated: false });
     const req = { ...target, content, expectedContent: before };
-    expect(isRemoteChannel('fs:writeText')).toBe(false);
     for (const actor of ['user', 'agent'] as const) {
       await expect(r.registry.invoke('fs:writeText', req, actor)).rejects.toThrow(/local desktop owner/);
     }
@@ -1301,20 +1273,19 @@ describe('vesta handlers', () => {
   });
 });
 
-describe('remote handlers', () => {
+describe('relay connection handlers', () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  /** The registered remote:* handlers with the privileged pieces mocked: the host records what it
-   *  was asked to connect to, the secret store what it was asked to keep. */
+  /** The registered remote:* handlers with the host mocked: it records which relay it was asked to
+   *  sign in to, and the secret store records any write. */
   function remoteRig(registered = false) {
-    const enabled: [string, string][] = [];
+    const signedIn: string[] = [];
     const saved = new Map<string, string>();
     const remote = {
       state: () => ({ status: 'off' }),
       listDevices: async () => [],
-      auditEntries: () => [],
       isRegistered: async () => registered,
-      enable: async (url: string, token: string) => void enabled.push([url, token]),
+      signIn: async (url: string) => void signedIn.push(url),
       disable: async () => undefined
     } as unknown as RemoteHost;
     const secrets = {
@@ -1323,18 +1294,28 @@ describe('remote handlers', () => {
       set: async (id: string, value: string) => void saved.set(id, value),
       clear: async () => undefined
     } as unknown as SecretStore;
-    return { enabled, saved, ...stubDeps({ remote, secrets }) };
+    return { signedIn, saved, ...stubDeps({ remote, secrets }) };
   }
 
-  it('persists analytics sharing and tells the uploader, keeping the rest of the remote config', async () => {
+  it('registers no channel of the retired paired-browser access', () => {
+    const { registry } = remoteRig();
+    for (const channel of ['remote:enable', 'remote:pairStart', 'remote:pairRespond', 'remote:setViewOnly', 'remote:setMirror', 'remote:clearAudit', 'sessions:transcriptPage', 'terminal:watch', 'terminal:unwatch', 'terminal:watchAck']) {
+      expect(registry.channels()).not.toContain(channel);
+    }
+    for (const channel of ['remote:get', 'remote:signIn', 'remote:disable', 'remote:revoke', 'remote:revokeAll', 'remote:setShareAnalytics']) {
+      expect(registry.channels()).toContain(channel);
+    }
+  });
+
+  it('persists analytics sharing and tells the uploader, dropping flags of the retired browser access', async () => {
     const changed: Array<boolean | undefined> = [];
     const { registry, deps, pushes } = remoteRig();
     deps.analyticsSync = { sharingChanged: async () => void changed.push(deps.settings.get().remote?.shareAnalytics) };
-    await deps.settings.update({ remote: { enabled: true, viewOnly: true } });
+    await deps.settings.update({ remote: { enabled: true, viewOnly: true, mirror: true } as RemoteConfig });
     await registry.invoke('remote:setShareAnalytics', { share: false });
-    expect(deps.settings.get().remote).toEqual({ enabled: true, viewOnly: true, shareAnalytics: false });
+    expect(deps.settings.get().remote).toEqual({ enabled: true, shareAnalytics: false });
     await registry.invoke('remote:setShareAnalytics', { share: true });
-    expect(deps.settings.get().remote?.shareAnalytics).toBe(true);
+    expect(deps.settings.get().remote).toEqual({ enabled: true, shareAnalytics: true });
     // The uploader runs after the setting is saved, so it reads the new value.
     expect(changed).toEqual([false, true]);
     expect(pushes.filter(([channel]) => channel === 'push:settingsChanged')).toHaveLength(2);
@@ -1342,50 +1323,38 @@ describe('remote handlers', () => {
 
   it('refuses an insecure relay override before settings, secret writes, or host dispatch', async () => {
     vi.stubEnv('VOCS_CODE_RELAY_URL', 'http://user:password@192.168.1.2/?token=hidden');
-    const { registry, deps, enabled, saved, pushes } = remoteRig();
+    const { registry, deps, signedIn, saved, pushes } = remoteRig();
     const update = vi.spyOn(deps.settings, 'update');
-    for (const [channel, input] of [['remote:enable', { enrollToken: 'private' }], ['remote:signIn', undefined]] as const) {
-      await expect(registry.invoke(channel, input)).rejects.toThrow(/HTTPS/);
-    }
-    expect(update).not.toHaveBeenCalled(); expect(enabled).toEqual([]); expect(saved.size).toBe(0); expect(pushes).toEqual([]);
+    await expect(registry.invoke('remote:signIn', undefined)).rejects.toThrow(/HTTPS/);
+    expect(update).not.toHaveBeenCalled(); expect(signedIn).toEqual([]); expect(saved.size).toBe(0); expect(pushes).toEqual([]);
   });
 
-  it('connects to code.vocs.io with only the enrollment secret, dropping a relay URL an older build stored', async () => {
+  it('connects to code.vocs.io with no secret, dropping what an older build stored in settings', async () => {
     vi.stubEnv('VOCS_CODE_RELAY_URL', undefined);
-    const { registry, deps, enabled, saved } = remoteRig();
-    await deps.settings.update({ remote: { enabled: false, viewOnly: true, relayUrl: 'https://old-relay.workers.dev' } as RemoteConfig });
-    expect(((await registry.invoke('remote:get', undefined)) as { relayUrl: string }).relayUrl).toBe('https://code.vocs.io');
+    const { registry, deps, signedIn, saved } = remoteRig(true);
+    await deps.settings.update({ remote: { enabled: false, viewOnly: true, mirror: true, shareAnalytics: false, relayUrl: 'https://old-relay.workers.dev' } as RemoteConfig });
+    const got = (await registry.invoke('remote:get', undefined)) as { relayUrl: string; registered: boolean; config: RemoteConfig };
+    expect(got).toMatchObject({ relayUrl: 'https://code.vocs.io', registered: true, config: { enabled: false, shareAnalytics: false } });
+    expect(got.config).toEqual({ enabled: false, shareAnalytics: false });
+    expect('audit' in got).toBe(false);
 
-    await registry.invoke('remote:enable', { enrollToken: 'enroll-secret' });
-    expect(enabled).toEqual([['https://code.vocs.io', 'enroll-secret']]);
-    expect(saved.get('remote-enroll')).toBe('enroll-secret');
-    // The view-only policy survives; the typed-in relay of an older build does not.
-    expect(deps.settings.get().remote).toEqual({ enabled: true, viewOnly: true });
-  });
-
-  it('connects a registered computer without asking for the secret again', async () => {
-    vi.stubEnv('VOCS_CODE_RELAY_URL', undefined);
-    const { registry, enabled, saved } = remoteRig(true);
-    saved.set('remote-enroll', 'first-time-secret');
-    expect(((await registry.invoke('remote:get', undefined)) as { registered: boolean }).registered).toBe(true);
-    // An empty field neither overwrites the stored secret nor blocks the connection.
-    await registry.invoke('remote:enable', {});
-    await registry.invoke('remote:enable', { enrollToken: '   ' });
-    expect(enabled).toEqual([['https://code.vocs.io', 'first-time-secret'], ['https://code.vocs.io', 'first-time-secret']]);
-    expect(saved.get('remote-enroll')).toBe('first-time-secret');
+    await registry.invoke('remote:signIn', undefined);
+    expect(signedIn).toEqual(['https://code.vocs.io']);
+    expect(saved.size).toBe(0);
+    expect(deps.settings.get().remote).toEqual({ enabled: true, shareAnalytics: false });
   });
 
   it('points a development build at another relay through VOCS_CODE_RELAY_URL', async () => {
     vi.stubEnv('VOCS_CODE_RELAY_URL', 'http://127.0.0.1:8787/');
-    const { registry, enabled } = remoteRig();
+    const { registry, signedIn } = remoteRig();
     expect(((await registry.invoke('remote:get', undefined)) as { relayUrl: string }).relayUrl).toBe('http://127.0.0.1:8787');
-    await registry.invoke('remote:enable', { enrollToken: 'enroll-secret' });
-    expect(enabled).toEqual([['http://127.0.0.1:8787', 'enroll-secret']]);
+    await registry.invoke('remote:signIn', undefined);
+    expect(signedIn).toEqual(['http://127.0.0.1:8787']);
   });
 });
 
 describe('external control owner boundary', () => {
-  it('refuses browser/default and agent origins before any owner service call', async () => {
+  it('refuses default and agent origins before any owner service call', async () => {
     const ownerState = vi.fn(async () => ({ enabled: false }));
     const setEnabled = vi.fn();
     const grant = vi.fn();
@@ -1405,7 +1374,6 @@ describe('external control owner boundary', () => {
     await expect(registry.invoke('control:grant', { controllerId: '../escape' }, 'desktop')).rejects.toBeDefined();
     await expect(registry.invoke('control:revoke', { grantId: '../escape' }, 'desktop')).rejects.toBeDefined();
     expect(setEnabled).not.toHaveBeenCalled(); expect(grant).not.toHaveBeenCalled(); expect(revoke).not.toHaveBeenCalled();
-    for (const channel of ['control:get', 'control:enable', 'control:grant', 'control:revoke']) expect(isRemoteChannel(channel)).toBe(false);
   });
 
   it('checks control resources canonically without starting Git status refreshes', async () => {
@@ -1421,12 +1389,11 @@ describe('external control owner boundary', () => {
     expect(list.mock.calls.filter(([options]) => options?.refreshGit !== false)).toEqual([]);
   });
 
-  it('does not route local grant setup through browser access or an agent', async () => {
+  it('does not route local grant setup through a default or agent origin', async () => {
     const state = { supported: true, projects: [], approvedProjectIds: [], target: null };
     const ownerState = vi.fn(async () => state), enable = vi.fn(async () => state), disable = vi.fn(async () => state);
     const { registry } = stubDeps({ localControl: { ownerState, enable, disable } });
     for (const channel of ['control:local:get', 'control:local:enable', 'control:local:disable']) {
-      expect(isRemoteChannel(channel)).toBe(false);
       for (const actor of [undefined, 'user', 'agent'] as const) {
         await expect(registry.invoke(channel, { actor: 'desktop', projectIds: ['some-project'] }, actor)).rejects.toThrow('local desktop owner');
       }
@@ -1449,9 +1416,8 @@ describe('remote sign-in handlers', () => {
     vi.stubEnv('VOCS_CODE_RELAY_URL', undefined);
     const signedIn: string[] = [];
     const remote = {
-      state: () => ({ status: 'connecting', onlineClients: [], viewOnly: false }),
+      state: () => ({ status: 'connecting' }),
       listDevices: async () => [],
-      auditEntries: () => [],
       isRegistered: async () => false,
       signIn: async (url: string, open: (link: string) => Promise<void>) => {
         signedIn.push(url);
@@ -1470,7 +1436,7 @@ describe('remote sign-in handlers', () => {
   it('offers sign-in only where the relay origin answers /v1/me like a login gate, without blocking', async () => {
     const answers: Record<string, number> = { 'http://127.0.0.1:9911': 401, 'http://127.0.0.1:9912': 404, 'http://127.0.0.1:9913': 503 };
     vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ status: answers[new URL(url).origin] ?? 500 })));
-    const remote = { state: () => ({ status: 'off', onlineClients: [], viewOnly: false }), listDevices: async () => [], auditEntries: () => [], isRegistered: async () => false } as unknown as RemoteHost;
+    const remote = { state: () => ({ status: 'off' }), listDevices: async () => [], isRegistered: async () => false } as unknown as RemoteHost;
     const { registry } = stubDeps({ remote });
     for (const [relay, expected] of [['http://127.0.0.1:9911', true], ['http://127.0.0.1:9912', false], ['http://127.0.0.1:9913', false]] as const) {
       vi.stubEnv('VOCS_CODE_RELAY_URL', relay);

@@ -1,4 +1,4 @@
-/** Frame routing for the relay Hub (docs/REMOTE-ACCESS.md §5–6): which socket a frame may reach,
+/** Frame routing for the relay Hub (docs/RELAY.md): which socket a frame may reach,
  *  what is queued for an offline browser, and who hears about presence changes. Cloudflare-free:
  *  the Durable Object (worker.ts) and the Node test relay (tests/fake-relay.ts) drive this one
  *  implementation through a SocketRegistry, so local suites exercise the production routing rules

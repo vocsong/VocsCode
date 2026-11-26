@@ -19,7 +19,7 @@ import { AppearanceSection } from './settings/AppearanceSection';
 import { GeneralSection, HousekeepSection } from './settings/GeneralSection';
 import { AcpAgentsSection, HarnessesSection } from './settings/HarnessesSection';
 import { ProvidersSection } from './settings/ProvidersSection';
-import { RemoteSection } from './settings/RemoteSection';
+import { RelayConnectionSection } from './settings/RelayConnectionSection';
 import { BackgroundModelFields, SessionDefaultsSection } from './settings/SessionDefaultsSection';
 import { ShortcutsSection } from './settings/ShortcutsSection';
 import { TerminalSection } from './settings/TerminalSection';
@@ -157,7 +157,7 @@ export function SettingsView() {
               {section === 'pi' && <PiSection />}
               {section === 'acp' && <AcpAgentsSection settings={settings} update={update} />}
               {section === 'remote' && <>
-                <SettingsGroup id="remote-browser" title="Browser access" icon="globe"><RemoteSection settings={settings} update={update} /></SettingsGroup>
+                <SettingsGroup id="remote-connection" title="Vocs relay connection" icon="globe"><RelayConnectionSection settings={settings} /></SettingsGroup>
                 <SettingsGroup id="remote-controllers" title="External MCP control" description="Experimental · Connect a controller with explicit desktop grants." icon="shield"><ControlSettings /></SettingsGroup>
                 <LocalControlSettings />
               </>}

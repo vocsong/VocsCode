@@ -13,7 +13,6 @@ export interface ShutdownTargets {
   keepAwake: { quit(): void };
   mission: { dispose(): void };
   updater?: { stopChecking(): void } | null;
-  remoteMirror?: { stop(): void } | null;
   analyticsSync?: { stop(): void } | null;
   remoteHost?: { close(): void } | null;
   sessions?: {
@@ -34,7 +33,6 @@ export interface ShutdownTargets {
   passiveLearning?: { close(): Promise<void> | void } | null;
   memoryStore: { close(): Promise<void> | void };
   knowledgeUsage: { close(): Promise<void> | void };
-  webServer?: { stop(): Promise<void> | void } | null;
   registry: { shutdown(): Promise<void> };
   sharedGitnexus: { stop(): void };
   processes: { close(): Promise<void> | void };
@@ -90,7 +88,6 @@ export async function runGracefulShutdown(targets: ShutdownTargets): Promise<Shu
   // finds running missions interrupted from their records as they are now.
   safeSync('mission dispose', () => targets.mission.dispose());
   safeSync('updater stop', () => targets.updater?.stopChecking());
-  safeSync('remote mirror stop', () => targets.remoteMirror?.stop());
   safeSync('analytics sync stop', () => targets.analyticsSync?.stop());
   safeSync('remote host close', () => targets.remoteHost?.close());
 
@@ -121,7 +118,6 @@ export async function runGracefulShutdown(targets: ShutdownTargets): Promise<Shu
       safeInvoke('memory ledger close', () => targets.memoryStore.close())
     ),
     safeInvoke('knowledge usage flush', () => targets.knowledgeUsage.close()),
-    safeInvoke('web server stop', () => targets.webServer?.stop()),
     safeInvoke('registry shutdown', () => targets.registry.shutdown()),
     safeInvoke('gitnexus shared stop', () => targets.sharedGitnexus.stop()),
     safeInvoke('process tracker close', () => targets.processes.close())

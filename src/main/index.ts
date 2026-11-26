@@ -1,5 +1,6 @@
 /** Electron entry point: app lifecycle, service composition, logging, and graceful shutdown. */
 import { existsSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -59,11 +60,8 @@ import { LocalControl } from './control/local';
 import { ControlService } from './control/service';
 import { windowsLocalPipe } from './control/windows-pipe';
 import type { ControlResourceGuard } from './control/workspace';
-import { RemoteAudit } from './remote/audit';
-import { RemoteMirror } from './remote/mirror';
 import { AnalyticsSync } from './remote/analytics-sync';
 import { relayUrl } from './remote/relay-url';
-import { WebServer } from './web-server';
 import { MainWindowController, resolvePreloadPath } from './window';
 import { registerAppUserModelId } from './windows-shell-identity';
 
@@ -107,7 +105,6 @@ if (!app.isPackaged || process.env.VOCS_CODE_USER_DATA) app.setPath('userData', 
 let windowController: MainWindowController | null = null;
 let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
-let webServer: WebServer | null = null;
 let remoteHost: RemoteHost | null = null;
 let updater: UpdateService | null = null;
 let processErrorHandlersInstalled = false;
@@ -157,11 +154,13 @@ async function main(): Promise<void> {
   installAppProcessHandlers();
   const settings = new SettingsStore(userData, logTo);
   await settings.load();
-  // Remote-access identity and enrollment secrets, a Vocs sign-in kept on this computer and a Vocs
-  // MCP Hub connection never fall back to obfuscated storage on disk: without a real OS keychain
-  // they live for this run only.
+  // The relay identity, a Vocs sign-in kept on this computer and a Vocs MCP Hub connection never
+  // fall back to obfuscated storage on disk: without a real OS keychain they live for this run only.
   const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll'], keychainOnly: [...VOCS_ACCOUNT_VAULT_IDS, ...VOCS_HUB_VAULT_IDS] });
   await secrets.load();
+  // The legacy relay enrollment secret only ever registered a computer through browser pairing,
+  // which is gone: drop a stored copy rather than keep a credential nothing reads.
+  if (secrets.has('remote-enroll')) await secrets.clear('remote-enroll').catch(() => undefined);
   // Vocs MCP Hub connections: a refresh token in the keychain, access tokens in memory, and a
   // loopback proxy for sessions. Restoring reads the vault only; the first proxied call renews.
   const vocsHub = createVocsHub({ realm: vocsAccountRealm(), openExternal: (url) => shell.openExternal(url), vault: secrets, isOnline: () => net.isOnline(), log: logTo });
@@ -383,9 +382,8 @@ async function main(): Promise<void> {
   // Fan-out hooks that need to run on every sessions change (the update prompt waits for idle).
   const sessionsChangedHooks: Array<() => void> = [];
   const keepAwake = new KeepAwake(powerSaveBlocker, log);
-  // Declared before the manager so the push callbacks can mirror transcripts; assigned once the
-  // remote host exists (the callbacks only fire on real activity, long after boot).
-  let remoteMirror: RemoteMirror | null = null;
+  // Declared before the manager so the push callbacks can reach it; assigned once the relay host
+  // exists (the callbacks only fire on real activity, long after boot).
   let analyticsSync: AnalyticsSync | null = null;
   let processesRef: ProcessTracker | null = null;
   // Mission mode needs the manager and the manager reaches it through hooks; assigned right below.
@@ -412,7 +410,6 @@ async function main(): Promise<void> {
     knowledgeDigest: (scope) => knowledge.digest(scope, { seedIfEmpty: true }),
     pushEvent: (env: SessionEventEnvelope) => {
       pushAll(PUSH_CHANNELS.sessionEvent, env);
-      remoteMirror?.notify(env.sessionId);
       if (env.event.type === 'status' && (env.event.status === 'idle' || env.event.status === 'stopped')) {
         processesRef?.soon(300);
       }
@@ -445,7 +442,6 @@ async function main(): Promise<void> {
       }
       for (const id of reflectedStates.keys()) if (!liveIds.has(id)) reflectedStates.delete(id);
       for (const hook of sessionsChangedHooks) hook();
-      remoteMirror?.notifyIndex();
       analyticsSync?.notify();
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
     },
@@ -476,12 +472,10 @@ async function main(): Promise<void> {
 
   const sessionsRef = sessions;
 
-  // One push fan-out for the window and web clients alike. Declared before Mission recovery, whose
-  // session updates already push the session list through it.
+  // One push fan-out to the window. Declared before Mission recovery, whose session updates already
+  // push the session list through it.
   const pushAll = (channel: string, payload: unknown) => {
     pushToRenderer(currentWindow(), channel, payload);
-    webServer?.broadcast(channel, payload);
-    void remoteHost?.broadcastPush(channel, payload);
   };
 
   // Mission mode: the loopback gateway carries the Mission tools; it opens on the first mission
@@ -503,15 +497,14 @@ async function main(): Promise<void> {
   await missionRef.recover().catch((e) => log('warn', `mission: recovery failed: ${errorMessage(e)}`));
   void missionRef.sweep().catch((e) => log('warn', `mission: startup sweep failed: ${errorMessage(e)}`));
 
-  // Which session the desktop window is on, pushed to paired browsers so they can open the same
-  // one. The window's focus/blur is wired in `MainWindowController`; the list reconcile forgets a
-  // target that was deleted or archived since it was reported.
+  // Which session the desktop window is on (unseen-turn marks, the graph's selected session). The
+  // window's focus/blur is wired in `MainWindowController`; the list reconcile forgets a target that
+  // was deleted or archived since it was reported.
   const desktopFocus = new DesktopFocusTracker({
     hasSession: (id) => !!sessionsRef.get(id),
     push: (focus) => {
       selectGraphSession(focus.sessionId);
       pushAll(PUSH_CHANNELS.desktopFocus, focus);
-      remoteMirror?.notifyIndex();
     }
   });
   sessionsChangedHooks.push(() => {
@@ -568,10 +561,10 @@ async function main(): Promise<void> {
   });
   await terminals.load();
 
-  // Remote access (docs/REMOTE-ACCESS.md): the host needs the registry lazily, since
-  // registerIpc itself consumes the host to bind the remote:* channels.
-  const remoteAudit = new RemoteAudit({ dir: userData, log });
-  await remoteAudit.load();
+  // The audit trail of the retired paired-browser access; nothing reads it any more.
+  void rm(path.join(userData, 'remote-audit.jsonl'), { force: true }).catch(() => undefined);
+  // The control resource guard needs the registry lazily, since registerIpc consumes the control
+  // service and the relay host.
   let registryRef: import('./handlers').HandlerRegistry | null = null;
   const controlJournal = new ControlJournal(userData);
   await controlJournal.load().catch(() => log('warn', 'External control journal unavailable; automation is disabled.'));
@@ -587,36 +580,18 @@ async function main(): Promise<void> {
     sessions: sessionsRef, guard: guardControlResource,
     open: windowsLocalPipe(runtime.resource('control', 'windows-pipe.ps1')),
   });
+  // The relay connection (docs/CONTROL-MCP.md): external MCP controllers reach this computer over it
+  // and the analytics dashboard receives snapshots through it.
   remoteHost = new RemoteHost({
     control,
-    registry: () => registryRef!,
     secrets: { get: (key) => secrets.get(key), set: (key, value) => secrets.set(key, value) },
     pushState: () => pushAll(PUSH_CHANNELS.remoteState, remoteHost!.state()),
     log,
-    broadcast: (channel, payload) => void remoteHost?.broadcastPush(channel, payload),
-    audit: remoteAudit,
-    // Read live: toggling view-only must apply to an already-connected browser without a reconnect.
-    viewOnly: () => settings.get().remote?.viewOnly === true,
-    // A re-keyed mirror must be re-sealed: the relay copy under the old key was just dropped.
-    onMirrorRotated: () => remoteMirror?.sync(),
-    onOnline: () => analyticsSync?.connected(),
-    // P3.5: a paired browser streams a terminal it watches; it never attaches the desktop's view.
-    terminals: () => terminals
-  });
-
-  // Offline mirror (P4): the desktop seals transcript snapshots for paired browsers to read while
-  // it is offline. Off unless the user opts in; the key lives in the host's secret-store creds.
-  remoteMirror = new RemoteMirror({
-    host: () => remoteHost,
-    sessions: () => sessionsRef.list(),
-    transcript: (id) => sessionsRef.transcript(id),
-    focus: () => desktopFocus.state().sessionId,
-    enabled: () => settings.get().remote?.mirror === true,
-    log
+    onOnline: () => analyticsSync?.connected()
   });
 
   // The code.vocs.io dashboard (docs/WEB-DASHBOARD.md): a connected computer uploads its analytics
-  // snapshot unless sharing is off. Nothing is sent while remote access is off or unregistered.
+  // snapshot unless sharing is off. Nothing is sent while the relay connection is off or unregistered.
   analyticsSync = new AnalyticsSync({
     snapshot: () => analytics.snapshot({ appVersion: app.getVersion(), platform: `${process.platform} ${process.arch}` }),
     request: (requestPath, init) => remoteHost!.analyticsRequest(requestPath, init),
@@ -648,39 +623,17 @@ async function main(): Promise<void> {
     localControl,
     localControlDocument,
     desktopFocus,
-    remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
     analyticsSync,
     updater: updater ?? undefined,
     processes,
     mission: missionRef,
-    broadcast: (channel, payload) => {
-      webServer?.broadcast(channel, payload);
-    },
     getWindow: currentWindow,
     log
   });
   registryRef = registry;
 
-  // Resume remote access across restarts when it was left enabled; the relay is always relayUrl().
-  const remoteConfig = settings.get().remote;
-  if (remoteConfig?.enabled) {
-    // A registered computer reconnects with its own credential; the secret only matters before that.
-    await remoteHost.enable(relayUrl(), (await secrets.get('remote-enroll')) ?? '');
-    // The mirror resumes with it, reading the last snapshots back up from the same store.
-    if (remoteConfig.mirror) remoteMirror?.sync();
-  }
-
-  // Localhost web client (P1 dogfood, docs/REMOTE-ACCESS.md): explicit opt-in, dev-oriented.
-  // Serves the built renderer (npm run build first) and bridges the same handler registry to a browser tab.
-  if (process.env.VOCS_CODE_WEB === '1') {
-    webServer = new WebServer({
-      registry,
-      staticDir: path.join(appRoot, 'out', 'renderer'),
-      port: Number(process.env.VOCS_CODE_WEB_PORT) || 5177,
-      log
-    });
-    await webServer.start();
-  }
+  // Resume the relay connection across restarts when it was left on; the relay is always relayUrl().
+  if (settings.get().remote?.enabled) await remoteHost.enable(relayUrl());
 
   const watchRenderer = (contents: Electron.WebContents) => {
     forgetVisibleOnRendererReset(contents, desktopFocus);
@@ -765,7 +718,6 @@ async function main(): Promise<void> {
       keepAwake,
       mission: missionRef,
       updater,
-      remoteMirror,
       analyticsSync,
       remoteHost,
       sessions,
@@ -779,7 +731,6 @@ async function main(): Promise<void> {
       passiveLearning,
       memoryStore,
       knowledgeUsage,
-      webServer,
       registry,
       sharedGitnexus,
       processes,

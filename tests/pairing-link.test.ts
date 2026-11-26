@@ -1,14 +1,16 @@
-/** Pairing links (src/shared/pairing.ts): the web page claims a code against the origin it was
- *  opened on, so a link to any origin other than this desktop's relay can never pair. The link
- *  used to be hard-coded to code.vocs.io, which broke every dev, preview and self-hosted relay. */
+/** Connect with Vocs links (src/shared/pairing.ts): the page that adds a computer lives on the relay's
+ *  own origin, so the link must open the relay this desktop is connected to. The link used to be
+ *  hard-coded to code.vocs.io, which broke every dev, preview and self-hosted relay. */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_REMOTE_ORIGIN, PAIRING_CODE_PATTERN, pairingLink, remoteOrigin } from '../src/shared/pairing';
+import { connectCheckCode, connectLink, DEFAULT_REMOTE_ORIGIN, remoteOrigin } from '../src/shared/pairing';
 
-describe('pairing links', () => {
-  it('opens the web client on the relay this desktop is connected to', () => {
-    expect(pairingLink('https://code.vocs.io', 'ABCD2345')).toBe('https://code.vocs.io/app?code=ABCD2345');
-    expect(pairingLink('http://127.0.0.1:8787/', 'ABCD2345')).toBe('http://127.0.0.1:8787/app?code=ABCD2345');
-    expect(pairingLink('https://vocs-relay.vocs.workers.dev', 'ABCD2345')).toBe('https://vocs-relay.vocs.workers.dev/app?code=ABCD2345');
+const HASH = 'ab'.repeat(32);
+
+describe('Connect with Vocs links', () => {
+  it('opens the dashboard on the relay this desktop is connected to', () => {
+    expect(connectLink('https://code.vocs.io', HASH)).toBe(`https://code.vocs.io/dashboard?connect=${HASH}`);
+    expect(connectLink('http://127.0.0.1:8787/', HASH)).toBe(`http://127.0.0.1:8787/dashboard?connect=${HASH}`);
+    expect(connectLink('wss://relay.example.dev/v1/ws/host', HASH)).toBe(`https://relay.example.dev/dashboard?connect=${HASH}`);
   });
 
   it('maps socket schemes to the page scheme and drops paths, credentials and queries', () => {
@@ -23,8 +25,9 @@ describe('pairing links', () => {
     }
   });
 
-  it('matches only the relay code alphabet', () => {
-    expect(PAIRING_CODE_PATTERN.test('ABCD2345')).toBe(true);
-    for (const code of ['abcd2345', 'ABCD234', 'ABCD23456', 'ABCD1345', 'ABCDO345', '<img src>']) expect(PAIRING_CODE_PATTERN.test(code)).toBe(false);
+  it('derives the same short check code on both sides, from the hash alone', () => {
+    expect(connectCheckCode(HASH)).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/);
+    expect(connectCheckCode(HASH)).toBe(connectCheckCode(HASH));
+    expect(connectCheckCode('cd'.repeat(32))).not.toBe(connectCheckCode(HASH));
   });
 });

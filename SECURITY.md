@@ -10,13 +10,14 @@ a public issue, discussion or pull request for a suspected vulnerability.
 Include what you can of:
 
 - the affected version (Settings → About, or the release tag) or commit, and your OS;
-- the component: desktop app, a harness integration, the relay (`relay/`), the web client
-  (`src/web`), remote access or the MCP bridge;
+- the component: desktop app, a harness integration, the desktop's relay connection
+  (`src/main/remote/`), the relay (`relay/`), the code.vocs.io dashboard (`src/web`), External MCP
+  control or the MCP bridge;
 - steps to reproduce, ideally the smallest example, with what you expected and what happened;
 - the impact you believe it has.
 
 Do not send real API keys, tokens, session cookies or anyone else's data. Test only against
-your own installation, accounts and paired devices; no denial-of-service, spam or social
+your own installation, accounts and registered computers; no denial-of-service, spam or social
 engineering.
 
 ## What happens next

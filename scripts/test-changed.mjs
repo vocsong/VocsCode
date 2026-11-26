@@ -39,6 +39,6 @@ const log = listOnly ? console.error : console.log;
 log(reason
   ? `${reason} changed on this branch or worktree: ${action} the full offline suite.`
   : `${changed.length} file(s) changed against ${baseRef}: ${action} affected offline test files.`);
-const run = spawnSync(process.execPath, [vitest, ...command, ...scope, '--exclude', 'tests/smoke.remote-live.test.ts', ...args], { cwd: root, stdio: 'inherit' });
+const run = spawnSync(process.execPath, [vitest, ...command, ...scope, ...args], { cwd: root, stdio: 'inherit' });
 if (run.error) throw run.error;
 process.exit(run.status ?? 1);

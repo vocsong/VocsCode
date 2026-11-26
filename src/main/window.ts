@@ -138,7 +138,7 @@ export class MainWindowController {
       // A closed window shows nothing: a turn that ends now was not seen, whatever the last blur said.
       opts.onWindowFocus(false);
     });
-    // Presence for paired browsers: they follow the desktop only while its window is foregrounded.
+    // Window presence for the desktop focus tracker.
     win.on('focus', () => opts.onWindowFocus(true));
     win.on('blur', () => opts.onWindowFocus(false));
     opts.watchRenderer(win.webContents);

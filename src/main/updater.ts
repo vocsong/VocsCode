@@ -33,7 +33,7 @@ export interface UpdaterDeps {
   isPackaged: boolean;
   /** A restart prompt waits until every session is out of a live turn. */
   isAnySessionLive: () => boolean;
-  /** Publishes every state transition to the renderer (and web/remote clients). */
+  /** Publishes every state transition to the renderer. */
   push: (state: UpdateState) => void;
   log: Logger;
   checkTimeoutMs?: number;

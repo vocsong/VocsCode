@@ -76,7 +76,7 @@ export interface AppSettings {
   uiMode?: UiModeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
-  /** Remote access (docs/REMOTE-ACCESS.md): outbound relay connection, off by default. */
+  /** The relay connection for MCP control and the analytics dashboard: outbound, off by default. */
   remote: RemoteConfig;
   defaultEffort?: EffortLevel;
   /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */

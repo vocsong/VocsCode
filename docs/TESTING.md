@@ -13,7 +13,7 @@ npm run test:changed           # broad affected-test run for shared or uncertain
 npm run test:changed -- --list # see which test files would be selected, without running them
 npm run test:pr                # reproduce the hosted develop test allowlist (not another local requirement)
 npm test                       # full offline suite — release gate
-npm run build                  # desktop out/ and web relay/public/app/
+npm run build                  # desktop out/ and web relay/public/dashboard/
 npm run dist:win               # NSIS installer + dist/win-unpacked/
 ```
 
@@ -69,39 +69,21 @@ Add or extend a test when behavior changes; permission-gating changes must keep
 
 The relay is covered at four depths. `tests/fake-relay.ts` serves the relay's **real** route table
 and frame router (`relay/src/routes.ts`, `relay/src/hub.ts`) over `ws` sockets that throw on send
-after close like a Durable Object's, so the remote suites exercise production rules, not a
-re-implementation. `npm run test:relay-do` runs the Hub in workerd (tags, hibernation, queues,
-edge rate-limit bindings). `tests/remote-workerd.test.ts` — part of `npm test`, about four
-seconds — starts the whole relay Worker locally in workerd (`tests/support/local-relay.ts`, wrangler's
-programmatic dev server with a throwaway secret) and runs the full smoke flow against it over real
-sockets: pairing, the sealed credential, proof-of-possession tokens, handshake, invoke, mirror key,
-revocation. It is what found a refused request's unread body ending a `wrangler dev` session and a
-revocation answering 500, which no fake could. `e2e.web-dashboard` (in `test:e2e:ci`) loads the
-web dashboard in Electron's Chromium from that local relay: two desktops join through its Connect
-with Vocs page (one through the retired `/app` link), upload their analytics, and the page shows
-them combined and apart under the static CSP;
-and, through `tests/support/test-landing.ts` (a stand-in for the landing that signs per-account
-assertions, gates owner routes and isolates accounts), Connect with Vocs, account switching and
-pairing from the signed-in computer list. `e2e.remote` drives the desktop side of the same flow in
-the real app. The opt-in **deployed** smoke runs the flow against the incumbent production account;
-it needs the enrollment secret and a signed-in session cookie kept outside the repo:
-
-```bash
-REMOTE_LIVE=1 REMOTE_LIVE_ORIGIN=https://code.vocs.io \
-  REMOTE_LIVE_TOKEN_FILE=/absolute/path/to/relay-enroll-token.txt \
-  REMOTE_LIVE_SESSION_COOKIE_FILE=/absolute/path/to/incumbent-session-cookie.txt npm run test:remote-live
-```
-
-It attempts to revoke temporary devices and clear its mirror, including recovery through the
-claimant-only poll capability if the approved browser response is lost. A failed run can still
-leave devices when neither side receives credentials; inspect/revoke them through an existing
-authenticated desktop before rerunning. Never run it against a shared account without
-authorization. The session-cookie preflight verifies it belongs to `vocs-v1` before any mutation;
-keep that HttpOnly credential private. With `REMOTE_LIVE=1`, missing origin, token file or session
-cookie fails loudly before network access. `npm test` excludes it, so a green offline run is not live
-verification. Run it
-after any production relay/landing deploy and after pairing, socket or mirror changes; if no
-credentials or deployment are available, report the live tier as unverified.
+after close like a Durable Object's, so `tests/remote-host-lifecycle.test.ts` and `e2e.remote`
+exercise production rules, not a re-implementation. `npm run test:relay-do` runs the Hub in workerd
+(tags, hibernation, queues, edge rate-limit bindings, control discovery).
+`tests/control-relay-workerd.test.ts` — part of `npm test` — starts the whole relay Worker locally
+in workerd (wrangler's programmatic dev server with throwaway secrets and storage) and drives the
+controller route over real host sockets, including nonce replay across a workerd restart.
+`e2e.web-dashboard` (in `test:e2e:ci`) loads the web dashboard in Electron's Chromium from the same
+kind of local relay (`tests/support/local-relay.ts`) behind `tests/support/test-landing.ts` (a
+stand-in for the landing that signs per-account assertions, gates owner routes and isolates
+accounts): two desktops join through its Connect with Vocs page (one through the retired `/app`
+link), upload their analytics, and the page shows them combined and apart under the static CSP.
+`e2e.remote` drives the desktop side in the real app: Connect with Vocs, resuming after a restart
+and External MCP grants. There is no deployed smoke; after a production deploy run the
+[live verification checklist](RELAY.md#live-verification), and if no deployment is available,
+report the live tier as unverified.
 
 ## Opt-in Electron suites (no provider key)
 
@@ -189,15 +171,14 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Vocs account broker/settings and kept sign-in (`main/vocs-account.ts`, `shared/vocs-account.ts`, `VocsAccountSettings.tsx`, the `vocs-account:*` ids in `main/secrets.ts`) | `tests/vocs-account.test.ts`, `tests/vocs-account-persistent.test.ts`, `tests/vocs-account-settings.test.tsx`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts`, the MCP OAuth suites, `tests/unit-secrets.test.ts` + `e2e.vocs-account`, `e2e.layout`; preserve owner-frame IPC, no-secret state, cancellation/retry/expiry/account-switch, vault-before-use rotation, offline-versus-ended refresh outcomes and no automatic tool authorization. The fake issuer in `vocs-account-persistent` follows the identity-service contract; no suite contacts a real issuer. Real PC steps: [ACCOUNT-STAGING-TEST.md](ACCOUNT-STAGING-TEST.md). |
 | Vocs MCP Hub connections (`main/vocs-hub.ts`, the `keepRefreshToken` option in `mcp/oauth.ts`, the `vocs-hub:*` ids, `vocs-openrouter` injection, the Hub controls in `VocsAccountSettings.tsx`) | `tests/vocs-hub.test.ts` (fake Hub on a local HTTP server: real SDK OAuth, keychain record, the loopback proxy through the app's own MCP client, renewal/rotation order, 401 retry, `invalid_grant`, restore, revocation, account lifecycle, session injection), `tests/mcp-oauth.test.ts`, `tests/vocs-account.test.ts`, `tests/vocs-account-settings.test.tsx`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/codex-mcp-config.test.ts`, `tests/pi-mcp-builtin-trust.test.ts` + `e2e.vocs-account` (keychain-sealed restore, Disconnect revocation through an in-main fetch interceptor, restart). Keep the Hub token out of every harness-visible value, the vault write before first use, and no request at launch; no suite contacts mcp.vocs.io. |
 | MCP layer (`src/main/mcp/**`), built-in servers, computer use (`mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`) | `tests/mcp.test.ts`, `tests/mcp-gitnexus.test.ts`, `tests/mcp-client.test.ts`, `tests/mcp-client-http.test.ts`, `tests/mcp-oauth.test.ts`, `tests/mcp-oauth-transport-race.test.ts`, `tests/cua.test.ts`, `tests/cua-preview.test.ts`, `tests/cua-card.test.tsx`, `tests/desktop-tab.test.tsx`, `tests/right-panel-bottom.test.tsx` |
-| Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy, the pairing QR (`shared/qr.ts`, `PairingQr.tsx`) | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/remote-host-lifecycle.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-client.test.ts`, `tests/remote-ui.test.tsx`, `tests/qr.test.ts` |
+| Relay connection (`src/main/remote/**`, `handlers/account-remote.ts`, Settings → MCP control's `RelayConnectionSection.tsx`, Connect with Vocs links in `shared/pairing.ts`) | `tests/remote-host-lifecycle.test.ts`, `tests/remote-ui.test.tsx`, `tests/handler-registry.test.ts`, `tests/pairing-link.test.ts` + `e2e.remote`. See [RELAY.md](RELAY.md). |
 | Remote controller MCP (`shared/control.ts`, `main/control/**`, controlled SessionManager turns, `relay/src/control-*.ts`, `relay/src/entry.ts`, `ControlSettings.tsx`) | `tests/control-service.test.ts`, `tests/control-turns.test.ts`, `tests/control-relay.test.ts`, `tests/control-relay-workerd.test.ts`, `tests/handler-registry.test.ts`, `tests/remote-ui.test.tsx` + `e2e.remote`. `test:relay-do` exercises discovery over the named binding, with two authenticated simulated hosts, denial before dispatch and nonce replay across restart. Retain the affected lifecycle and relay rows below. The separate gateway repos own their OAuth/consent tests; actual Dots/Muse and two real computers are rollout gates, not implied by offline success. |
 | Windows local CLI/stdio discovery (`scripts/vocs-code.mjs`, `main/control/local.ts`, `windows-pipe.*`, `LocalControlSettings.tsx`) | `tests/local-control.test.ts`, `tests/local-control-cli.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + on Windows `tests/local-control-windows.test.ts` (native ACL, restricted-token denial, peer identity, frame limits and owner death) and `e2e.remote` (owner grant, CLI and SDK stdio, exact profile and revocation). See [LOCAL-CONTROL.md](LOCAL-CONTROL.md#verification). |
-| Remote terminal (P3.5): `src/main/remote/terminal-streams.ts`, `TerminalManager.watch/snapshot`, `shared/remote-terminal.ts` | `tests/remote-terminal-streams.test.ts`, `tests/remote-e2e.test.ts`, `tests/terminal.test.ts` |
-| Relay routing, accounts, auth, tokens or rate limiting (`relay/src/{account,core,routes,edge,rate}.ts`) | `tests/relay-account.test.ts`, `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-e2e.test.ts`, `tests/remote-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
+| Relay routing, accounts, auth, tokens or rate limiting (`relay/src/{account,core,routes,edge,rate}.ts`) | `tests/relay-account.test.ts`, `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-host-lifecycle.test.ts`, `tests/control-relay-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
 | Web dashboard (`src/web/**`, `vite.config.web.ts`, `relay/public/_headers`, `relay/src/legacy-app.ts`) and the shared analytics view it reuses (`components/analytics/{AnalyticsView,env}.tsx`) | `tests/web-dashboard.test.tsx`, `tests/web-router.test.ts`, `tests/web-account.test.ts`, `tests/web-bundle.test.ts`, `tests/relay-page-layout.test.ts` (reads `_headers` and the `/app` redirect), `tests/analytics-dashboard.test.tsx` + `e2e.web-dashboard` (real browser, same-origin fonts and CSP, Connect with Vocs, light/dark and desktop/phone layout). Review `tests/artifacts/web-dashboard-*.png` after web visual changes. |
 | Analytics snapshot, its relay storage and the desktop uploader (`shared/analytics/{snapshot,snapshot-codec,snapshot-wire,combine,usage-summary}.ts`, `relay/src/analytics.ts`, `main/remote/analytics-sync.ts`) | `tests/analytics-snapshot.test.ts`, `tests/relay-analytics.test.ts`, `tests/analytics-sync.test.ts`, `tests/analytics.test.ts`, `tests/relay-edge.test.ts` + `e2e.web-dashboard` |
-| Relay browser client used by the pairing suites (`relay/src/web-client.ts`) | `tests/web-client.test.ts`, `tests/browser-socket.test.ts`, `tests/remote-workerd.test.ts`, `e2e.remote` |
-| Relay Durable Object and frame routing (`relay/src/{worker,hub}.ts`, socket lifecycle/tags/queues) | `test:relay-do`, `tests/remote-workerd.test.ts` + `test:remote-live` against the deployed origin after deploy |
+| Relay test client (`relay/src/web-client.ts`, kept for the suites that still drive the relay's legacy browser routes) | `tests/browser-socket.test.ts`, `tests/endpoint-transport.test.ts`, `tests/remote-host-lifecycle.test.ts`, `e2e.remote` |
+| Relay Durable Object and frame routing (`relay/src/{worker,hub}.ts`, socket lifecycle/tags/queues) | `test:relay-do`, `tests/control-relay-workerd.test.ts` + the [live verification checklist](RELAY.md#live-verification) after deploy |
 | CI workflows and test runners (`.github/workflows/`, `scripts/test-*.mjs`, `scripts/e2e-guard*.mjs`, `scripts/pr-test-files.json`) | `tests/ci-workflow.test.ts` and the affected runner tests: `tests/test-changed.test.ts`, `tests/e2e-guard.test.ts`, `tests/test-metrics.test.ts`, `tests/test-inventory.test.ts`. `vitest.relay.config.ts` or relay test config changes also need `npm run test:relay-do`. |
 | Split view — panes, the active pane, the divider, drag-to-split, layout restore (`panes.ts`, `components/SessionPanes.tsx`, the `layout`/`activeId` pair in `store.ts`) | `tests/session-panes.test.ts`, `tests/split-view.test.tsx` + `e2e.split`; `e2e.files` checks the editor drawer does not resize the split |
 | Transcript rendering — message rows, work/command collapse groups, tool cards, shell panels (`components/Transcript.tsx`, `transcript-window.ts`) | `tests/tool-group.test.tsx`, `tests/transcript-window.test.ts`, `tests/transcript-virtual.test.tsx` + `e2e.transcript` |

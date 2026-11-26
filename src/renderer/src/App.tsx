@@ -62,7 +62,7 @@ export function App() {
   const hasFilePreview = useStore((s) => !!s.layout.filePreview);
   const showPanel = (panelOpen || hasFilePreview) && !!panelSession && view === 'chat';
   const previewOnly = showPanel && !panelOpen;
-  // Tell main (and through it, paired browsers) which session this window is on.
+  // Tell main which session this window is on and which sessions are on screen.
   useReportDesktopFocus();
   useSessionViewing();
 

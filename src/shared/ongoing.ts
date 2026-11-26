@@ -3,9 +3,8 @@
  * is currently running or idle. Keep this file free of Node/Electron/DOM imports.
  *
  * Autonomous agent work (`subagent` | `task` | `hook`) rides on `SessionMeta.ongoing` (ephemeral,
- * never persisted across restarts) and reaches both desktop and paired remote web shells.
- * Desktop-only OS process activity rides separately on `ProcessSummary.bySession` so OS PIDs and
- * command lines stay off remote channels.
+ * never persisted across restarts). Desktop-only OS process activity rides separately on
+ * `ProcessSummary.bySession` so OS PIDs and command lines stay out of session metadata.
  */
 export type OngoingKind = 'subagent' | 'task' | 'hook';
 

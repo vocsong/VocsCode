@@ -54,7 +54,7 @@ export function registerGitFsHandlers(ctx: HandlerContext): void {
   const { settings, sessions } = deps;
 
   // Neither probe takes a session id, so both gate on a folder the app already knows about (or one
-  // the local user just picked): a paired browser must not be able to walk the host's disk.
+  // the local user just picked): an invoking caller must not be able to walk the host's disk.
   const knownFolder = (projectRoot: string) =>
     pickedFolders.has(projectRoot) || settings.get().folders.includes(projectRoot) || sessions.list().some((s) => s.config.projectRoot === projectRoot);
 

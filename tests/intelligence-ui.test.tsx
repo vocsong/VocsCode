@@ -13,7 +13,7 @@ import type { KnowledgeUsageReport, KnowledgeUsageTotals, KnowledgeUsageVote, Re
 import type { SessionMeta } from '../src/shared/types';
 
 const { invoke, canInvoke, on } = vi.hoisted(() => ({ invoke: vi.fn(), canInvoke: vi.fn(), on: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, canInvoke, on, isMac: false, modKey: 'Ctrl', isWeb: false }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, canInvoke, on, isMac: false, modKey: 'Ctrl' }));
 
 type MemoryListener = (event: PushPayloads['push:projectMemoryChanged']) => void;
 const memoryListeners = new Set<MemoryListener>();

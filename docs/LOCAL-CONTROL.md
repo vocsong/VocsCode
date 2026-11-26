@@ -9,7 +9,7 @@ The [remote HTTPS MCP](CONTROL-MCP.md) rollout is separate.
 
 1. In the repository, install the locked dependencies with `npm ci --include=dev` and run
    `npm run dev`. Open a project folder and create an ordinary session, or use an existing one.
-2. In **Settings → Remote access → Local CLI & MCP discovery**, select the projects, read and
+2. In **Settings → MCP control → Local CLI & MCP discovery**, select the projects, read and
    acknowledge what is shared, and click **Enable grant**. Copy the target descriptor. Choose
    it in the desktop profile you actually want to control.
 3. With the app still running, run these commands from the checkout (PowerShell):

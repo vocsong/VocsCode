@@ -46,7 +46,9 @@ src/main
   secrets.ts      API keys encrypted at rest via Electron safeStorage
   terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
   handlers.ts + handlers/   transport-agnostic IPC handler registry (Electron-free, unit-tested in Node), split by domain (app, settings-providers, harnesses, mcp-cua, sessions, account-remote, git-fs, knowledge-terminal)
-  web-server.ts   localhost web client (VOCS_CODE_WEB=1): serves the built renderer, bridges the registry over WebSocket
+  remote/         the outbound relay connection (docs/RELAY.md): host.ts (RemoteHost), host-sign-in.ts
+                  (Connect with Vocs), relay-client.ts (proof-of-possession access tokens), host-control.ts
+                  (External MCP control frames), analytics-sync.ts (dashboard upload), relay-url.ts
   analytics.ts + analytics-migrations.ts + analytics-executions.ts   usage ledger, stat-gated startup replay, one-time repairs, execution log
   git.ts / settings.ts / store.ts / ipc.ts / index.ts / window.ts / shutdown.ts / windows-shell-identity.ts   (ipc.ts binds handlers.ts to ipcMain; window.ts, shutdown.ts, windows-shell-identity.ts hold Electron shell/lifecycle mechanics)
 src/preload       contextBridge (window.harness)
@@ -54,8 +56,8 @@ src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
     git/          Git panel modules used by BranchesTab.tsx (useGitPanelPolling, BranchList, WorktreeList, GitHubLists, GitItemDialogs)
     transcript/   Transcript modules re-exported by Transcript.tsx (grouping, shared, ApprovalCard, ToolCards, MessageViews, Groups)
-    settings/     modular Settings sections (appearance, general, sessions, terminal, providers, harnesses, shortcuts, remote, about)
-    SessionTitle.tsx  shared desktop and web session label with a harness pill and project | session name
+    settings/     modular Settings sections (appearance, general, sessions, terminal, providers, harnesses, shortcuts, relay connection, about)
+    SessionTitle.tsx  session label with a harness pill and project | session name
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
   styles.css      @layer entry importing modular stylesheets under styles/ (tokens, reset, layout, primitives, sidebar, conversation, panel, dialogs, views, themes/)
   terminal/       xterm.js instances kept alive outside React (host.ts)
@@ -66,13 +68,11 @@ src/renderer      React 19 + zustand UI
   settings-nav.ts deep-link navigation into Settings sections without circular imports with SettingsView
   panes.ts        the split view's session pane model and the separate, transient file drawer target; components/SessionPanes.tsx renders the split
   file-open.ts    where a session's files are read from and how outside paths are only revealed; components/FilePreviewPane.tsx previews
-src/web           the browser shell at code.vocs.io/app (plain Vite build into relay/public/app)
-  transport/      RelayTransport (window.harness over the e2e session, local `can` gate) + mirror backend + IndexedDB vault
-  shell/          WebApp root, connection state, account probe, viewport keyboard inset
-  screens/        pairing, Connect with Vocs, sessions home, one session
-  sheets/         bottom sheets: computers, devices, new session, terminal
-  terminal/       the live terminal: stream controller, headless-xterm screen model, key mapping, view
-  components/     web composer, session header, status chip, connection banner
+src/web           the analytics dashboard at code.vocs.io/dashboard (plain Vite build into relay/public/dashboard, docs/WEB-DASHBOARD.md)
+  shell/          DashboardApp root, signed-in account probe, product switcher
+  dashboard/      the combined dashboard and its snapshot loader
+  screens/        the Connect with Vocs screen that adds a computer to the account
+  owner-api.ts    the same-origin owner routes the page calls
 resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents and the MCP bridge
 
 resources/processes the read-only Windows process-table reader (Toolhelp snapshot) behind the Processes panel
@@ -320,7 +320,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - `src/main` — all privileged work. `harness/` holds the adapters, `models/` holds provider clients, and `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
 - `src/preload` — the only bridge. Shared transport calls go through `window.harness` (`src/shared/ipc.ts`). Keep computer awake has a separate desktop-only preload binding and bypasses the shared handler registry.
 - `src/renderer` — React 19 + zustand. **Never touches Node or Electron directly.** `terminal/host.ts` keeps xterm.js instances alive outside React.
-- `src/web` — the browser shell. It may import `src/renderer/src`, `src/shared` and `relay/src/web-client.ts`; it must **never** import `src/main`, Electron or `terminal/host` (xterm). It binds its own `window.harness` before any renderer module loads (`install-transport.ts`).
+- `src/web` — the analytics dashboard and the Connect with Vocs screen. It may import `src/renderer/src` (the shared analytics view), `src/shared` and `relay/src/account.ts`; it must **never** import `src/main`, Electron or `terminal/host` (xterm). It talks only to same-origin owner routes (`owner-api.ts`).
 
 ## Key invariants
 
@@ -333,7 +333,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
 - Local images in assistant Markdown resolve against that session's checkout (`cwd`, not the main project root or renderer URL). Sanitized HTML carries inert references; the desktop loads bounded image bytes through the existing session-scoped `fs:readImage` handler, which also rejects symlink escapes. Never loosen the Markdown URI allowlist or CSP to expose filesystem paths. Missing, oversized and denied images show an unavailable caption; web Markdown continues to omit images.
 - Every process the app starts is tracked for the Processes panel without the spawning code knowing about it. `SessionManager` wraps each adapter in `ownedAdapter`, so a ChildProcess created during any adapter call (an SDK's CLI, MCP servers, tool shells) is claimed for that session through Node's `child_process` diagnostics channel; terminals come from `TerminalManager.activity()`; descendants inherit the owner. An app-wide process that a session's call may start lazily must be spawned under `withProcessOwner({ label })` (as the shared GitNexus server and Vesta are), or it is attributed to whichever session asked first. On Windows each session's processes also join a per-session Job Object (no limits, breakaway allowed, never kills), so a process started through a launcher that exits at once (`Start-Process` from a tool shell) is still listed under its session, flagged detached. Processes are named by PID *and* creation time everywhere; ending one re-checks a fresh sample, and the panel is desktop-only (not a remote channel).
-- API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo. Without OS encryption, API keys fall back to obfuscated storage with a warning, but the remote-access identity and enrollment secrets (`remote-host`, `remote-enroll`) stay in memory for that run only: remote access must be paired again after a restart.
+- API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo. Without OS encryption, API keys fall back to obfuscated storage with a warning, but the relay identity (`remote-host`) stays in memory for that run only, so the computer must Connect with Vocs again after a restart. A stored `remote-enroll` (the retired enrollment secret) is cleared at startup.
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
 - **Keep computer awake** is an opt-in in the composer’s run controls for ordinary, unarchived sessions. Only the desktop owner window’s main frame can read or change it. The host remembers the choice in memory until opt-out, archive, removal, or app quit, never in `sessions.json` or remote metadata. An already opted-in session’s active work counts even if the turn came from an authorized remote client or controller; neither they nor agents get a power control. One app-wide Electron `prevent-app-suspension` blocker covers starting, running and awaiting sessions. It releases when no opted-in session is active, and quit prevents reacquisition. This prevents idle sleep, not display sleep or an explicit system sleep.

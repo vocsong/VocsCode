@@ -1,4 +1,4 @@
-/** Offline transcript mirror storage (docs/REMOTE-ACCESS.md P4).
+/** Offline transcript mirror storage (docs/RELAY.md).
  *  The relay stores opaque sealed blobs so a paired browser can read history while the desktop is
  *  off. It never holds the key: only the IV, the ciphertext and plaintext routing metadata
  *  (session id, size, timestamp). Every entry is bounded and TTL'd so one host cannot fill the DO. */

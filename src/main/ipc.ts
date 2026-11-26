@@ -43,16 +43,14 @@ export interface IpcDeps {
   gitnexusIndexer?: GitnexusIndexer;
   /** The app's own instruction layer, shared with the session manager. */
   appInstructions?: AppInstructions;
-  /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
+  /** The relay connection for MCP control and the analytics dashboard, wired in index.ts. */
   remote?: RemoteHost;
   control?: HandlerDeps['control'];
   localControl?: HandlerDeps['localControl'];
   /** Exact renderer document allowed to administer the local preview (fragment ignored). */
   localControlDocument?: string;
-  /** Where the desktop window is looking, mirrored to paired browsers; wired in index.ts. */
+  /** Where the desktop window is looking; wired in index.ts. */
   desktopFocus?: DesktopFocusTracker;
-  /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
-  remoteMirror?: { sync(): void; disable(): void };
   analyticsSync?: { sharingChanged(): Promise<unknown> };
   /** In-app auto-update (issue #198); present only in packaged builds. */
   updater?: UpdateService;
@@ -60,8 +58,6 @@ export interface IpcDeps {
   processes?: HandlerDeps['processes'];
   /** Mission mode, wired in index.ts (desktop owner only). */
   mission?: HandlerDeps['mission'];
-  /** Extra push sink for non-window clients (the localhost web server today, the relay later). */
-  broadcast?: (channel: string, payload: unknown) => void;
   getWindow: () => BrowserWindow | null;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -154,16 +150,12 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     control: deps.control,
     localControl: deps.localControl,
     desktopFocus: deps.desktopFocus,
-    remoteMirror: deps.remoteMirror,
     analyticsSync: deps.analyticsSync,
     updater: deps.updater,
     processes: deps.processes,
     mission: deps.mission,
     log: deps.log,
-    push: (channel, payload) => {
-      pushToRenderer(deps.getWindow(), channel, payload);
-      deps.broadcast?.(channel, payload);
-    },
+    push: (channel, payload) => pushToRenderer(deps.getWindow(), channel, payload),
     desktop: desktopBridge(deps)
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
@@ -193,7 +185,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
   const keepAwake = deps.keepAwake;
   if (keepAwake) {
     const request = z.strictObject({ id: z.string().regex(/^[A-Za-z0-9_-]+$/), enabled: z.boolean().optional() });
-    // Deliberately not registered in the transport shared with local web and paired devices.
+    // Deliberately not registered in the handler registry that agents can invoke.
     ipcMain.handle(KEEP_AWAKE_CHANNEL, (event, req: unknown) => {
       const contents = deps.getWindow()?.webContents;
       if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {

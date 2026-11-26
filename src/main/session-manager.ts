@@ -800,9 +800,9 @@ export class SessionManager {
     return this.deps.store.readHousekeepTranscript(id);
   }
 
-  /** The transcript plus the event-sequence floor its live overlay reflects. A remote client keeps
-   *  the floor beside the snapshot and applies only later events, so the stream that follows can
-   *  neither double the text the snapshot already has nor lose an event the snapshot missed. */
+  /** The transcript plus the event-sequence floor its live overlay reflects. A reader that keeps
+   *  the floor beside the snapshot and applies only later events can neither double the text the
+   *  snapshot already has nor lose an event the snapshot missed. */
   async transcriptSnapshot(id: string): Promise<{ items: TranscriptItem[]; seq: number }> {
     if (!this.get(id)) throw new Error('Session not found');
     const beforeActive = this.active.get(id);

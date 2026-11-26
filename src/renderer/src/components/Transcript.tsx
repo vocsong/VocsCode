@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { SessionMeta } from '../../../shared/types';
-import { invoke, isWeb } from '../api';
-import { useTranscriptCapabilities } from '../capabilities';
+import { invoke } from '../api';
 import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
 import { chunkKey, estimateChunkHeight, windowRange } from '../transcript-window';
@@ -44,21 +43,17 @@ const VIRTUALIZE_MIN = 150;
 /** `active` is false for a split pane the user is not working in: it keeps streaming, but window-wide keys skip it. */
 export function Transcript({ session, active = true }: { session: SessionMeta; active?: boolean }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
-  const sessionProcesses = useStore((s) => (isWeb ? EMPTY : (s.processSummary?.bySession?.[session.id] ?? EMPTY)));
+  const sessionProcesses = useStore((s) => s.processSummary?.bySession?.[session.id] ?? EMPTY);
   const loaded = useStore((s) => s.loaded[session.id]);
   const transcriptError = useStore((s) => s.transcriptErrors[session.id]);
   const loadTranscript = useStore((s) => s.loadTranscript);
-  const loadEarlier = useStore((s) => s.loadEarlier);
-  // A paged transcript's first item index; zero on the desktop, where the whole file is loaded.
-  const transcriptStart = useStore((s) => s.transcriptStarts[session.id] ?? 0);
   const showThinking = useStore((s) => s.showThinking);
   const jump = useStore((s) => s.searchJump);
   // Subscribe once at the transcript level with primitive selectors so individual AssistantMessage
   // rows never run `s.sessions.find(...)` on every session status/usage push.
   const storeCwd = useStore((s) => s.sessions.find((candidate) => candidate.id === session.id)?.cwd);
-  const canOpenPr = useStore((s) => !isWeb && s.activeId === session.id && s.sessions.some((candidate) => candidate.id === session.id));
+  const canOpenPr = useStore((s) => s.activeId === session.id && s.sessions.some((candidate) => candidate.id === session.id));
   const sessionCtx = useMemo(() => ({ cwd: storeCwd, canOpenPr }), [storeCwd, canOpenPr]);
-  const caps = useTranscriptCapabilities();
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
   const activeRef = useRef(active);
@@ -83,7 +78,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
     (path: string, line?: number) => useStore.getState().revealFile(session.id, path, line),
     [session.id]
   );
-  const canEdit = caps.editAndResend && session.config.harness === 'native' && session.status === 'idle';
+  const canEdit = session.config.harness === 'native' && session.status === 'idle';
 
   const chunks = useMemo(() => groupTranscript(items, showThinking), [items, showThinking]);
   const running = session.status === 'running' || session.status === 'starting';
@@ -185,8 +180,8 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
       if (canOpenTranscriptPullRequest(session, state.activeId) && state.openPullRequestLink(session.id, url)) return;
       void invoke('app:openExternal', { url });
     };
-    return installMarkdownHandlers(el, openLink, !isWeb && caps.openFile ? openFile : undefined);
-  }, [openFile, caps.openFile, session]);
+    return installMarkdownHandlers(el, openLink, openFile);
+  }, [openFile, session]);
 
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
@@ -205,20 +200,6 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
     }
     anchor.current = { firstId, fromBottom: el.scrollHeight - el.scrollTop };
   }, [items]);
-
-  // Near the top of a paged transcript, fetch the previous page automatically (the desktop loads
-  // the whole file at once, so this only runs in a web shell with `transcriptStart > 0`).
-  const earlierBusy = useRef(false);
-  const lastAutoLoad = useRef(0);
-  useEffect(() => {
-    if (!loaded || transcriptStart <= 0 || scrollTop > 160 || earlierBusy.current) return;
-    if (Date.now() - lastAutoLoad.current < 500) return;
-    lastAutoLoad.current = Date.now();
-    earlierBusy.current = true;
-    void loadEarlier(session.id).finally(() => {
-      earlierBusy.current = false;
-    });
-  }, [loaded, transcriptStart, scrollTop, loadEarlier, session.id]);
 
   const onScroll = () => {
     const el = ref.current;
@@ -318,8 +299,8 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
 
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
   // Count what arrived since the reader left the bottom; switching sessions in this pane starts over.
-  // Anchored on the last item seen rather than a length, so `loadEarlier` prepending a page of
-  // history does not read as new arrivals.
+  // Anchored on the last item seen rather than a length, so older items joining the front of the
+  // list do not read as new arrivals.
   useEffect(() => setUnseenAfter(stick ? null : (id) => id ?? items[items.length - 1]?.id ?? null), [stick]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => setUnseenAfter(null), [session.id]);
   const unseen = useMemo(() => {
@@ -371,7 +352,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   return (
     <div className="transcript-wrap">
       <TranscriptSessionContext.Provider value={sessionCtx}>
-        <div className={`transcript ${virtual ? 'virtual' : ''} ${caps.openFile ? '' : 'no-file-links'}`} ref={ref} onScroll={onScroll} onContextMenu={caps.contextMenu ? onContextMenu : undefined}>
+        <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll} onContextMenu={onContextMenu}>
           {!loaded && !transcriptError && <div className="transcript-loading"><Spinner /> Loading…</div>}
           {!loaded && transcriptError && (
             <div className="transcript-error callout warn" role="alert">
@@ -389,14 +370,6 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
             </div>
           )}
           {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
-          {caps.header}
-          {loaded && transcriptStart > 0 && (
-            <div className="transcript-more">
-              <Button size="sm" variant="ghost" icon="chevron" onClick={() => void loadEarlier(session.id)}>
-                Load earlier
-              </Button>
-            </div>
-          )}
           {visible.map((chunk) => (
             <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} live={chunk.kind === 'work' && chunk.id === liveWorkId} />
           ))}

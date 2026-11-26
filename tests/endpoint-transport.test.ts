@@ -12,7 +12,6 @@ import { browserSocket, memoryVault, RelayClient, relayBaseFor, type WebCredenti
 import { relayUrl } from '../src/main/remote/relay-url';
 import { RemoteHost } from '../src/main/remote/host';
 import type { ProviderConfig } from '../src/shared/types';
-import type { HandlerRegistry } from '../src/main/handlers';
 import { generateIdentity } from '../src/shared/crypto';
 
 const unsafe = 'http://192.168.1.2:8080/v1?token=hidden';
@@ -102,13 +101,15 @@ describe('credential transport boundaries', () => {
     await expect(store.update({ providers: store.get().providers.map((p) => p.id === 'test' ? { ...p, baseUrl: 'https://provider.example/v1' } : p) })).resolves.toBeTruthy();
   });
 
-  it('rejects desktop and browser overrides before pairing secrets or identities are touched', async () => {
+  it('rejects desktop and browser overrides before relay secrets or identities are touched', async () => {
     expect(() => relayUrl({ VOCS_CODE_RELAY_URL: unsafe })).toThrow();
     expect(() => relayBaseFor('https://code.vocs.io', unsafe)).toThrow();
     const get = vi.fn(async () => undefined), set = vi.fn(async () => undefined), log = vi.fn();
-    const host = new RemoteHost({ registry: () => ({} as HandlerRegistry), secrets: { get, set }, pushState: vi.fn(), broadcast: vi.fn(), log });
-    await expect(host.enable(unsafe, 'enroll-secret')).rejects.toThrow();
-    expect(get).not.toHaveBeenCalled(); expect(set).not.toHaveBeenCalled(); expect(log).not.toHaveBeenCalled();
+    const open = vi.fn(async () => undefined);
+    const host = new RemoteHost({ secrets: { get, set }, pushState: vi.fn(), log });
+    await expect(host.enable(unsafe)).rejects.toThrow();
+    await expect(host.signIn(unsafe, open)).rejects.toThrow();
+    expect(get).not.toHaveBeenCalled(); expect(set).not.toHaveBeenCalled(); expect(log).not.toHaveBeenCalled(); expect(open).not.toHaveBeenCalled();
     const network = vi.fn(), newIdentity = vi.fn();
     const client = new RelayClient({ vault: memoryVault(), fetchImpl: network, newIdentity });
     await expect(client.pair({ relayBase: unsafe, code: 'ABCD', deviceName: 'Browser' })).rejects.toThrow();
@@ -127,15 +128,15 @@ describe('credential transport boundaries', () => {
 
   it('guards raw desktop requests and restored desktop routes before credentials can leave', async () => {
     const network = vi.fn<typeof fetch>(async () => new Response('', { status: 307, headers: { location: unsafe } })); vi.stubGlobal('fetch', network);
-    const host = new RemoteHost({ registry: () => ({} as HandlerRegistry), secrets: { get: vi.fn(), set: vi.fn() }, pushState: vi.fn(), broadcast: vi.fn(), log: vi.fn() });
+    const host = new RemoteHost({ secrets: { get: vi.fn(), set: vi.fn() }, pushState: vi.fn(), log: vi.fn() });
     // Model the already-restored credential state, then exercise public production request paths.
-    const restored = { relayUrl: unsafe, enrollToken: 'enroll-private', deviceId: 'host', deviceToken: 'refresh-private', clients: {}, identity: await generateIdentity() };
+    const restored = { relayUrl: unsafe, deviceId: 'host', deviceToken: 'refresh-private', identity: await generateIdentity() };
     Object.assign(host, { creds: restored });
-    await expect(host.startPairing('Desktop')).rejects.toThrow(/HTTPS/);
     await expect(host.listDevices()).rejects.toThrow(/HTTPS/);
+    await expect(host.revokeAll()).rejects.toThrow(/HTTPS/);
     expect(network).not.toHaveBeenCalled();
-    Object.assign(host, { creds: { ...restored, relayUrl: 'https://relay.example', deviceId: undefined, deviceToken: undefined } });
-    await expect(host.startPairing('Desktop')).rejects.toThrow(/redirect/);
+    Object.assign(host, { creds: { ...restored, relayUrl: 'https://relay.example' } });
+    await expect(host.listDevices()).rejects.toThrow(/redirect/);
     expect(network).toHaveBeenCalledTimes(1); expect(network.mock.calls[0][1]).toMatchObject({ redirect: 'error' });
   });
 

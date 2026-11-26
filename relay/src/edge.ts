@@ -1,4 +1,4 @@
-/** The relay Worker's front door (docs/REMOTE-ACCESS.md §7). Every `/v1` request is classified
+/** The relay Worker's front door (docs/RELAY.md). Every `/v1` request is classified
  *  here before it costs more than header parsing: a route the Hub does not serve is answered at
  *  once, and every route — authenticated ones included, since authentication has not happened yet
  *  — passes an edge rate limit keyed on route and caller address, a credential-shape check, a

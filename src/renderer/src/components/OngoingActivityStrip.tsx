@@ -4,7 +4,7 @@
  * Keeps two categories visually distinct:
  * - Autonomous harness work (`session.ongoing`: subagents, background commands/tasks, hooks):
  *   active blue spinner signalling that work in this session is still executing and may report
- *   back on its own. Works on desktop and paired remote web shells.
+ *   back on its own.
  * - Background OS processes (`processSummary.bySession[session.id]`, desktop-only): quieter
  *   neutral/amber chip shown when the parent turn is not actively running, surfacing detached
  *   jobs, running terminal commands, or lingering child servers without claiming the agent is
@@ -14,7 +14,7 @@ import React, { useEffect, useState } from 'react';
 import type { OngoingItem, SessionMeta } from '../../../shared/types';
 import { ongoingStripHeadline } from '../../../shared/ongoing';
 import type { SessionOngoingProcess } from '../../../shared/processes';
-import { canInvoke, invoke, isWeb } from '../api';
+import { canInvoke, invoke } from '../api';
 import { fmtDuration } from '../format';
 import { useStore } from '../store';
 import { Button, Icon, Spinner } from './ui';
@@ -47,7 +47,7 @@ function itemMeta(item: OngoingItem, now: number): string {
 
 export function OngoingActivityStrip({ session }: { session: SessionMeta }) {
   const autonomous = session.ongoing ?? EMPTY_ONGOING;
-  const sessionProcesses = useStore((s) => (isWeb ? EMPTY_PROCS : (s.processSummary?.bySession?.[session.id] ?? EMPTY_PROCS)));
+  const sessionProcesses = useStore((s) => s.processSummary?.bySession?.[session.id] ?? EMPTY_PROCS);
   const parentRunning = session.status === 'running' || session.status === 'starting';
   // During an active parent turn, live tool cards already represent foreground shell commands
   // under the harness root; still surface detached jobs and terminal-tab commands right away,
@@ -107,9 +107,9 @@ export function OngoingActivityStrip({ session }: { session: SessionMeta }) {
     }
   };
 
-  const canInspectSubagent = !isWeb && canInvoke('subagents:list');
-  const canStopSubagent = !isWeb && canInvoke('subagents:stop');
-  const canManageProcesses = !isWeb && canInvoke('processes:end');
+  const canInspectSubagent = canInvoke('subagents:list');
+  const canStopSubagent = canInvoke('subagents:stop');
+  const canManageProcesses = canInvoke('processes:end');
 
   const earliestAutonomous = hasAutonomous ? Math.min(...autonomous.map((i) => i.startedAt || now)) : 0;
   const autonomousElapsed = earliestAutonomous > 0 && now - earliestAutonomous >= 1_000 ? fmtDuration(now - earliestAutonomous) : '';

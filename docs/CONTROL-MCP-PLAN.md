@@ -54,8 +54,8 @@ The code graph was stale in this review; the working tree supplied the implement
 | --- | --- |
 | `src/main/remote/host.ts` | The desktop initiates an authenticated outbound connection to `/v1/ws/host`; it reconnects without exposing an inbound PC port. |
 | `relay/src/worker.ts`, `hub.ts`, `routes.ts` | Account-isolated Hubs, registered computers, presence, targeted routing and revocation already exist. Account membership does not replace device authorization. |
-| `docs/REMOTE-ACCESS.md`, `REMOTE-ACCESS-ROADMAP.md` | `code.vocs.io` is owned by the landing Worker in the separate `vocs.io` repository; it fronts `/app` and `/v1` through a service binding. Adding `/mcp` requires coordinated ingress/auth work there. |
-| `src/shared/remote-channels.ts` | The browser channel allowlist is not an automation grant. Do not expose it wholesale or give the gateway a browser's approval/terminal authority. |
+| `docs/RELAY.md` (then the remote-access design and roadmap) | `code.vocs.io` is owned by the landing Worker in the separate `vocs.io` repository; it fronts `/app` and `/v1` through a service binding. Adding `/mcp` requires coordinated ingress/auth work there. |
+| `src/shared/remote-channels.ts` (since removed with paired-browser access) | The browser channel allowlist is not an automation grant. Do not expose it wholesale or give the gateway a browser's approval/terminal authority. |
 | `src/main/session-manager.ts`, `store.ts` | One session/runtime/transcript authority. Ordinary sends are not durably deduplicated just because the internal IPC accepts an `idempotencyKey`. |
 | `src/main/handlers.ts` | Shared domain behavior, but invocation defaults to user origin. A controller must receive its own verified origin, never inherit that default. |
 | `src/shared/session-defaults.ts` | Resolve remembered per-project choices, not only app-wide defaults. Existing project identity is path-based and needs an explicit stable-ID mapping. |
@@ -121,7 +121,7 @@ local execution. Implement and test both boundaries:
    consent or token reuse across accounts/resources. Do not put credentials in URLs or chat.
 4. Each desktop separately enables external control and approves a named delegated grant. The cloud
    grant cannot exceed that local host/project/action grant. Existing browser pairing alone grants
-   the automation client nothing.
+   the automation client nothing. (Browser pairing has since been retired; see [RELAY.md](RELAY.md).)
 5. The gateway sends only typed control requests with verifiable controller/grant provenance. The
    desktop validates scope, expiry, revocation and resource ownership again at admission and dispatch.
    A request with unavailable authorization freshness fails closed.
@@ -162,6 +162,7 @@ The owner accepted that the deployed MCP gateway processes the tool requests and
 Cloudflare is the infrastructure provider; Dots also receives the content returned to its MCP client.
 Do not advertise the gateway as a blind encrypted relay. Preserve the existing browser-to-desktop
 E2E path without giving the gateway browser identity keys, mirror keys or automatic transcript access.
+(That browser path and its mirror have since been retired; see [RELAY.md](RELAY.md).)
 
 Use a distinct authenticated controller channel over the existing host connectivity. Specify its
 principal attestation, replay protection and grant binding before implementation; adding a new
@@ -291,7 +292,7 @@ chat replies still use `send` once the session is ready; they never resolve an u
 | W2 — durable session boundary | Receipt journal, outbox/replay, input-turn-output binding and terminal persistence barrier, exact interruption and restart reconciliation. Real SessionManager/SessionStore with scripted adapters and failure injection. No generic IPC tunnel. |
 | W3 — authenticated vertical slice | Local desktop enablement/revocation UI, OAuth consent/token validation, explicit controller channel over existing relay, `/mcp` ingress and capability-filtered tools. Read-only end-to-end first, then W2-backed ordinary session control. No production enablement without review. |
 | W4 — actual Dots qualification | Connect the real Dots client, select between two authorized running desktop instances, use new/existing sessions and follow-up chat, observe results and prove wrong-host/project/approval requests are denied. Qualify packaged Windows first; other platforms need their own evidence. |
-| W5 — release and operations | Coordinated desktop/relay/landing versions, migration/rollback, grant revocation, redacted diagnostics, retention defaults, compatibility matrix and deployment review. Existing browser remote access must remain intact. |
+| W5 — release and operations | Coordinated desktop/relay/landing versions, migration/rollback, grant revocation, redacted diagnostics, retention defaults, compatibility matrix and deployment review. Existing browser remote access must remain intact (it has since been retired separately; see [RELAY.md](RELAY.md)). |
 
 W1/W2 can proceed without adding CLI packaging or Mission readiness work. A local test client is
 useful but not a requirement to ship a complete CLI. W3's mutation path depends on W2's tests, not
@@ -325,6 +326,8 @@ Required behavior tests include:
 - No cloud content/token logging or persistence in errors, telemetry, retries, queues and diagnostics;
   bounded payloads, slow readers, reconnection and no global mutable computer selection.
 - Existing browser enrollment, E2E routing, view-only controls, pairing/revocation and web UX regressions.
+  Browser access has since been retired; Connect with Vocs registration and device revocation remain
+  ([RELAY.md](RELAY.md)).
 
 Each implementation PR follows [AGENTS.md](../AGENTS.md) and the current change-to-suite table in
 [TESTING.md](TESTING.md): develop typecheck, changed tests plus named area suites, build and edited/new
@@ -353,7 +356,7 @@ No implementation, deployment or client-compatibility result is claimed by this 
 
 ## References
 
-- [Remote design and trust model](REMOTE-ACCESS.md), [remote roadmap](REMOTE-ACCESS-ROADMAP.md)
+- [The relay connection](RELAY.md) (the remote design and roadmap it replaced are in git history)
 - [Architecture / harness permission matrix](ARCHITECTURE.md), Mission limits (`MISSION-STATUS.md`, removed with the Mission feature)
 - [Cloudflare MCP transport](https://developers.cloudflare.com/agents/model-context-protocol/protocol/transport/)
 - [Cloudflare MCP authorization](https://developers.cloudflare.com/agents/model-context-protocol/protocol/authorization/)

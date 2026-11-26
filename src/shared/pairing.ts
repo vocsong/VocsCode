@@ -1,15 +1,11 @@
-/** Remote-access pairing links (docs/REMOTE-ACCESS.md §6.3). The relay serves the web client at
- *  `/app` on its own origin and the page claims codes against that origin, so a link must open
- *  the relay this desktop is connected to — a link to any other origin can never pair. */
+/** Connect with Vocs links. The relay serves the page that adds a computer on its own origin, so a
+ *  link must open the relay this desktop is connected to. */
 
-/** The production relay: web client, API and sockets on one origin. Desktops always use it unless
+/** The production relay: dashboard, API and sockets on one origin. Desktops always use it unless
  *  VOCS_CODE_RELAY_URL overrides it (src/main/remote/relay-url.ts). */
 export const DEFAULT_REMOTE_ORIGIN = 'https://code.vocs.io';
 
-/** Code alphabet from relay/src/core.ts: 8 symbols, no ambiguous glyphs (I/L/O/0/1). */
-export const PAIRING_CODE_PATTERN = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
-
-/** The web-client origin for a configured relay URL (ws/wss map to http/https; any path is
+/** The relay's web origin for a configured relay URL (ws/wss map to http/https; any path is
  *  dropped because the relay's routes live at the origin root). */
 export function remoteOrigin(relayUrl: string | undefined): string {
   if (!relayUrl?.trim()) return DEFAULT_REMOTE_ORIGIN;
@@ -21,11 +17,6 @@ export function remoteOrigin(relayUrl: string | undefined): string {
   } catch {
     return DEFAULT_REMOTE_ORIGIN;
   }
-}
-
-/** The link a browser (or a phone scanning its QR code) opens to prefill `code`. */
-export function pairingLink(relayUrl: string | undefined, code: string): string {
-  return `${remoteOrigin(relayUrl)}/app?code=${encodeURIComponent(code)}`;
 }
 
 /** SHA-256 hex of a desktop's one-time "Connect with Vocs" secret: the only part of it that

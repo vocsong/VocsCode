@@ -187,10 +187,8 @@ export interface SessionEventEnvelope {
   ts: number;
   /** Host-only binding for an exclusively admitted controller turn; not a completion receipt. */
   control?: { operationId: string; inputId: string; runtimeId: string; turnId?: string };
-  /** Monotonic across every event this desktop pushes. A remote client takes a transcript snapshot
-   *  together with the counter it reflects (`sessions:transcriptPage`'s `seq`) and applies only
-   *  later events, so a follow-up stream cannot double text the snapshot already has. Absent on
-   *  desktops that predate sequencing; clients fall back to their old heuristic then. */
+  /** Monotonic across every event this desktop pushes, so a reader that took a transcript snapshot
+   *  can apply only later events without doubling text the snapshot already has. */
   seq?: number;
 }
 

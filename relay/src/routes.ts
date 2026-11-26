@@ -1,4 +1,4 @@
-/** HTTP routing for the relay hub (docs/REMOTE-ACCESS.md). Deliberately a declarative,
+/** HTTP routing for the relay hub (docs/RELAY.md). Deliberately a declarative,
  *  deny-by-default table: every route names the authentication it needs and the dispatcher
  *  authorizes before the handler runs, so a new route cannot ship unauthenticated by forgetting a
  *  check. `device`/`web`/`host` require a short-lived access token; only the two token endpoints

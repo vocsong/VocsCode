@@ -1,4 +1,4 @@
-import { canInvoke, isWeb } from './api';
+import { canInvoke } from './api';
 
 export const HOUSEKEEP_OPEN = 'vocs:housekeep-open';
 export interface HousekeepOpenOptions { recentDaysOverride?: number }
@@ -9,7 +9,7 @@ declare global {
   }
 }
 
-export const canHousekeepHere = (): boolean => !isWeb && canInvoke('housekeep:preview');
+export const canHousekeepHere = (): boolean => canInvoke('housekeep:preview');
 export function openHousekeep(recentDaysOverride?: number): void {
   if (canHousekeepHere()) window.dispatchEvent(new CustomEvent(HOUSEKEEP_OPEN, { detail: { recentDaysOverride } }));
 }

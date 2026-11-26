@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { AppSettings, HarnessId, ModelInfo, SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), isMac: false, modKey: 'Ctrl', isWeb: false, canInvoke: () => true }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), isMac: false, modKey: 'Ctrl', canInvoke: () => true }));
 
 import { useStore } from '../src/renderer/src/store';
 import { pickSessionModels } from '../src/renderer/src/models';

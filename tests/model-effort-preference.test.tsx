@@ -7,7 +7,7 @@ import { useStore } from '../src/renderer/src/store';
 import type { EffortLevel, ModelInfo } from '../src/shared/types';
 
 const { invoke, gate } = vi.hoisted(() => ({ invoke: vi.fn(), gate: { settings: true } }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', isWeb: false, canInvoke: (channel: string) => channel !== 'settings:update' || gate.settings }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', canInvoke: (channel: string) => channel !== 'settings:update' || gate.settings }));
 
 class ResizeObserverMock {
   observe() {}
