@@ -579,6 +579,60 @@ describe('acp adapter', () => {
     expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
   });
 
+  it('records the token usage Antigravity reports on each prompt response', async () => {
+    const h = makeHarness({ harness: 'antigravity' });
+    scriptBasics(h);
+    h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+    // Captured from agy 1.5.16: usage_update carries only the context size; the per-turn tokens
+    // arrive on the prompt response, input excluding cache reads and output including thoughts.
+    const responses = [
+      { used: 13_866, usage: { inputTokens: 13_838, outputTokens: 28, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 26, totalTokens: 13_866 } },
+      { used: 13_968, usage: { inputTokens: 2_163, outputTokens: 24, cachedReadTokens: 11_781, cachedWriteTokens: 0, thoughtTokens: 22, totalTokens: 13_968 } }
+    ];
+    h.agent.on('session/prompt', ({ sessionId }) => {
+      const next = responses.shift()!;
+      h.agent.notify('session/update', { sessionId, update: { sessionUpdate: 'usage_update', used: next.used, size: 1_048_576 } });
+      h.agent.notify('session/update', { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } } });
+      return { stopReason: 'end_turn', usage: next.usage };
+    });
+    await h.adapter.start();
+    for (const text of ['first', 'second']) {
+      await h.adapter.send({ text });
+      await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+    }
+
+    const usage = h.events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
+    expect(usage.at(-1)?.totals).toEqual({
+      inputTokens: 16_001,
+      outputTokens: 52,
+      cacheReadTokens: 11_781,
+      cacheWriteTokens: 0,
+      reasoningTokens: 48,
+      costUsd: 0,
+      turns: 2,
+      contextTokens: 13_968,
+      contextWindow: 1_048_576
+    });
+    expect(turnItems(h.items).map((t) => [t.status, t.usage])).toEqual([
+      ['completed', { inputTokens: 13_838, outputTokens: 28, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 26, costUsd: 0 }],
+      ['completed', { inputTokens: 2_163, outputTokens: 24, cacheReadTokens: 11_781, cacheWriteTokens: 0, reasoningTokens: 22, costUsd: 0 }]
+    ]);
+  });
+
+  it('leaves turns without token usage when the ACP agent reports none', async () => {
+    const h = makeHarness();
+    scriptBasics(h);
+    h.agent.on('session/prompt', () => ({ stopReason: 'end_turn', usage: null }));
+    await h.adapter.start();
+    await h.adapter.send({ text: 'hi' });
+    await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+
+    expect(turnItems(h.items).map((t) => [t.status, t.usage])).toEqual([['completed', undefined]]);
+    const usage = h.events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
+    expect(usage.at(-1)?.totals).toMatchObject({ inputTokens: 0, outputTokens: 0, turns: 1 });
+  });
+
   it('publishes the agent’s advertised commands and sends a picked one as /name prompt text', async () => {
     const h = makeHarness();
     scriptBasics(h);
