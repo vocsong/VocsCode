@@ -17,10 +17,12 @@ src/main
     acp.ts + acp-{config,elicitation,events,launch,ongoing}.ts   Agent Client Protocol client (Google Antigravity and generic ACP agents)
     antigravity.ts  Antigravity CLI settings, account probe and quota decoding
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
-  mission-mode/   Mission mode (docs/MISSION-MODE.md): service (mission record, Lead/Builder lifecycle, inbox
-                  delivery, limits, restart), gateway + tools (loopback Mission tool server, role-bound tokens),
-                  approvals (Builder request classifier), git-ops (worktrees, ff landing, cleanup, push/PR),
-                  prompts and report; resources/mcp/vocs-mission.mjs is its stdio client
+  mission-mode/   Mission mode (docs/MISSION-MODE.md): service + {format,delivery,lead-setup,git-actions}
+                  (mission record, Lead/Builder lifecycle, idle-boundary inbox delivery, worktree setup,
+                  publish/land/clean orchestration, limits, restart), gateway + tools (loopback Mission
+                  tool server, role-bound tokens), approvals (Builder request classifier), git-ops
+                  (worktrees, ff landing, cleanup, push/PR), prompts and report;
+                  resources/mcp/vocs-mission.mjs is its stdio client
   legacy-mission.ts   removes the retired Mission feature's coordination data from userData on startup
   process-tracker.ts + process-snapshot.ts + process-context.ts   the Processes panel: every process
                   the app started (sampled tree under main, saved for the next run), who it works for, and ending it;
