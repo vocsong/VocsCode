@@ -3,6 +3,7 @@ import type { HarnessCommand } from '../../shared/harness-commands';
 import type { FileChange, TranscriptItem, UserInput } from '../../shared/types';
 import { truncate } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
+import type { TurnUsage } from '../util/turn-usage';
 
 /** An ACP `available_commands_update` list as harness commands. v1 sends `input: { hint }`; the v2 draft adds a `type`. */
 export function acpHarnessCommands(raw: unknown): HarnessCommand[] {
@@ -105,6 +106,27 @@ export function buildAcpPromptBlocks(
     else warn('This ACP agent does not accept images; the attachment was dropped.');
   }
   return blocks;
+}
+
+/**
+ * Token usage from a `session/prompt` response (ACP's unstable `PromptResponse.usage`) in the app's
+ * shape, or undefined when the agent reported none. The block covers this turn alone, summed over
+ * every model request in it — Antigravity sends it here and nowhere else (its `usage_update` carries
+ * only the context size). Input excludes cache reads and output already includes thought tokens,
+ * which is what `UsageTotals` expects.
+ */
+export function acpTurnUsage(raw: unknown): TurnUsage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const u = raw as Record<string, unknown>;
+  const count = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
+  const usage: TurnUsage = {
+    inputTokens: count(u.inputTokens),
+    outputTokens: count(u.outputTokens),
+    cacheReadTokens: count(u.cachedReadTokens),
+    cacheWriteTokens: count(u.cachedWriteTokens),
+    reasoningTokens: count(u.thoughtTokens)
+  };
+  return Object.values(usage).some((v) => v !== undefined) ? usage : undefined;
 }
 
 export function mapAcpStopReason(stop: string | undefined): {

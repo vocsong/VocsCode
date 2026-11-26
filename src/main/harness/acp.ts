@@ -6,13 +6,14 @@ import { assertPermissionModeOffered, isEffortLevel } from '../../shared/harness
 import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UserInput } from '../../shared/types';
 import { errorMessage, shortId, withTimeout } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
-import { TurnUsageTracker } from '../util/turn-usage';
+import { TurnUsageTracker, type TurnUsage } from '../util/turn-usage';
 import { acpModelCatalog, decodeAcpModelValue, findEffortOption, findModelOption, flattenSelect, type ConfigOptionLike } from './acp-config';
 import { buildAcpElicitationResponse, planAcpFormElicitation } from './acp-elicitation';
 import {
   acpChangesFromContent,
   acpHarnessCommands,
   acpToolHint,
+  acpTurnUsage,
   applyAcpToolUpdate,
   buildAcpPromptBlocks,
   mapAcpStopReason,
@@ -533,7 +534,7 @@ export class AcpAdapter implements HarnessAdapter {
       (res) => {
         if (this.prompt !== turn || turn.recovering) return;
         const { status, error } = mapAcpStopReason(res.stopReason);
-        this.finishPrompt(turn, status, error);
+        this.finishPrompt(turn, status, error, true, acpTurnUsage(res.usage));
         this.drainQueue();
       },
       (e) => {
@@ -545,7 +546,7 @@ export class AcpAdapter implements HarnessAdapter {
     );
   }
 
-  private finishPrompt(turn: ActivePrompt, status: Extract<TranscriptItem, { kind: 'turn' }>['status'], error?: string, count = true): void {
+  private finishPrompt(turn: ActivePrompt, status: Extract<TranscriptItem, { kind: 'turn' }>['status'], error?: string, count = true, reported?: TurnUsage): void {
     clearTimeout(turn.quietTimer);
     clearTimeout(turn.cancelTimer);
     this.closeAssistant();
@@ -554,9 +555,13 @@ export class AcpAdapter implements HarnessAdapter {
         if (item.status === 'running') this.ctx.emit({ type: 'item.upsert', item: { ...item, status: 'error' } });
       }
     }
+    if (reported) this.usage.addUsage(reported);
     const completed = this.usage.finishTurn(count);
     if (count) this.ctx.emit({ type: 'usage', totals: completed.totals });
-    this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - turn.startedAt, error } });
+    // Only a turn the agent reported tokens for carries them, so an agent that reports none never
+    // shows a 0-token turn or contributes a speed sample.
+    const usage = reported ? completed.usage : undefined;
+    this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - turn.startedAt, usage, error } });
     this.prompt = null;
     this.ongoing.emitTasks();
   }
