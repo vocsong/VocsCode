@@ -318,11 +318,25 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await win.waitForTimeout(300);
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'ui-modes-zen-rail-open.png') });
-    // A dot in the rail opens its session, whether the rail is open or still closed.
+    // A dot in the open rail still opens its session.
     await clickDot(win, SECOND);
     await expect.poll(() => activeRow(win)).toBe(SECOND);
+
+    const pinnedRow = win.locator(`[data-session-id="${FIRST}"]`);
+    await pinnedRow.locator('.session-pin').click({ button: 'right' });
+    await win.getByTestId('context-menu').getByRole('menuitem', { name: 'Pin to top', exact: true }).click();
+    await expect.poll(() => pinnedRow.getAttribute('data-pinned')).toBe('');
     await park(win);
     await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(52);
+
+    const marker = (id: string) => win.locator(`[data-session-id="${id}"] .session-pin`).evaluate((el) => {
+      const { clipPath, borderRadius } = getComputedStyle(el, '::before');
+      return { clipPath, borderRadius };
+    });
+    expect((await marker(FIRST)).clipPath, 'pinned session marker points up').toBe('polygon(50% 0%, 100% 100%, 0% 100%)');
+    expect(await marker(SECOND), 'unpinned session marker stays round').toEqual({ clipPath: 'none', borderRadius: '50%' });
+
+    // The triangle is clickable even while the rail is closed.
     await clickDot(win, FIRST);
     await expect.poll(() => activeRow(win)).toBe(FIRST);
     expect(await draft(win)).toBe(DRAFT);
