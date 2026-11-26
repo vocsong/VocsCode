@@ -18,6 +18,7 @@ import { emptyUsage } from '../src/main/models/static-models';
 import { defaultSettings } from '../src/main/settings';
 import { createAdapter } from '../src/main/harness/registry';
 import { ANTIGRAVITY_CANCEL_GRACE_MS, ANTIGRAVITY_PROMPT_QUIET_MS } from '../src/main/harness/acp';
+import { antigravityPricing } from '../src/main/harness/antigravity';
 import { deferred } from '../src/main/util/async';
 
 type AnyRecord = Record<string, any>;
@@ -579,8 +580,9 @@ describe('acp adapter', () => {
     expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
   });
 
-  it('records the token usage Antigravity reports on each prompt response', async () => {
+  it('records the token usage Antigravity reports on each prompt response and prices it', async () => {
     const h = makeHarness({ harness: 'antigravity' });
+    h.meta.activeModel = { provider: 'antigravity', model: 'gemini-4-neon' };
     scriptBasics(h);
     h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
     h.agent.on('session/set_mode', () => ({}));
@@ -602,22 +604,58 @@ describe('acp adapter', () => {
       await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
     }
 
+    // Gemini 4 Neon at $3 in / $15 out / $0.15 cached per 1M tokens.
+    const turn1Usd = (13_838 * 3 + 28 * 15) / 1e6;
+    const turn2Usd = (2_163 * 3 + 24 * 15 + 11_781 * 0.15) / 1e6;
     const usage = h.events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
-    expect(usage.at(-1)?.totals).toEqual({
+    const { costUsd, ...tokens } = usage.at(-1)!.totals;
+    expect(tokens).toEqual({
       inputTokens: 16_001,
       outputTokens: 52,
       cacheReadTokens: 11_781,
       cacheWriteTokens: 0,
       reasoningTokens: 48,
-      costUsd: 0,
       turns: 2,
       contextTokens: 13_968,
       contextWindow: 1_048_576
     });
-    expect(turnItems(h.items).map((t) => [t.status, t.usage])).toEqual([
-      ['completed', { inputTokens: 13_838, outputTokens: 28, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 26, costUsd: 0 }],
-      ['completed', { inputTokens: 2_163, outputTokens: 24, cacheReadTokens: 11_781, cacheWriteTokens: 0, reasoningTokens: 22, costUsd: 0 }]
+    expect(costUsd).toBeCloseTo(turn1Usd + turn2Usd, 12);
+    const turns = turnItems(h.items);
+    expect(turns.map((t) => [t.status, t.usage?.inputTokens, t.usage?.outputTokens, t.usage?.cacheReadTokens, t.usage?.reasoningTokens])).toEqual([
+      ['completed', 13_838, 28, 0, 26],
+      ['completed', 2_163, 24, 11_781, 22]
     ]);
+    expect(turns[0].costUsd).toBeCloseTo(turn1Usd, 12);
+    expect(turns[1].costUsd).toBeCloseTo(turn2Usd, 12);
+    expect(turns[1].usage?.costUsd).toBeCloseTo(turn2Usd, 12);
+  });
+
+  it('never prices tokens for a generic ACP agent, which reports its own spend or none', async () => {
+    const h = makeHarness();
+    h.meta.activeModel = { provider: 'test-agent', model: 'gemini-4-neon' };
+    scriptBasics(h);
+    h.agent.on('session/prompt', () => ({ stopReason: 'end_turn', usage: { inputTokens: 1_000, outputTokens: 10, totalTokens: 1_010 } }));
+    await h.adapter.start();
+    await h.adapter.send({ text: 'hi' });
+    await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+
+    const usage = h.events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
+    expect(usage.at(-1)?.totals).toMatchObject({ inputTokens: 1_000, outputTokens: 10, costUsd: 0, turns: 1 });
+    expect(turnItems(h.items).map((t) => t.costUsd)).toEqual([0]);
+  });
+
+  it('prices Antigravity models at the Gemini API rate in force on the turn’s date', () => {
+    const before = Date.parse('2026-11-30T23:59:59Z');
+    const after = Date.parse('2026-12-01T00:00:00Z');
+    expect(antigravityPricing('gemini-4-neon', after)).toEqual({ input: 3, output: 15, cacheRead: 0.15, cacheWrite: 0 });
+    expect(antigravityPricing('gemini-4-carbon', before)).toMatchObject({ input: 2, output: 10, cacheRead: 0.1 });
+    expect(antigravityPricing('gemini-4-carbon', after)).toMatchObject({ input: 4, output: 20, cacheRead: 0.2 });
+    expect(antigravityPricing('gemini-3.8-flash', Date.parse('2027-01-01T00:00:00Z'))).toMatchObject({ input: 1.5, output: 7.5 });
+    // Hosted partner models price by exact id; a newer version never borrows an older neighbour's rate.
+    expect(antigravityPricing('claude-opus-5-5', after)).toMatchObject({ input: 4, output: 20 });
+    expect(antigravityPricing('claude-sonnet-5-5', after)).toBeUndefined();
+    expect(antigravityPricing('gemini-pro-orchestrator-neon', after)).toBeUndefined();
+    expect(antigravityPricing(undefined, after)).toBeUndefined();
   });
 
   it('leaves turns without token usage when the ACP agent reports none', async () => {

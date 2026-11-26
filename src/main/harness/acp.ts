@@ -21,7 +21,8 @@ import {
 } from './acp-events';
 import { resolveAcpLaunch, resolveAcpMcpServers } from './acp-launch';
 import { AcpOngoingTracker } from './acp-ongoing';
-import { ANTIGRAVITY_SIGN_IN_MESSAGE, connectAcp, isAntigravityAuthRequired } from './antigravity';
+import { ANTIGRAVITY_SIGN_IN_MESSAGE, antigravityPricing, connectAcp, isAntigravityAuthRequired } from './antigravity';
+import { estimateCostUsd } from '../models/static-models';
 import { reportHarnessCommands } from './commands';
 import { requiresPathApproval } from './permissions';
 import { shutdownChild, spawnTool } from './spawn';
@@ -57,6 +58,8 @@ export class AcpAdapter implements HarnessAdapter {
   private configOptions: ConfigOptionLike[] = [];
   private caps: Record<string, unknown> = {};
   private readonly usage: TurnUsageTracker;
+  /** Set once the agent sends its own session cost, which then outranks any catalog estimate. */
+  private agentReportsCost = false;
   private sessionAllowedKinds = new Set<string>();
   private preset: AcpAgentPreset | null = null;
   private sessionModes?: acp.SessionModeState | null;
@@ -457,6 +460,7 @@ export class AcpAdapter implements HarnessAdapter {
       case 'usage_update': {
         const p = u as unknown as { used: number; size: number; cost?: { amount?: number; total?: number; value?: number } | null };
         const cost = p.cost?.amount ?? p.cost?.total ?? p.cost?.value;
+        if (typeof cost === 'number') this.agentReportsCost = true;
         this.usage.setCumulative({ contextTokens: p.used, contextWindow: p.size, costUsd: typeof cost === 'number' ? cost : undefined });
         this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
         return;
@@ -555,15 +559,26 @@ export class AcpAdapter implements HarnessAdapter {
         if (item.status === 'running') this.ctx.emit({ type: 'item.upsert', item: { ...item, status: 'error' } });
       }
     }
-    if (reported) this.usage.addUsage(reported);
+    if (reported) this.usage.addUsage({ ...reported, costUsd: this.estimateTurnCost(reported) });
     const completed = this.usage.finishTurn(count);
     if (count) this.ctx.emit({ type: 'usage', totals: completed.totals });
     // Only a turn the agent reported tokens for carries them, so an agent that reports none never
     // shows a 0-token turn or contributes a speed sample.
     const usage = reported ? completed.usage : undefined;
-    this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - turn.startedAt, usage, error } });
+    this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - turn.startedAt, usage, costUsd: usage?.costUsd, error } });
     this.prompt = null;
     this.ongoing.emitTasks();
+  }
+
+  /**
+   * Antigravity reports tokens but no price, so its turns are priced from the API rate of the model
+   * that ran them. Other ACP agents report spend themselves or not at all, and are never guessed.
+   */
+  private estimateTurnCost(usage: TurnUsage): number | undefined {
+    if (this.id !== 'antigravity' || this.agentReportsCost) return undefined;
+    const pricing = antigravityPricing(this.ctx.session().activeModel?.model);
+    if (!pricing) return undefined;
+    return estimateCostUsd(pricing, { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0, cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens });
   }
 
   private drainQueue(): void {
