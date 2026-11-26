@@ -20,11 +20,13 @@ describe('staging Vocs account settings', () => {
     expect(api.invoke.mock.calls).toEqual([['vocsAccount:get', undefined]]);
   });
   it('labels production without staging wording and keeps staging labels behind the staging realm', async () => {
-    api.invoke.mockResolvedValue({ ...out(), realm: 'production', deviceSignIn: false });
+    api.invoke.mockResolvedValue({ ...out(), realm: 'production', deviceSignIn: true });
     render(<VocsAccountSettings />); await screen.findByText('Signed out');
     expect(screen.queryByText('Staging only')).toBeNull();
     expect(screen.getByText(/Sign-in opens your system browser at auth.vocs.io/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Sign in with Vocs' })).toBeTruthy();
+    expect(screen.getByRole<HTMLInputElement>('checkbox', { name: 'Keep me signed in on this computer' }).checked).toBe(true);
+    expect(screen.getByText(/Stays signed in for up to a year \(90 days unused\)/)).toBeTruthy();
     expect(screen.queryByText(/staging/i)).toBeNull();
     api.invoke.mockResolvedValue({ ...connected(4), realm: 'production' });
     await act(async () => { await new Promise((r) => setTimeout(r, 2100)); });

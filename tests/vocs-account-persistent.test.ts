@@ -198,16 +198,34 @@ describe('device enrollment ("Keep me signed in")', () => {
     expect(stored(f)).toBeUndefined(); expect(f.vault.set).not.toHaveBeenCalled();
   });
 
-  it('production offers no kept sign-in yet: it signs in with vocs-code and never enrolls a device', async () => {
+  it('production offers kept sign-in: enrolls vocs-code-device, keeps the 1-year record and restores across restarts', async () => {
     const f = issuer('production'); const b = broker(f);
-    expect(b.get()).toMatchObject({ realm: 'production', deviceSignIn: false });
-    expect(VOCS_REALMS.production.deviceClientId).toBeUndefined();
-    const state = await b.signIn({ persist: true }); // a stale or forged request cannot force it
+    expect(b.get()).toMatchObject({ realm: 'production', deviceSignIn: true });
+    expect(VOCS_REALMS.production.deviceClientId).toBe('vocs-code-device');
+    const state = await b.signIn({ persist: true });
+    expect(state).toMatchObject({ status: 'signed_in', realm: 'production', persistent: true, accountId: 'a'.repeat(64), keychain: true });
+    expect(state.deviceExpiresAt).toBeGreaterThan(Date.now() + YEAR - 60_000);
+    expect(state.expiresAt).toBeUndefined();
+    expect(f.lastBrowserUrl()!.searchParams.get('client_id')).toBe('vocs-code-device');
+    expect(f.enrollment).toHaveBeenCalledTimes(1);
+    expect(stored(f, 'production')).toMatchObject({ v: 1, issuer: VOCS_REALMS.production.issuer, clientId: 'vocs-code-device', resource: VOCS_REALMS.production.resource, deviceId: 'dev-1', refreshToken: token('e1'), deviceExpiresAt: state.deviceExpiresAt });
+    expect(f.urls.every(url => !url.includes('staging'))).toBe(true);
+    expectNoSecrets([state, b.get()], f);
+    // Restarting restores from the production vault slot.
+    await b.dispose();
+    const restored = await broker(f).restore();
+    expect(restored).toMatchObject({ status: 'signed_in', realm: 'production', persistent: true, deviceExpiresAt: state.deviceExpiresAt });
+    expect(broker(issuer('staging')).get().deviceSignIn).toBe(true);
+  });
+
+  it('production still supports temporary sign-in when persist=false', async () => {
+    const f = issuer('production'); const b = broker(f);
+    const state = await b.signIn({ persist: false });
     expect(state).toMatchObject({ status: 'signed_in', realm: 'production' }); expect(state.persistent).toBeUndefined();
+    expect(state.expiresAt).toBeGreaterThan(Date.now());
     expect(f.lastBrowserUrl()!.searchParams.get('client_id')).toBe('vocs-code');
     expect(f.enrollment).not.toHaveBeenCalled(); expect(f.temporaryExchange).toHaveBeenCalledTimes(1);
     expect(f.vault.set).not.toHaveBeenCalled();
-    expect(broker(issuer('staging')).get().deviceSignIn).toBe(true);
   });
 
   it('falls back to a clear message when the issuer does not offer the device client yet', async () => {
