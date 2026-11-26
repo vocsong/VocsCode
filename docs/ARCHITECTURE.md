@@ -38,6 +38,10 @@ src/main
   knowledge/      Layer 2 project knowledge: markdown wiki store, scored retrieval, synthesis and
                   distillation jobs, publish (docs/MEMORY.md); resources/mcp/vocs-memory.mjs is
                   the stdio MCP server every harness reaches it through
+  intelligence/   Vocs Intelligence Core: service + {scope,retrieval,recording,promotion,reflection}
+                  (project identity, permission-scoped federated retrieval, drafts/recording,
+                  cross-project promotions, session reflection), memory-store, registry, gateway,
+                  graphify + graph-snapshot, passive-learning, and usage tracking
   runtime.ts      binary discovery (PATH, app runtime dir, bundled), the npm update check, doctor, installer
   secrets.ts      API keys encrypted at rest via Electron safeStorage
   terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
