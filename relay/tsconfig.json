@@ -11,5 +11,5 @@
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/account.ts", "src/analytics.ts", "src/control-auth.ts", "src/control-host.ts", "src/control-mcp.ts", "src/core.ts", "src/edge.ts", "src/entry.ts", "src/hub.ts", "src/legacy-app.ts", "src/rate.ts", "src/routes.ts", "src/storage.ts", "src/worker.ts", "src/web-client.ts"]
+  "include": ["src/account.ts", "src/analytics.ts", "src/control-auth.ts", "src/control-host.ts", "src/control-mcp.ts", "src/core.ts", "src/devices.ts", "src/edge.ts", "src/enrollment.ts", "src/entry.ts", "src/hub.ts", "src/legacy-app.ts", "src/mirror-store.ts", "src/pairing.ts", "src/rate.ts", "src/routes.ts", "src/storage.ts", "src/worker.ts", "src/web-client.ts"]
 }
