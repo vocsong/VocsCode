@@ -1,9 +1,9 @@
 /** Vocs relay (docs/REMOTE-ACCESS.md): opaque e2e frames and tenant state live in one Hub Durable
- *  Object per account. The landing signs GitHub account assertions; device ids carry a MACed
+ *  Object per account. The landing signs Vocs account assertions; device ids carry a MACed
  *  routing hint, but every selected Hub still verifies the device's proof-of-possession token. */
 import type { RelayStorage, RelayStore } from './core';
 import { ENROLL_GRANT_TTL_MS, hashToken, PairError } from './core';
-import { accountIdFromDeviceId, ACCOUNT_ASSERTION_HEADER, INTERNAL_ACCOUNT_AUTH_HEADER, INTERNAL_ACCOUNT_ID_HEADER, isAccountId, LEGACY_ACCOUNT_ID, verifyAccountAssertion } from './account';
+import { accountIdFromDeviceId, ACCOUNT_ASSERTION_HEADER, INTERNAL_ACCOUNT_AUTH_HEADER, INTERNAL_ACCOUNT_ID_HEADER, isAccountId, isLegacyAccountId, LEGACY_ACCOUNT_ID, verifyAccountAssertion } from './account';
 import { admit, edgeLimited, forwardAdmitted } from './edge';
 import { HubRouter, type SocketRegistry } from './hub';
 import { CONTROL_DISCOVERY_INTERNAL_PATH, CONTROL_INTERNAL_PATH, CONTROL_PATH, CONTROLLER_ASSERTION_HEADER, controlHttpError, controlJson, readControlBytes, verifyControllerAssertion } from './control-auth';
@@ -314,7 +314,7 @@ export class EnrollmentDirectory {
 
 async function routeAccount(request: Request, env: Env): Promise<{ accountId: string; authenticated: boolean } | Response> {
   const url = new URL(request.url);
-  const legacyAccount = isAccountId(env.RELAY_ACCOUNT) ? env.RELAY_ACCOUNT : LEGACY_ACCOUNT_ID;
+  const legacyAccount = isLegacyAccountId(env.RELAY_ACCOUNT) ? env.RELAY_ACCOUNT : LEGACY_ACCOUNT_ID;
   const hasAssertion = request.headers.has(ACCOUNT_ASSERTION_HEADER);
   const assertedAccount = hasAssertion ? await verifyAccountAssertion(request, env.ACCOUNT_ASSERTION_SECRET) : null;
   if (hasAssertion && !assertedAccount) return json({ error: 'invalid account assertion' }, 401);

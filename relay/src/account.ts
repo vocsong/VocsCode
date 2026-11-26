@@ -1,5 +1,5 @@
 /** Tenant identity and relay-only account assertions (docs/REMOTE-ACCESS.md). The landing Worker
- *  proves the logged-in GitHub subject with a short-lived HMAC assertion; device ids carry a
+ *  proves the signed-in Vocs account with a short-lived HMAC assertion; device ids carry a
  *  separately keyed account routing tag so an unauthenticated caller cannot create arbitrary
  *  Durable Objects by choosing account names. Neither value replaces device-token proof of
  *  possession inside the selected Hub. */
@@ -15,8 +15,14 @@ const ASSERTION_PURPOSE = 'vocs.account.assertion.v1';
 const DEVICE_ROUTE_PURPOSE = 'vocs.device-route.v1';
 const encoder = new TextEncoder();
 
-export function isAccountId(value: unknown): value is string {
+export function isLegacyAccountId(value: unknown): value is string {
   return value === LEGACY_ACCOUNT_ID || (typeof value === 'string' && /^github:[1-9]\d{0,19}$/.test(value));
+}
+
+/** The landing derives `vocs:` IDs from verified Vocs Login subjects. The full SHA-256 digest in
+ *  unpadded base64url (canonical last sextet) keeps minted device IDs below the 128-byte socket limit. */
+export function isAccountId(value: unknown): value is string {
+  return typeof value === 'string' && (isLegacyAccountId(value) || /^vocs:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value));
 }
 
 function base64url(bytes: Uint8Array): string {

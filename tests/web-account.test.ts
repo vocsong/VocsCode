@@ -35,6 +35,12 @@ describe('account resolution', () => {
     }
   });
 
+  it('uses a separate vault partition for self-service accounts, with no legacy migration', async () => {
+    const accountId = `vocs:${'a'.repeat(42)}A`;
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { login: 'Vocs account', accountId })));
+    await expect(resolveAccount()).resolves.toEqual({ accountId, authenticated: true, allowLegacyMigration: false, login: 'Vocs account' });
+  });
+
   it('only shows the signed-in UI for an authenticated identity', () => {
     expect(accountStateOf({ accountId: 'github:710003', authenticated: true, allowLegacyMigration: false, login: 'vocs' })).toEqual({ status: 'signed-in', account: { login: 'vocs', accountId: 'github:710003' } });
     expect(accountStateOf({ accountId: LEGACY_ACCOUNT_ID, authenticated: false, allowLegacyMigration: true })).toEqual({ status: 'anonymous' });
