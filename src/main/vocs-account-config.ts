@@ -21,9 +21,8 @@ export const VOCS_REALMS: Readonly<Record<VocsAccountRealm, Readonly<RealmConfig
     identityIssuer: 'https://auth.vocs.io',
     hub: 'https://mcp.vocs.io',
     resource: 'https://mcp.vocs.io/api/connections',
-    clientId: 'vocs-code'
-    // No deviceClientId yet: production has device grants off. Set it to VOCS_DEVICE_CLIENT_ID only
-    // once the owner turns NATIVE_DEVICE_GRANTS_ENABLED on in production (docs/ARCHITECTURE.md).
+    clientId: 'vocs-code',
+    deviceClientId: VOCS_DEVICE_CLIENT_ID
   }),
   staging: Object.freeze({
     issuer: 'https://vocs-login-staging.vocs.workers.dev/api/auth',

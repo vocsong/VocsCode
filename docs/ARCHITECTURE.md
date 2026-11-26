@@ -524,10 +524,10 @@ contract before returning descriptive state (a connection's `accountScopes` may 
 duplicate-free subset of `models:read`, `speech:write`, `audio:read` that includes `models:read`). Each cancellation/sign-out/expiry invalidates its
 generation and clears catalog data; refreshing never treats stale metadata as authorization.
 
-**Kept sign-in.** A realm offers "Keep me signed in on this computer" only when its config has a
-`deviceClientId`: staging does; production does not until the owner turns
-`NATIVE_DEVICE_GRANTS_ENABLED` on there, and enabling it then means setting `deviceClientId` for
-production in `VOCS_REALMS` (`main/vocs-account.ts`). Where it is offered the box is on by
+**Kept sign-in.** A realm offers "Keep me signed in on this computer" when its config has a
+`deviceClientId`; both production and staging set `VOCS_DEVICE_CLIENT_ID` in `VOCS_REALMS`
+(`main/vocs-account-config.ts`) — production requires `NATIVE_DEVICE_GRANTS_ENABLED` on
+`auth.vocs.io` to enroll devices. Where it is offered the box is on by
 default and signs in with `vocs-code-device` and a platform-only `device_name`; off or unoffered
 it is the temporary `vocs-code` flow. Without a real keychain (including Linux
 `basic_text`/`unknown`) the device is still enrolled (owner decision 10), its refresh token stays in
@@ -576,5 +576,5 @@ bearer that forwards POSTs to the exact Hub resource with the real token; no har
 Hub token. The account broker hands Connect only the connection and account id it verified, and
 ends Hub connections on sign-out, on a catalog naming another account, and when a connection
 leaves the catalog (revoked at the Hub, best effort). A connection outlives a temporary sign-in
-by design: production sign-ins last five minutes, the Hub grant 30 days. A refresh answered
+by design: temporary sign-ins last five minutes, the Hub grant 30 days. A refresh answered
 `invalid_grant` (revoked on the Hub dashboard) clears it locally.

@@ -56,7 +56,7 @@ export const SETTINGS_PAGES = [
     { label: 'Utility model', description: 'A fast model for session titles and worktree names.', keywords: 'background cheap naming flash model', anchor: 'assistant-models' },
     { label: 'Vesta assistant', description: 'Show or hide the floating assistant and choose its Pi model.', keywords: 'floating agent vesta pi assistant enabled', anchor: 'assistant-vesta' },
   ] },
-  { id: 'account', label: 'Vocs account', icon: 'shield', group: 'Connections', description: 'Sign in with your Vocs account and connect the Hub connections it may use.', saveHint: 'Temporary, memory-only session', topics: [
+  { id: 'account', label: 'Vocs account', icon: 'shield', group: 'Connections', description: 'Sign in with your Vocs account and connect the Hub connections it may use.', saveHint: 'Kept in your OS keychain for up to a year', topics: [
     { label: 'Vocs sign-in', description: 'Connect your Vocs identity using the system browser, or sign out.', keywords: 'login auth identity account cancel logout staging production keep signed in remember persistent device', anchor: 'vocs-account-login' },
     { label: 'Hub connections', description: 'Connect your account’s MCP Hub connections so new agent sessions get their tools, or disconnect them.', keywords: 'mcp catalog cloud staging refresh connect disconnect openrouter hub oauth tools', anchor: 'vocs-account-catalog' },
   ] },

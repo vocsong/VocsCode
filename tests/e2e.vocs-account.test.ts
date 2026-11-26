@@ -44,9 +44,14 @@ describe.runIf(enabled)('Vocs account desktop settings', () => {
     expect(await win.getByRole('button', { name: 'Sign in with Vocs' }).isEnabled()).toBe(true);
     expect(await win.getByText('Staging only', { exact: true }).count()).toBe(0);
     expect(await win.getByText(/Sign-in opens your system browser at auth.vocs.io/).count()).toBe(1);
-    // Production has device grants off: no "Keep me signed in", only the temporary sign-in.
-    expect(await win.getByRole('checkbox', { name: 'Keep me signed in on this computer' }).count()).toBe(0);
+    // Production offers the kept sign-in, on by default (this machine has an OS keychain).
+    const keep = win.getByRole('checkbox', { name: 'Keep me signed in on this computer' });
+    expect(await keep.isChecked()).toBe(true);
+    expect(await win.getByText(/Stays signed in for up to a year/).count()).toBe(1);
+    await keep.uncheck();
     expect(await win.getByText(/lasts up to five minutes and is kept only in memory/).count()).toBe(1);
+    await keep.check();
+    expect(await win.getByText(/Stays signed in for up to a year/).count()).toBe(1);
     expect(await win.locator('.vocs-account-settings').getByText(/staging/i).count()).toBe(0);
     await nav.getByRole('button', { name: 'General', exact: true }).click();
     await nav.getByRole('button', { name: 'Vocs account', exact: true }).click();
