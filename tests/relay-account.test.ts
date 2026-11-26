@@ -20,6 +20,21 @@ describe('relay account routing assertions', () => {
     expect(await verifyAccountAssertion(request('/v1/pair/claim', 'POST', assertion), `${SECRET}!`, NOW + 1)).toBeNull();
   });
 
+  it('accepts the self-service namespace only with valid account and device proofs', async () => {
+    const id = `vocs:${'a'.repeat(42)}A`;
+    const path = '/v1/owner/analytics';
+    const assertion = await createAccountAssertion(id, 'GET', path, SECRET, NOW);
+    expect(await verifyAccountAssertion(request(path, 'GET', assertion), SECRET, NOW + 1)).toBe(id);
+    const other = `vocs:${'b'.repeat(42)}A`;
+    expect(await verifyAccountAssertion(request(path, 'GET', assertion.replace(id, other)), SECRET, NOW + 1)).toBeNull();
+    const deviceId = await createDeviceId('h', id, DEVICE_SECRET);
+    expect(deviceId.length).toBeLessThanOrEqual(128);
+    expect(await accountIdFromDeviceId(deviceId, DEVICE_SECRET)).toBe(id);
+    for (const invalid of ['vocs:', 'vocs:owner', `vocs:${'A'.repeat(64)}`, `${id.slice(0, -1)}B`, `${id}.extra`]) {
+      await expect(createAccountAssertion(invalid, 'GET', path, SECRET, NOW)).rejects.toThrow('invalid account assertion input');
+    }
+  });
+
   it('MAC-binds device routing hints to exactly one account and preserves legacy ids', async () => {
     const idA = await createDeviceId('h', 'github:12345', DEVICE_SECRET);
     const idB = await createDeviceId('w', 'github:67890', DEVICE_SECRET);

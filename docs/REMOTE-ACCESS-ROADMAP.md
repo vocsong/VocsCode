@@ -36,7 +36,7 @@ the deployed smoke.
 
 | Roadmap item | Delivered | Still needs (owner) |
 | --- | --- | --- |
-| §2.1 Login gate | Live on `code.vocs.io`: allowlisted GitHub sessions gate `/app`, own `/v1/me`, and drive Connect with Vocs owner routes; the same `ACCOUNT_ASSERTION_SECRET` is provisioned on both Workers | Run `npm run test:remote-live` and the two-account check before adding more users (**user**) |
+| §2.1 Login gate | Vocs Login protects `/dashboard`, `/v1/me` and Connect with Vocs. Existing tenants keep their IDs. | Verify two isolated accounts before opening the self-service flag (§2.1) |
 | §2.2 CI flakes | Timer attribution, analytics recovery, subagent cap race; post-merge CI on `develop` green | — |
 | §2.3 Deploy loop | Protected `deploy-relay` workflow, run from release tags with approval; the account-aware release and the one before it both deployed through it; rollback runbook | — |
 | §2.4 Live path testable | Deployed smoke passing against production; the same flow against local workerd in `npm test`; real-browser e2e; 14 workerd DO tests. These found three runtime bugs no fake could (§2.4) | — |
@@ -50,13 +50,11 @@ the deployed smoke.
 | §2.6 Multi-host UI | Several computers per browser, switcher with live presence, Add a computer, unpair revokes at the relay | — |
 | §2.6 Mirror polish | Tail-first transcripts with Load earlier; relay copies of deleted or aged-out sessions removed; per-host catalogue (no blob loads); blobs sized to the 2 MB Durable Object value limit | — |
 | §2.6 P3.5 terminal | Read-only first; then read/write on `develop`: per-browser streams, input, open a terminal, coalescing, an ack window that resyncs instead of pausing the shell, snapshot on reconnect; the desktop keeps resize | **Live (v0.8.0, 2026-10-12)**; a desktop older than v0.8.0 answers the live view with "update this computer" |
-| §2.7 Multi-account isolation | **Live 2026-09-26**: one Hub DO per GitHub subject, owner-session assertions, per-tenant enrollment binding, same-account claims/polls, and browser vault partitioning; the incumbent stays `vocs-v1`, so existing devices keep working | Two-account live check, then onboard allowlisted GitHub users and flip `remote.status` to `live` in vocs.io `code/src/data/code.ts` (**user**) |
+| §2.7 Multi-account isolation | One Hub DO per tenant, with owner-session assertions, per-tenant enrollment, claims/polls and browser vaults. The incumbent stays `vocs-v1`. | Deploy the compatible relay before the landing's self-service rollout |
 
 **Status: per-account isolation live (v0.7.0, 2026-09-26).** The relay and the landing are both
 deployed with the shared `ACCOUNT_ASSERTION_SECRET` and the relay-only `DEVICE_ROUTE_SECRET`, so the
-gate no longer falls back to legacy code pairing in production. Do not add another GitHub login to
-`ALLOWED_LOGINS`, and do not flip `remote.status` to `live` in vocs.io `code/src/data/code.ts`,
-until the two-account live check passes.
+gate no longer falls back to legacy code pairing in production.
 
 ### Web-shell overhaul (live)
 
@@ -83,61 +81,23 @@ before the dry-run and the deploy.
 
 ### 2.1 Login gate and account identity
 
-**Login gate: live, on Vocs Login since 2026-11-16.** `code.vocs.io/app` redirects signed-out
-visitors to Vocs Login (`auth.vocs.io`, product client `vocs-code-web`). The landing Worker exchanges
-the code server-to-server, admits only Vocs subjects listed in its `VOCS_ACCOUNTS` map, issues a
-signed session, and returns `/v1/me` (`{login: "Vocs account", accountId}`) for the signed-in
-account. It replaced the GitHub OAuth gate; account ids did not change. The desktop's **Connect with Vocs** flow and owner computer list are also live.
+**Login gate: live on Vocs Login since 2026-11-16.** The landing redirects signed-out dashboard
+visitors to `auth.vocs.io` (client `vocs-code-web`). It exchanges the code server-to-server, checks
+the pinned issuer and audience, sets a signed session, and serves `/v1/me` for the browser vault.
+The landing rechecks the Vocs Login session and binds each relay assertion to the selected tenant,
+method and path. The relay still independently requires device proof and desktop approval.
 
-**Account isolation is live (2026-09-26).** The landing maps the stable GitHub numeric user id to
-an account id (`vocs-v1` for incumbent id `7744354`; `github:<id>` for others); existing pre-account
-sessions require one fresh login. It signs each session-backed `/v1` request with a one-minute HMAC
-assertion bound to account, method and pathname. The relay
-verifies the assertion, routes to one Hub DO per account, and refuses code claims/polls without the
-same signed account. `ENROLL_TOKEN` remains a legacy/manual capability for `vocs-v1`; new accounts
-enroll through the signed Connect-with-GitHub grant. The browser vault is partitioned by account.
+**Self-service rollout.** Preserve legacy `VOCS_ACCOUNTS` entries. A relay that supports the
+`vocs:<digest>` namespace can route additional verified subjects to their own Hubs when the landing
+sets `PUBLIC_CODE_ACCOUNTS=true`. Deploy the compatible tagged relay first and qualify the
+incumbent account and two separate test accounts before wider rollout. To pause browser access,
+turn off only that flag, not the `AUTH_GATE_MODE` gate. See [Remote Access §6.3.1](REMOTE-ACCESS.md#631-connect-with-vocs-no-secret-no-code)
+for the tenant format and rollback constraints. The rollout does not enable desktop MCP.
 
-**Rollout prerequisite (satisfied 2026-09-26).** The same `ACCOUNT_ASSERTION_SECRET` is provisioned
-on both Workers and the relay-only `DEVICE_ROUTE_SECRET` on the relay; the relay release was deployed
-before the landing code that sends assertions, and the incumbent login stays mapped to `vocs-v1` so
-existing devices and mirrors stay in place. Add other GitHub logins to `ALLOWED_LOGINS` only after
-the two-account live check.
-
-**Design.**
-
-- **Session cookie**, no new dependencies: `HMAC-SHA256(SESSION_SECRET)` over `{login, accountId, exp}`,
-  `HttpOnly; Secure; SameSite=Lax; Path=/`, ~7-day rolling. The numeric GitHub subject supplies the account identity; login remains the allowlist key and display name.
-- **Routes (landing Worker)**: `GET /login` → 302 to GitHub with signed, browser-bound `state`;
-  `GET /auth/callback` → verify state, exchange the code at GitHub, read `api.github.com/user`,
-  check the allowlist, set the cookie, 302 `/app`; `POST /logout` → clear and 302 `/`.
-  The relay's table only sees paths *under* `/v1` and must not own these browser routes.
-- **Gate and account assertion live in the landing Worker**, not the relay: `/app` and `/app/*`
-  require a valid session → else 302 `/login?next=/app`. Device-authenticated `/v1/*` still pass
-  through without browser login; signed-in requests add a short-lived account assertion, and
-  `/v1/pair/claim`, `/v1/pair/poll` and `/v1/owner/*` require it at the relay. Device tokens remain
-  the authority for device operations.
-- **`GET /v1/me`** (session-authed) so the SPA can show the account and offer log out.
-- **Env:** `SESSION_SECRET`, `ACCOUNT_ASSERTION_SECRET`, `VOCS_ACCOUNTS` and `RELAY_ENROLL_TOKEN`
-  secrets on the landing Worker, plus the `vocs-code-web` client row in Vocs Login. (The GitHub-era
-  `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `ALLOWED_LOGINS` and `LEGACY_GITHUB_USER_ID` are no
-  longer read.) The relay has
-  the same `ACCOUNT_ASSERTION_SECRET`. An explicit `AUTH_GATE_MODE=disabled` keeps the pre-activation
-  preview behavior; once enabled, missing/invalid config fails closed (503), never silently opens `/app`.
-- **Allowlist is not signup.** Each admitted GitHub subject gets an isolated relay account, but
-  signup, billing and account recovery remain out of scope. `VOCS_ACCOUNTS` controls access.
-
-**Files.** vocs.io `code/worker/index.ts`, `code/wrangler.jsonc`, `code/worker/index.test.mjs`;
-Vocs-Code's `src/web/transport/vault.ts` partitions browser credentials by account and keeps account
-sign-out separate from unpairing. `remote.status` stays `in-development` in vocs.io
-`code/src/data/code.ts` until the two-account check passes. Desktop `h_` device traffic still
-authenticates at the relay without a browser session; `w_` browser-device traffic, claim/poll and
-owner routes require the landing session.
-
-**Verification.** Landing Worker tests cover numeric GitHub identity, legacy mapping, HMAC assertion
-scope, spoofed-header replacement, session-only claim/poll, WebSocket pass-through and anonymous
-desktop traffic. Vocs-Code workerd and browser tests prove distinct Hub registries, same-account
-claims, and account-partitioned browser state. Production is deployed; the live smoke and the
-two-account check still need the owner's credentials.
+**Verification.** Landing tests verify both account formats, signed session and assertion scope,
+and preserve Connect links and browser sign-out. Vocs Code tests drive enrollment, pairing, socket
+traffic, analytics isolation and vault partitioning in workerd and a real browser. Production
+verification still needs authorized test identities.
 
 ### 2.2 Fix the flaky tests first — done
 
@@ -386,7 +346,7 @@ Gotchas:
 | `DEVICE_ROUTE_SECRET` | relay `vocs-relay` only; keep stable | MACed tenant routing hints in new device ids | do not rotate without a versioned device-id migration; it is not an account credential |
 | Device refresh credentials | desktop secret store (`secrets.ts`, safeStorage; memory only for that run when OS encryption is unavailable); account-partitioned browser IndexedDB | buying access tokens, with a device-key signature | revoke the device; re-pair |
 | `SESSION_SECRET` | landing `vocs-code` Worker secret | session and OAuth state signing (§2.1) | invalidates all sessions |
-| `VOCS_ACCOUNTS` | landing Worker secret | who may sign in (§2.1): `<vocs subject>=<relay account id>`; the owner maps to `vocs-v1` | add/remove an entry (removal ends that account's sessions); never remap an account id without a data migration; revoke devices for removed users separately |
+| `VOCS_ACCOUNTS` | landing Worker secret | existing mappings (§2.1): `<vocs subject>=<relay account id>`; the owner maps to `vocs-v1` | preserve existing mappings; never remap an account without a data migration; revoke devices separately |
 | `vocs-code-web` SSO client | Vocs Login `vocs_sso_client` row | the landing's sign-in handoff (§2.1) | disable the row to stop new sign-ins |
 | `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` | protected GitHub `relay-production` environment secrets (not provisioned) | relay deploy workflow | rotate in the Cloudflare dashboard |
 

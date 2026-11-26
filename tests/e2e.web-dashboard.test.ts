@@ -316,7 +316,7 @@ async function checkDashboardAppearance(page: Page): Promise<void> {
 describe.runIf(enabled)('web dashboard in a real browser', () => {
   it('adds two computers through Connect with Vocs, then shows their analytics together and apart', async () => {
     relay = await startLocalRelay();
-    landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
+    landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', `vocs:${'a'.repeat(42)}A`, relay.accountAssertionSecret);
 
     // A current desktop opens /dashboard?connect=…
     const pc = await connectingComputer('Vocs PC', landing.origin, analyticsOf('pc', 'funCentral', 3, 1));

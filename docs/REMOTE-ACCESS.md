@@ -262,7 +262,7 @@ root of trust.)
 
 | Party | Identity | Key material | Storage |
 | --- | --- | --- | --- |
-| Account | Stable GitHub numeric subject (`github:<id>`); the incumbent subject maps to `vocs-v1` | signed 60-second landing assertion; allowlist remains the invitation gate | one Hub DO and registry per account |
+| Account | Stable Vocs Login subject, resolved to the existing `vocs-v1` or `github:<id>` tenant or to a distinct `vocs:<digest>` tenant when self-service is enabled | signed 60-second landing assertion | one Hub DO and registry per account |
 | Desktop host | device id + human name ("Work PC") | P-256 ECDSA + ECDH | private JWK via `secrets.ts` (safeStorage) |
 | Web device | device id + human name ("Chrome on Windows"), one per paired computer | P-256 ECDSA + ECDH | non-extractable CryptoKeys in IndexedDB |
 | Relay | routing registry | public keys, refresh- and access-token hashes; an approved poll record holds the browser's credential sealed to its key, never in plaintext | DO storage (Workers) |
@@ -283,11 +283,11 @@ device id), so what the relay holds until the claimant polls is ciphertext only 
 open. Pairings made under the previous long-lived bearer keep working: that token is their
 refresh credential now.
 
-Account model: **accounts-lite** — one isolated account per allowlisted GitHub user, with no signup
-or billing flow. The incumbent GitHub subject maps to `vocs-v1`, preserving its existing Hub,
-devices and mirrors; every other numeric GitHub subject maps to `github:<id>`. Enrollment, device
-ids, storage and browser vaults are scoped to that account. Signup and billing remain a separate
-productization track.
+The landing authenticates through Vocs Login. Existing subjects keep their legacy account IDs
+(`vocs-v1` and `github:<id>`), preserving their Hubs, devices and mirrors. With self-service
+access enabled on the landing, any other verified Vocs subject gets a separate tenant. Enrollment,
+device IDs, storage and browser vaults are scoped to that tenant. Nothing in this flow authorizes
+a controller or changes device permissions.
 
 **Status:** P0–P3 implemented. P0 transport extraction; P1 localhost web client + shims +
 responsive shell; P2 relay + desktop host + e2e crypto + Settings UI + relay web client
@@ -320,12 +320,11 @@ of relying on review. The public pairing endpoints also carry in-memory fixed-wi
 **Deployed.** The relay and landing Worker share the `code.vocs.io` origin through a service
 binding (vocs.io PR #18); the landing forwards `/app` and `/v1` including REST and `/v1/ws/*`
 WebSockets, with no CORS hop or second DNS record. The login gate is live on the landing: since
-2026-11-16 `/app` redirects signed-out visitors to **Vocs Login** (`auth.vocs.io`, the shared Vocs
-identity), and the landing's operator-managed `VOCS_ACCOUNTS` map controls who may sign in (it
-replaced the GitHub OAuth gate and its `ALLOWED_LOGINS` allowlist). **Live since 2026-09-26** (v0.7.0): the relay and the landing run per-account Hubs,
-account assertions, account-bound enrollment and pairing, and the relay's direct `workers.dev`
-endpoint is disabled so browser traffic must pass through the gate. The incumbent login stays mapped
-to `vocs-v1`. Do not enable another login until the two-account live check passes.
+2026-11-16 signed-out visitors are sent to **Vocs Login** (`auth.vocs.io`, the shared Vocs
+identity). The landing's `VOCS_ACCOUNTS` map preserves tenant IDs from before self-service access
+(see §6.3.1). The relay and the landing run per-account Hubs, account assertions, account-bound
+enrollment and pairing, and the relay's direct `workers.dev` endpoint is disabled so browser
+traffic must pass through the gate. The incumbent login stays mapped to `vocs-v1`.
 
 The desktop's signed Allow/Deny remains mandatory. Login authenticates an account; device credentials
 and signatures continue to authorize device operations.
@@ -428,13 +427,21 @@ Web (browser)                Relay                      Desktop (host)
 
 #### 6.3.1 Connect with Vocs: no secret, no code
 
-The landing's Vocs Login gate maps each admitted Vocs subject to its relay account through the
-operator-managed `VOCS_ACCOUNTS` map: the incumbent owner maps to `vocs-v1`, and accounts created in
-the GitHub era keep their `github:<id>` ids, so no Hub, device id or mirror moves. (Until 2026-11-16
-the gate was GitHub OAuth, mapping the stable numeric GitHub subject the same way.) `/v1/me` returns that account
-id to the web client, which partitions its IndexedDB vault by account. Pre-account session cookies
-lack a subject and are rejected once; the user signs in again. The desktop offers
-**Connect with Vocs** for new-account enrollment.
+The landing's `VOCS_ACCOUNTS` map preserves established relay IDs (`vocs-v1` for the incumbent
+owner and `github:<id>` for previous accounts). Do not remap one without a data migration. For
+verified Vocs Login subjects with no entry, `PUBLIC_CODE_ACCOUNTS=true` enables a separate tenant
+with ID `vocs:<digest>` (`SHA-256` of the versioned Code purpose, pinned issuer and verified
+subject, in unpadded base64url). The short encoding fits the existing 128-byte device-ID bound
+for socket frames; neither device routing nor browser credentials move. `/v1/me` returns the
+tenant ID for browser-vault partitioning. No legacy vault data migrates into a self-service
+account. Users enroll a computer with **Connect with Vocs**.
+
+Deploy and verify the compatible relay release before enabling the landing flag. Pausing the
+flag ends self-service **browser** sessions, not established desktop device credentials; leave
+the compatible relay in place so devices can still be identified and revoked. Mapping removal
+invalidates the previous browser session; with public access on, a fresh login receives only
+the new, separate tenant. Use Vocs Login suspension to block the subject entirely, and revoke
+its paired devices separately if needed. Desktop MCP is not enabled by this flag.
 
 - **Account assertion.** For each signed-in `/v1/*` request, including browser API calls and WebSocket
   upgrades, the landing strips caller-supplied identity headers and signs
