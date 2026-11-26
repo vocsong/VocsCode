@@ -2,6 +2,7 @@ import type { ChildProcess } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
 import type { ModelInfo } from '../../shared/types';
+import { ANTHROPIC_STATIC_MODELS, OPENAI_STATIC_MODELS } from '../models/static-models';
 import { withTimeout } from '../util/async';
 import { acpModelCatalog, type ConfigOptionLike } from './acp-config';
 import { shutdownChild, spawnTool } from './spawn';
@@ -11,6 +12,50 @@ import { shutdownChild, spawnTool } from './spawn';
 const antigravitySettings = JSON.stringify({ modelProvider: '', toolPermission: 'strict', allowNonWorkspaceAccess: false });
 export const ANTIGRAVITY_ACP_ARGS = ['--settings', antigravitySettings, 'acp'] as const;
 export const ANTIGRAVITY_SIGN_IN_MESSAGE = 'Sign in with Google in Settings → Providers & keys → Harness logins, then retry.';
+
+type Pricing = NonNullable<ModelInfo['pricing']>;
+
+/**
+ * Gemini API paid-tier Standard rates (USD per 1M tokens; thinking bills as output) from Google's
+ * pricing page, read 2026-11-26. Antigravity runs on a Google AI subscription and reports tokens
+ * but never a price, so a turn is priced at what the same tokens cost on the API — the way Codex
+ * on a ChatGPT sign-in is. Gemini caches implicitly with no write charge. Some rates step up on a
+ * published date, so each model lists its periods oldest first and a turn takes the one it fell in.
+ * Orchestrator models are absent on purpose: they split one turn between two models at an
+ * undisclosed ratio, so no single rate is honest.
+ */
+const GEMINI_RATES: Record<string, { from?: string; pricing: Pricing }[]> = {
+  'gemini-4-neon': [{ pricing: { input: 3, output: 15, cacheRead: 0.15, cacheWrite: 0 } }],
+  'gemini-4-hydrogen': [{ pricing: { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 } }],
+  'gemini-4-carbon': [
+    { pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 } },
+    { from: '2026-12-01', pricing: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 } }
+  ],
+  'gemini-4-argon': [
+    { pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 } },
+    { from: '2026-12-01', pricing: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 } }
+  ],
+  'gemini-3.8-flash': [
+    { pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 } },
+    { from: '2027-01-01', pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 } }
+  ]
+};
+
+/**
+ * The API-equivalent rate for an Antigravity model at `now`. Partner models it hosts (Claude, GPT)
+ * price from the bundled catalogs by exact id only — a prefix match would put `claude-sonnet-5-5` on
+ * Sonnet 5's older rate. Anything unpriced returns undefined and the turn stays $0.
+ */
+export function antigravityPricing(model: string | undefined, now = Date.now()): ModelInfo['pricing'] | undefined {
+  if (!model) return undefined;
+  const periods = GEMINI_RATES[model];
+  if (periods) {
+    // Periods start at UTC midnight on the date Google publishes.
+    const current = periods.filter((p) => !p.from || Date.parse(`${p.from}T00:00:00Z`) <= now).at(-1);
+    return current?.pricing;
+  }
+  return [...ANTHROPIC_STATIC_MODELS, ...OPENAI_STATIC_MODELS].find((m) => m.id === model)?.pricing;
+}
 
 // Use the CLI's saved sign-in even if Gemini API keys or Cloud ADC are set for other integrations.
 export const ANTIGRAVITY_AUTH_ENV_OVERRIDES: readonly string[] = [
