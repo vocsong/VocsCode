@@ -142,6 +142,13 @@ describe.runIf(enabled)('electron e2e: processes', () => {
     expect(await win.getByTestId('process-group-orphaned').locator(`[title*="${marker}"]`).count(), 'not left behind: it is the session\'s').toBe(0);
     detached = Number(await detachedRow.getAttribute('data-pid'));
     expect(alive(detached)).toBe(true);
+    if (process.platform === 'win32') {
+      // Read the same list that backs the End control, without targeting any system process.
+      const tracked = await win.evaluate(() => window.harness.invoke('processes:list', undefined));
+      expect(tracked.error).toBeUndefined();
+      expect(tracked.processes.find((p) => p.pid === detached)?.startedAt).toBeGreaterThan(0);
+      expect(tracked.processes.filter((p) => p.startedAt <= 0 || /^(csrss|winlogon)\.exe$/i.test(p.name))).toEqual([]);
+    }
     await detachedRow.getByTestId('process-end').click();
     await expect.poll(() => alive(detached!), { timeout: 20_000 }).toBe(false);
     await expect.poll(async () => detachedRow.count(), { timeout: 20_000 }).toBe(0);
