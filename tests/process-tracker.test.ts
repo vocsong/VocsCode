@@ -7,9 +7,10 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { ProcessTracker, type ProcessTrackerOptions } from '../src/main/process-tracker';
 import type { ProcessSource, RawProcess } from '../src/main/process-snapshot';
+import * as registryFs from '../src/main/util/fs';
 import type { ProcessSummary, TrackedProcess } from '../src/shared/processes';
 
 const APP = 1000;
@@ -67,6 +68,8 @@ let source: FakeSource;
 let clock: number;
 let signals: [number, NodeJS.Signals | 0][];
 let summaries: ProcessSummary[];
+let registryWrites: Promise<void>[];
+let writeJsonSpy: MockInstance<typeof registryFs.writeJson>;
 
 function tracker(over: Partial<ProcessTrackerOptions> = {}): ProcessTracker {
   return new ProcessTracker({
@@ -90,6 +93,13 @@ const byPid = (list: TrackedProcess[], pid: number) => list.find((p) => p.pid ==
 
 beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-processes-'));
+  registryWrites = [];
+  const writeJson = registryFs.writeJson;
+  writeJsonSpy = vi.spyOn(registryFs, 'writeJson').mockImplementation((...args) => {
+    const write = writeJson(...args);
+    registryWrites.push(write);
+    return write;
+  });
   source = new FakeSource();
   clock = T0;
   signals = [];
@@ -103,7 +113,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Sampling starts atomic saves without awaiting them. Drain every real write (including queued
+  // writes and failed-write cleanup) before rm: a late temp file can race directory removal.
+  const results = await Promise.allSettled(registryWrites);
+  writeJsonSpy.mockRestore();
   await fs.rm(dir, { recursive: true, force: true });
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
 });
 
 describe('process tracker', () => {
@@ -209,8 +224,8 @@ describe('process tracker', () => {
     const first = tracker();
     first.claim(2000, { sessionId: 's1' });
     await first.list();
-    // The save is fire-and-forget; wait for the file.
-    await expect.poll(async () => (await fs.readFile(path.join(dir, 'processes.json'), 'utf8').catch(() => '')).includes('"pid": 2002')).toBe(true);
+    await Promise.all(registryWrites);
+    expect(await fs.readFile(path.join(dir, 'processes.json'), 'utf8')).toContain('"pid": 2002');
 
     // The app quits: its direct children die with it, the grandchild survives. A new run starts.
     source.table = [
@@ -248,12 +263,15 @@ describe('process tracker', () => {
     const logs: [string, string][] = [];
     const t = tracker({ log: (level, message) => logs.push([level, message]) });
     await t.list();
-    await expect.poll(() => logs.some(([level, message]) => level === 'warn' && message.includes('could not save the process list'))).toBe(true);
+    await expect(registryWrites[0]).rejects.toThrow();
+    registryWrites.shift(); // This rejection is expected and has already been checked.
+    expect(logs.some(([level, message]) => level === 'warn' && message.includes('could not save the process list'))).toBe(true);
 
     await fs.rm(file, { recursive: true });
     clock += 10_000;
     await t.refresh();
-    await expect.poll(async () => (await fs.readFile(file, 'utf8').catch(() => '')).includes('"pid": 2000')).toBe(true);
+    await Promise.all(registryWrites);
+    expect(await fs.readFile(file, 'utf8')).toContain('"pid": 2000');
   });
 
   it('ends a target and its whole subtree, parents first, and refuses anything it does not track', async () => {
