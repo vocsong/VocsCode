@@ -93,7 +93,10 @@ it('adds a desktop through a signed-in owner and pairs that browser on Allow, th
   }
 }, 60_000);
 
-it('isolates two GitHub accounts across enrollment, owner lists, pairing claims and device registries', async () => {
+it.each([
+  ['existing GitHub-era accounts', 'github:710001', 'github:710002'],
+  ['self-service Vocs accounts', `vocs:${'a'.repeat(42)}A`, `vocs:${'b'.repeat(42)}A`],
+])('isolates %s across enrollment, analytics, pairing claims and device registries', async (_kind, accountA, accountB) => {
   const origin = relay.origin;
   const makeOwnerFetch = (accountId: string): typeof fetch => async (input, init = {}) => {
     const url = new URL(String(input));
@@ -140,11 +143,30 @@ it('isolates two GitHub accounts across enrollment, owner lists, pairing claims 
     expect(added.status).toBe('redeemed');
     return { host, browser, hostId: added.hostDeviceId! };
   };
-  const a = await createAccount('github:710001', 'Account A');
-  const b = await createAccount('github:710002', 'Account B');
+  const a = await createAccount(accountA, 'Account A');
+  const b = await createAccount(accountB, 'Account B');
   try {
     expect((await a.browser.ownerHosts(origin)).map((entry) => entry.deviceId)).toEqual([a.hostId]);
     expect((await b.browser.ownerHosts(origin)).map((entry) => entry.deviceId)).toEqual([b.hostId]);
+
+    const part = { hash: 'a'.repeat(64), data: 'dGVzdA==' };
+    const write = (body: unknown) => ({ method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    expect((await a.host.analyticsRequest('/v1/analytics/part?id=tools', write(part)))?.status).toBe(200);
+    expect((await a.host.analyticsRequest('/v1/analytics/manifest', write({
+      schemaVersion: 1, generatedAt: Date.now(), appVersion: '0.13.0', platform: 'test',
+      parts: [{ id: 'tools', hash: part.hash, bytes: 4 }],
+    })))?.status).toBe(200);
+    const partUrl = `${origin}/v1/owner/analytics/part?host=${encodeURIComponent(a.hostId)}&id=tools`;
+    const same = await makeOwnerFetch(accountA)(partUrl);
+    expect(same.status).toBe(200);
+    expect(await same.json()).toEqual(part);
+    for (const other of [accountB, 'vocs-v1']) {
+      const owner = makeOwnerFetch(other);
+      const list = await owner(`${origin}/v1/owner/analytics`);
+      expect(list.status).toBe(200);
+      expect((await list.json() as { hosts: { hostId: string }[] }).hosts.map((h) => h.hostId)).not.toContain(a.hostId);
+      expect((await owner(partUrl)).status).toBe(404);
+    }
 
     const pairA = a.browser.pairWithHost({ relayBase: origin, hostDeviceId: a.hostId, deviceName: 'A browser' });
     await until(() => a.host.state().pendingRequest?.name === 'A browser', 'Account A desktop pairing request');
@@ -183,8 +205,8 @@ it('isolates two GitHub accounts across enrollment, owner lists, pairing claims 
     const matchingAccount = await fetch(`${origin}/v1/devices?device=${encodeURIComponent(aCredentials.webDeviceId)}`, {
       headers: {
         authorization: `Bearer ${aAccess}`,
-        [ACCOUNT_ASSERTION_HEADER]: await createAccountAssertion('github:710001', 'GET', '/v1/devices', relay.accountAssertionSecret),
-        [INTERNAL_ACCOUNT_ID_HEADER]: 'github:710002',
+        [ACCOUNT_ASSERTION_HEADER]: await createAccountAssertion(accountA, 'GET', '/v1/devices', relay.accountAssertionSecret),
+        [INTERNAL_ACCOUNT_ID_HEADER]: accountB,
         [INTERNAL_ACCOUNT_AUTH_HEADER]: '1'
       }
     });
@@ -192,7 +214,7 @@ it('isolates two GitHub accounts across enrollment, owner lists, pairing claims 
     const mismatchedAccount = await fetch(`${origin}/v1/devices?device=${encodeURIComponent(bCredentials.webDeviceId)}`, {
       headers: {
         authorization: `Bearer ${bAccess}`,
-        [ACCOUNT_ASSERTION_HEADER]: await createAccountAssertion('github:710001', 'GET', '/v1/devices', relay.accountAssertionSecret)
+        [ACCOUNT_ASSERTION_HEADER]: await createAccountAssertion(accountA, 'GET', '/v1/devices', relay.accountAssertionSecret)
       }
     });
     expect(mismatchedAccount.status).toBe(403);
