@@ -78,15 +78,13 @@ export interface HandlerDeps {
   revokeMemoryGrants?: () => void;
   /** Best-effort GitNexus freshness queue; absent in tests/hosts that do not run the built-in. */
   gitnexusIndexer?: Pick<GitnexusIndexer, 'schedule' | 'index'>;
-  /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
+  /** The relay connection (docs/CONTROL-MCP.md); present when wired up in index.ts. */
   remote?: RemoteHostPort;
-  /** Local owner configuration, never exposed through browser/agent invocation origins. */
+  /** Local owner configuration, never exposed through the agent invocation origin. */
   control?: import('../control/service').ControlService;
   localControl?: Pick<import('../control/local').LocalControl, 'ownerState' | 'enable' | 'disable'>;
-  /** Which session the desktop window is on, mirrored to paired browsers; absent in tests. */
+  /** Which session the desktop window is on; absent in tests. */
   desktopFocus?: DesktopFocusTracker;
-  /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
-  remoteMirror?: { sync(): void; disable(): void };
   /** The code.vocs.io dashboard's analytics uploader (src/main/remote/analytics-sync.ts). */
   analyticsSync?: { sharingChanged(): Promise<unknown> };
   /** Base-pi global config (Settings → Pi); a default store is created when absent. */
@@ -102,7 +100,7 @@ export interface HandlerDeps {
   /** Mission mode (desktop owner only); absent in hosts that do not run it. */
   mission?: Pick<MissionService, 'start' | 'createLead' | 'get' | 'stop' | 'resume'>;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
-  /** Push an async event to the connected client (the window today, remote clients later). */
+  /** Push an async event to the desktop window. */
   push: (channel: string, payload: unknown) => void;
   desktop: DesktopBridge;
 }

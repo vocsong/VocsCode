@@ -33,10 +33,10 @@ describe('renderer boot failure handling', () => {
     useStore.setState({ boot: originalBoot });
   });
 
-  it('records the desktop focus and remote policy the boot is given', async () => {
+  it('records the desktop focus the boot is given and follows its pushes', async () => {
     const listeners = new Map<string, (payload: unknown) => void>();
     const invoke = vi.fn(async (channel: string) => {
-      if (channel === 'settings:get') return { remote: { viewOnly: true } };
+      if (channel === 'settings:get') return {};
       if (channel === 'sessions:list') return [];
       if (channel === 'terminal:list') return [];
       if (channel === 'desktop:focus') return { sessionId: 's1', at: 1, windowFocused: true };
@@ -54,11 +54,8 @@ describe('renderer boot failure handling', () => {
 
     await useStore.getState().boot();
     await waitFor(() => expect(useStore.getState().desktopFocus).toMatchObject({ sessionId: 's1' }));
-    expect(useStore.getState().remoteAccess.viewOnly).toBe(true);
 
-    listeners.get('push:remotePolicy')?.({ viewOnly: false });
     listeners.get('push:desktopFocus')?.({ sessionId: null, at: 2, windowFocused: false });
-    expect(useStore.getState().remoteAccess.viewOnly).toBe(false);
     expect(useStore.getState().desktopFocus).toMatchObject({ sessionId: null });
   });
 });

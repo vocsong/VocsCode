@@ -1,5 +1,5 @@
 /** Which session the desktop window is on (src/main/desktop-focus.ts): validated, deduped, pushed
- *  to paired browsers, and readable over `desktop:focus` in view-only mode. */
+ *  to the window, and readable over `desktop:focus`. */
 import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
@@ -9,7 +9,6 @@ import { DesktopFocusTracker, forgetVisibleOnRendererReset } from '../src/main/d
 import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import { SettingsStore } from '../src/main/settings';
 import type { DesktopFocus } from '../src/shared/types';
-import { REMOTE_CHANNELS } from '../src/shared/remote-channels';
 
 const dirs: string[] = [];
 function tmpDir(prefix: string): string {
@@ -125,9 +124,5 @@ describe('desktop focus handlers', () => {
     expect(focus.isViewing('s1')).toBe(true);
     await expect(registry.invoke('desktop:setVisible', { sessionIds: 's1' } as never)).rejects.toThrow();
     expect(focus.isViewing('s1')).toBe(true);
-  });
-
-  it('keeps the visible-pane report off the remote surface', () => {
-    expect(REMOTE_CHANNELS.has('desktop:setVisible' as never)).toBe(false);
   });
 });

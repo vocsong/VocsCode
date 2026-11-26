@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { GitSummary, SessionMeta } from '../../../shared/types';
 import { hasOngoingWork, ongoingBadgeLabel } from '../../../shared/ongoing';
 import type { SessionOngoingProcess } from '../../../shared/processes';
-import { invoke, isWeb } from '../api';
+import { invoke } from '../api';
 import { basename } from '../format';
 import { archiveSession } from '../sessionActions';
 import { useGitSummary } from '../gitReads';
@@ -32,7 +32,7 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
   const splittable = useStore((s) => canSplit(s.layout));
   // A file preview beside a lone session does not make that session's pane closable.
   const split = useStore((s) => !!paneId && canClosePane(s.layout, paneId));
-  const sessionProcesses = useStore((s) => (isWeb ? EMPTY_PROCS : (s.processSummary?.bySession?.[session.id] ?? EMPTY_PROCS)));
+  const sessionProcesses = useStore((s) => s.processSummary?.bySession?.[session.id] ?? EMPTY_PROCS);
   const { data: summary } = useGitSummary(session.id, changesVersion);
   const branch = summary?.branch;
   const folder = basename(session.cwd);

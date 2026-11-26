@@ -8,7 +8,7 @@ import * as panes from './panes';
 import { createHostSlice } from './store/host-slice';
 import { createLayoutSlice } from './store/layout-slice';
 import { createMissionSlice } from './store/mission-slice';
-import { configureStore, createStoreRuntime } from './store/runtime';
+import { createStoreRuntime } from './store/runtime';
 import { createSessionsSlice } from './store/sessions-slice';
 import { COMPOSER_HISTORY_LIMIT, NO_COMPOSER_HISTORY, type State } from './store/types';
 
@@ -21,11 +21,10 @@ export type {
   NavEntry,
   PanelBottomTab,
   PanelTab,
-  StoreOptions,
   Toast,
   View
 } from './store/types';
-export { COMPOSER_HISTORY_LIMIT, configureStore, NO_COMPOSER_HISTORY };
+export { COMPOSER_HISTORY_LIMIT, NO_COMPOSER_HISTORY };
 
 const runtime = createStoreRuntime();
 

@@ -1,4 +1,4 @@
-/** Fixed-window rate limiter for the relay's public endpoints (docs/REMOTE-ACCESS.md §7).
+/** Fixed-window rate limiter for the relay's public endpoints (docs/RELAY.md).
  *  In-memory on purpose: it is defense in depth in front of Durable Object storage, so losing
  *  the counters when a Hub hibernates costs nothing, and it never turns a request into a write. */
 export interface RateLimiter {

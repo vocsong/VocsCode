@@ -5,8 +5,7 @@ import { resolveNewSessionDefaults } from '../../../shared/session-defaults';
 import type { SessionConfig, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
 import * as panes from '../panes';
-import { affectsActiveWorkspace, dropPendingDeltas, replayBuffered, replacementFor, sameUsageTotals } from './helpers';
-import { getStoreOptions } from './runtime';
+import { affectsActiveWorkspace, dropPendingDeltas, replacementFor, sameUsageTotals } from './helpers';
 import { COMPOSER_HISTORY_LIMIT, type Getter, type Setter, type State, type StoreRuntime } from './types';
 
 type SessionsSliceKeys =
@@ -14,15 +13,12 @@ type SessionsSliceKeys =
   | 'transcripts'
   | 'loaded'
   | 'transcriptErrors'
-  | 'transcriptFloors'
-  | 'transcriptStarts'
   | 'models'
   | 'drafts'
   | 'composerHistory'
   | 'archiving'
   | 'changesVersion'
   | 'loadTranscript'
-  | 'loadEarlier'
   | 'applyEvent'
   | 'setSessions'
   | 'createQuickSession'
@@ -39,8 +35,6 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
     transcripts: {},
     loaded: {},
     transcriptErrors: {},
-    transcriptFloors: {},
-    transcriptStarts: {},
     models: {},
     drafts: {},
     composerHistory: {},
@@ -52,10 +46,6 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
       if (pending) return pending;
       if (!force && get().loaded[id]) return Promise.resolve();
       const generation = rt.storeGeneration;
-      const paged = getStoreOptions().pagedTranscripts === true;
-      // A paged read has no floor until it lands; hold its events so the snapshot and the stream can
-      // be reconciled by sequence instead of the events landing on an empty list.
-      if (paged) rt.bufferedEvents.set(id, []);
       // Register before invoking IPC or notifying subscribers, which may request the same load.
       const request = Promise.resolve().then(async () => {
         if (rt.transcriptLoads.get(id) !== request) return;
@@ -67,28 +57,15 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
           return { transcriptErrors };
         });
         try {
-          if (paged) {
-            const page = await invoke('sessions:transcriptPage', { id });
-            if (rt.transcriptLoads.get(id) !== request || generation !== rt.storeGeneration) return;
-            set((s) => ({
-              transcripts: { ...s.transcripts, [id]: page.items },
-              loaded: { ...s.loaded, [id]: true },
-              transcriptFloors: page.seq === undefined ? s.transcriptFloors : { ...s.transcriptFloors, [id]: page.seq },
-              transcriptStarts: { ...s.transcriptStarts, [id]: page.start }
-            }));
-            replayBuffered(rt, get, id);
-          } else {
-            const items = await invoke('sessions:transcript', { id });
-            if (rt.transcriptLoads.get(id) !== request || generation !== rt.storeGeneration) return;
-            // The snapshot already contains any streamed text; queued deltas would duplicate it.
-            dropPendingDeltas(rt, id);
-            set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
-          }
+          const items = await invoke('sessions:transcript', { id });
+          if (rt.transcriptLoads.get(id) !== request || generation !== rt.storeGeneration) return;
+          // The snapshot already contains any streamed text; queued deltas would duplicate it.
+          dropPendingDeltas(rt, id);
+          set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
         } catch (e) {
           if (rt.transcriptLoads.get(id) !== request || generation !== rt.storeGeneration) return;
           // Never throw: the transcript pane stays mounted with a retry instead of loading forever.
           set((s) => ({ transcriptErrors: { ...s.transcriptErrors, [id]: e instanceof Error ? e.message : String(e) } }));
-          if (paged) replayBuffered(rt, get, id);
         }
       }).finally(() => {
         if (rt.transcriptLoads.get(id) === request) rt.transcriptLoads.delete(id);
@@ -97,50 +74,8 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
       return request;
     },
 
-    loadEarlier(id) {
-      const start = get().transcriptStarts[id];
-      if (getStoreOptions().pagedTranscripts !== true || start === undefined || start <= 0) return Promise.resolve();
-      const pending = rt.transcriptEarlier.get(id);
-      if (pending) return pending;
-      const generation = rt.storeGeneration;
-      // The older page brings no floor of its own: events during the read keep counting against the
-      // current one, so replay holds them until it returns and then applies them in order.
-      rt.bufferedEvents.set(id, []);
-      const request = Promise.resolve()
-        .then(async () => {
-          try {
-            const page = await invoke('sessions:transcriptPage', { id, end: start });
-            if (generation !== rt.storeGeneration || rt.transcriptEarlier.get(id) !== request) return;
-            set((s) => ({
-              transcripts: { ...s.transcripts, [id]: [...page.items, ...(s.transcripts[id] ?? [])] },
-              transcriptStarts: { ...s.transcriptStarts, [id]: page.start }
-            }));
-          } catch (e) {
-            if (generation !== rt.storeGeneration) return;
-            get().toast(e instanceof Error ? e.message : String(e), 'error');
-          } finally {
-            if (generation === rt.storeGeneration) replayBuffered(rt, get, id);
-          }
-        })
-        .finally(() => {
-          if (rt.transcriptEarlier.get(id) === request) rt.transcriptEarlier.delete(id);
-        });
-      rt.transcriptEarlier.set(id, request);
-      return request;
-    },
-
     applyEvent(env) {
       const { event, sessionId } = env;
-      // A page in flight has no floor yet: hold the event until the page lands, then replay past it.
-      const buffered = rt.bufferedEvents.get(sessionId);
-      if (buffered) {
-        buffered.push(env);
-        return;
-      }
-      // Paged clients get a floor with the window; anything at or below it is already in the list.
-      // `seq` is absent from an older desktop, in which case nothing is dropped.
-      const floor = get().transcriptFloors[sessionId];
-      if (floor !== undefined && env.seq !== undefined && env.seq <= floor) return;
       if (event.type === 'item.delta') {
         rt.pendingDeltas.push(env);
         if (!rt.flushScheduled) {
@@ -268,8 +203,6 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
         for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
         for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
         for (const id of Object.keys(s.transcriptErrors)) if (!ids.has(id)) removed.add(id);
-        for (const id of Object.keys(s.transcriptFloors)) if (!ids.has(id)) removed.add(id);
-        for (const id of Object.keys(s.transcriptStarts)) if (!ids.has(id)) removed.add(id);
         for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
         for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
         for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
@@ -313,8 +246,6 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
         const transcripts = { ...s.transcripts };
         const loaded = { ...s.loaded };
         const transcriptErrors = { ...s.transcriptErrors };
-        const transcriptFloors = { ...s.transcriptFloors };
-        const transcriptStarts = { ...s.transcriptStarts };
         const activeTerminal = { ...s.activeTerminal };
         const models = { ...s.models };
         const drafts = { ...s.drafts };
@@ -323,8 +254,6 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
           delete transcripts[id];
           delete loaded[id];
           delete transcriptErrors[id];
-          delete transcriptFloors[id];
-          delete transcriptStarts[id];
           delete activeTerminal[id];
           delete models[id];
           delete drafts[id];
@@ -335,8 +264,6 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
           transcripts,
           loaded,
           transcriptErrors,
-          transcriptFloors,
-          transcriptStarts,
           activeTerminal,
           models,
           drafts,
@@ -391,21 +318,12 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
     },
 
     clearTranscriptLocal(id) {
-      set((s) => {
-        // A cleared transcript starts a new window: the old floor must not hide the new events.
-        const floors = { ...s.transcriptFloors };
-        delete floors[id];
-        return { transcripts: { ...s.transcripts, [id]: [] }, transcriptFloors: floors, transcriptStarts: { ...s.transcriptStarts, [id]: 0 } };
-      });
+      set((s) => ({ transcripts: { ...s.transcripts, [id]: [] } }));
     },
 
     replaceTranscript(id, items) {
       dropPendingDeltas(rt, id);
-      set((s) => {
-        const floors = { ...s.transcriptFloors };
-        delete floors[id];
-        return { transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true }, transcriptFloors: floors };
-      });
+      set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
     },
 
     setLocalInfo(sessionId, id, text, opts) {

@@ -1,12 +1,10 @@
-/** Which session the desktop window is on (docs/REMOTE-ACCESS.md §4). The renderer reports its
- *  active session here, the window's own focus/blur updates the presence half, and paired browsers
- *  receive `push:desktopFocus` whenever either changes — so a phone can open the session the
- *  computer is showing instead of guessing. Main owns this because a browser can never be asked
- *  what the desktop is doing; `desktop:setFocus` stays local-only.
+/** Which session the desktop window is on. The renderer reports its active session here, the
+ *  window's own focus/blur updates the presence half, and `push:desktopFocus` follows whenever
+ *  either changes. `desktop:setFocus` stays local-only.
  *
  *  It also keeps which sessions are on screen — every visible pane, not just the active one — so
  *  main can tell, when a turn ends, whether anyone saw it finish. That set is local bookkeeping:
- *  it is never part of the `DesktopFocus` paired browsers receive. */
+ *  it is never part of the pushed `DesktopFocus`. */
 import type { DesktopFocus } from '../shared/types';
 
 export interface DesktopFocusTrackerDeps {

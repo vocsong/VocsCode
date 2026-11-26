@@ -25,8 +25,8 @@ availability/sign-in only; **Check for updates** checks CLI versions.
 | --- | --- |
 | Workspace | General, Appearance, Shortcuts, Terminal, Voice |
 | Agent behavior | Session defaults, Instructions, Vesta & utility |
-| Connections | Vocs account, Providers & keys, Harnesses, Pi, ACP agents |
-| System | Import chats, Remote access, Housekeep, About & doctor |
+| Connections | Vocs account, MCP control, Providers & keys, Harnesses, Pi, ACP agents |
+| System | Import chats, Housekeep, About & doctor |
 
 General is the starting point for daily preferences and common destinations. Appearance owns the
 interface mode (Standard, or the minimalist Zen layout), the live theme preview and the theme
@@ -50,7 +50,7 @@ locally, or explicitly ask your configured utility model to assess short convers
 excerpts. Results are recommendations and never archive anything before a separate confirmation.
 Sessions with local files, including Git-ignored files, are left alone. Clean worktrees go to the
 operating system’s Trash (Recycle Bin on Windows), never through permanent deletion. Existing
-branches and transcripts are retained. Housekeep is not available to paired browsers or agents.
+branches and transcripts are retained. Housekeep is not available to agents or MCP controllers.
 
 In the same dialog, choose **Scan worktrees and branches** under **Stranded worktrees and
 branches**. This is a read-only inventory of repositories known to this profile through saved

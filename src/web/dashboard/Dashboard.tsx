@@ -222,7 +222,7 @@ export function Dashboard({ loader = new DashboardLoader(), now: nowFn = Date.no
         <section className="v-card w-empty" data-testid="dashboard-empty">
           <span className="v-glyph v-glyph-lg"><Icon name="monitor" size={22} /></span>
           <h2 className="v-title">No computers yet</h2>
-          <p className="v-text">Open Vocs Code on a computer, go to <strong>Settings → Remote access</strong> and click <strong>Connect with Vocs</strong>. Its analytics appear here a few seconds later.</p>
+          <p className="v-text">Open Vocs Code on a computer, go to <strong>Settings → MCP control</strong> (<strong>Remote access</strong> in older versions) and click <strong>Connect with Vocs</strong>. Its analytics appear here a few seconds later.</p>
         </section>
       )}
       {data && data.computers.length > 0 && (
@@ -242,7 +242,7 @@ export function Dashboard({ loader = new DashboardLoader(), now: nowFn = Date.no
             <section className="v-card w-empty" data-testid="dashboard-waiting">
               <span className="v-glyph v-glyph-lg"><Icon name="chart" size={22} /></span>
               <h2 className="v-title">Waiting for analytics</h2>
-              <p className="v-text">None of your computers has shared analytics yet. Update Vocs Code on them and keep <strong>Share analytics with code.vocs.io</strong> on in Settings → Remote access.</p>
+              <p className="v-text">None of your computers has shared analytics yet. Update Vocs Code on them and keep <strong>Share analytics with code.vocs.io</strong> on in Settings → MCP control (Remote access in older versions).</p>
             </section>
           ) : (
             view && scope && (

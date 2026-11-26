@@ -2,17 +2,15 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TranscriptCapabilitiesProvider } from '../src/renderer/src/capabilities';
 import { Transcript } from '../src/renderer/src/components/Transcript';
 import { renderMarkdown } from '../src/renderer/src/markdown';
 import { singlePaneLayout } from '../src/renderer/src/panes';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta } from '../src/shared/types';
 
-const host = vi.hoisted(() => ({ web: false, invoke: vi.fn() }));
+const host = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('../src/renderer/src/api', async (original) => ({
   ...await original<typeof import('../src/renderer/src/api')>(),
-  get isWeb() { return host.web; },
   platform: 'win32',
   invoke: host.invoke
 }));
@@ -33,16 +31,12 @@ function mount(text: string, current = session, activeId = current.id) {
     sessions: [current], activeId, layout: singlePaneLayout(current.id), loaded: { [current.id]: true },
     transcripts: { [current.id]: [{ id: 'reply', kind: 'assistant', ts: 2, text }] }
   });
-  const body = <Transcript session={current} />;
-  return render(host.web ? (
-    <TranscriptCapabilitiesProvider value={{ contextMenu: false, editAndResend: false, openFile: false }}>{body}</TranscriptCapabilitiesProvider>
-  ) : body);
+  return render(<Transcript session={current} />);
 }
 const link = (name: string) => screen.getByRole('link', { name });
 const kind = (el: HTMLElement) => el.dataset.linkKind;
 
 beforeEach(() => {
-  host.web = false;
   host.invoke.mockReset().mockImplementation(async (channel: string, request: { path?: string }) => {
     if (channel === 'fs:readImage') return request.path === imagePath ? image : null;
     if (channel === 'app:showInFolder') return { ok: true };
@@ -105,25 +99,15 @@ describe('transcript link destinations', () => {
     ]);
   });
 
-  it('leaves web file refs and refused local actions uncolored and out of the tab order', async () => {
+  it('leaves refused local actions uncolored and out of the tab order', async () => {
     Object.defineProperty(window.harness, 'can', { value: (channel: string) => channel !== 'app:showInFolder' });
     const md = `[Overview](${prUrl}) [Outside](G:/elsewhere/index.ts) \`src/store.ts\` ![Local](${imagePath})`;
-    const desktop = mount(md);
+    mount(md);
     expect(kind(screen.getByText('Outside'))).toBeUndefined();
     expect(screen.getByText('Outside').hasAttribute('tabindex')).toBe(false);
     fireEvent.click(screen.getByText('Outside'));
     expect(host.invoke).not.toHaveBeenCalledWith('app:showInFolder', expect.anything());
     expect(useStore.getState().layout.filePreview).toBeUndefined();
-    desktop.unmount();
-    host.invoke.mockClear();
-    host.web = true;
-    mount(md);
-    expect(kind(link('Overview'))).toBe('external');
-    expect(screen.queryByRole('link', { name: 'src/store.ts' })).toBeNull();
-    expect(kind(screen.getByText('src/store.ts'))).toBeUndefined();
-    fireEvent.click(screen.getByText('src/store.ts'));
-    fireEvent.click(link('Overview'));
-    expect(host.invoke.mock.calls).toEqual([['app:openExternal', { url: prUrl }]]);
   });
 
   it('marks only hydrated image buttons, preserving their keyboard preview and image cache on pane changes', async () => {

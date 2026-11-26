@@ -2,7 +2,6 @@
 import DOMPurify from 'dompurify';
 import { Marked, Renderer, type RendererObject, type Tokens } from 'marked';
 import { joinRelative, parseFileLink, parseFileRef, type FileRef } from './file-refs';
-import { isWeb } from './api';
 
 const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -15,8 +14,6 @@ export interface MarkdownOptions {
   fileLinks?: boolean;
   /** Reuse and retain rendered HTML (default true). Set false for intermediate streaming renders. */
   cache?: boolean;
-  /** Override the platform's default: a web page drops images and opens links `noopener`. */
-  web?: boolean;
   /**
    * Workspace-relative folder of the markdown file being rendered. Relative link targets inside a
    * file are relative to that file (`../src/a.ts` in `docs/guide.md`), not to the workspace root.
@@ -43,7 +40,7 @@ function linkFileRef(href: string): FileRef | null {
   return parseFileLink(href);
 }
 
-function buildRenderer(fileLinks: boolean, web: boolean): RendererObject {
+function buildRenderer(fileLinks: boolean): RendererObject {
   return {
     table(token) {
       // Keep Marked's native table (including alignments and inline tokens) inside a scrollport.
@@ -64,8 +61,7 @@ function buildRenderer(fileLinks: boolean, web: boolean): RendererObject {
         linkDepth--;
       }
       if (/^https?:\/\//i.test(href ?? '')) {
-        // `noopener` on the web: the page that opens is a different origin and must not reach back.
-        return `<a href="${escapeHtml(href)}" title="${escapeHtml(title ?? '')}" target="_blank" rel="${web ? 'noopener noreferrer' : 'noreferrer'}">${inner}</a>`;
+        return `<a href="${escapeHtml(href)}" title="${escapeHtml(title ?? '')}" target="_blank" rel="noreferrer">${inner}</a>`;
       }
       const ref = fileLinks ? linkFileRef(href ?? '') : null;
       if (ref) {
@@ -85,8 +81,6 @@ function buildRenderer(fileLinks: boolean, web: boolean): RendererObject {
       return `<code>${escapeHtml(text)}</code>`;
     },
     image({ href, title, text }) {
-      // A remote page must not fetch images from arbitrary hosts; drop them entirely.
-      if (web) return '';
       // Transcript images are inert until the assistant resolves them in its own workspace.
       // Never put local paths (or arbitrary URL schemes) into a browser image request.
       if (fileLinks) return `<span data-local-image="${escapeHtml(href ?? '')}" data-image-alt="${escapeHtml(text)}">${escapeHtml(text || 'Image')} (image unavailable)</span>`;
@@ -96,12 +90,12 @@ function buildRenderer(fileLinks: boolean, web: boolean): RendererObject {
 }
 
 const instances = new Map<string, Marked>();
-function renderer(fileLinks: boolean, web: boolean): Marked {
-  const key = `${fileLinks ? 'L' : 'P'}${web ? 'W' : ''}`;
+function renderer(fileLinks: boolean): Marked {
+  const key = fileLinks ? 'L' : 'P';
   let instance = instances.get(key);
   if (!instance) {
     instance = new Marked({ gfm: true, breaks: false });
-    instance.use({ renderer: buildRenderer(fileLinks, web) });
+    instance.use({ renderer: buildRenderer(fileLinks) });
     instances.set(key, instance);
   }
   return instance;
@@ -117,9 +111,8 @@ let cacheBytes = 0;
 export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
   if (!md) return '';
   const fileLinks = !!opts.fileLinks;
-  const web = opts.web ?? isWeb;
   const base = fileLinks ? opts.fileBase : undefined;
-  const key = opts.cache === false ? undefined : `${fileLinks ? 'L' : 'P'}${web ? 'W' : ''}${base !== undefined ? `B${base.length}:${base}` : ''}:${md}`;
+  const key = opts.cache === false ? undefined : `${fileLinks ? 'L' : 'P'}${base !== undefined ? `B${base.length}:${base}` : ''}:${md}`;
   if (key !== undefined) {
     const hit = cache.get(key);
     if (hit !== undefined) {
@@ -132,7 +125,7 @@ export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
   fileBase = base;
   linkDepth = 0;
   try {
-    html = renderer(fileLinks, web).parse(md, { async: false });
+    html = renderer(fileLinks).parse(md, { async: false });
   } catch {
     html = `<pre>${escapeHtml(md)}</pre>`;
   } finally {
@@ -148,7 +141,7 @@ export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
     ADD_URI_SAFE_ATTR: ['tabindex', 'target', 'rel'],
     // Transcript link kinds are assigned by the UI after sanitization, never supplied by Markdown.
     FORBID_ATTR: ['data-link-kind'],
-    FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input', ...(web ? ['img', 'image', 'feimage'] : [])],
+    FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input'],
     ALLOWED_URI_REGEXP: /^https?:\/\//i
   });
   if (key !== undefined) {

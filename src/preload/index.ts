@@ -1,6 +1,5 @@
-/** contextBridge surface: exposes the typed harness API to the sandboxed renderer as window.harness.
- *  The object is the shared Transport bound to Electron IPC; web builds bind the same Transport
- *  to a WebSocket (docs/REMOTE-ACCESS.md). */
+/** contextBridge surface: exposes the typed harness API to the sandboxed renderer as window.harness,
+ *  the shared Transport bound to Electron IPC. */
 import { contextBridge, ipcRenderer } from 'electron';
 import { KEEP_AWAKE_CHANNEL, type KeepAwakeBridge } from '../shared/keep-awake';
 import type { Transport } from '../shared/transport';

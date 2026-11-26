@@ -1,13 +1,13 @@
 /**
  * Host lifecycle (boot/resync/reset), settings, model catalog, availability,
- * onboarding, terminals, Vesta agent, updates, remote policy, and toast notifications slice.
+ * onboarding, terminals, Vesta agent, updates, and toast notifications slice.
  */
 import { EMPTY_AGENT_STATE } from '../../../shared/agent';
 import type { AppSettings, HarnessId } from '../../../shared/types';
 import { canInvoke, invoke, on } from '../api';
 import * as panes from '../panes';
 import { applyLayout, bootErrorMessage } from './helpers';
-import { getStoreOptions, resetStoreRuntime } from './runtime';
+import { resetStoreRuntime } from './runtime';
 import type { Getter, ModelCatalogEntry, Setter, State, StoreRuntime } from './types';
 
 type HostSliceKeys =
@@ -29,7 +29,6 @@ type HostSliceKeys =
   | 'updateState'
   | 'processSummary'
   | 'desktopFocus'
-  | 'remoteAccess'
   | 'agentPrefill'
   | 'toasts'
   | 'boot'
@@ -72,7 +71,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
     updateState: { status: 'idle' },
     processSummary: null,
     desktopFocus: null,
-    remoteAccess: { viewOnly: false },
     agentPrefill: null,
     toasts: [],
 
@@ -80,7 +78,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
       if (rt.bootInFlight) return rt.bootInFlight;
       if (get().booted && get().settings && !get().bootError) return Promise.resolve();
       set({ bootError: null, booted: false });
-      const storeOptions = getStoreOptions();
       rt.bootInFlight = (async () => {
         // Install the push subscriptions before any round trip: a boot that fails halfway must not
         // leave the store deaf to events, and a reconnect must not need a second boot to listen.
@@ -95,7 +92,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
             on('push:updateState', (s) => set({ updateState: s }));
             on('push:processSummary', (summary) => set({ processSummary: summary }));
             on('push:desktopFocus', (focus) => set({ desktopFocus: focus }));
-            on('push:remotePolicy', ({ viewOnly }) => set({ remoteAccess: { viewOnly } }));
             rt.subscribed = true;
           } catch {
             // No usable bridge (a torn-down test window, a failed preload): the invoke below reports
@@ -104,32 +100,28 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
         }
         try {
           const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
-          // A web shell cannot list local terminals: ask only for what this host can serve.
+          // Ask only for what this host can serve.
           const terminals = canInvoke('terminal:list') ? await invoke('terminal:list', undefined) : [];
-          set({ settings, sessions, terminals, terminalsLoaded: true, booted: true, remoteAccess: { viewOnly: settings.remote?.viewOnly === true } });
-          // Refused channels are never invoked: a browser cannot update the app or read Vesta's state.
+          set({ settings, sessions, terminals, terminalsLoaded: true, booted: true });
+          // Refused channels are never invoked.
           if (canInvoke('update:state')) void invoke('update:state', undefined).then((s) => set({ updateState: s })).catch(() => undefined);
           if (canInvoke('agent:state')) void invoke('agent:state', undefined).then((s) => get().setAgentState(s)).catch(() => undefined);
           if (canInvoke('desktop:focus')) void invoke('desktop:focus', undefined).then((focus) => set({ desktopFocus: focus })).catch(() => undefined);
           const first = sessions.find((s) => !s.archived);
-          if (storeOptions.openFirstSessionOnBoot !== false) {
-            // A split from the last run comes back when its sessions still exist; otherwise the first
-            // session opens exactly as it did before split view existed.
-            const restored = panes.restoreLayout(panes.loadStoredLayout(), (id) => sessions.some((s) => s.id === id && !s.archived));
-            if (restored && restored.panes.length > 1) await applyLayout(rt, set, get, restored);
-            else if (first) await get().setActive(first.id);
-            rt.persistLayout = true;
-          }
+          // A split from the last run comes back when its sessions still exist; otherwise the first
+          // session opens exactly as it did before split view existed.
+          const restored = panes.restoreLayout(panes.loadStoredLayout(), (id) => sessions.some((s) => s.id === id && !s.archived));
+          if (restored && restored.panes.length > 1) await applyLayout(rt, set, get, restored);
+          else if (first) await get().setActive(first.id);
+          rt.persistLayout = true;
           // Availability probes spawn one subprocess per harness; kicking them off right as the
           // window opens competes with the first git calls and stalls startup under antivirus.
           // On-demand refreshes (dialogs, settings, fork menus) stay immediate.
-          if (storeOptions.probeAvailabilityOnBoot !== false) {
-            if (rt.availabilityTimer) clearTimeout(rt.availabilityTimer);
-            rt.availabilityTimer = setTimeout(() => {
-              rt.availabilityTimer = null;
-              void get().refreshAvailability();
-            }, 2_500);
-          }
+          if (rt.availabilityTimer) clearTimeout(rt.availabilityTimer);
+          rt.availabilityTimer = setTimeout(() => {
+            rt.availabilityTimer = null;
+            void get().refreshAvailability();
+          }, 2_500);
         } catch (error) {
           set({ booted: false, bootError: bootErrorMessage(error) });
         }
@@ -143,8 +135,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
       const generation = rt.storeGeneration;
       const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
       if (generation !== rt.storeGeneration) return;
-      // The remote policy is live (`push:remotePolicy`) and boot owns its initial value; a resync
-      // must not overwrite a newer push with a settings read that raced it.
       set({ settings, sessions });
       if (canInvoke('desktop:focus')) {
         void invoke('desktop:focus', undefined).then((focus) => {
@@ -171,8 +161,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
         transcripts: {},
         loaded: {},
         transcriptErrors: {},
-        transcriptFloors: {},
-        transcriptStarts: {},
         models: {},
         modelCatalog: {},
         availability: {},
@@ -191,7 +179,6 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
         searchJump: null,
         processSummary: null,
         desktopFocus: null,
-        remoteAccess: { viewOnly: false },
         history: [],
         historyIndex: -1
       });

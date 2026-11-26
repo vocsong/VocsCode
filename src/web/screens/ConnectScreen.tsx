@@ -1,4 +1,4 @@
-/** Connect with Vocs, in the browser the desktop opened (docs/REMOTE-ACCESS.md §6.3.1): add that
+/** Connect with Vocs, in the browser the desktop opened (docs/RELAY.md): add that
  *  computer to the signed-in account and wait for it to collect its credential. Its analytics then
  *  arrive on the dashboard on their own; no browser pairing is involved any more. */
 import { useState } from 'react';

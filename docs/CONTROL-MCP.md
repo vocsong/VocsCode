@@ -21,7 +21,8 @@ remain outstanding. The broader [plan](CONTROL-MCP-PLAN.md) is not all implement
   checks account/controller, instance, project, action, expiry, harness and permission mode.
 - Gateway and relay see readable content. MCP bodies/results are not logged, cached or queued in
   cloud storage. OAuth storage contains authorization data, not conversations; relay storage contains
-  bounded nonce metadata. Existing encrypted browser access and its optional mirror remain separate.
+  bounded nonce metadata. The encrypted paired-browser access that once shared the relay is retired
+  ([RELAY.md](RELAY.md#retired-paired-browser-access)).
 
 ## MCP Hub discovery preview for Dots and Muse
 
@@ -42,23 +43,24 @@ the legacy `windows.create` also requires `control:discover` but can write the j
 `CONTROL_DISCOVERY_ENABLED` is unset in the checked-in relay config; setting it on an isolated
 staging instance does not enable the legacy route. This slice does not provision the Hub's
 independent OAuth authority or its private service bindings. Real Dots/Muse OAuth and a live
-two-desktop run remain activation gates. The Windows CLI and browser Remote Access are unchanged.
+two-desktop run remain activation gates. The Windows CLI is unchanged.
 
 ## Owner setup (after a separately approved rollout)
 
-1. Enroll/connect each computer through the existing Remote access panel. Keep its project folders
+1. Connect each computer with Vocs in **Settings → MCP control → Vocs relay connection**
+   ([RELAY.md](RELAY.md#connect-with-vocs)). Keep its project folders
    in Vocs Code. Source checkouts and harness credentials stay on that computer.
 2. Start OAuth from the controller client. On the consent page, copy both **Account ID** and
    **Controller ID** before completing consent.
-3. On each native desktop, open **Settings → Remote access → External MCP control**. Enable
+3. On each native desktop, open **Settings → MCP control → External MCP control**. Enable
    external control, enter those IDs, and select projects, actions, a harness and a permission mode.
    Confirm the disclosure and save the grant. The UI grants **all ordinary sessions** in the
    selected projects, not one individually chosen session, for 30 days.
 4. Discovery now returns only online, compatible computers with a matching local grant. A missing,
    offline, unapproved or older computer is not silently replaced by another target.
 
-Only the actual desktop main frame can invoke the grant-management IPC channels. A paired browser,
-internal agent, or controller cannot enable control or change its grants.
+Only the actual desktop main frame can invoke the grant-management IPC channels. An internal agent
+or a controller cannot enable control or change its grants.
 
 Project enrollment binds a stable ID to a canonical root and filesystem identity. A missing,
 replaced or redirected root is refused. A moved root needs explicit owner re-enrollment; automatic
@@ -163,4 +165,4 @@ code/refresh/revocation qualification and edge abuse controls; actual Dots OAuth
 two real computers/projects including existing-session follow-ups, disconnect/restart, revocation,
 wrong-resource denial and unaffected desktop work. Live GitHub/provider tests, provisioning and
 production deployment require separate authorization. See [TESTING.md](TESTING.md) for the develop
-gate and [the roadmap](REMOTE-ACCESS-ROADMAP.md#28-dots-remote-mcp-control-implemented-first-slice-disabled) for status.
+gate and [RELAY.md](RELAY.md) for the relay connection this channel rides on.

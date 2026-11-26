@@ -1,8 +1,7 @@
 /** Authenticated relay REST client and proof-of-possession access-token cache for RemoteHost. */
-import { sign, tokenProofPayload, type Identity, type PublicIdentity } from '../../shared/crypto';
+import { sign, tokenProofPayload, type Identity } from '../../shared/crypto';
 import { assertEndpointUrl, credentialFetch } from '../../shared/endpoint-policy';
 import type { RemoteDeviceInfo } from '../../shared/types';
-import { MirrorWriteSuperseded } from './mirror-transport';
 
 export const relayRequest = credentialFetch();
 
@@ -13,12 +12,8 @@ export interface HostCredentials {
   /** The relay refresh credential. It buys short-lived access tokens only together with a
    *  signature by `identity`; it is dropped once the relay stops accepting it. */
   deviceToken?: string;
-  enrollToken?: string;
-  /** Web devices paired with this host, by deviceId — the handshake trust anchors. */
-  clients: Record<string, PublicIdentity>;
-  /** P4: the symmetric key that seals the offline transcript mirror. Shared with every paired
-   *  browser over the e2e session; never written to the relay. */
-  mirrorKey?: string;
+  /** An older build left a sealed transcript mirror at the relay; deleted on the next connect. */
+  legacyMirror?: true;
 }
 
 /** Refresh the access token this long before it expires. */
@@ -72,7 +67,7 @@ export class RelayClient {
     const query = `?device=${encodeURIComponent(deviceId)}`;
     const challengeRes = await relayRequest(`${base}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${refresh}` } });
     if (challengeRes.status === 401) {
-      await this.deps.onCredentialRejected(creds, 'this computer is no longer registered with the relay; pair a browser to register it again', refresh);
+      await this.deps.onCredentialRejected(creds, 'this computer is no longer registered with the relay; connect with Vocs to register it again', refresh);
       throw new Error('relay credential rejected');
     }
     if (!challengeRes.ok) throw new Error(`token challenge failed: ${challengeRes.status}`);
@@ -92,16 +87,13 @@ export class RelayClient {
   }
 
   /** An authenticated relay REST call as this device. A 401 means the access token expired or was
-   *  dropped: prove possession once more and retry, then report whatever the relay says.
-   *  `proceed` is asked right before each request leaves (after the token wait); when it says no,
-   *  nothing is sent and the call rejects with MirrorWriteSuperseded. */
-  async fetch(path: string, init: RequestInit = {}, proceed?: () => boolean): Promise<Response> {
+   *  dropped: prove possession once more and retry, then report whatever the relay says. */
+  async fetch(path: string, init: RequestInit = {}): Promise<Response> {
     const creds = this.deps.getCreds();
     if (!creds?.deviceId) throw new Error('remote access is not enrolled');
     const url = `${relayBaseUrl(creds.relayUrl)}${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(creds.deviceId)}`;
     for (let attempt = 0; ; attempt++) {
       const token = await this.accessToken();
-      if (proceed && !proceed()) throw new MirrorWriteSuperseded();
       const res = await relayRequest(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
       if (res.status !== 401 || attempt > 0) return res;
       if (this.access?.token === token) this.access = null;
@@ -125,16 +117,5 @@ export class RelayClient {
   async revokeAll(): Promise<void> {
     const res = await this.fetch('/v1/devices/revoke-all', { method: 'POST' });
     if (!res.ok) throw new Error(`revoke all failed: ${res.status}`);
-  }
-
-  async mirroredSessions(): Promise<string[]> {
-    const res = await this.fetch('/v1/mirrors');
-    if (!res.ok) throw new Error(`mirror list failed: ${res.status}`);
-    return ((await res.json()) as Array<{ sessionId: string }>).map((entry) => entry.sessionId);
-  }
-
-  async deleteMirrorSession(sessionId: string): Promise<void> {
-    const res = await this.fetch(`/v1/mirror/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error(`mirror delete failed: ${res.status}`);
   }
 }

@@ -46,7 +46,6 @@ so. `unavailable` is set when pi is not installed, and the panel shows where to 
 - Projections keep payloads out of the prompt as well as the context: `get_app_settings` deliberately drops the provider table.
 - Secrets never reach the model. Vesta learns only that `${GITHUB_TOKEN}` is *required*; the value goes from the renderer to the OS keychain and never enters the transcript, the history or a provider request.
 - Pasted images are not capabilities: they go straight to the model through pi's prompt, so they add nothing to the allowlist and never reach a handler themselves.
-- `agent:*` is blocked on the WebSocket transport (`isRemoteBlocked` in `web-server.ts`), which otherwise forwards every channel.
 
 ## Adding a capability
 

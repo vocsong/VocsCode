@@ -1,7 +1,7 @@
-/** Desktop-only hydration of inert transcript image placeholders; never changes cached HTML. */
+/** Hydration of inert transcript image placeholders; never changes cached HTML. */
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import { imageMimeType, type WorkspaceImage } from '../../shared/image-files';
-import { invoke, isWeb } from './api';
+import { invoke } from './api';
 import { workspaceRelativePath } from './file-refs';
 import type { LightboxImage } from './components/ImageLightbox';
 
@@ -41,7 +41,7 @@ export function useMarkdownImages(html: string, sessionId: string, cwd: string |
   }, [scope]);
   useLayoutEffect(() => {
     const body = root.current;
-    if (!body || isWeb || !cwd) return;
+    if (!body || !cwd) return;
     let live = true;
     for (const placeholder of body.querySelectorAll<HTMLElement>('[data-local-image]')) {
       const alt = placeholder.getAttribute('data-image-alt') || 'Image';

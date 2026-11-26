@@ -6,7 +6,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { sessionTitleText } from '../../../shared/session-title';
-import { invoke, isMac, isWeb, modKey } from '../api';
+import { invoke, isMac, modKey } from '../api';
 import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
 import { Icon, MenuItem } from './ui';
@@ -39,7 +39,7 @@ export function TitleBar() {
   const title = view === 'settings' ? 'Settings · Vocs Code' : session ? `${sessionTitleText(session)} · Vocs Code` : 'Vocs Code';
 
   return (
-    <div className={`titlebar ${isMac ? 'titlebar-mac' : ''} ${isWeb ? 'titlebar-web' : ''}`}>
+    <div className={`titlebar ${isMac ? 'titlebar-mac' : ''}`}>
       <div className="titlebar-lead">
         <TitleBarButton icon="sidebar" label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} hint={`${modKey}+B`} onClick={toggleSidebar} />
         <TitleBarButton icon="arrowLeft" label="Back" hint={isMac ? '⌘[' : 'Alt+←'} disabled={!canBack} onClick={() => void navBack()} />
@@ -59,7 +59,7 @@ export function TitleBar() {
       <div className="titlebar-trail">
         <VestaLauncher />
       </div>
-      <div className="titlebar-tail">{isWeb && <span className="web-badge">web</span>}</div>
+      <div className="titlebar-tail" />
     </div>
   );
 }

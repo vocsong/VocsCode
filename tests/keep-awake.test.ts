@@ -4,7 +4,6 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { KEEP_AWAKE_CHANNEL } from '../src/shared/keep-awake';
 import { agentChannels } from '../src/shared/agent-manifest';
-import { isRemoteChannel } from '../src/shared/remote-channels';
 import type { SessionMeta } from '../src/shared/types';
 import { createAdapter } from '../src/main/harness/registry';
 import type { HarnessContext } from '../src/main/harness/types';
@@ -102,7 +101,6 @@ it('authorizes only the owner main frame and validates before touching session o
   expect(lookup).not.toHaveBeenCalled();
   for (const id of ['s_missing', 's_archived']) expect(() => choice(id, true)).toThrow(/ordinary, unarchived/);
   expect(registry.channels()).not.toContain(KEEP_AWAKE_CHANNEL);
-  expect(isRemoteChannel(KEEP_AWAKE_CHANNEL)).toBe(false);
   expect(agentChannels()).not.toContain(KEEP_AWAKE_CHANNEL);
   for (const actor of ['user', 'agent', 'desktop'] as const) {
     await expect(registry.invoke(KEEP_AWAKE_CHANNEL, { id: 's_live', enabled: true }, actor)).rejects.toThrow(/Unknown channel/);

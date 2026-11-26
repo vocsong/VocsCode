@@ -14,7 +14,6 @@ import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SettingsStore } from '../src/main/settings';
 import type { HarnessAdapter } from '../src/main/harness/types';
-import { REMOTE_CHANNELS } from '../src/shared/remote-channels';
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -184,9 +183,5 @@ describe('markViewed', () => {
     await expect(f.manager.markViewed('s1')).rejects.toThrow('disk full');
     expect(f.get()).toMatchObject({ unseenAt: 5_000, unseenFailed: true, lastViewedAt: 1 });
     expect(f.pushSessions).not.toHaveBeenCalled();
-  });
-
-  it('is a desktop-only channel, never on the remote surface', () => {
-    expect(REMOTE_CHANNELS.has('sessions:markViewed' as never)).toBe(false);
   });
 });

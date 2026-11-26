@@ -23,7 +23,6 @@ import { emptyCodeOutputReport } from '../src/shared/analytics/code-output';
 import { emptyReliabilityReport } from '../src/shared/analytics/reliability';
 import { connectCheckCode } from '../src/shared/pairing';
 import { emptyCounters, emptyDimensions, emptySlice } from '../src/shared/usage-rollup';
-import type { HandlerRegistry } from '../src/main/handlers';
 import type { UsageDay, UsageSessionRecord } from '../src/shared/types';
 import { isolatedEnv } from './e2e-ui';
 import { startLocalRelay, type LocalRelay } from './support/local-relay';
@@ -179,11 +178,9 @@ interface Computer {
 async function connectingComputer(name: string, origin: string, snapshot: () => AnalyticsSnapshot): Promise<{ computer: Computer; link: string; checkCode: string }> {
   const secrets = new Map<string, string>();
   const host = new RemoteHost({
-    registry: () => ({ channels: () => [], invoke: async () => undefined }) as unknown as HandlerRegistry,
     secrets: { get: async (k) => secrets.get(k), set: async (k, v) => void secrets.set(k, v) },
     pushState: () => undefined,
-    log: () => undefined,
-    broadcast: () => undefined
+    log: () => undefined
   });
   hosts.push(host);
   let link = '';

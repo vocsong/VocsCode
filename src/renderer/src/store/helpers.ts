@@ -51,15 +51,6 @@ export function dropPendingDeltas(rt: StoreRuntime, sessionId: string, itemId?: 
   }
 }
 
-/** Replays what arrived while a page was loading. The floor set with the page decides which of
- *  those events the snapshot already contains; the rest apply in arrival order. */
-export function replayBuffered(rt: StoreRuntime, get: Getter, id: string): void {
-  const events = rt.bufferedEvents.get(id);
-  rt.bufferedEvents.delete(id);
-  if (!events?.length) return;
-  for (const env of events) get().applyEvent(env);
-}
-
 export function pushHistory(rt: StoreRuntime, set: Setter, get: Getter, entry: NavEntry): void {
   if (rt.navigating) return;
   // An empty pane is not a destination. Recording one would make a later Back replay

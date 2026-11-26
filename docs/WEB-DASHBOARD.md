@@ -2,14 +2,15 @@
 
 Status: **live since v0.12.0.** The signed-in dashboard at `code.vocs.io/dashboard` replaced the
 browser remote client and combines analytics from every Vocs Code computer on the account. The
-remaining desktop Remote panel cleanup and the assistant/control plane are separate work.
+desktop cleanup that followed (step 4b) is done: see [RELAY.md](RELAY.md). The assistant/control
+plane is separate work.
 
 ## 1. Decisions of record
 
 | # | Question | Decision |
 | --- | --- | --- |
 | 1 | How data reaches the web | Each desktop **uploads a snapshot** to its account on the relay. Signing in with Vocs Login is enough to see every computer, including ones that are asleep or off. The relay can read the aggregates (Cloudflare encrypts at rest). This is not end-to-end encryption. |
-| 2 | The existing web remote client | **Removed** (session view, composer, terminal, browser pairing). The relay's pairing, mirror and control endpoints stay for now; the MCP track may build on them. |
+| 2 | The existing web remote client | **Removed** (session view, composer, terminal, browser pairing). The desktop side of browser access is removed too ([RELAY.md](RELAY.md#retired-paired-browser-access)). The relay's pairing and mirror endpoints stay until released desktops no longer call them; the control endpoints serve the MCP track. |
 | 3 | What leaves the machine | Desktop parity **minus raw paths**. Projects go by folder name. Session titles stay. Per-file paths are not uploaded. |
 | 4 | Projects on several computers | **Merged by folder name**, with a per-computer split. A same-name clash between unrelated projects is an accepted edge case. |
 | 5 | Desktop Analytics screen | **Unchanged** (local only). The combined view is web only. A combined view on the desktop is a possible follow-up. |
@@ -38,7 +39,7 @@ remaining desktop Remote panel cleanup and the assistant/control plane are separ
   execution drill-down (`analytics:executions`) is desktop-only and hidden on the web.
 - **Code tab:** like Reliability, its rates (lines per million tokens, cost per thousand lines) do
   not add up, so **All computers** shows each computer's report in turn. There is no file list.
-- **Empty state:** no connected computers → explain Connect with Vocs (desktop Settings → Remote access).
+- **Empty state:** no connected computers → explain Connect with Vocs (desktop Settings → MCP control).
 - **Connect screen:** `/dashboard?connect=<nonceHash>` keeps the approve-this-computer step, so
   desktops can still register. It no longer pairs the browser: once the computer has collected its
   credential, the page offers the dashboard.
@@ -113,17 +114,19 @@ New routes, added to both `relay/src/routes.ts` and the edge allowlist in `relay
 - **Uploader:** a new `src/main/remote/analytics-sync.ts`. It runs when `remote.enabled` is
   set and the computer is enrolled, because credentials load only then. It syncs once after
   connecting, then on analytics changes (debounced about 2 minutes) and hourly as a heartbeat.
-  It calls the relay through `RemoteHost.analyticsRequest`, which uses the same access tokens as
-  the mirror and returns nothing while remote access is off. The host's `onOnline` hook re-reads the
-  relay's manifest after every (re)connect.
-- **Setting:** `remote.shareAnalytics`, default `true`. Settings → Remote access gets a "Share
+  It calls the relay through `RemoteHost.analyticsRequest`, which uses the computer's relay access
+  tokens and returns nothing while the relay connection is off. The host's `onOnline` hook re-reads
+  the relay's manifest after every (re)connect.
+- **Setting:** `remote.shareAnalytics`, default `true`. Settings → MCP control has a "Share
   analytics with code.vocs.io" toggle with a one-line disclosure of what is uploaded. Off →
   `DELETE /v1/analytics`.
 - **Connect link:** `connectLink()` (`src/shared/pairing.ts`) points at `/dashboard?connect=`.
-- **Remote panel cleanup** (its own PR after the web dashboard): remove the browser-pairing
-  link/QR, the pairing request, view-only mode and the transcript-mirror toggle. Keep **External MCP
-  control** (`ControlSettings`), the device list with Revoke all, and anything the MCP track depends
-  on. Stop mirror uploads and send a one-time `DELETE /v1/mirror` on upgrade.
+- **Remote panel cleanup — done.** The browser-pairing link/QR, the pairing request, view-only mode
+  and the transcript-mirror toggle are gone; the panel is now Settings → MCP control, keeping
+  **External MCP control** (`ControlSettings`) and the computer list with Remove all. Mirror uploads
+  stopped, and an upgraded computer sends a one-time `DELETE /v1/mirror`
+  ([RELAY.md](RELAY.md#upgrading-from-paired-browser-builds)). The relay's pairing and mirror
+  endpoints remain until the follow-up removal.
 
 ## 6. Web (`src/web`)
 
@@ -167,7 +170,7 @@ Each step is one PR into `develop`, independently reviewable.
    no `files` and no receipts, merge tests (per-computer totals then sum, folder-name merge,
    session-id prefix, UTC days), and part-size enforcement.
 2. **Relay storage and routes.** Routes, edge allowlist, revoke cleanup, manifest commit and prune.
-   Tests: `relay-routes`, `relay-edge`, `relay-core`, `test:relay-do`, `remote-workerd`; account
+   Tests: `relay-routes`, `relay-edge`, `relay-core`, `test:relay-do`, `relay-analytics`; account
    isolation (account B cannot read A), host cannot write another host's keys, revoke clears data.
 3. **Desktop uploader and setting.** `analytics-sync`, `remote.shareAnalytics`, toggle UI. Tests:
    uploads only changed parts, manifest last, toggle off deletes, not running when not enrolled,
@@ -178,22 +181,24 @@ Each step is one PR into `develop`, independently reviewable.
    loader cache, switcher, by-computer breakdown, per-computer reports, stale and empty states and
    the Connect screen; `e2e.remote-web` is replaced by `e2e.web-dashboard` (two real hosts join
    through the page and upload); web-only tests for deleted code are removed with it.
-4b. **Desktop Remote panel cleanup.** Pairing UI, view-only mode and the mirror toggle go; mirror
-   uploads stop with a one-time relay clear. `tests/remote-ui.test.tsx` and `e2e.remote` follow.
+4b. **Desktop Remote panel cleanup — done.** Pairing UI, view-only mode and the mirror toggle are
+   gone; mirror uploads stopped with a one-time relay clear ([RELAY.md](RELAY.md)).
+   `tests/remote-host-lifecycle.test.ts`, `tests/remote-ui.test.tsx` and `e2e.remote` cover it.
 5. **Landing.** `/dashboard` gate and proxy, signed-in `/` redirect, Sign in target. Landing Worker tests.
 
 **Rollout order.** The landing change that proxies `/dashboard` (step 5's first half) deploys first.
 It is harmless while the relay has no `/dashboard`. Then a Vocs Code release deploys the relay
 (steps 1–4) through `deploy-relay`. Then the landing's signed-in `/` redirect. Update desktops so
-they upload; until then their cards read "never synced". Run Appendix A of
-[REMOTE-ACCESS-ROADMAP.md](REMOTE-ACCESS-ROADMAP.md) with `/dashboard` substituted.
+they upload; until then their cards read "never synced". Run the
+[live verification checklist](RELAY.md#live-verification).
 
 ## 9. Coordination and open items
 
-- **MCP / Dots track** edits `relay/src/routes.ts`, `edge.ts` and the Remote panel too. Rebase
-  carefully, and do not remove relay pairing, mirror or control endpoints in this track.
+- **MCP / Dots track** edits `relay/src/routes.ts`, `edge.ts` and Settings → MCP control too.
+  Rebase carefully. The relay's pairing and mirror endpoints stay until released desktops no longer
+  call them, then go in a follow-up ([RELAY.md](RELAY.md#retired-paired-browser-access)); the control
+  endpoints stay.
 - **Dev profile:** a `Vocs Code (Dev)` build connected to the production relay registers as its
   own computer, named after the machine like the installed app, so the two cards share a name
   (they differ in app version). Not addressed yet; renaming a computer is a possible follow-up.
-- Docs to update as the steps land: [REMOTE-ACCESS.md](REMOTE-ACCESS.md),
-  [REMOTE-ACCESS-ROADMAP.md](REMOTE-ACCESS-ROADMAP.md) (status snapshot, test map), [TESTING.md](TESTING.md).
+- Docs to update as the steps land: [RELAY.md](RELAY.md), [TESTING.md](TESTING.md).

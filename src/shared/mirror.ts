@@ -1,4 +1,4 @@
-/** Offline transcript mirror (docs/REMOTE-ACCESS.md P4). The desktop seals these shapes with the
+/** Offline transcript mirror (docs/RELAY.md). The desktop seals these shapes with the
  *  shared mirror key and uploads them to the relay as opaque blobs; a paired browser opens them
  *  when the desktop is unreachable. Both halves must agree on the shape, and the relay never sees
  *  it in the clear — so titles, folders and transcript text all stay inside the ciphertext. */

@@ -1,4 +1,4 @@
-/** Relay core facade (docs/REMOTE-ACCESS.md §6): re-exports device registry, token auth,
+/** Relay core facade (docs/RELAY.md): re-exports device registry, token auth,
  *  pairing, Connect-with-Vocs enrollment, and offline transcript mirror operations. */
 export type { RelayStorage, RelayStore } from './storage';
 export {

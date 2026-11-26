@@ -2,7 +2,7 @@
 import { imageMimeType } from '../../../../shared/image-files';
 import { missionToolOf } from '../../../../shared/mission-mode';
 import type { SessionMeta, TranscriptItem } from '../../../../shared/types';
-import { isWeb, platform } from '../../api';
+import { platform } from '../../api';
 import { workspaceRelativePath } from '../../file-refs';
 import { isHandoffTool } from '../../mission';
 import type { RenderChunk } from '../../transcript-window';
@@ -42,7 +42,7 @@ export function pinnedPromptIndex(userChunks: number[], tops: number[], base: nu
 }
 
 export function canOpenTranscriptPullRequest(session: SessionMeta | undefined, activeId: string | null): boolean {
-  return !isWeb && !!session && session.id === activeId;
+  return !!session && session.id === activeId;
 }
 
 /** Mirrors revealFile's routing without reading or resolving files ahead of a click. */

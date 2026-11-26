@@ -2,13 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { VocsAccountState } from '../src/shared/vocs-account';
-const api = vi.hoisted(() => ({ invoke: vi.fn(), isWeb: false }));
+const api = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('../src/renderer/src/api', () => api);
 import { VocsAccountSettings } from '../src/renderer/src/components/VocsAccountSettings';
 const out = (revision = 1): VocsAccountState => ({ realm: 'staging', status: 'signed_out', revision, refreshing: false, connections: [], deviceSignIn: true, keychain: true });
 const connected = (revision = 3): VocsAccountState => ({ ...out(revision), status: 'signed_in', accountId: 'opaque-account-a', expiresAt: Date.now() + 300000, connections: [{ id: 'openrouter', name: 'OpenRouter', transport: 'streamable-http', resource: 'https://vocs-mcp-staging.vocs.workers.dev/openrouter', authorizationServer: 'https://vocs-mcp-staging.vocs.workers.dev', accountScopes: ['models:read'], authorization: 'oauth_required', executionReadiness: 'not_checked' }] });
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((r, j) => { resolve = r; reject = j; }); return { promise, resolve, reject }; }
-beforeEach(() => { api.isWeb = false; api.invoke.mockReset().mockResolvedValue(out()); });
+beforeEach(() => { api.invoke.mockReset().mockResolvedValue(out()); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 async function ready() { render(<VocsAccountSettings />); await screen.findByText('Signed out'); }
 describe('staging Vocs account settings', () => {
@@ -276,12 +276,5 @@ describe('staging Vocs account settings', () => {
     api.invoke.mockResolvedValue({ ...out(), hub: [{ id: 'openrouter', serverId: 'vocs-openrouter', status: 'disconnected' }] });
     await ready();
     expect(screen.queryByText('OpenRouter')).toBeNull();
-  });
-  it('keeps account management out of remote browser sessions', () => {
-    api.isWeb = true;
-    render(<VocsAccountSettings />);
-    expect(screen.getByText(/Remote browser access cannot authorize/)).toBeTruthy();
-    expect(api.invoke).not.toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: 'Sign in to staging' })).toBeNull();
   });
 });

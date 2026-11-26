@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 /** A session counts as viewed after 1.5 s on screen in the focused window: the renderer reports the
  *  visible panes to main (so main can tell whether a finished turn was seen) and clears "done · not
- *  viewed" through `sessions:markViewed` once the dwell holds. A browser never reports either. */
+ *  viewed" through `sessions:markViewed` once the dwell holds. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, renderHook } from '@testing-library/react';
 import type { PaneLayout } from '../src/renderer/src/panes';
@@ -120,13 +120,6 @@ describe('counting a session as viewed', () => {
     await act(async () => { useStore.setState({ sessions: [{ ...(meta as object), unseenAt: 99 } as never] }); });
     await act(async () => { vi.advanceTimersByTime(1_500); });
     expect(markViewedCalls()).toHaveLength(2);
-  });
-
-  it('never reports or marks from a browser', async () => {
-    const useStore = await setup('browser');
-    await act(async () => { useStore.setState({ visibleSessionIds: ['s1'], ...focused(true) }); });
-    await act(async () => { vi.advanceTimersByTime(5_000); });
-    expect(invoke).not.toHaveBeenCalled();
   });
 });
 

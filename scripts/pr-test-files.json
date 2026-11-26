@@ -72,7 +72,6 @@
   "tests/relay-account.test.ts",
   "tests/relay-core.test.ts",
   "tests/relay-routes.test.ts",
-  "tests/qr.test.ts",
   "tests/web-router.test.ts",
   "tests/web-dashboard.test.tsx",
   "tests/mission-mode-approvals.test.ts",

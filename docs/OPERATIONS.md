@@ -58,33 +58,40 @@ defaults). Credential-bearing fetches do not follow redirects: configure the fin
 Configured Claude/Codex routes are validated before app keys are handed to the external runtime;
 CLI-owned configuration and MCP transports are separate policies, not covered by this check.
 
-## Remote relay operations
+## Relay operations
 
 The relay and landing deploy separately. The relay deploys with each release: the `vX.Y.Z` tag
 push starts `.github/workflows/deploy-relay.yml`, which publishes once the protected
 `relay-production` environment is approved (release tags only; it holds the
 `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets). A `develop` merge never deploys it.
 The landing Worker (`code.vocs.io`) is owned by the separate `vocs.io` repo and deploys with
-`npm run deploy:code`. Neither deploy provisions the GitHub OAuth app or rotates the enrollment
-secret. For manual deploy, rollback, verification and secret-rotation instructions see
+`npm run deploy:code`. Neither deploy provisions login clients or rotates secrets. For manual
+deploy, rollback, verification and secret-rotation instructions see
 [`relay/README.md`](../relay/README.md) and the live checklist in
-[`REMOTE-ACCESS-ROADMAP.md`](./REMOTE-ACCESS-ROADMAP.md#appendix-a--live-verification-checklist).
-Deploy the per-account relay before the landing assertion code, then set `workers_dev: false` so browser requests cannot bypass the live GitHub gate. The production rollout needs the same `ACCOUNT_ASSERTION_SECRET` on both Workers; see `relay/README.md`.
+[`RELAY.md`](./RELAY.md#live-verification). Deploy a relay change before the landing code that
+depends on it. `workers_dev: false` keeps browser requests from bypassing the landing's login gate.
 
 The account-isolated relay requires `ACCOUNT_ASSERTION_SECRET` to match on the landing and relay,
 plus a stable relay-only `DEVICE_ROUTE_SECRET` for account-tagged device ids; do not rotate the latter
 without a device-id migration. See `relay/README.md` before changing either secret.
 
-The proof-of-possession relay (access tokens, sealed pairing delivery, socket tickets) has been live
-since 2026-09-25 and is incompatible with older desktops: they cannot connect until they run the new
-code, but keep their pairings. Desktop log lines worth grepping: `remote: this computer is no
-longer registered with the relay` (its credential was rejected — revoked, or a different relay; it
-falls back to enrolling and keeps its identity), `remote: forgot N browser pairing(s)` (reconciled
-against the relay's registry; the offline mirror was re-keyed), `remote: pairing refused by the relay`
-and `…maximum number of paired devices` (the per-account cap: ten browsers, five computers),
-`remote: waiting for this computer to be added in the browser (Connect with Vocs)` and
-`remote: this computer was added in the browser (device …)` (the signed-in path; it gives up after
-ten minutes with `the sign-in page expired`).
+Desktop log lines worth grepping (the relay connection, [RELAY.md](./RELAY.md)):
+
+- `remote: enabled for <origin> (stored identity|new identity, registered|not yet registered)` —
+  the connection was turned on or resumed at startup. Tokens and keys are never logged.
+- `remote: relay connection open`, `remote: relay connection closed (code N); reconnecting in 3s`,
+  `remote: relay connection failed`, `remote: disconnected from the relay`.
+- `remote: waiting for this computer to be added in the browser (Connect with Vocs)` and
+  `remote: this computer was added in the browser (device …)` — registration. The state detail says
+  `the sign-in page expired` when ten minutes pass without the owner adding it.
+- `remote: this computer is no longer registered with the relay; connect with Vocs to register it
+  again` — its credential was rejected (removed, or a different relay); it keeps its identity.
+  `remote: this computer was removed from your account` is the same after it removed itself.
+- `remote: stored host credentials are unreadable` — a new identity is generated and the computer
+  must Connect with Vocs again.
+- `remote: deleted the transcript mirror an earlier version left at the relay` /
+  `remote: could not delete the old transcript mirror yet; retrying on the next connect` — the
+  one-time upgrade cleanup.
 
 ## Environment variables
 
@@ -95,9 +102,7 @@ None of these are required to run the app; they exist for headless runs and the 
 | `VOCS_CODE_USER_DATA` | main process | Overrides Electron's userData directory, so a run gets isolated settings, sessions and keychain entries. |
 | `VOCS_CODE_DEBUG` | main process | `1` keeps debug-level lines (harness stderr, MCP resolution, git probes, renderer `console.log`) in a packaged build. Renderer warnings and errors are logged regardless. |
 | `VOCS_CODE_ACCOUNT_REALM` | main process | `staging` points Settings → Vocs account at the staging identity and Hub services (`vocs-login-staging`, `vocs-mcp-staging`). Anything else, or unset, uses production (`auth.vocs.io`, `mcp.vocs.io`). |
-| `VOCS_CODE_WEB` | main process | `1` starts the localhost web client: serves the built renderer (`npm run build` first) at `http://localhost:5177/?token=…` and bridges the same handler registry to a browser tab. See docs/REMOTE-ACCESS.md. |
-| `VOCS_CODE_WEB_PORT` | main process | Port for the web client. Defaults to `5177`. |
-| `VOCS_CODE_RELAY_URL` | main process | Relay for remote access instead of `https://code.vocs.io`; requires HTTPS except literal loopback, e.g. `http://localhost:8787` for a local `wrangler dev`. There is no insecure LAN override or setting for it; `e2e.remote` uses it to reach the test relay. |
+| `VOCS_CODE_RELAY_URL` | main process | Relay for the relay connection (docs/RELAY.md) instead of `https://code.vocs.io`; requires HTTPS except literal loopback, e.g. `http://localhost:8787` for a local `wrangler dev`. There is no insecure LAN override or setting for it; `e2e.remote` uses it to reach the test relay. |
 | `VOCS_CODE_SCREENSHOT` | main process | Writes a PNG of the window to this path once the UI has settled, then continues running. |
 | `VOCS_CODE_SCREENSHOT_DELAY` | main process | Milliseconds to wait before that screenshot. Defaults to `2500`. |
 | `VOCS_CODE_AUTOQUIT` | main process | Quits the app after this many milliseconds. Used to bound headless runs. |

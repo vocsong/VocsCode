@@ -1,4 +1,4 @@
-/** Owner-window IPC only. Not part of the shared web/remote transport or session metadata. */
+/** Owner-window IPC only. Not part of the handler registry or session metadata. */
 export const KEEP_AWAKE_CHANNEL = 'desktop:keepAwake';
 
 export interface KeepAwakeBridge {

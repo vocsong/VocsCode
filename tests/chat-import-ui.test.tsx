@@ -8,7 +8,6 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('../src/renderer/src/api', () => ({
   invoke,
   invokeErrorMessage: (error: unknown) => error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']*': Error: /, '') : String(error),
-  isWeb: false,
   isMac: false,
   modKey: 'Ctrl',
   platform: 'linux',

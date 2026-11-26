@@ -29,7 +29,7 @@ describe('CI tier boundaries', () => {
     expect(prFiles.every((file) => existsSync(path.join(root, file)))).toBe(true);
     expect(prFiles).toEqual(expect.arrayContaining([
       'tests/review-fixes.test.ts', 'tests/mcp-oauth.test.ts', 'tests/mcp-oauth-transport-race.test.ts', 'tests/vocs-account.test.ts', 'tests/vocs-account-settings.test.tsx', 'tests/session-resume.test.ts',
-      'tests/relay-core.test.ts', 'tests/qr.test.ts', 'tests/web-dashboard.test.tsx', 'tests/workspace-files.test.ts'
+      'tests/relay-core.test.ts', 'tests/web-dashboard.test.tsx', 'tests/workspace-files.test.ts'
     ]));
     expect(gate).toMatch(releaseCondition);
     expect(gate).toContain('name: Full offline suite');
@@ -225,12 +225,11 @@ describe('develop-tier local test scope', () => {
     expect(scripts['test:changed']).toBe('node scripts/test-changed.mjs');
     const script = readFileSync(path.join(root, 'scripts/test-changed.mjs'), 'utf8');
     expect(script).toContain("'--changed', base");
-    expect(script).toContain('tests/smoke.remote-live.test.ts');
     expect(readFileSync(path.join(root, 'AGENTS.md'), 'utf8')).toContain('`npm run test:changed`');
   });
 
   it('follows the import graph for source, test and docs edits', () => {
-    expect(fullRunReason(['src/main/session-manager.ts', 'tests/qr.test.ts', 'docs/TESTING.md', 'AGENTS.md'])).toBeUndefined();
+    expect(fullRunReason(['src/main/session-manager.ts', 'tests/pairing-link.test.ts', 'docs/TESTING.md', 'AGENTS.md'])).toBeUndefined();
     expect(fullRunReason(['src/renderer/src/package.json', 'scripts/tsconfig-notes.md'])).toBeUndefined();
   });
 
@@ -238,7 +237,7 @@ describe('develop-tier local test scope', () => {
     'package.json', 'package-lock.json', 'tsconfig.test.json', 'relay/tsconfig.json',
     'vitest.config.ts', 'vitest.relay.config.ts', 'vite.config.web.ts', 'electron.vite.config.ts'
   ])('runs the whole offline suite when %s changes, which no test imports', (file) => {
-    expect(fullRunReason(['src/shared/qr.ts', file])).toBe(file);
+    expect(fullRunReason(['src/shared/pairing.ts', file])).toBe(file);
     expect(fullRunReason([file.replace(/\//g, '\\')])).toBe(file);
   });
 });

@@ -38,7 +38,7 @@ export class PairError extends Error {
   }
 }
 
-/** Per-account device cap (docs/REMOTE-ACCESS.md §6.5): bounds what one leaked pairing flow or
+/** Per-account device cap (docs/RELAY.md): bounds what one leaked pairing flow or
  *  enrollment secret can add. A browser paired with two computers holds two web devices. */
 export const MAX_WEB_DEVICES = 10;
 export const MAX_HOST_DEVICES = 5;

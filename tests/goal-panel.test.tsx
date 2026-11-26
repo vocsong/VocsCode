@@ -14,9 +14,7 @@ vi.mock('../src/renderer/src/api', () => ({
   on: vi.fn().mockReturnValue(() => undefined),
   isMac: false,
   modKey: 'Ctrl',
-  platform: 'win32',
-  isWeb: false,
-  webShim: vi.fn()
+  platform: 'win32'
 }));
 
 import { cleanup, render, screen } from '@testing-library/react';

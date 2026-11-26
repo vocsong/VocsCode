@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { VocsAccountConnection, VocsAccountState, VocsHubConnectionId, VocsHubConnectionState } from '../../../shared/vocs-account';
-import { invoke, isWeb } from '../api';
+import { invoke } from '../api';
 import { Button } from './ui';
 import { SettingsGroup, SettingsNote } from './SettingsPrimitives';
 
@@ -67,7 +67,6 @@ export function VocsAccountSettings() {
   useEffect(() => {
     mounted.current = true;
     if (leftDuringSignIn) { leftDuringSignIn = false; setNotice(leftNotice); }
-    if (isWeb) return () => { mounted.current = false; };
     let reading = false;
     const read = async () => {
       if (reading || pending.current) return;
@@ -159,38 +158,36 @@ export function VocsAccountSettings() {
       <SettingsNote>{staging
         ? 'This connects only to the isolated Vocs staging environment, not your production account. Sign-in opens your system browser. Signing in uses no provider key or paid request; connecting one below is a separate approval on the staging Hub.'
         : 'Sign-in opens your system browser at auth.vocs.io and reads which Vocs Hub connections your account may use. Signing in uses no provider key or paid request; connecting one below is a separate approval on mcp.vocs.io.'}</SettingsNote>
-      {isWeb ? <p role="status">Open Vocs Code on this computer to manage account sign-in. Remote browser access cannot authorize this desktop.</p> : <>
-        <p role="status" aria-live="polite" className="vocs-account-status">{statusText}</p>
-        {/* Retry re-reads status, so it is offered only when reading or confirming status failed;
-            after a refused or expired sign-in the retry is the sign-in button. */}
-        {(error || state?.error) && <div className="vocs-account-error" role="alert"><p>{error || state?.error}</p>{(error === statusUnavailable || error === actionUnconfirmed) && <Button disabled={!!busy} onClick={() => void retry()}>Retry status</Button>}</div>}
-        {notice && <p className="muted vocs-account-notice">{notice}</p>}
-        {state?.notice && <p className="vocs-account-notice" role="alert">{state.notice}</p>}
-        {connected && <dl className="vocs-account-details"><div><dt>Account</dt><dd data-testid="vocs-account-id">{state.accountId ?? 'Loading…'}</dd></div><div><dt>Session</dt><dd data-testid="vocs-account-session">{session}</dd></div></dl>}
-        <div className="vocs-account-actions">
-          {/* The sign-in button stays mounted, disabled, while waiting, and Cancel sits beside it:
-              the second click of a double-click must land on it, never on Cancel. */}
-          {connected ? <>
-            <Button disabled={!!busy || state.refreshing} onClick={() => void action('refresh')}>{busy === 'refresh' || state.refreshing ? 'Refreshing…' : 'Refresh connections'}</Button>
-            <Button disabled={busy === 'signOut'} onClick={() => void action('signOut')}>Sign out</Button>
-          </> : kept ? <>
-            {/* Retry renews the kept sign-in (main treats refresh from offline as a retry). */}
-            {offline && <Button variant="primary" disabled={!!busy} onClick={() => void action('refresh')}>{busy === 'refresh' ? 'Retrying…' : 'Retry'}</Button>}
-            <Button disabled={busy === 'signOut'} onClick={() => void action('signOut')}>Sign out</Button>
-          </> : <>
-            <Button key="start-sign-in" variant="primary" disabled={!state || !!busy || signingIn} onClick={() => void action('signIn')}>{signInLabel}</Button>
-            {signingIn && <Button key="cancel-sign-in" onClick={() => void action('cancel')} disabled={busy === 'cancel'}>Cancel sign-in</Button>}
-          </>}
-        </div>
-        {!connected && !kept && (offersKeep ? <div className="vocs-account-keep">
-          <label><input type="checkbox" checked={persist} disabled={!state || !!busy || signingIn} onChange={(event) => setKeep(event.target.checked)} /> Keep me signed in on this computer</label>
-          <p className="muted">{!keep ? temporaryNote
-            : state?.keychain === false ? noKeychain
-            : 'Stays signed in for up to a year (90 days unused) in this computer’s keychain. Sign out here, or revoke it under Account & security on Vocs Login.'}</p>
-        </div> : state && <p className="muted">{temporaryNote}</p>)}
-        {connected && !state.persistent && <p className="muted">This session lasts up to five minutes and is kept only in memory. Restarting or signing out clears it.</p>}
-        {connected && state.persistent && state.keychain === false && <p className="muted">{noKeychain}</p>}
-      </>}
+      <p role="status" aria-live="polite" className="vocs-account-status">{statusText}</p>
+      {/* Retry re-reads status, so it is offered only when reading or confirming status failed;
+          after a refused or expired sign-in the retry is the sign-in button. */}
+      {(error || state?.error) && <div className="vocs-account-error" role="alert"><p>{error || state?.error}</p>{(error === statusUnavailable || error === actionUnconfirmed) && <Button disabled={!!busy} onClick={() => void retry()}>Retry status</Button>}</div>}
+      {notice && <p className="muted vocs-account-notice">{notice}</p>}
+      {state?.notice && <p className="vocs-account-notice" role="alert">{state.notice}</p>}
+      {connected && <dl className="vocs-account-details"><div><dt>Account</dt><dd data-testid="vocs-account-id">{state.accountId ?? 'Loading…'}</dd></div><div><dt>Session</dt><dd data-testid="vocs-account-session">{session}</dd></div></dl>}
+      <div className="vocs-account-actions">
+        {/* The sign-in button stays mounted, disabled, while waiting, and Cancel sits beside it:
+            the second click of a double-click must land on it, never on Cancel. */}
+        {connected ? <>
+          <Button disabled={!!busy || state.refreshing} onClick={() => void action('refresh')}>{busy === 'refresh' || state.refreshing ? 'Refreshing…' : 'Refresh connections'}</Button>
+          <Button disabled={busy === 'signOut'} onClick={() => void action('signOut')}>Sign out</Button>
+        </> : kept ? <>
+          {/* Retry renews the kept sign-in (main treats refresh from offline as a retry). */}
+          {offline && <Button variant="primary" disabled={!!busy} onClick={() => void action('refresh')}>{busy === 'refresh' ? 'Retrying…' : 'Retry'}</Button>}
+          <Button disabled={busy === 'signOut'} onClick={() => void action('signOut')}>Sign out</Button>
+        </> : <>
+          <Button key="start-sign-in" variant="primary" disabled={!state || !!busy || signingIn} onClick={() => void action('signIn')}>{signInLabel}</Button>
+          {signingIn && <Button key="cancel-sign-in" onClick={() => void action('cancel')} disabled={busy === 'cancel'}>Cancel sign-in</Button>}
+        </>}
+      </div>
+      {!connected && !kept && (offersKeep ? <div className="vocs-account-keep">
+        <label><input type="checkbox" checked={persist} disabled={!state || !!busy || signingIn} onChange={(event) => setKeep(event.target.checked)} /> Keep me signed in on this computer</label>
+        <p className="muted">{!keep ? temporaryNote
+          : state?.keychain === false ? noKeychain
+          : 'Stays signed in for up to a year (90 days unused) in this computer’s keychain. Sign out here, or revoke it under Account & security on Vocs Login.'}</p>
+      </div> : state && <p className="muted">{temporaryNote}</p>)}
+      {connected && !state.persistent && <p className="muted">This session lasts up to five minutes and is kept only in memory. Restarting or signing out clears it.</p>}
+      {connected && state.persistent && state.keychain === false && <p className="muted">{noKeychain}</p>}
     </SettingsGroup>
     <SettingsGroup id="vocs-account-catalog" title="Hub connections" icon="globe" description="Signing in grants no tools. Connecting a connection is a separate approval on the Hub; while connected, new agent sessions on this computer get its tools through a local proxy, and the Hub token never leaves Vocs Code.">
       {!connected ? <>

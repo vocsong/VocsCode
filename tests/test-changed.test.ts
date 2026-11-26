@@ -46,24 +46,23 @@ it('uses the branch diff for fallback, but still sees local toolchain edits', ()
     writeFileSync(file('.gitignore'), 'node_modules/\n');
 
     const affected = ['--changed', git('rev-parse', 'develop').toString().trim(), '--passWithNoTests'];
-    const excludeLive = ['--exclude', 'tests/smoke.remote-live.test.ts'];
-    expect(selected()).toEqual(['run', ...affected, ...excludeLive]);
-    expect(selected('--list', '--json')).toEqual(['list', '--filesOnly', ...affected, ...excludeLive, '--json']);
+    expect(selected()).toEqual(['run', ...affected]);
+    expect(selected('--list', '--json')).toEqual(['list', '--filesOnly', ...affected, '--json']);
 
     writeFileSync(file('package-lock.json'), '{"local":true}');
     git('add', 'package-lock.json');
     // Leave the working tree identical to the index so only the cached diff sees the edit.
     expect(git('ls-files', '--modified', '--', 'package-lock.json').toString()).toBe('');
-    expect(selected()).toEqual(['run', ...excludeLive]);
+    expect(selected()).toEqual(['run']);
     git('restore', '--source=HEAD', '--staged', '--worktree', '--', 'package-lock.json');
 
     writeFileSync(file('vitest.config.ts'), 'export default {};'); // Untracked config is also global.
-    expect(selected('--list')).toEqual(['list', '--filesOnly', ...excludeLive]);
+    expect(selected('--list')).toEqual(['list', '--filesOnly']);
     rmSync(file('vitest.config.ts'));
 
     git('mv', 'package-lock.json', 'renamed-lock.json');
     git('commit', '-m', 'Remove the lockfile from its expected path');
-    expect(selected()).toEqual(['run', ...excludeLive]);
+    expect(selected()).toEqual(['run']);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

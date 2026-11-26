@@ -663,7 +663,7 @@ export interface GraphEdge {
 /* Settings and app-facing views                                      */
 /* ------------------------------------------------------------------ */
 
-/** Used at both dispatch boundaries; these operations never originate from a paired client or agent. */
+/** Used at both dispatch boundaries; these operations never originate from an agent. */
 export function isIntelligenceOwnerRequest(channel: string, req: unknown): boolean {
   return channel.startsWith('intelligence:') || (channel === 'settings:update' && !!req && typeof req === 'object' && 'intelligence' in req);
 }

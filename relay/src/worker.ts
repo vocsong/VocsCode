@@ -1,4 +1,4 @@
-/** Vocs relay (docs/REMOTE-ACCESS.md): opaque e2e frames and tenant state live in one Hub Durable
+/** Vocs relay (docs/RELAY.md): opaque e2e frames and tenant state live in one Hub Durable
  *  Object per account. The landing signs Vocs account assertions; device ids carry a MACed
  *  routing hint, but every selected Hub still verifies the device's proof-of-possession token. */
 import type { RelayStorage, RelayStore } from './core';

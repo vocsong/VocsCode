@@ -5,7 +5,7 @@ import type { AppSettings, ModelInfo, SessionMeta } from '../src/shared/types';
 import { FAST_MODE_COST_WARNING } from '../src/shared/fast-mode';
 
 const { invoke, gate } = vi.hoisted(() => ({ invoke: vi.fn(), gate: { allowed: true } }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), canInvoke: () => gate.allowed, isMac: false, isWeb: false, platform: 'win32', modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), canInvoke: () => gate.allowed, isMac: false, platform: 'win32', modKey: 'Ctrl' }));
 
 import { NewSessionDialog } from '../src/renderer/src/components/NewSessionDialog';
 import { Composer } from '../src/renderer/src/components/Composer';

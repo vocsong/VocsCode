@@ -5,7 +5,6 @@ import path from 'node:path';
 import { z } from 'zod';
 import { MAX_HOUSEKEEP_RECENT_DAYS } from '../../shared/housekeep';
 import { PUSH_CHANNELS } from '../../shared/ipc';
-import { transcriptPage } from '../../shared/transcript-page';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from '../agent-files';
 import { Vesta } from '../agents';
 import { discoverChatImports } from '../chat-import';
@@ -129,10 +128,6 @@ export function registerSessionHandlers(ctx: HandlerContext): void {
 
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
-  handle('sessions:transcriptPage', async (req) => {
-    const { items, seq } = await sessions.transcriptSnapshot(req.id);
-    return { ...transcriptPage(items, req), seq };
-  });
 
   handle('subagents:list', ({ id }) => sessions.subagentRuns(id));
   handle('subagents:get', ({ id, runId }) => sessions.subagentRun(id, runId));

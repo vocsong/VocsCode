@@ -1,6 +1,6 @@
 /**
- * `SecretStore` ids that hold identity material (remote-access pairing, a kept Vocs sign-in, a Vocs
- * MCP Hub connection). They share the store with provider API keys, so they must never be reachable
+ * `SecretStore` ids that hold identity material (the relay identity and the retired relay enrollment
+ * secret, a kept Vocs sign-in, a Vocs MCP Hub connection). They share the store with provider API keys, so they must never be reachable
  * as a provider id: not written or cleared through `secrets:*`, and never read back as a provider's
  * API key.
  */

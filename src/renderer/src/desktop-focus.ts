@@ -1,15 +1,12 @@
-/** Reports the desktop's active session to main (docs/REMOTE-ACCESS.md §4), where it becomes
- *  `desktop:focus` and `push:desktopFocus` for paired browsers. Debounced so a fast session switch
- *  reports only where it settled. A browser never reports: it follows the desktop, and
- *  `desktop:setFocus` is not on the remote surface anyway. */
+/** Reports the desktop's active session to main, where it becomes `desktop:focus` and
+ *  `push:desktopFocus`. Debounced so a fast session switch reports only where it settled. */
 import { useEffect, useRef } from 'react';
-import { invoke, isWeb } from './api';
+import { invoke } from './api';
 import { useStore } from './store';
 
 export function useReportDesktopFocus(): void {
   const activeId = useStore((s) => s.activeId);
   useEffect(() => {
-    if (isWeb) return;
     const timer = setTimeout(() => {
       // Best-effort: a failed report must never surface as a toast in the middle of a switch.
       void invoke('desktop:setFocus', { sessionId: activeId }).catch(() => undefined);
@@ -45,7 +42,6 @@ export function useSessionViewing(): void {
   // marked; additions are debounced to where a fast switch settles.
   const reported = useRef<string[]>([]);
   useEffect(() => {
-    if (isWeb) return;
     const next = key ? key.split('\n') : [];
     // Best-effort: a failed report must never surface as a toast in the middle of a switch.
     const report = (sessionIds: string[]) => {
@@ -66,7 +62,7 @@ export function useSessionViewing(): void {
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const counted = useRef(new Set<string>());
   useEffect(() => {
-    const ids = isWeb || !windowFocused || !key ? [] : key.split('\n');
+    const ids = !windowFocused || !key ? [] : key.split('\n');
     for (const [id, timer] of timers.current) {
       if (ids.includes(id)) continue;
       clearTimeout(timer);

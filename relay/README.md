@@ -1,9 +1,18 @@
 # Vocs relay
 
-The routing service for Vocs Code remote access (see [docs/REMOTE-ACCESS.md](../docs/REMOTE-ACCESS.md)).
-A Cloudflare Worker + one Hub Durable Object per account. It routes opaque end-to-end-encrypted
-frames between paired desktops and web clients and holds the pairing registry. It can never
-read payload content — it sees routing metadata and ciphertext only.
+The service behind the desktop's relay connection (see [docs/RELAY.md](../docs/RELAY.md)).
+A Cloudflare Worker + one Hub Durable Object per account. It registers computers through Connect
+with Vocs, holds the device registry and access tokens, routes External MCP controller requests to
+a computer's host socket ([docs/CONTROL-MCP.md](../docs/CONTROL-MCP.md)), stores analytics
+snapshots for the dashboard ([docs/WEB-DASHBOARD.md](../docs/WEB-DASHBOARD.md)) and serves the
+dashboard at `/dashboard`.
+
+**Paired-browser access is retired on the desktop.** From the first release after v0.14.0,
+desktops no longer pair browsers, relay end-to-end encrypted browser sessions or upload transcript
+mirrors. The relay's pairing, mirror, `/v1/ws/client`, `/v1/ws/ticket`, `/v1/owner/hosts` and
+`/v1/owner/pair-request` routes, documented below, stay only because released desktops (v0.14.0
+and older) still call them; they are removed in a follow-up once those desktops are gone
+([docs/RELAY.md](../docs/RELAY.md#retired-paired-browser-access)).
 
 ## Deploy and recovery
 
@@ -12,9 +21,9 @@ that the installers are built from ([RELEASING.md](../docs/RELEASING.md#shipping
 it, so production always speaks the protocol of the released desktop. The protected GitHub
 environment `relay-production` holds `CLOUDFLARE_API_TOKEN` (an "Edit Cloudflare Workers" token
 limited to this account) and `CLOUDFLARE_ACCOUNT_ID`, admits release tags only, and waits for the
-owner's approval. The workflow checks the relay types and tests — including the full pairing flow
-against this checkout's Worker in local workerd — verifies the generated web bundle and dry-run,
-and fails loudly when credentials are absent. Redeploy a release with
+owner's approval. The workflow checks the relay types and tests — including the controller route
+against this checkout's Worker in local workerd — builds the dashboard bundle, dry-runs, and fails
+loudly when credentials are absent. Redeploy a release with
 `gh workflow run deploy-relay.yml --ref vX.Y.Z`. Tag pushes and redeploys alike first pass the
 [release tag gate](../docs/RELEASING.md#release-tag-gate): the tag's commit must be on `master` with
 a green CI run. It does **not** create or rotate `ENROLL_TOKEN`.
@@ -24,9 +33,9 @@ For a manual deploy or recovery (run from a release tag's checkout, not an unmer
 ```bash
 npm ci --include=dev
 npm run typecheck:relay && npm run typecheck:relay-test
-npx vitest run tests/relay-core.test.ts tests/relay-routes.test.ts tests/relay-edge.test.ts tests/remote-e2e.test.ts tests/remote-mirror.test.ts tests/remote-host-lifecycle.test.ts tests/web-client.test.ts tests/browser-socket.test.ts tests/web-transport.test.ts tests/web-router.test.ts tests/web-shell.test.tsx tests/remote-workerd.test.ts
+npx vitest run tests/relay-core.test.ts tests/relay-routes.test.ts tests/relay-edge.test.ts tests/remote-host-lifecycle.test.ts tests/control-relay.test.ts tests/browser-socket.test.ts tests/web-router.test.ts tests/web-dashboard.test.tsx tests/relay-analytics.test.ts tests/control-relay-workerd.test.ts
 npm run test:relay-do  # real workerd/Hub sockets and storage
-npm run build:web && test -f public/app/index.html  # the shell is built, not committed
+npm run build:web && test -f relay/public/dashboard/index.html  # the dashboard is built, not committed
 cd relay
 npx wrangler deploy --dry-run  # validate before touching production
 npx wrangler deploy
@@ -40,8 +49,8 @@ before redeploying.
 A relay protocol change reaches production with the release that carries the matching desktop,
 because the deploy runs from the release tag. The proof-of-possession protocol (#407) is not
 backward compatible: it went live on 2026-09-25, ahead of a release, and desktops older than it
-cannot connect until they run the new code. They keep their pairings, because their old device
-token is now their refresh credential; a browser simply reloads the page.
+cannot connect until they run the new code. They keep their registration, because their old
+device token is now their refresh credential.
 
 The rate limits in `wrangler.jsonc` (`ratelimits`, namespaces 4101–4105) are Workers Rate Limiting
 bindings: checked at the edge before a request can wake the Hub, per Cloudflare location, eventually
@@ -80,25 +89,26 @@ The Hub keeps its own in-memory per-caller limits, counting callers the same way
 credential. The controller endpoint (`/v1/control/mcp`, disabled in production) is rate limited here
 and bounds its own body. Edge limits are counted per Cloudflare location.
 
-The landing Worker at `code.vocs.io` forwards `/app` and `/v1` (REST and WebSockets under
-`/v1/ws/*`) through a service binding. It is a **separate repo and deployment** (`vocs.io`:
-`npm run deploy:code`); a relay deployment does not update the landing Worker. The landing's GitHub
-gate is live. This relay change adds one Hub DO per allowlisted GitHub subject, verifies its
-short-lived account assertions, and sets `workers_dev: false` so browser requests cannot bypass the
-gate. Deploy the relay first, then deploy the landing Worker with the same `ACCOUNT_ASSERTION_SECRET`;
-never enable additional logins between those deployments. After any deploy, run the HTTP checklist in
-`docs/REMOTE-ACCESS-ROADMAP.md` Appendix A and the opt-in live smoke.
+The landing Worker at `code.vocs.io` forwards `/dashboard`, `/app` and `/v1` (REST and WebSockets
+under `/v1/ws/*`) through a service binding. It is a **separate repo and deployment** (`vocs.io`:
+`npm run deploy:code`); a relay deployment does not update the landing Worker. The landing's login
+gate is live. The relay keeps one Hub DO per account, verifies the landing's short-lived account
+assertions, and sets `workers_dev: false` so browser requests cannot bypass the gate. Deploy the
+relay first, then deploy the landing Worker with the same `ACCOUNT_ASSERTION_SECRET`; never enable
+additional logins between those deployments. After any deploy, run the
+[live verification checklist](../docs/RELAY.md#live-verification).
 
 ## Enrollment secret
 
 `ENROLL_TOKEN` is the legacy/manual enrollment capability for the incumbent `vocs-v1` account and
 is also the landing Worker's service credential for owner routes. On `/v1/owner/*`, the relay now
 requires both that credential and a valid account assertion from the landing; the assertion scopes
-computer list, enrollment grant and browser pair request to the signed-in GitHub subject. New GitHub
-accounts enroll via **Connect with Vocs**; they must not be given the incumbent's manual secret.
-An enrolled desktop starts every later pairing with its own device credential, so rotating the legacy
-secret leaves paired devices working. Rotation does not revoke devices; to cut off a lost or
-compromised device use Revoke (or Settings → Remote access → Revoke all, the kill switch).
+computer list, enrollment grant and browser pair request to the signed-in account. Desktops from
+this version on never use the secret: they register only through **Connect with Vocs**. New
+accounts must not be given the incumbent's manual secret. A registered desktop uses its own device
+credential, so rotating the legacy secret leaves registered computers working. Rotation does not
+revoke devices; to cut off a lost or compromised device use Remove (or Settings → MCP control →
+Remove all, the kill switch).
 
 To rotate the **legacy enrollment secret**:
 
@@ -109,12 +119,11 @@ To rotate the **legacy enrollment secret**:
    answer 403.
 3. In the vocs.io repo, run `npx wrangler secret put RELAY_ENROLL_TOKEN -c code/wrangler.jsonc` with
    the same value; owner routes will refuse requests if the copies differ.
-4. Only legacy `vocs-v1` desktops that have **never** paired need the enrollment secret, and only
-   where sign-in is unavailable. New GitHub accounts use Connect with Vocs, which binds enrollment
-   to their own account; the Settings fallback is hidden when the gate is available.
-5. A desktop the relay no longer recognizes (revoked, or pointed at a different relay) may need the
-   current legacy value to re-enroll. Start one pairing, then let the code expire or deny it, and
-   confirm no temporary device remains in the device list.
+4. Only released desktops (v0.14.0 and older) on the legacy `vocs-v1` account that have **never**
+   paired could use the enrollment secret, and only where sign-in was unavailable. Current desktops
+   have no field for it and use Connect with Vocs, which binds enrollment to their own account.
+5. A desktop the relay no longer recognizes (revoked, or pointed at a different relay) registers
+   again with Connect with Vocs. Confirm no temporary device remains in the device list.
 
 ## Account routing secrets
 
@@ -132,15 +141,21 @@ new device ids so arbitrary account names cannot create Durable Objects. Provisi
 without a versioned device-id migration makes existing non-legacy device ids unroutable. It is not
 an account credential and never leaves the relay.
 
-If a legacy enrollment-secret rollout goes wrong, re-enter the new value on the affected desktop;
-do not roll back to a value suspected of compromise. A Worker code rollback does not restore an old
+If a legacy enrollment-secret rollout goes wrong, re-enter the new value on the affected released
+desktop (or update it and use Connect with Vocs); do not roll back to a value suspected of
+compromise. A Worker code rollback does not restore an old
 secret.
 
 ## Layout
 
 - `src/account.ts` — signed landing assertions and MACed tenant-routing hints (Cloudflare-free, unit-tested)
-- `src/core.ts` — pairing state machine, device registry, refresh and access tokens, the offline
-  mirror catalogue (storage-agnostic, unit-tested)
+- `src/core.ts` — facade over the device registry, refresh and access tokens (`devices.ts`),
+  Connect with Vocs enrollment (`enrollment.ts`), and the legacy pairing state machine and offline
+  mirror catalogue (`pairing.ts`, `mirror-store.ts`) (storage-agnostic, unit-tested)
+- `src/analytics.ts` — dashboard analytics snapshots: part and manifest storage, owner reads
+- `src/control-auth.ts`, `src/control-host.ts`, `src/control-mcp.ts` — the External MCP controller
+  route: controller assertions, RPC over authenticated host sockets, and the stateless MCP server
+- `src/legacy-app.ts` — the `/app*` → `/dashboard*` redirect released desktops' Connect links need
 - `src/routes.ts` — the deny-by-default HTTP route table and its account/device authentication (Cloudflare-free, unit-tested)
 - `src/hub.ts` — frame routing between desktops and browsers, shared by the Durable Object and the
   test relay (`tests/fake-relay.ts`) so local suites run the production rules
@@ -148,10 +163,10 @@ secret.
 - `src/rate.ts` — in-memory fixed-window rate limiter inside the Hub, and how both limiters key a caller
 - `src/entry.ts` — deployed exports and the optional [binding-only MCP discovery entrypoint](../docs/CONTROL-MCP.md#mcp-hub-discovery-preview-for-dots-and-muse)
 - `src/worker.ts` — the public Worker, per-account Hub Durable Object and short-lived EnrollmentDirectory (platform glue)
-- `src/web-client.ts` — the browser-side pairing, tokens, vault and e2e transport (DOM-free, unit-tested)
-- `src/page.ts` — the web page logic (bundled to `app/app.js` via `npm run relay:page` at the repo root)
-- `public/app/` — the static web client, served at `/app` (pairing, computer switcher, sessions,
-  transcripts, approvals, a live terminal)
+- `src/web-client.ts` — the retired browser client's pairing, tokens, vault and e2e transport, kept
+  as a test client for the legacy browser routes (DOM-free)
+- `public/dashboard/` — the analytics dashboard built from `src/web` by `npm run build:web` at the
+  repo root (gitignored), served at `/dashboard`; `public/_headers` sets its CSP
 
 ## Local development
 

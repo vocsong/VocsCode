@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import type { KnowledgeUsageVote } from '../../../../shared/knowledge-usage';
-import { canInvoke, invoke, isWeb } from '../../api';
+import { canInvoke, invoke } from '../../api';
 import { Button } from '../ui';
 import { InlineError } from './controls';
 import { errorMessage, useScopeGuard } from './useIntelligence';
@@ -51,7 +51,7 @@ export function LookupFeedback({ sessionId, receipt, label, initialVote, disable
     }
   };
 
-  if (isWeb || !canInvoke('intelligence:usage:vote')) return null;
+  if (!canInvoke('intelligence:usage:vote')) return null;
   return (
     <div className="knowledge-lookup-feedback" role="group" aria-labelledby={labelId}>
       <div className="intelligence-row">

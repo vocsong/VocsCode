@@ -377,12 +377,6 @@
   padding: 60px 0;
   text-align: center;
 }
-/* "Load earlier" at the head of a paged transcript; hidden entirely on the desktop. */
-.transcript-more {
-  display: flex;
-  justify-content: center;
-  padding: 8px 0 4px;
-}
 .working {
   display: flex;
   align-items: center;
@@ -1062,17 +1056,6 @@
   cursor: text;
   text-decoration: none;
 }
-/* A host that cannot open files (the paired browser) shows file names as plain code. */
-.transcript.no-file-links .file-ref {
-  cursor: text;
-  border-bottom: none;
-}
-.transcript.no-file-links a.file-ref {
-  color: inherit;
-}
-.transcript.no-file-links .file-ref:hover {
-  color: inherit;
-}
 .md pre {
   overflow-x: auto;
 }
@@ -1607,10 +1590,6 @@
 .approval-actions .approval-opt.opt-deny:hover,
 .approval-actions .approval-opt.opt-deny_always:hover {
   background: var(--red-soft);
-}
-/* A client that cannot answer: says where the decision has to be made instead of showing buttons. */
-.approval-remote {
-  padding: 4px 0 2px;
 }
 .approval-field {
   display: flex;

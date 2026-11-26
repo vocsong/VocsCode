@@ -14,7 +14,7 @@ import { Stamp } from './shared';
 
 export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem, { kind: 'approval' }>; sessionId: string }) {
   const req = item.request;
-  // A view-only or browser client cannot answer: it says where the decision has to be made.
+  // A transport that would refuse the answer gets a read-only card.
   const canRespond = useCanInvoke('approvals:respond');
   const toast = useStore((s) => s.toast);
   const [note, setNote] = useState('');
@@ -217,7 +217,6 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
           {responseState !== 'idle' && <span className="muted small" role="status">{responseState === 'sending' ? 'Sending response…' : 'Response sent'}</span>}
         </div>
       )}
-      {!decided && !canRespond && <div className="approval-remote muted small">Decide on your computer</div>}
     </div>
   );
 }

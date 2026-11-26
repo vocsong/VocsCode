@@ -57,16 +57,6 @@ export interface Toast {
   text: string;
 }
 
-/** What a host shell asks of the shared store (web shells configure it before mounting). */
-export interface StoreOptions {
-  /** Load transcripts tail-first from `sessions:transcriptPage`, with a sequence floor. */
-  pagedTranscripts?: boolean;
-  /** Skip the deferred availability probe at boot (a browser cannot install harnesses). */
-  probeAvailabilityOnBoot?: boolean;
-  /** Leave the first session unopened at boot (a web shell routes to its own default). */
-  openFirstSessionOnBoot?: boolean;
-}
-
 /** How many sent prompts a session's ArrowUp history keeps. */
 export const COMPOSER_HISTORY_LIMIT = 50;
 /** Stable stand-in for a session with no history yet — selectors must not build a fresh array per render. */
@@ -86,10 +76,6 @@ export interface State {
   loaded: Record<string, boolean>;
   /** Last transcript load failure per session; the transcript pane offers a retry instead of spinning forever. */
   transcriptErrors: Record<string, string>;
-  /** Event floor per session: events at or below it are already in the loaded window (web shells). */
-  transcriptFloors: Record<string, number>;
-  /** First item index of each paged transcript; greater than zero means earlier items exist. */
-  transcriptStarts: Record<string, number>;
   models: Record<string, ModelInfo[]>;
   /** Per-harness catalog shared by New Session, settings and existing session model pickers. */
   modelCatalog: Partial<Record<HarnessId, ModelCatalogEntry>>;
@@ -173,7 +159,7 @@ export interface State {
   showThinking: boolean;
   /** Vesta's transcript, mirrored from the main process. */
   agent: AgentState;
-  /** In-app auto-update state (issue #198); idle (never transitions) in dev and web builds. */
+  /** In-app auto-update state (issue #198); idle (never transitions) in dev builds. */
   updateState: UpdateState;
   /** Tracked process counts, pushed as they change, for the Processes tab badge. */
   processSummary: ProcessSummary | null;
@@ -181,8 +167,6 @@ export interface State {
   desktopFocus: DesktopFocus | null;
   /** The sessions in the panes actually on screen (SessionPanes); empty while another view hides them. */
   visibleSessionIds: string[];
-  /** The host's remote policy, pushed over the e2e session; view-only gates write controls. */
-  remoteAccess: { viewOnly: boolean };
   /** Text another part of the UI wants Vesta's composer to start from. */
   agentPrefill: { text: string; nonce: number } | null;
   toasts: Toast[];
@@ -204,8 +188,6 @@ export interface State {
   resizePanes(sizes: number[]): void;
   /** `force` reloads a transcript that is already marked loaded (resync); items stay until it lands. */
   loadTranscript(id: string, force?: boolean): Promise<void>;
-  /** Prepends the page before a paged transcript's first item (web shells). */
-  loadEarlier(id: string): Promise<void>;
   /** Re-reads the list, settings and focus, then replaces the active transcript window. */
   resync(): Promise<void>;
   /** Clears per-host state on a computer switch; push subscriptions stay in place. */
@@ -298,10 +280,6 @@ export interface StoreRuntime {
   bootInFlight: Promise<void> | null;
   /** Share transcript reads; removing an entry also invalidates its delayed response. */
   transcriptLoads: Map<string, Promise<void>>;
-  /** Share the "load earlier" reads of a paged transcript, keyed by session. */
-  transcriptEarlier: Map<string, Promise<void>>;
-  /** Events that arrived while a page was in flight; replayed once the page's floor is known. */
-  bufferedEvents: Map<string, SessionEventEnvelope[]>;
   /** Bumped by reset(): in-flight reads from the previous host must not write into the new one. */
   storeGeneration: number;
   /** The deferred boot-time availability probe; a second boot must not stack a second timer. */
