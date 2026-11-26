@@ -77,6 +77,11 @@ interface Registry {
 
 /** Windows console hosts: one per console program, gone with it. Tracked, never listed. */
 const CONSOLE_HOSTS = new Set(['conhost.exe', 'openconsole.exe']);
+/** Core Windows processes are not app work, even if their creation time is readable. */
+const WINDOWS_SYSTEM_IMAGES = new Set([
+  'system', 'secure system', 'registry', 'memory compression',
+  'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe', 'lsass.exe', 'lsm.exe'
+]);
 /** A list answered this recently is current enough for a polling panel. */
 const FRESH_MS = 1_500;
 /** An unbound claim whose process never showed up is dropped after this. */
@@ -98,7 +103,8 @@ export class ProcessTracker {
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private soonTimer: ReturnType<typeof setTimeout> | null = null;
   private stopObserving: (() => void) | null = null;
-  private savedSignature = '';
+  /** Undefined until the live list is saved, even if it is empty and replaces an old registry. */
+  private savedSignature?: string;
   /** Processes the reader refused to put into a Job (another user's, elevated); not retried. */
   private readonly unadoptable = new Set<string>();
   private loaded: Promise<void> | null = null;
@@ -346,6 +352,7 @@ export class ProcessTracker {
   private classify(raw: RawProcess[], at: number, members: Map<string, number[]> = new Map()): Map<string, TrackedProcess> {
     const byKey = new Map(raw.map((p) => [processKey(p), p]));
     const children = childMap(raw);
+    const windows = (this.opts.platform ?? process.platform) === 'win32';
     const internal = new Set([this.opts.rootPid, ...(this.opts.internalPids?.() ?? [])]);
     if (this.opts.source.helperPid) internal.add(this.opts.source.helperPid);
     const terminals = new Map<number, ProcessOwner>();
@@ -358,7 +365,7 @@ export class ProcessTracker {
 
     const ownerOf = (p: RawProcess, inherited: ProcessOwner): ProcessOwner => {
       const claim = this.claims.get(p.pid);
-      if (claim && (claim.startedAt === undefined ? !p.startedAt || p.startedAt <= claim.at + CLOCK_SLACK_MS : claim.startedAt === p.startedAt)) {
+      if (claim && (claim.startedAt === undefined ? p.startedAt <= claim.at + CLOCK_SLACK_MS : claim.startedAt === p.startedAt)) {
         claim.startedAt = p.startedAt;
         return claim.owner;
       }
@@ -368,6 +375,9 @@ export class ProcessTracker {
       const queue: [RawProcess, ProcessOwner][] = [[start, owner]];
       while (queue.length) {
         const [p, inherited] = queue.shift()!;
+        // All attribution paths converge here. Unreadable rows cannot own a subtree, enter
+        // a session's Job through sampling, or enter the tracked set used for ending processes.
+        if (!hasCreationTime(p) || (windows && WINDOWS_SYSTEM_IMAGES.has(p.name.toLowerCase()))) continue;
         const key = processKey(p);
         if (visited.has(key)) continue;
         visited.add(key);
@@ -384,8 +394,8 @@ export class ProcessTracker {
       }
     };
 
-    const root = raw.find((p) => p.pid === this.opts.rootPid) ?? { pid: this.opts.rootPid, ppid: 0, startedAt: 0, cpuMs: 0, memory: 0, name: '' };
-    walk(root, {}, {}, false);
+    const root = raw.find((p) => p.pid === this.opts.rootPid);
+    if (root) walk(root, {}, {}, false);
     // A terminal's shell is the app's whatever the pseudo-console made its parent; the terminal
     // manager holds it open right now, so its PID cannot have been reused.
     for (const [pid, owner] of terminals) {
@@ -411,13 +421,14 @@ export class ProcessTracker {
       walk(live, prev.owner, { orphaned: true, previousRun: prev.previousRun }, true);
     }
     // Started since the last sample by a tracked process that has died since: still the app's.
+    // An occupied PID with an unreadable creation time is not evidence that its parent died.
     const dead = new Map<number, TrackedProcess>();
-    for (const [key, prev] of this.known) if (!byKey.has(key) && !prev.previousRun) dead.set(prev.pid, prev);
+    for (const prev of this.known.values()) if (!livePids.has(prev.pid) && !prev.previousRun) dead.set(prev.pid, prev);
     if (dead.size) {
       for (const p of raw) {
         const parent = dead.get(p.ppid);
         const key = processKey(p);
-        if (!parent || visited.has(key) || internal.has(p.pid) || !p.startedAt) continue;
+        if (!parent || visited.has(key) || internal.has(p.pid) || !hasCreationTime(p)) continue;
         if (p.startedAt < parent.startedAt || p.startedAt < this.knownAt - CLOCK_SLACK_MS || p.startedAt > at + CLOCK_SLACK_MS) continue;
         walk(p, withoutLabel(parent.owner), { orphaned: true }, true);
       }
@@ -463,7 +474,7 @@ export class ProcessTracker {
     };
     void writeJson(file, registry).catch((e) => {
       // Forget what was saved, so the next sample writes again instead of trusting a failed write.
-      if (this.savedSignature === signature) this.savedSignature = '';
+      if (this.savedSignature === signature) this.savedSignature = undefined;
       this.opts.log?.('warn', `processes: could not save the process list (${e instanceof Error ? e.message : String(e)})`);
     });
   }
@@ -484,7 +495,11 @@ function childMap(raw: RawProcess[]): Map<number, RawProcess[]> {
   return children;
 }
 
-/** A child cannot predate its parent; one that does names a reused PID, not this parent. */
+function hasCreationTime(process: RawProcess): boolean {
+  return Number.isSafeInteger(process.startedAt) && process.startedAt > 0;
+}
+
+/** A child cannot predate its parent. An unreadable timestamp cannot establish either identity. */
 function startedUnder(child: RawProcess, parent: RawProcess): boolean {
-  return child.pid !== parent.pid && (!child.startedAt || !parent.startedAt || child.startedAt >= parent.startedAt);
+  return child.pid !== parent.pid && hasCreationTime(child) && hasCreationTime(parent) && child.startedAt >= parent.startedAt;
 }

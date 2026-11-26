@@ -162,6 +162,75 @@ describe('process tracker', () => {
     expect((await tracker().list()).processes).toEqual([]);
   });
 
+  it('never lists, retains, adopts, or ends a process whose creation time could not be read', async () => {
+    const jobs = new JobSource([
+      ...source.table,
+      proc(2000, APP, T0 - 30_000, 'claude.exe'),
+      proc(2001, 2000, 0, 'unreadable.exe'),
+      proc(2002, 2001, T0 - 120_000, 'unrelated.exe'),
+      proc(2003, 2000, T0 - 20_000, 'node.exe'),
+      proc(3000, 2500, 0, 'unreadable-job-member.exe')
+    ]);
+    jobs.members.set('s1', new Set([3000]));
+    const t = tracker({ source: jobs });
+    t.claim(2000, { sessionId: 's1' });
+    expect((await t.list()).processes.map((p) => p.pid)).toEqual([2000, 2003]);
+    expect(jobs.calls.flatMap(([, targets]) => targets.map((target) => target.pid))).toEqual([2000, 2003]);
+
+    jobs.table = jobs.table.filter((p) => p.pid !== 2000);
+    clock += 2_000;
+    expect((await t.refresh()).processes.map((p) => p.pid)).toEqual([2003]);
+    expect(summaries.at(-1)).toEqual({
+      count: 1,
+      orphaned: 1,
+      bySession: { s1: [expect.objectContaining({ pid: 2003, detached: true })] }
+    });
+    expect(await t.end([{ pid: 2001, startedAt: 0 }, { pid: 3000, startedAt: 0 }])).toMatchObject({
+      ended: 0,
+      failed: [{ pid: 2001 }, { pid: 3000 }]
+    });
+    expect(signals).toEqual([]);
+  });
+
+  it('does not infer orphan ownership when a sampled parent loses its creation time', async () => {
+    source.table.push(proc(2000, APP, T0 - 30_000, 'claude.exe'));
+    const t = tracker();
+    t.claim(2000, { sessionId: 's1' });
+    expect((await t.list()).processes.map((p) => p.pid)).toEqual([2000]);
+
+    source.table.find((p) => p.pid === 2000)!.startedAt = 0;
+    source.table.push(proc(2001, 2000, T0 + 1_000, 'other.exe'));
+    clock += 2_000;
+    expect((await t.refresh()).processes).toEqual([]);
+    expect(summaries.at(-1)).toEqual({ count: 0, orphaned: 0 });
+  });
+
+  it.each(['missing', 'unreadable'])('does not infer children when the app identity is %s', async (root) => {
+    source.table = source.table.filter((p) => p.pid !== APP);
+    if (root === 'unreadable') source.table.push(proc(APP, 900, 0, 'Vocs Code.exe'));
+    source.table.push(proc(2000, APP, T0 - 120_000, 'other.exe'));
+    expect((await tracker().list()).processes).toEqual([]);
+  });
+
+  it('excludes Windows system processes even when creation times are visible or recorded', async () => {
+    const osLogon = proc(5000, 4000, T0 - 120_000, 'WINLOGON.EXE');
+    await fs.writeFile(path.join(dir, 'processes.json'), JSON.stringify({
+      version: 1, savedAt: T0, processes: [{ ...osLogon, owner: { sessionId: 's1' } }]
+    }));
+    const jobs = new JobSource([...source.table, osLogon, proc(5001, APP, T0 - 30_000, 'Csrss.exe')]);
+    const t = tracker({ source: jobs });
+    expect((await t.list()).processes).toEqual([]);
+    expect(summaries.at(-1)).toEqual({ count: 0, orphaned: 0 });
+    expect(jobs.calls).toEqual([]);
+    expect(await t.end([{ pid: 5000, startedAt: osLogon.startedAt }, { pid: 5001, startedAt: T0 - 30_000 }])).toMatchObject({
+      ended: 0,
+      failed: [{ pid: 5000 }, { pid: 5001 }]
+    });
+    expect(signals).toEqual([]);
+    await Promise.all(registryWrites);
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'processes.json'), 'utf8')).processes).toEqual([]);
+  });
+
   it('attributes a terminal tab\'s shell and what runs in it to that tab\'s session', async () => {
     source.table.push(proc(7000, APP, T0 - 10_000, 'powershell.exe'), proc(7001, 7000, T0 - 5_000, 'node.exe'));
     const t = tracker({ terminalRoots: () => [{ pid: 7000, sessionId: 's2', terminalId: 't1', title: 'PowerShell' }] });
