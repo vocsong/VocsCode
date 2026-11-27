@@ -1123,6 +1123,40 @@
   font-size: var(--code-size);
   line-height: 1.55;
 }
+/* A Mermaid block drawn as a diagram (mermaid-diagrams.ts): the source stays behind the Code view. */
+.codeblock-view,
+.codeblock-note {
+  margin-left: auto;
+}
+.codeblock-note {
+  margin-right: 6px;
+  color: var(--amber);
+}
+.codeblock[data-view='diagram'] > pre,
+.codeblock[data-view='code'] > .codeblock-diagram {
+  display: none;
+}
+.codeblock-diagram {
+  padding: 14px;
+  overflow-x: auto;
+  text-align: center;
+  /* Mermaid sizes each label box by measuring its text in <body>. Text rules inherited from the
+     Markdown around the block (break-anywhere wrapping above all) would lay the label out
+     differently inside that box and clip it. */
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: manual;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-transform: none;
+  text-indent: 0;
+  font-style: normal;
+  font-weight: 400;
+}
+.codeblock-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
 .thinking {
   margin: 2px 0 6px;
 }

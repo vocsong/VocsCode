@@ -26,7 +26,8 @@ export function search(root: HTMLElement, query: string): Match[] {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(n) {
       const p = n.parentElement;
-      if (!p || p.closest('script, style, textarea, .find-bar, .stamp')) return NodeFilter.FILTER_REJECT;
+      // A drawn Mermaid block keeps its source next to the diagram; only the view on screen counts.
+      if (!p || p.closest(`script, style, textarea, .find-bar, .stamp, .codeblock[data-view='diagram'] > pre, .codeblock[data-view='code'] > .codeblock-diagram`)) return NodeFilter.FILTER_REJECT;
       return n.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
     },
   });

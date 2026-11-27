@@ -437,4 +437,135 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     expect(landedStandard).toBeLessThanOrEqual(60);
     await win.screenshot({ path: path.join(shots, 'transcript-08-pinned-standard-jumped.png') });
   }, 120_000);
+
+  it('draws a mermaid block as a diagram, keeps its source a click away, and leaves a broken one as code', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-mermaid-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { theme: 'light', windowBounds: { width: 1280, height: 860 } }));
+
+    const sid = 's_mermaid_e2e';
+    const session: SessionMeta = {
+      id: sid,
+      title: 'Mermaid diagram',
+      createdAt: T,
+      updatedAt: T,
+      config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
+      cwd: project,
+      status: 'idle',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 1 }
+    };
+    const flow = [
+      'flowchart TD',
+      '    Admin["Admin / Superadmin<br/>(Complete / Emergency / Nightly Retirement)"] --> Mongo["MongoDB `models`<br/>lifecycleStatus = RETIRED"]',
+      '    Mongo --> NewKeys["New Keys & /api/models<br/>(immediately excluded)"]',
+      '',
+      '    subgraph L1["Layer 1: Immediate Enforcement (Portal Writes Virtual Keys)"]',
+      '        Runner["executeLifecycleRun()"]',
+      '        Runner --> ProdVK["Prod Bifrost<br/>PUT /api/governance/virtual-keys/{id}"]',
+      '        ProdVK --> EnfState["lifecycle.enforcement<br/>(COMPLETE / INCOMPLETE)"]',
+      '    end',
+      '',
+      '    Mongo --> Runner'
+    ].join('\n');
+    const text = [
+      'Retirement runs in two layers:',
+      '```mermaid',
+      flow,
+      '```',
+      'A diagram that does not parse stays readable:',
+      '```mermaid',
+      'flowchart TD',
+      '    Broken -->',
+      '```'
+    ].join('\n');
+    const items: TranscriptItem[] = [
+      { id: 'u1', kind: 'user', ts: T, text: 'Draw the retirement flow.' },
+      { id: 'a1', kind: 'assistant', ts: T + 1, text },
+      { id: 't1', kind: 'turn', ts: T + 2, status: 'completed', durationMs: 4000 }
+    ];
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+    await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
+    await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
+
+    await app?.close().catch(() => undefined);
+    const packaged = process.env.HARNESS_E2E_EXE;
+    app = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+      env: isolatedEnv(userData),
+      timeout: 60_000
+    });
+    const win: Page = await app.firstWindow();
+    // Mermaid styles its SVG inline and loads as a separate chunk: neither may trip the page's CSP.
+    const blocked: string[] = [];
+    win.on('console', (message) => {
+      if (/Content Security Policy/i.test(message.text())) blocked.push(message.text());
+    });
+    await win.waitForSelector('.brand', { timeout: 60_000 });
+    await expectQuietWindow(app);
+    await fs.mkdir(shots, { recursive: true });
+
+    const blocks = win.locator('.msg-assistant .codeblock');
+    const drawn = blocks.nth(0);
+    await win.locator('.msg-assistant .codeblock[data-diagram="rendered"]').waitFor({ timeout: 30_000 });
+    expect(await blocks.count()).toBe(2);
+    expect(await drawn.getAttribute('data-diagram')).toBe('rendered');
+
+    // A real drawing: every node and the subgraph title are laid out, and the source is hidden.
+    const svg = drawn.locator('.codeblock-diagram svg');
+    for (const label of ['executeLifecycleRun()', 'lifecycleStatus = RETIRED', 'Layer 1: Immediate Enforcement (Portal Writes Virtual Keys)']) {
+      await svg.getByText(label).first().waitFor({ state: 'visible', timeout: 10_000 });
+    }
+    expect(await svg.locator('g.node').count()).toBe(6);
+    const size = await svg.boundingBox();
+    expect(size!.width).toBeGreaterThan(300);
+    expect(size!.height).toBeGreaterThan(200);
+    // It fits the message column instead of spilling out of it.
+    const column = await drawn.boundingBox();
+    expect(size!.x).toBeGreaterThanOrEqual(column!.x);
+    expect(size!.x + size!.width).toBeLessThanOrEqual(column!.x + column!.width);
+    expect(await drawn.locator('pre').isVisible()).toBe(false);
+    // Mermaid sized every label box from its own measurement; the transcript's text rules must not
+    // re-wrap a label inside it, or the box clips the text.
+    const clipped = await svg.locator('foreignObject').evaluateAll((boxes) => boxes.flatMap((box) => {
+      const outer = box.getBoundingClientRect();
+      const inner = box.firstElementChild?.getBoundingClientRect();
+      return inner && (inner.width > outer.width + 1 || inner.height > outer.height + 1) ? [box.textContent] : [];
+    }));
+    expect(clipped).toEqual([]);
+    // Painted from the app's palette, not Mermaid's stock colors.
+    const nodeFill = () => svg.locator('g.node rect, g.node path').first().evaluate((el) => getComputedStyle(el).fill);
+    const lightFill = await nodeFill();
+    expect(lightFill).toBe('rgb(255, 255, 255)');
+    await win.screenshot({ path: path.join(shots, 'transcript-09-mermaid-diagram.png') });
+
+    // The source is one click away, and back.
+    const toggle = drawn.getByRole('button', { name: 'Code', exact: true });
+    await toggle.click();
+    await drawn.locator('pre').waitFor({ state: 'visible' });
+    expect(await drawn.locator('pre').innerText()).toContain('Mongo --> Runner');
+    expect(await svg.isVisible()).toBe(false);
+    await drawn.getByRole('button', { name: 'Diagram', exact: true }).click();
+    await svg.waitFor({ state: 'visible' });
+
+    // A diagram that does not parse stays a code block with a note; nothing is left on the page.
+    const broken = blocks.nth(1);
+    await expect.poll(() => broken.getAttribute('data-diagram'), { timeout: 10_000 }).toBe('error');
+    expect(await broken.locator('.codeblock-note').innerText()).toBe('Diagram could not be drawn');
+    expect(await broken.locator('pre').innerText()).toContain('Broken -->');
+    expect(await broken.locator('.codeblock-diagram').count()).toBe(0);
+    expect(await win.locator('body > [id^="dvocs-mermaid"], body > [id^="vocs-mermaid"]').count()).toBe(0);
+
+    // Switching to dark redraws the diagram in the dark palette.
+    await win.evaluate(() => document.documentElement.setAttribute('data-scheme', 'dark'));
+    await expect.poll(nodeFill, { timeout: 10_000 }).not.toBe(lightFill);
+    await svg.getByText('executeLifecycleRun()').first().waitFor({ state: 'visible', timeout: 10_000 });
+    await win.screenshot({ path: path.join(shots, 'transcript-10-mermaid-dark.png') });
+
+    expect(blocked).toEqual([]);
+  }, 120_000);
 });
