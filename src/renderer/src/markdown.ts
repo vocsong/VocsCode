@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify';
 import { Marked, Renderer, type RendererObject, type Tokens } from 'marked';
 import { joinRelative, parseFileLink, parseFileRef, type FileRef } from './file-refs';
 import { isWeb } from './api';
+import { installMermaidDiagrams } from './mermaid-diagrams';
 
 const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -171,7 +172,7 @@ export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
  * Delegated handlers for copy buttons, file references and links inside rendered markdown.
  * Every anchor click is intercepted: http(s) links open in the system browser, file references go
  * to `openFile` when the caller supplied one, and anything else is ignored so the app window never
- * navigates away from the renderer page.
+ * navigates away from the renderer page. Mermaid code blocks under `root` are drawn as diagrams.
  */
 export function installMarkdownHandlers(root: HTMLElement, openExternal: (url: string) => void, openFile?: (path: string, line?: number) => void): () => void {
   const activate = (el: HTMLElement | null): boolean => {
@@ -222,7 +223,9 @@ export function installMarkdownHandlers(root: HTMLElement, openExternal: (url: s
   root.addEventListener('click', onClick);
   root.addEventListener('auxclick', onAuxClick);
   if (openFile) root.addEventListener('keydown', onKeyDown);
+  const stopDiagrams = installMermaidDiagrams(root);
   return () => {
+    stopDiagrams();
     root.removeEventListener('click', onClick);
     root.removeEventListener('auxclick', onAuxClick);
     root.removeEventListener('keydown', onKeyDown);
