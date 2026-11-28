@@ -1,5 +1,5 @@
-/** Skills page: browses and manages each harness's global skills (SKILL.md folders). */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+/** Skills page: the local shared library and the separate native / built-in skills. */
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { SkillHarness, SkillInfo, SkillRootInfo } from '../../../shared/types';
 import { HOUSEKEEP_SKILL } from '../../../shared/built-in-skills';
 import { canHousekeepHere, openHousekeep } from '../housekeep';
@@ -7,7 +7,11 @@ import { invoke } from '../api';
 import { basename, relTime } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
+import { SharedSkillsView } from './SharedSkillsView';
 import { askConfirm, Badge, Button, Dropdown, EmptyState, Field, Icon, MenuItem, Modal, Spinner } from './ui';
+
+const LIBRARIES = [{ id: 'shared', label: 'Shared' }, { id: 'native', label: 'Native & built-in' }] as const;
+type Library = typeof LIBRARIES[number]['id'];
 
 const TONE: Record<SkillHarness, 'amber' | 'green' | 'purple'> = { claude: 'amber', codex: 'green', pi: 'purple' };
 const BUILTIN_HOUSEKEEP = 'builtin:housekeep';
@@ -15,6 +19,40 @@ const housekeepDocHtml = () => renderMarkdown(HOUSEKEEP_SKILL);
 
 export function SkillsView() {
   const setView = useStore((s) => s.setView);
+  const [library, setLibrary] = useState<Library>('shared');
+  const id = useId();
+  return (
+    <div className="skills">
+      <div className="skills-top">
+        <div className="skills-title">
+          <Button variant="ghost" size="sm" icon="chevronRight" className="rot180" onClick={() => setView('chat')} title="Back" />
+          <Icon name="puzzle" size={16} /> Skills
+        </div>
+      </div>
+      <div className="skills-tabs" role="tablist" aria-label="Skill libraries" onKeyDown={(e) => {
+        const next = e.key === 'Home' ? 'shared' : e.key === 'End' ? 'native' :
+          e.key === 'ArrowLeft' || e.key === 'ArrowRight' ? (library === 'shared' ? 'native' : 'shared') : null;
+        if (!next) return;
+        e.preventDefault();
+        setLibrary(next);
+        e.currentTarget.querySelector<HTMLElement>(`[data-library="${next}"]`)?.focus();
+      }}>
+        {LIBRARIES.map(({ id: key, label }) => (
+          <button key={key} id={`${id}-${key}-tab`} data-library={key} type="button" role="tab" aria-selected={library === key}
+            aria-controls={`${id}-${key}-panel`} tabIndex={library === key ? 0 : -1} className={`atab ${library === key ? 'active' : ''}`}
+            onClick={() => setLibrary(key)}>{label}</button>
+        ))}
+      </div>
+      {LIBRARIES.map(({ id: key }) => (
+        <div key={key} id={`${id}-${key}-panel`} role="tabpanel" aria-labelledby={`${id}-${key}-tab`} hidden={library !== key} className="skills-library-panel">
+          {library === key && (key === 'shared' ? <SharedSkillsView /> : <NativeSkillsView />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function NativeSkillsView() {
   const toast = useStore((s) => s.toast);
   const [roots, setRoots] = useState<SkillRootInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -137,13 +175,9 @@ export function SkillsView() {
   };
 
   return (
-    <div className="skills">
+    <>
       <div className="skills-top">
-        <div className="skills-title">
-          <Button variant="ghost" size="sm" icon="chevronRight" className="rot180" onClick={() => setView('chat')} title="Back" />
-          <Icon name="puzzle" size={16} /> Skills
-          {roots && <span className="muted small">{total} across {roots.filter((r) => r.skills.length > 0).length} harnesses</span>}
-        </div>
+        <span className="muted small">{roots ? `${total} across ${roots.filter((r) => r.skills.length > 0).length} harnesses` : 'Harness skill folders'}</span>
         <div className="skills-actions">
           <div className="skills-search">
             <Icon name="search" size={14} />
@@ -276,7 +310,7 @@ export function SkillsView() {
           }}
         />
       )}
-    </div>
+    </>
   );
 }
 

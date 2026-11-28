@@ -362,5 +362,6 @@ export const SLASH_COMMANDS: { name: string; description: string; args?: string 
   { name: 'worktree', description: 'Show worktree information for this session' },
   { name: 'pr', description: 'Push this branch and open a GitHub PR into a base branch (needs gh)', args: '<branch>' },
   { name: 'merge', description: 'Merge the open PR for this branch (needs gh)', args: '<branch>' },
-  { name: 'stop', description: 'Interrupt the current turn' }
+  { name: 'stop', description: 'Interrupt the current turn' },
+  { name: 'skill', description: 'Use a reviewed Shared skill in this desktop session', args: '<name> [task]' }
 ];

@@ -7,7 +7,8 @@ const { listeners, invoke, mainFrame, contents, ownerChannels, ownerDocument } =
     'harness:login', 'subscriptions:read', 'subscriptions:claudeObserved', 'subscriptions:openUsage', 'control:grant', 'control:local:get', 'control:local:enable', 'control:local:disable',
     'vocsAccount:get', 'vocsAccount:signIn', 'vocsAccount:cancel', 'vocsAccount:refresh', 'vocsAccount:signOut',
     'vocsAccount:hubConnect', 'vocsAccount:hubCancel', 'vocsAccount:hubDisconnect',
-    'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText', 'intelligence:view', 'intelligence:promote', 'desktop:setFocus'
+    'housekeep:preview', 'housekeep:assess', 'housekeep:apply', 'housekeep:inventory', 'fs:writeText', 'intelligence:view', 'intelligence:promote', 'desktop:setFocus',
+    'sharedSkills:list', 'sharedSkills:read', 'sharedSkills:create', 'sharedSkills:save', 'sharedSkills:review', 'sharedSkills:invoke'
   ];
   return { listeners: new Map<string, (event: { sender: unknown; senderFrame: unknown }, req: unknown) => unknown>(), invoke: vi.fn(), mainFrame, ownerChannels, ownerDocument,
     contents: { mainFrame, isLoadingMainFrame: vi.fn(() => false) } };
@@ -65,6 +66,20 @@ describe('local desktop setup authority', () => {
     mainFrame.url = ownerDocument + '#settings';
     await expect(handler(event, input)).resolves.toEqual({ ok: true });
     expect(invoke).toHaveBeenCalledExactlyOnceWith('control:local:enable', input, 'desktop');
+  });
+  it('never gives a navigated or detached main frame the Shared Skills catalog', async () => {
+    const handler = listeners.get('sharedSkills:list')!;
+    const event = { sender: contents, senderFrame: mainFrame };
+    mainFrame.url = `${ownerDocument}?other`;
+    expect(() => handler(event, undefined)).toThrow(/trusted desktop page/);
+    mainFrame.url = ownerDocument;
+    mainFrame.detached = true;
+    expect(() => handler(event, undefined)).toThrow(/trusted desktop page/);
+    expect(invoke).not.toHaveBeenCalled();
+    mainFrame.detached = false;
+    mainFrame.url = `${ownerDocument}#settings`;
+    await expect(handler(event, undefined)).resolves.toEqual({ ok: true });
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('sharedSkills:list', undefined, 'desktop');
   });
   it.each(['subscriptions:read', 'subscriptions:claudeObserved', 'subscriptions:openUsage'])('refuses stale main frames for %s', (channel) => {
     mainFrame.detached = true;

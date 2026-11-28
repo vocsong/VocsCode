@@ -1,0 +1,48 @@
+.skills-library-panel:not([hidden]) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.skills .shared-skills-toolbar, .skills .shared-skills-toolbar .skills-actions {
+  flex-wrap: wrap;
+}
+.skills .shared-skills-body {
+  grid-template-columns: minmax(200px, 2fr) minmax(0, 3fr);
+}
+.shared-skills-body .skill-row {
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+}
+.shared-skills-body .skill-row:hover {
+  background: var(--bg-sunken);
+}
+.shared-skills-body .skills-preview {
+  display: flex;
+  min-width: 0;
+}
+.shared-skills-preview-head {
+  flex-wrap: wrap;
+}
+.shared-skills-note {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.shared-skill-content {
+  font-family: var(--mono);
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+@media (max-width: 760px) {
+  .skills .shared-skills-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 2fr);
+  }
+  .shared-skills-body .skills-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+}

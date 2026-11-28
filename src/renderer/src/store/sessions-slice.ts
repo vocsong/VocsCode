@@ -2,6 +2,7 @@
  * Sessions, transcripts, streaming delta batching, drafts, and composer history slice.
  */
 import { resolveNewSessionDefaults } from '../../../shared/session-defaults';
+import { parseSharedSkillCommand } from '../../../shared/shared-skills';
 import type { SessionConfig, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
 import * as panes from '../panes';
@@ -18,6 +19,7 @@ type SessionsSliceKeys =
   | 'transcriptStarts'
   | 'models'
   | 'drafts'
+  | 'draftSharedSkills'
   | 'composerHistory'
   | 'archiving'
   | 'changesVersion'
@@ -43,6 +45,7 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
     transcriptStarts: {},
     models: {},
     drafts: {},
+    draftSharedSkills: {},
     composerHistory: {},
     archiving: {},
     changesVersion: 0,
@@ -318,6 +321,7 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
         const activeTerminal = { ...s.activeTerminal };
         const models = { ...s.models };
         const drafts = { ...s.drafts };
+        const draftSharedSkills = { ...s.draftSharedSkills };
         const composerHistory = { ...s.composerHistory };
         for (const id of removed) {
           delete transcripts[id];
@@ -328,6 +332,7 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
           delete activeTerminal[id];
           delete models[id];
           delete drafts[id];
+          delete draftSharedSkills[id];
           delete composerHistory[id];
         }
         return {
@@ -340,6 +345,7 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
           activeTerminal,
           models,
           drafts,
+          draftSharedSkills,
           composerHistory,
           layout,
           activeId: activeAfter
@@ -431,8 +437,18 @@ export function createSessionsSlice(rt: StoreRuntime, toastError: (error: unknow
       });
     },
 
-    setDraft(sessionId, text) {
-      set((s) => (s.drafts[sessionId] === text ? {} : { drafts: { ...s.drafts, [sessionId]: text } }));
+    setDraft(sessionId, text, skill) {
+      set((s) => {
+        const previous = s.draftSharedSkills[sessionId];
+        const selected = skill ?? previous;
+        const next = selected && parseSharedSkillCommand(text)?.name === selected.name ? selected : undefined;
+        const draft = s.drafts[sessionId] === text ? {} : { drafts: { ...s.drafts, [sessionId]: text } };
+        if (previous === next) return draft;
+        const draftSharedSkills = { ...s.draftSharedSkills };
+        if (next) draftSharedSkills[sessionId] = next;
+        else delete draftSharedSkills[sessionId];
+        return { ...draft, draftSharedSkills };
+      });
     },
 
     pushComposerHistory(sessionId, text) {

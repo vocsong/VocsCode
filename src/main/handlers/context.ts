@@ -20,6 +20,7 @@ import type { RuntimeResolver } from '../runtime';
 import type { SearchIndex } from '../search';
 import type { SecretStore } from '../secrets';
 import type { SessionManager } from '../session-manager';
+import type { SharedSkillsStore } from '../shared-skills';
 import type { SettingsStore } from '../settings';
 import type { TerminalManager } from '../terminal';
 import type { UpdateService } from '../updater';
@@ -93,6 +94,8 @@ export interface HandlerDeps {
   piConfig?: PiConfigStore;
   /** The app's own instruction layer (Settings → Instructions); created from userData when absent. */
   appInstructions?: AppInstructions;
+  /** Owner-only catalog; otherwise constructed lazily from the desktop profile. */
+  sharedSkills?: SharedSkillsStore;
   /** In-app auto-update (issue #198); absent in dev and other unpackaged runs. */
   updater?: UpdateService;
   /** Every process the app started (the Processes panel); absent in tests that do not sample. */

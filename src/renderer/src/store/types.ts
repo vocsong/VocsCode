@@ -4,6 +4,7 @@
 import type { AgentState } from '../../../shared/agent';
 import type { MissionView } from '../../../shared/mission-mode';
 import type { ProcessSummary } from '../../../shared/processes';
+import type { SharedSkillReceipt } from '../../../shared/shared-skills';
 import type { TerminalInfo } from '../../../shared/terminal';
 import type {
   AppSettings,
@@ -103,6 +104,8 @@ export interface State {
   activeTerminal: Record<string, string>;
   /** Unsent composer text per session, kept so switching sessions does not lose the draft. */
   drafts: Record<string, string>;
+  /** The revision selected for an unsent Shared command, retained across composer remounts. */
+  draftSharedSkills: Record<string, SharedSkillReceipt>;
   /** Prompts already sent per session, newest first, so ArrowUp can recall them after a remount. */
   composerHistory: Record<string, string[]>;
   /** Sessions whose composer Mission switch is on: the next message starts Mission mode. Renderer-local. */
@@ -266,7 +269,7 @@ export interface State {
   replaceTranscript(id: string, items: TranscriptItem[]): void;
   /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
   setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
-  setDraft(sessionId: string, text: string): void;
+  setDraft(sessionId: string, text: string, skill?: SharedSkillReceipt): void;
   /** Records a sent prompt as the session's most recent history entry; re-sending an old prompt moves it back to the front. */
   pushComposerHistory(sessionId: string, text: string): void;
   /** Turns a session's composer Mission switch on or off. */

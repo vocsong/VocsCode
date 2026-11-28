@@ -24,6 +24,7 @@ import { fastModeSupport } from '../shared/fast-mode';
 import { HARNESS_BY_ID, assertPermissionModeOffered, closestPermissionMode } from '../shared/harness-meta';
 import { hasOngoingWork } from '../shared/ongoing';
 import { validateQuestionResponse } from '../shared/question-response';
+import { isSharedSkillCommand, parseSharedSkillCommand, sharedSkillSupported, type SharedSkillReceipt } from '../shared/shared-skills';
 import { createAdapter } from './harness/registry';
 import { ownedAdapter } from './process-context';
 import { renderForkContext } from './fork-context';
@@ -73,6 +74,15 @@ const ORDINARY_DISPOSE_WAIT_MS = 20_000;
 /** A controlled turn's authorization was withdrawn before its runtime started: not a harness fault. */
 class ControlledStartRefused extends Error {}
 
+const SHARED_SKILL_RUNTIME_ERROR = 'The harness reported an error during the Shared skill turn.';
+
+/** Internal only: never read the payload or authority for a Shared turn from a generic UserInput. */
+interface SharedSkillAdmission {
+  assertCurrent(): void;
+  beforeSend(): Promise<void>;
+  record(active: ActiveSession): void;
+}
+
 /** Title calls per session per run: one on the first message, one more if that one came back empty. */
 const MAX_TITLE_ATTEMPTS = 2;
 
@@ -91,6 +101,8 @@ export class SessionManager {
   private antigravityModeUpdates = new Set<string>();
   /** Reserve send-first dispatches before startup/preamble awaits expose an idle gap. */
   private configDispatches = new Map<string, number>();
+  /** Occupies ordinary admission even before an idle runtime has been started. */
+  private sharedSkillAdmissions = new Map<string, { canceled: boolean }>();
   /** Blocks turn admission and ordinary edits during the checked housekeeping commit. */
   private housekeepArchives = new Set<string>();
   /** Last runtime created per session. An ordinary runtime is fenced only once a newer one exists. */
@@ -657,7 +669,7 @@ export class SessionManager {
 
   private housekeepIdle(id: string): boolean {
     const meta = this.get(id);
-    if (!meta || meta.archived || meta.pinned || this.configDispatches.has(id) || this.persistTimers.has(id) ||
+    if (!meta || meta.archived || meta.pinned || this.configDispatches.has(id) || this.sharedSkillAdmissions.has(id) || this.persistTimers.has(id) ||
         this.fastModeUpdates.has(id) || this.antigravityModeUpdates.has(id) || missionLive(meta)) return false;
     const activity = this.activity(id);
     return !activity.active && activity.quiescent;
@@ -894,6 +906,10 @@ export class SessionManager {
         if (!current()) return;
         const m = this.get(id);
         if (!m) return;
+        if (runtime?.()?.sharedSkillTurn) {
+          const { title: _title, statusDetail: _detail, ...safe } = patch;
+          patch = safe;
+        }
         Object.assign(m, patch);
         // A harness may discover its actual model only after startup. Refresh the analytics
         // snapshot immediately so tool calls before the first usage update are not unattributed.
@@ -911,13 +927,16 @@ export class SessionManager {
         this.schedulePersist(m);
         this.pushSessions();
       },
-      log: (level, message) => this.deps.log(level, `[${id}] ${message}`),
+      // Adapter diagnostics may include reflected provider input. Normal turn telemetry remains.
+      log: (level, message) => {
+        if (!runtime?.()?.sharedSkillTurn) this.deps.log(level, `[${id}] ${message}`);
+      },
       readJson: (name) => readJson(path.join(sessionDir, name), null),
       writeJson: (name, data) => current() ? writeJson(path.join(sessionDir, name), data) : Promise.resolve()
     };
   }
 
-  private async ensureActive(id: string): Promise<ActiveSession> {
+  private async ensureActive(id: string, beforeStart?: () => void): Promise<ActiveSession> {
     if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
     const existing = this.active.get(id);
     if (existing) {
@@ -935,6 +954,7 @@ export class SessionManager {
       await this.applyGoalDriver(meta);
       this.schedulePersist(meta);
     }
+    beforeStart?.(); // Stop may have won while restoring the last advertised commands above.
     meta.fastModeStatus = { state: meta.config.fastMode ? 'requested' : 'off' };
     const seq = (this.runtimeSeq.get(id) ?? 0) + 1;
     this.runtimeSeq.set(id, seq);
@@ -1049,9 +1069,73 @@ export class SessionManager {
     return this.sendAs(id, input, 'user');
   }
 
+  /** Explicit desktop-owner invocation. Reserve the turn before any filesystem wait. */
+  async sendSharedSkill(
+    id: string, text: string, resolve: (name: string) => Promise<{ receipt: SharedSkillReceipt; content: string }>, expected?: string
+  ): Promise<void> {
+    const command = parseSharedSkillCommand(text);
+    if (!command) throw new Error('Use /skill <name> [task].');
+    this.assertNotControlled(id);
+    const session = this.get(id);
+    if (!session) throw new Error('Session not found');
+    if (!sharedSkillSupported(session.config.harness)) throw new Error('This harness does not support Shared skills.');
+    const identity = (m: SessionMeta) => JSON.stringify([m.cwd, m.config.projectRoot, m.config.harness, m.config.permissionMode]);
+    const original = identity(session);
+    const assertIdle = () => {
+      const active = this.active.get(id);
+      if (this.get(id) !== session || identity(session) !== original || this.housekeepArchives.has(id) ||
+          session.archived || session.controlCreation || session.mission || session.goal?.status === 'active' || session.nativeGoal ||
+          active?.pendingGoalKickoff || active?.goalContinuationTimer || active?.deferredGoalContinuation || active?.sharedSkillTurn ||
+          hasOngoingWork(session) || this.antigravityModeUpdates.has(id) || this.fastModeUpdates.has(id) ||
+          !this.activity(id).quiescent || ['starting', 'running', 'awaiting'].includes(session.status)) {
+        throw new Error('Shared skills require an idle desktop session with no active Goal or Mission.');
+      }
+    };
+    if (this.configDispatches.has(id)) throw new Error('Wait for the current session operation to finish.');
+    assertIdle();
+    const lease = { canceled: false };
+    this.sharedSkillAdmissions.set(id, lease);
+    const assertCurrent = () => {
+      if (lease.canceled) throw new Error('Shared skill stopped before sending.');
+      assertIdle();
+    };
+    try {
+      const { receipt, content } = await resolve(command.name);
+      if (expected && receipt.revision !== expected) throw new Error('The selected Shared skill revision changed. Select it again before sending.');
+      assertCurrent();
+      const itemId = shortId('u_');
+      await this.dispatchInput(id, {
+        text: `Shared skill instructions (${receipt.name}):\n\n${content}\n\nUser's task:\n${command.args || '(No additional task specified.)'}`,
+        mode: 'now', transcriptItemId: itemId
+      }, {
+        assertCurrent,
+        beforeSend: async () => {
+          assertCurrent();
+          // Recheck review and file identity after startup/preamble, but send the original
+          // captured body, not a harness-native lookup (which may be repo-first).
+          if ((await resolve(command.name)).receipt.revision !== receipt.revision) {
+            throw new Error('Shared skill changed before sending. Review it and send again.');
+          }
+          assertCurrent();
+        },
+        record: (active) => {
+          active.sharedSkillTurn = true;
+          const ts = Date.now();
+          this.emit(id, { type: 'item.upsert', item: { id: itemId, kind: 'user', ts, text, queuedAs: 'now', sharedSkill: receipt, userInput: measureUserInput(id, text) } });
+          this.recordDirectUserActivity(session, ts);
+          this.schedulePersist(session);
+          this.pushSessions();
+        }
+      });
+    } finally {
+      this.sharedSkillAdmissions.delete(id);
+    }
+  }
+
   private assertNotControlled(id: string): void {
     this.assertNotHousekeeping(id);
     if (this.controlled.has(id)) throw new Error('Session is busy with a controlled turn');
+    if (this.sharedSkillAdmissions.has(id)) throw new Error('A Shared skill is being sent in this session.');
   }
 
   /** Covers awaits before ordinary sends and destructive/configuration edits as well as dispatch. */
@@ -1388,6 +1472,7 @@ export class SessionManager {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (meta.config.harness === 'antigravity' && source !== 'user') throw new Error('Antigravity sessions are driven by direct user prompts.');
+    if (this.active.get(id)?.sharedSkillTurn) throw new Error('Wait for the Shared skill turn to end before sending another message.');
     if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
     // Keep the no-attachment path synchronous until dispatch: an unnecessary await would move the
     // starting transition a tick later.
@@ -1403,12 +1488,7 @@ export class SessionManager {
     this.emit(id, { type: 'item.upsert', item: userItem });
     // The sidebar orders rows by the user's own last message: stamp it before the harness even
     // starts, so the row moves up on the send rather than on whatever the turn does next.
-    if (source === 'user') {
-      meta.lastUserMessageAt = userItem.ts;
-      // Writing to a session is looking at it.
-      delete meta.unseenAt;
-      delete meta.unseenFailed;
-    }
+    if (source === 'user') this.recordDirectUserActivity(meta, userItem.ts);
     // A session named from a dialog prompt or a goal is already carrying a placeholder, and that
     // placeholder is the better one: it was cut from what the user wrote, not from a `/goal …`
     // command the app composed. Keep it on screen and let the model replace it.
@@ -1423,6 +1503,13 @@ export class SessionManager {
     this.schedulePersist(meta);
     this.pushSessions();
     await this.dispatchInput(id, { ...input, files: undefined, text: promptWithFiles(input.text, files), transcriptItemId: userItem.id });
+  }
+
+  private recordDirectUserActivity(meta: SessionMeta, ts: number): void {
+    meta.lastUserMessageAt = ts;
+    // Writing to a session is looking at it.
+    delete meta.unseenAt;
+    delete meta.unseenFailed;
   }
 
   /** Replaces a sent prompt only when its adapter can restore a durable pre-message checkpoint. */
@@ -1440,6 +1527,9 @@ export class SessionManager {
     const index = items.findIndex((item) => item.id === userItemId && item.kind === 'user');
     if (index < 0) throw new Error('Message no longer exists in this transcript');
     const previous = items[index] as Extract<TranscriptItem, { kind: 'user' }>;
+    if (previous.sharedSkill || isSharedSkillCommand(input.text)) {
+      throw new Error('Shared skills cannot be edited and resent. Start a new turn from the composer.');
+    }
     const active = await this.ensureActive(id);
     if (active.compactionInFlight || active.approvals.size || active.adapter.busy) throw new Error('Wait for the current session activity to finish before editing a message');
     if (!active.adapter.rewindToUserMessage) throw new Error('This harness does not support editing past messages yet');
@@ -1471,11 +1561,11 @@ export class SessionManager {
     return this.transcript(id);
   }
 
-  private async dispatchInput(id: string, input: UserInput): Promise<void> {
+  private async dispatchInput(id: string, input: UserInput, shared?: SharedSkillAdmission): Promise<void> {
     if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
     this.configDispatches.set(id, (this.configDispatches.get(id) ?? 0) + 1);
     try {
-      await this.dispatchReservedInput(id, input);
+      await this.dispatchReservedInput(id, input, shared);
     } finally {
       const count = (this.configDispatches.get(id) ?? 1) - 1;
       if (count) this.configDispatches.set(id, count);
@@ -1483,8 +1573,8 @@ export class SessionManager {
     }
   }
 
-  private async dispatchReservedInput(id: string, input: UserInput): Promise<void> {
-    const active = await this.ensureActive(id);
+  private async dispatchReservedInput(id: string, input: UserInput, shared?: SharedSkillAdmission): Promise<void> {
+    const active = await this.ensureActive(id, shared?.assertCurrent);
     // Compaction can run without marking an adapter busy. Keep a new turn from reading or
     // mutating its context until that operation has settled.
     if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
@@ -1493,8 +1583,17 @@ export class SessionManager {
     };
     assertCurrent();
     const prepared = await this.withSessionPreamble(id, input);
+    if (shared) {
+      await shared.beforeSend();
+      shared.assertCurrent();
+    }
     assertCurrent();
     const pending = active.turnPending = Symbol();
+    if (shared) {
+      // Even if a saved app preamble starts with '/', the prepared text cannot invoke a native command.
+      prepared.text = `Vocs Code Shared skill turn\n\n${prepared.text}`;
+      shared.record(active);
+    }
     try {
       // Normal Pi steering aborts the old run; release its approval waits before handing off.
       // Queued input retains its existing approval lifecycle.
@@ -1505,9 +1604,18 @@ export class SessionManager {
     } catch (e) {
       // A refused send may go idle without a turn item. Retire only its own marker.
       if (active.turnPending === pending && !active.adapter.busy) active.turnPending = undefined;
+      if (shared) {
+        // Missing acknowledgement may mean it ran. Keep this runtime fenced until explicit Stop
+        // instead of letting a second send overwrite the unconfirmed turn's state.
+        if (active.sharedSkillTurn && this.active.get(id) === active) active.uncertain = true;
+        throw new Error('Could not confirm the Shared skill send. Check the session before trying again; Vocs did not retry.');
+      }
       throw e;
     }
-    await this.clearSessionPreamble(id);
+    if (shared) {
+      // An index write after acceptance cannot turn an already-sent action into a refused send.
+      await this.clearSessionPreamble(id).catch(() => this.deps.log('warn', `[${id}] session preamble state could not be saved after Shared skill dispatch`));
+    } else await this.clearSessionPreamble(id);
   }
 
   /**
@@ -1677,6 +1785,8 @@ export class SessionManager {
   }
 
   async interrupt(id: string): Promise<void> {
+    const skill = this.sharedSkillAdmissions.get(id);
+    if (skill) skill.canceled = true;
     const controlled = this.controlled.get(id);
     if (controlled) {
       if (!controlled.terminal) await this.interruptControlled(id, controlled.operationId);
@@ -1697,6 +1807,8 @@ export class SessionManager {
   }
 
   private async stopOrdinary(id: string): Promise<void> {
+    const skill = this.sharedSkillAdmissions.get(id);
+    if (skill) skill.canceled = true;
     const controlled = this.controlled.get(id);
     if (controlled) {
       controlled.canceled = true;
@@ -1711,7 +1823,7 @@ export class SessionManager {
 
   /** App quit. Never rejects, so the caller still flushes persistence and analytics afterwards. */
   async stopAll(): Promise<void> {
-    const ids = [...new Set([...this.active.keys(), ...this.controlled.keys()])];
+    const ids = [...new Set([...this.active.keys(), ...this.controlled.keys(), ...this.sharedSkillAdmissions.keys()])];
     if (ids.length) this.deps.log('info', `stopping ${ids.length} running session(s)`);
     const results = await Promise.allSettled(ids.map((id) => this.stopOrdinary(id)));
 
@@ -1915,7 +2027,7 @@ export class SessionManager {
     active.approvals.delete(requestId);
     d.resolve(decision);
     // Audit trail for what the user allowed the agent to do; the command itself is on the transcript card.
-    this.deps.log('info', `[${sessionId}] approval ${requestId} → ${decision.optionId}${item && item.kind === 'approval' ? ` (${item.request.title.slice(0, 120)})` : ''}`);
+    this.deps.log('info', `[${sessionId}] approval ${requestId} → ${decision.optionId}${!active.sharedSkillTurn && item?.kind === 'approval' ? ` (${item.request.title.slice(0, 120)})` : ''}`);
     if (item && item.kind === 'approval') {
       item.decision = decision;
       item.decidedAt = Date.now();
@@ -1954,7 +2066,7 @@ export class SessionManager {
     const request: ApprovalRequest = { ...draft, id: shortId('ap_'), sessionId, harness: meta.config.harness, createdAt: Date.now() };
     const d = deferred<ApprovalDecision>();
     active.approvals.set(request.id, d);
-    this.deps.log('info', `[${sessionId}] approval ${request.id} requested (${meta.config.permissionMode}): ${request.title.slice(0, 120)}`);
+    this.deps.log('info', `[${sessionId}] approval ${request.id} requested (${meta.config.permissionMode})${active.sharedSkillTurn ? '' : `: ${request.title.slice(0, 120)}`}`);
     meta.status = 'awaiting';
     meta.statusDetail = request.title;
     const hooks = meta.mission?.role === 'builder' && draft.kind !== 'question' ? this.deps.mission?.() : undefined;
@@ -1992,6 +2104,22 @@ export class SessionManager {
     }
     const meta = this.get(sessionId);
     const active = this.active.get(sessionId);
+    // Harness errors can contain the prompt. Keep normal model/tool output and approval cards,
+    // but do not forward arbitrary provider diagnostics into the app's history and logs.
+    const shared = (runtime ?? active)?.sharedSkillTurn;
+    if (shared) {
+      if (event.type === 'error') event = { ...event, message: SHARED_SKILL_RUNTIME_ERROR };
+      else if (event.type === 'status' && event.detail && (event.status === 'error' || event.status === 'stopped')) {
+        event = { ...event, detail: SHARED_SKILL_RUNTIME_ERROR };
+      } else if (event.type === 'item.upsert' && event.item.kind === 'turn' && event.item.error) {
+        event = { ...event, item: { ...event.item, error: SHARED_SKILL_RUNTIME_ERROR } };
+      } else if (event.type === 'item.upsert' && event.item.kind === 'info' && event.item.level !== 'info') {
+        event = { ...event, item: { ...event.item, text: SHARED_SKILL_RUNTIME_ERROR } };
+      } else if (event.type === 'meta') {
+        const { title: _title, lastError: _lastError, statusDetail: _detail, ...patch } = event.patch;
+        event = { ...event, patch };
+      }
+    }
     // Ownership/configuration are host-owned even if an adapter emits the broad normalized meta shape.
     // Mission identity is host-owned: an adapter's broad meta patch can never set it.
     if (event.type === 'meta' && 'mission' in event.patch) {
@@ -2085,6 +2213,7 @@ export class SessionManager {
           else if (event.status === 'error') this.deps.log('warn', `[${sessionId}] harness reported an error status${event.detail ? `: ${event.detail}` : ''}`);
           if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
             if (active) {
+              if (event.status === 'idle' && !active.turnPending && !active.adapter.busy && !active.uncertain) active.sharedSkillTurn = undefined;
               // A harness that exited will never finish its streaming answer; save what it said.
               void this.stream.flushLive(sessionId, active, event.status === 'stopped').catch((e) => this.deps.log('warn', `[${sessionId}] live flush failed: ${errorMessage(e)}`));
               if (event.status === 'stopped') {
@@ -2231,7 +2360,8 @@ export class SessionManager {
     // mistaken for the next kickoff's answer if that turn produces no assistant text.
     const text = active?.lastAssistantText ?? '';
     if (active) active.lastAssistantText = '';
-    if (this.controlled.has(meta.id)) return;
+    // The selected model may echo skill text. Do not forward its reply to a titling model.
+    if (this.controlled.has(meta.id) || active?.sharedSkillTurn) return;
     if (active && turn.status === 'completed') {
       this.scheduleLlmTitle(meta.id, { turnReply: text });
       this.goals.onTurnCompleted(meta, active, text, ongoingActive);

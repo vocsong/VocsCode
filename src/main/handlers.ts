@@ -33,6 +33,7 @@ import { registerHarnessHandlers } from './handlers/harnesses';
 import { registerKnowledgeTerminalHandlers } from './handlers/knowledge-terminal';
 import { registerMcpCuaHandlers } from './handlers/mcp-cua';
 import { registerSessionHandlers } from './handlers/sessions';
+import { registerSharedSkillHandlers } from './handlers/shared-skills';
 import { registerSettingsProviderHandlers } from './handlers/settings-providers';
 
 export type { DesktopBridge, HandlerDeps, HandlerRegistry, OpenDialogOptions, SaveDialogOptions };
@@ -130,6 +131,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (channel.startsWith('vocsAccount:') && actor !== 'desktop') throw new Error('Vocs account sign-in requires the local desktop owner.');
     if (channel.startsWith('control:') && actor !== 'desktop') throw new Error('External control grants require the local desktop owner.');
     if (channel.startsWith('housekeep:') && actor !== 'desktop') throw new Error('Housekeep requires the local desktop owner.');
+    if (channel.startsWith('sharedSkills:') && actor !== 'desktop') throw new Error('Shared skills require the local desktop owner.');
     if (isIntelligenceOwnerRequest(channel, req) && actor !== 'desktop') throw new Error('Intelligence settings and memory management require the local desktop owner.');
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
     if (channel.startsWith('subscriptions:') && actor !== 'desktop') throw new Error('Subscription usage requires the local desktop owner.');
@@ -189,6 +191,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   registerAppHandlers(ctx);
   registerSettingsProviderHandlers(ctx);
   registerHarnessHandlers(ctx);
+  registerSharedSkillHandlers(ctx);
   registerMcpCuaHandlers(ctx);
   registerSessionHandlers(ctx);
   registerGitFsHandlers(ctx);

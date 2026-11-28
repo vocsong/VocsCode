@@ -80,6 +80,8 @@ export type TranscriptItem =
       /** Host-measured original message text, before prompt assembly. Absent on legacy/automated input.
        * The receipt survives replay; its owner prevents copied fork history being counted again. */
       userInput?: { id: string; sessionId: string; ts: number; tokens: number };
+      /** Host receipt of the Shared skill revision dispatched for this command, never the skill body. */
+      sharedSkill?: import('./shared-skills').SharedSkillReceipt;
       /** Written by Mission mode, not typed by the user: a kickoff, a Lead↔Builder message or a report. */
       origin?: 'mission';
       mission?: MissionMessageMeta;

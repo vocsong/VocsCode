@@ -125,6 +125,8 @@ export interface ActiveSession {
   adapter: HarnessAdapter;
   /** Input acceptance is not a terminal turn observation (including ordinary source writers). */
   turnPending?: symbol;
+  /** While this turn is live, do not send possibly echoed skill content to diagnostics or titling. */
+  sharedSkillTurn?: boolean;
   startupDispatched: boolean;
   tearingDown: boolean;
   uncertain: boolean;

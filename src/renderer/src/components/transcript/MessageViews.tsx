@@ -74,6 +74,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
     <div className="msg msg-user">
       <div className="msg-bubble">
         {item.queuedAs && item.queuedAs !== 'now' && <Badge tone="blue">{item.queuedAs}</Badge>}
+        {item.sharedSkill && <Badge tone="neutral" title={`Shared skill revision ${item.sharedSkill.revision}`}>Shared skill: {item.sharedSkill.name}</Badge>}
         {editing ? (
           <div className="msg-edit">
             <textarea aria-label="Edit message" value={draft} onChange={(e) => setDraft(e.target.value)} rows={Math.max(2, Math.min(8, draft.split('\n').length))} autoFocus />
@@ -114,7 +115,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
       <div className="msg-user-meta">
         <Stamp ts={item.ts} />
         <button type="button" className="msg-action" title="Copy message" aria-label="Copy message" onClick={() => void copy()}><Icon name="copy" size={14} /></button>
-        {sessionId && canEdit && <button type="button" className="msg-action" title="Edit and rerun message" aria-label="Edit and rerun message" onClick={() => setEditing(true)} disabled={rerunning}><Icon name="edit" size={14} /></button>}
+        {sessionId && canEdit && !item.sharedSkill && <button type="button" className="msg-action" title="Edit and rerun message" aria-label="Edit and rerun message" onClick={() => setEditing(true)} disabled={rerunning}><Icon name="edit" size={14} /></button>}
       </div>
     </div>
   );

@@ -181,6 +181,7 @@ export function createHostSlice(rt: StoreRuntime, toastError: (error: unknown) =
         terminalsLoaded: false,
         activeTerminal: {},
         drafts: {},
+        draftSharedSkills: {},
         composerHistory: {},
         missionArmed: {},
         missionViews: {},

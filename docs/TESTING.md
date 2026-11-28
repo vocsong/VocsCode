@@ -131,7 +131,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 npm run dist:dir -- --publish never && HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.update.test.ts
 ```
 
-`npm run test:e2e:ci` runs twenty-eight no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
+`npm run test:e2e:ci` runs twenty-nine no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes`, `e2e.typography` and the
 seeded `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
@@ -163,6 +163,8 @@ called out (see [Keeping the suites alive](#keeping-the-suites-alive)).
 | Transcript image lightbox zoom/pan, and copy image from the Files drawer or lightbox | `tests/image-lightbox.test.tsx`, `tests/file-links.test.tsx` + `e2e.files` (real wheel and drag gestures; native image encoding with the clipboard write intercepted) |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |
+| Shared Skills catalog, owner IPC, and `/skill` | `tests/shared-skills.test.ts`, `tests/shared-skill-turn.test.ts`, `tests/handler-registry.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/composer-harness-commands.test.tsx` + `e2e.shared-skills` and `e2e.session-view` (built-in skill navigation). The new E2E launches real Electron and a scripted ACP agent, verifies exactly one prompt, then relaunches with the same profile. Run the separate [live Shared Skills smoke](SHARED-SKILLS.md#verification) to certify logged-in runtimes. |
+| Portable verification record evaluation (`scripts/verify-evidence.mjs`) | `tests/verify-evidence.test.ts`; run the standalone example in [Verification records](VERIFICATION-RECORDS.md) |
 | Harness-native slash commands (adapter reporting, `/` popover, `//name` route) | `tests/harness-commands.test.ts`, `tests/composer-harness-commands.test.tsx`, `tests/claude-goal-commands.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/acp-turn-state.test.ts`, `tests/codex-skills.test.ts` + `e2e.harness-commands` |
 | Usage panel, `/usage` shortcut, and desktop subscription limits | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx`, `tests/composer-harness-commands.test.tsx`, `tests/codex-quota.test.ts`, `tests/claude-usage-accounting.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/handler-registry.test.ts` + `e2e.usage` (automatic inline Codex limits, passive Claude observations, and manual vendor launches; no harness prompt) |
 | Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
