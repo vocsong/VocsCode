@@ -43,7 +43,7 @@ Auto-continue and iteration defaults are copied when a new goal is created.
 number from 0 to 3650; 0 turns off only age protection, not the other protections. The age rule is
 checked again before archiving. A review without an override uses the current setting at that check.
 
-Run `/housekeep sessions` (or the built-in **Housekeep sessions** skill) to preview older sessions one
+Run `/housekeep sessions` (or **Skills → Native & built-in → Housekeep sessions**) to preview older sessions one
 by one. Add a whole number from 0 to 3650, such as `/housekeep 3`, to set the protection window for
 that review only. It applies through confirmation and does not change the saved setting. Review
 locally, or explicitly ask your configured utility model to assess short conversation

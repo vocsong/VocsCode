@@ -3,6 +3,7 @@ import type { VocsAccountSignInRequest, VocsAccountState, VocsHubConnectionReque
 import type { ControlGrantInput, ControlOwnerState } from './control';
 import type { LocalControlOwnerState } from './local-control';
 import type { HousekeepInventory, HousekeepOutcome, HousekeepPreview } from './housekeep';
+import type { SharedSkillDocument, SharedSkillInfo } from './shared-skills';
 import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
 import type { InlineSubscriptionProvider, ObservedSubscriptionWindow, OpenSubscriptionUsageResult, SubscriptionLimits, SubscriptionProvider } from './subscription-usage';
 import type {
@@ -233,6 +234,15 @@ export interface IpcContract {
   /** Copies a skill folder into another harness's skills directory. */
   'skills:copy': [{ path: string; toHarness: SkillHarness }, { ok: boolean; path?: string; error?: string }];
   'skills:delete': [{ path: string }, { ok: boolean; error?: string }];
+
+  /** Personal skills. These channels are desktop-owner-only, unlike the native skills inventory. */
+  'sharedSkills:list': [void, SharedSkillInfo[]];
+  'sharedSkills:read': [{ name: string }, SharedSkillDocument];
+  'sharedSkills:create': [{ name: string; description: string }, SharedSkillDocument];
+  'sharedSkills:save': [{ name: string; revision: string; content: string }, SharedSkillDocument];
+  'sharedSkills:review': [{ name: string; revision: string; enabled: boolean }, SharedSkillInfo];
+  /** `sent` acknowledges dispatch, not a completed or successful turn. */
+  'sharedSkills:invoke': [{ id: string; text: string; revision?: string }, { sent: true }];
 
   /** Base-pi global config for Settings → Pi: agent dir resources, prompt files, curated settings.json keys. */
   'pi:setup': [void, PiSetup];

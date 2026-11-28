@@ -47,7 +47,7 @@ export interface IpcDeps {
   remote?: RemoteHost;
   control?: HandlerDeps['control'];
   localControl?: HandlerDeps['localControl'];
-  /** Exact renderer document allowed to administer the local preview (fragment ignored). */
+  /** Exact trusted renderer document for local-control and Shared Skills actions (fragment ignored). */
   localControlDocument?: string;
   /** Where the desktop window is looking, mirrored to paired browsers; wired in index.ts. */
   desktopFocus?: DesktopFocusTracker;
@@ -170,6 +170,14 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     const intelligenceOwner = isIntelligenceOwnerRequest(channel, req);
     const missionOwner = channel.startsWith('mission:') || (channel === 'sessions:create' && !!req && typeof req === 'object' && (req as { mission?: unknown }).mission !== undefined && (req as { mission?: unknown }).mission !== false);
     const subscriptionOwner = channel.startsWith('subscriptions:');
+    if (channel.startsWith('sharedSkills:')) {
+      const contents = deps.getWindow()?.webContents;
+      const frame = event.senderFrame;
+      if (!contents || event.sender !== contents || !frame || frame !== contents.mainFrame || frame.detached ||
+          !deps.localControlDocument || frame.url.split('#', 1)[0] !== deps.localControlDocument) {
+        throw new Error('Shared skills require the local desktop owner in the trusted desktop page.');
+      }
+    }
     if (intelligenceOwner || missionOwner || subscriptionOwner || channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel.startsWith('housekeep:') || channel === 'harness:login' || channel === 'fs:writeText' || channel === 'desktop:setFocus') {
       const contents = deps.getWindow()?.webContents;
       if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame || subscriptionOwner && (!event.senderFrame || event.senderFrame.detached)) {

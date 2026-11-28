@@ -323,6 +323,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await closeReview.click();
     await dialog.waitFor({ state: 'hidden' });
     await win.getByRole('button', { name: 'Skills', exact: true }).click();
+    await win.getByRole('tab', { name: 'Native & built-in', exact: true }).click();
     await win.getByRole('button', { name: 'Run /housekeep', exact: true }).click();
     await dialog.getByText(/Activity within the last 14 days/).waitFor();
   }, 90_000);
@@ -353,6 +354,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
 
     // The read-only inventory is also available when there are no sessions to archive.
     await win.getByRole('button', { name: 'Skills', exact: true }).click();
+    await win.getByRole('tab', { name: 'Native & built-in', exact: true }).click();
     await win.getByRole('button', { name: 'Run /housekeep', exact: true }).click();
     const dialog = win.getByRole('dialog', { name: 'Housekeep sessions', exact: true });
     await dialog.getByText('No sessions to review.', { exact: true }).waitFor();

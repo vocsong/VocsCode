@@ -1,5 +1,5 @@
 /** Prompt input: slash commands, @file mentions, and steer-vs-queue while a turn is running. */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { FileAttachment, ImageAttachment, ProviderConfig, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
 import { harnessRoutedText, slashEntries, type HarnessCommand, type SlashEntry } from '../../../shared/harness-commands';
@@ -9,6 +9,7 @@ import { hasOngoingWork } from '../../../shared/ongoing';
 import { modelName } from '../../../shared/model-names';
 import { missionSupport } from '../../../shared/mission-mode';
 import { insertTranscript } from '../../../shared/dictation';
+import { isSharedSkillCommand, parseSharedSkillCommand, type SharedSkillInfo } from '../../../shared/shared-skills';
 import { canInvoke, invoke, invokeErrorMessage } from '../api';
 import { readAttachments } from '../attachments';
 import { fmtCost } from '../format';
@@ -23,6 +24,7 @@ import { Dropdown, Icon, MenuItem } from './ui';
 import { DictationControl, type DictationHandle } from './DictationControl';
 import { SessionControls, SessionMeter } from './SessionControls';
 import { FastModeElectric } from './FastModeElectric';
+import { canUseSharedSkills, sharedSkillSessionBlocker } from './SharedSkillsView';
 import { ComposerAttachments, fileToAttachment } from './composer/ComposerAttachments';
 import { MentionPopover, SlashPopover, type MentionState, type SlashState } from './composer/ComposerPopovers';
 import { ComposerSendControls } from './composer/ComposerSendControls';
@@ -41,6 +43,8 @@ export type AttachFilesRef = React.MutableRefObject<((files: File[]) => void) | 
 
 const NO_HARNESS_COMMANDS: HarnessCommand[] = [];
 const NO_PROVIDERS: ProviderConfig[] = [];
+// A pane can unmount and remount before the host acknowledges the send.
+const pendingSharedSends = new Set<string>();
 
 /** The idle prompt's hint, shorter in the minimalist Zen interface. */
 const IDLE_PLACEHOLDER = {
@@ -54,14 +58,23 @@ const ONGOING_PLACEHOLDER = {
 } as const;
 
 export function Composer({ session, attachRef }: { session: SessionMeta; attachRef?: AttachFilesRef }) {
-  const setDraft = useStore((s) => s.setDraft);
-  // Seed from the per-session draft kept in the store, so switching away and back preserves the text.
-  const [text, setText] = useState(() => useStore.getState().drafts[session.id] ?? '');
+  // Use the per-session draft directly: the Skills view can stage it, and a send may settle across a remount.
+  const text = useStore((s) => s.drafts[session.id] ?? '');
+  const setText = useCallback((next: string | ((draft: string) => string)) => {
+    const st = useStore.getState();
+    st.setDraft(session.id, typeof next === 'string' ? next : next(st.drafts[session.id] ?? ''));
+  }, [session.id]);
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);
+  const readingAttachments = useRef(0);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [mentionError, setMentionError] = useState<string | null>(null);
   const [slash, setSlash] = useState<SlashState | null>(null);
+  const [sharedSkills, setSharedSkills] = useState<SharedSkillInfo[]>([]);
+  const [sharedIndex, setSharedIndex] = useState(0);
+  const [dismissedSharedDraft, setDismissedSharedDraft] = useState<string | null>(null);
+  const sharedListId = useId();
+  const sharedPopoverRef = useRef<HTMLDivElement>(null);
   // History lives in the store, not here: App mounts the composer with `key={session.id}`, so a local
   // copy would be thrown away the moment the user switched sessions and came back.
   const history = useStore((s) => s.composerHistory[session.id] ?? NO_COMPOSER_HISTORY);
@@ -83,6 +96,7 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
   // Mission mode: the switch arms this session's next send; a Lead is always on; an ended mission is read-only.
   const missionRole = session.mission?.role;
   const armed = useStore((s) => !!s.missionArmed[session.id]) && !missionRole;
+  const archiving = useStore((s) => !!s.archiving[session.id]);
   const ended = missionEnded(session);
   const uiMode = useUiMode();
   const { models } = useSessionModels(session);
@@ -142,11 +156,6 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
     el.setSelectionRange(end, end);
   }, [session.id]);
 
-  // Mirror every draft change (typed, inserted, history-navigated, cleared after send) into the store.
-  useEffect(() => {
-    setDraft(session.id, text);
-  }, [text, session.id, setDraft]);
-
   // Text handed over from elsewhere (the terminal's "send to agent") lands below the current draft.
   useEffect(() => {
     // Inserts go to the active session; the composer of another pane leaves them for it.
@@ -160,7 +169,7 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
     });
-  }, [composerInsert, clearComposerInsert, session.id]);
+  }, [composerInsert, clearComposerInsert, session.id, setText]);
 
   useEffect(() => {
     if (!mention) return;
@@ -188,6 +197,34 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
   const reportedCommands = useHarnessCommandList(session);
   const harnessCommands = reportedCommands ?? NO_HARNESS_COMMANDS;
   const nativeGoal = session.nativeGoal?.toLowerCase() === 'goal' ? 'goal' : undefined;
+  const canListShared = canUseSharedSkills('sharedSkills:list');
+  // This is a name prefix, not the command's task. Never offers completions for native /skill:name or //skill.
+  const sharedQuery = dismissedSharedDraft === text ? undefined : /^\/skill[ \t]+([a-z0-9-]*)$/.exec(text)?.[1];
+  const suggestShared = sharedQuery !== undefined && canListShared && canUseSharedSkills('sharedSkills:invoke') &&
+    !sharedSkillSessionBlocker(session, armed, archiving);
+  useEffect(() => {
+    setSharedSkills([]);
+    if (!suggestShared) return;
+    let alive = true;
+    void invoke('sharedSkills:list', undefined).then((list) => {
+      if (alive) setSharedSkills(list.filter((skill) => skill.reviewed));
+    }).catch(() => { /* autocomplete is optional; a typed command still goes through the host */ });
+    return () => { alive = false; };
+  }, [suggestShared, session.id]);
+  const sharedMatches = suggestShared ? sharedSkills.filter((skill) => skill.name.startsWith(sharedQuery!))
+    .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 12) : [];
+  const sharedActiveIndex = sharedIndex < sharedMatches.length ? sharedIndex : 0;
+  const sharedActive = sharedMatches[sharedActiveIndex];
+  useEffect(() => {
+    sharedPopoverRef.current?.querySelector<HTMLElement>('.popover-item.active')?.scrollIntoView?.({ block: 'nearest' });
+  }, [sharedActive?.name]);
+  const pickShared = ({ name, revision }: SharedSkillInfo) => {
+    useStore.getState().setDraft(session.id, `/skill ${name} `, { name, revision });
+    setMention(null);
+    setSlash(null);
+    ref.current?.focus();
+  };
+
   const slashMatches: SlashEntry[] = slash
     ? slashEntries({
         query: slash.query,
@@ -196,7 +233,7 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
         // The app's /compact already asks the harness to compact; a second row would do the same.
         delegated: ['compact'],
         nativeGoal
-      })
+      }).filter((row) => canListShared || row.source !== 'app' || row.insert !== 'skill')
     : [];
   const harnessNote = harnessCommandNote(harness, reportedCommands);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -221,8 +258,14 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
   };
 
   const send = async (mode: 'now' | 'steer' | 'queue' = 'now') => {
-    const t = text.trim();
+    const st = useStore.getState();
+    const original = st.drafts[session.id] ?? '';
+    const t = original.trim();
     if (!t && !images.length && !files.length) return;
+    if (pendingSharedSends.has(session.id)) {
+      toast('Wait for the shared skill send to finish.', 'info');
+      return;
+    }
     // Clears the draft and every popover/filter state derived from it. setText is programmatic here,
     // so onChange never fires — without this the stale mention/slash state keeps its key handling
     // alive and swallows ArrowUp/ArrowDown, breaking input history right after a send.
@@ -233,6 +276,48 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
       setSlash(null);
       setHistIdx(-1);
     };
+    // Own this namespace before Mission, app commands or ordinary sends. Don't turn leading whitespace
+    // into a shared command by normalizing the draft, and never re-serialize its task arguments.
+    if (isSharedSkillCommand(t)) {
+      if (!isSharedSkillCommand(original)) {
+        toast('Start /skill at the beginning of the draft, without leading spaces.', 'info');
+        return;
+      }
+      if (images.length || files.length || readingAttachments.current) {
+        toast('Shared skills cannot include attachments. Remove them before using /skill.', 'error');
+        return;
+      }
+      if (t === '/skill') {
+        if (!canUseSharedSkills('sharedSkills:list')) { toast('Shared skills are available in the desktop app.', 'info'); return; }
+        clearDraft();
+        st.setView('skills');
+        return;
+      }
+      const command = parseSharedSkillCommand(original);
+      if (!command) { toast('Usage: /skill <name> [task]', 'info'); return; }
+      if (!canUseSharedSkills('sharedSkills:invoke')) { toast('Shared skills are available in the desktop app.', 'info'); return; }
+      const latest = st.sessions.find((s) => s.id === session.id) ?? session;
+      const blocker = sharedSkillSessionBlocker(latest, !!st.missionArmed[session.id], !!st.archiving[session.id]);
+      if (blocker || mode !== 'now') { toast(blocker ?? 'Wait until the session is idle to use a shared skill.', 'info'); return; }
+      pendingSharedSends.add(session.id);
+      let edited = false;
+      const pin = st.draftSharedSkills[session.id];
+      const stopWatching = useStore.subscribe((next, previous) => {
+        if (next.drafts[session.id] !== previous.drafts[session.id] || next.draftSharedSkills[session.id] !== previous.draftSharedSkills[session.id]) edited = true;
+      });
+      try {
+        const result = await invoke('sharedSkills:invoke', { id: session.id, text: original, ...(pin?.name === command.name ? { revision: pin.revision } : {}) });
+        if (result?.sent !== true) throw new Error('No send confirmation was returned.');
+        pushHistory(session.id, original);
+        if (!edited) clearDraft();
+      } catch (e) {
+        toast(`Could not confirm the shared skill was sent. Check the session before retrying. ${invokeErrorMessage(e)}`, 'error');
+      } finally {
+        stopWatching();
+        pendingSharedSends.delete(session.id);
+      }
+      return;
+    }
     if (ended) return;
     const [command, ...args] = t.startsWith('/') ? t.slice(1).split(/\s+/) : [''];
     // The popover matches /usage case-insensitively; make sure alternate casing stays local too.
@@ -294,7 +379,6 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
       }
       if (!canHousekeepHere()) { toast('Housekeep is available in the desktop app.', 'info'); return; }
       clearDraft();
-      setDraft(session.id, '');
       if (arg === 'settings') openSettings('housekeep');
       else openHousekeep(days);
       return;
@@ -356,7 +440,7 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
     // The clip finished after the user switched sessions: it belongs to this session's draft.
     if (!el) {
       const draft = useStore.getState().drafts[session.id] ?? '';
-      setDraft(session.id, insertTranscript(draft, draft.length, draft.length, said).text);
+      setText(insertTranscript(draft, draft.length, draft.length, said).text);
       return;
     }
     const current = el?.value ?? text;
@@ -376,6 +460,30 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
       e.preventDefault();
       dictation.current?.toggle();
       return;
+    }
+    if (e.key === 'Enter' && e.repeat && !e.shiftKey && isSharedSkillCommand(text)) {
+      e.preventDefault();
+      return;
+    }
+    if (sharedActive && !e.nativeEvent.isComposing) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setDismissedSharedDraft(text);
+        return;
+      }
+      if (!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          setSharedIndex((sharedActiveIndex + (e.key === 'ArrowDown' ? 1 : -1) + sharedMatches.length) % sharedMatches.length);
+          return;
+        }
+        // Enter completes a partial name; an exact, selected name can be sent in one step.
+        if (e.key === 'Tab' || (e.key === 'Enter' && sharedQuery !== sharedActive.name)) {
+          e.preventDefault();
+          pickShared(sharedActive);
+          return;
+        }
+      }
     }
     if (mention && mention.results.length) {
       if (e.key === 'ArrowDown') {
@@ -455,6 +563,8 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
   const onChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const v = e.target.value;
     setText(v);
+    setSharedIndex(0);
+    setDismissedSharedDraft(null);
     const pos = e.target.selectionStart ?? v.length;
     const before = v.slice(0, pos);
     const at = before.match(/(?:^|\s)@([\w./\\-]*)$/);
@@ -475,10 +585,12 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
   };
 
   const addFiles = async (list: Iterable<File>) => {
-    const chosen = [...list];
-    const added = await readAttachments(chosen, (message) => toast(message, 'error'));
-    setImages((prev) => [...prev, ...added.images]);
-    setFiles((prev) => [...prev, ...added.files]);
+    ++readingAttachments.current;
+    try {
+      const added = await readAttachments(list, (message) => toast(message, 'error'));
+      setImages((prev) => [...prev, ...added.images]);
+      setFiles((prev) => [...prev, ...added.files]);
+    } finally { --readingAttachments.current; }
   };
 
   // A file dropped anywhere on the pane lands here, and the caret follows so typing can go on.
@@ -512,6 +624,20 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
     <div className="composer">
       <MentionPopover mention={mention} mentionError={mentionError} onPick={pickMention} />
       <SlashPopover slash={slash} slashMatches={slashMatches} harnessName={harness.name} harnessNote={harnessNote} popoverRef={popoverRef} onPick={pickSlash} />
+      {sharedActive && (
+        <div id={sharedListId} ref={sharedPopoverRef} className="popover slash-popover" role="listbox" aria-label="Shared skills">
+          <div className="slash-section" role="presentation">Shared skills</div>
+          {sharedMatches.map((skill, i) => (
+            <button key={skill.name} id={`${sharedListId}-${i}`} type="button" tabIndex={-1} role="option" aria-selected={i === sharedActiveIndex}
+              className={`popover-item slash-item ${i === sharedActiveIndex ? 'active' : ''}`}
+              onPointerDown={(e) => e.preventDefault()} onClick={() => pickShared(skill)}>
+              <span className="mono slash-name">{skill.name}</span>
+              <span className="spacer" />
+              <span className="muted small slash-desc">{skill.description}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <ComposerAttachments
         images={images}
         files={files}
@@ -528,6 +654,11 @@ export function Composer({ session, attachRef }: { session: SessionMeta; attachR
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
+          onBlur={() => { if (suggestShared) setDismissedSharedDraft(text); }}
+          onFocus={() => setDismissedSharedDraft(null)}
+          aria-autocomplete={suggestShared ? 'list' : undefined}
+          aria-controls={sharedActive ? sharedListId : undefined}
+          aria-activedescendant={sharedActive ? `${sharedListId}-${sharedActiveIndex}` : undefined}
           placeholder={ended
             ? MISSION_ENDED_TEXT
             : armed

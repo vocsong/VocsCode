@@ -140,6 +140,34 @@ async function fileResolveRig() {
 }
 
 describe('handler registry', () => {
+  it('keeps the Shared catalog and invocation local without expanding ordinary remote prompts', async () => {
+    const list = vi.fn(async () => []);
+    const resolve = vi.fn();
+    const { registry, deps, logs } = stubDeps({ sharedSkills: { list, resolve } as unknown as Deps['sharedSkills'] });
+    const sendSharedSkill = vi.fn(async () => undefined);
+    deps.sessions.sendSharedSkill = sendSharedSkill;
+    const send = vi.fn(async () => undefined);
+    deps.sessions.send = send;
+    for (const action of ['list', 'read', 'create', 'save', 'review', 'invoke']) {
+      const channel = `sharedSkills:${action}`;
+      expect(registry.channels()).toContain(channel);
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels()).not.toContain(channel);
+      for (const actor of ['agent', 'user'] as const) await expect(registry.invoke(channel, {}, actor)).rejects.toThrow(/desktop owner/);
+    }
+    expect(list).not.toHaveBeenCalled();
+    const request = { id: 's_test', text: '/skill verify-change Check this.' };
+    await expect(registry.invoke('sharedSkills:invoke', { ...request, mode: 'queue', private_canary_field: true }, 'desktop')).rejects.toThrow('Invalid Shared skill request.');
+    expect(JSON.stringify(logs)).not.toContain('private_canary_field');
+    expect(sendSharedSkill).not.toHaveBeenCalled();
+    await expect(registry.invoke('sessions:send', { id: request.id, input: { text: request.text } }, 'user')).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledExactlyOnceWith(request.id, { text: request.text });
+    expect(resolve).not.toHaveBeenCalled();
+    await expect(registry.invoke('sharedSkills:list', undefined, 'desktop')).resolves.toEqual([]);
+    await expect(registry.invoke('sharedSkills:invoke', request, 'desktop')).resolves.toEqual({ sent: true });
+    expect(sendSharedSkill).toHaveBeenCalledExactlyOnceWith(request.id, request.text, expect.any(Function));
+  });
+
   it('restricts Housekeep and its excerpts to the desktop and refuses forged batches before session dispatch', async () => {
     const { registry, deps } = stubDeps();
     const list = vi.spyOn(deps.sessions, 'list');

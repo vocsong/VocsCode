@@ -6,22 +6,33 @@
  * HARNESS_SMOKE_ONLY=mcp drives one harness (HARNESS_SMOKE_MCP_HARNESS, default claude) with an
  * injected MCP server and asserts it actually called a tool from it.
  * HARNESS_SMOKE_ANTIGRAVITY_BIN can point to an absolute path to the official Antigravity CLI.
+ * HARNESS_SMOKE=1 HARNESS_SMOKE_SHARED=1 npm run test:smoke -- -t 'Shared skill'
+ * runs only Codex app-server, Claude, Pi and Antigravity through the owner registry. It uses
+ * inherited auth or HARNESS_SMOKE_SHARED_HOME, an already-configured, dedicated test home
+ * (not a personal profile; disable Pi's retry setting there). HARNESS_SMOKE_MODEL can select a
+ * model for one harness, with HARNESS_SMOKE_PI_PROVIDER to override Pi's default provider.
  */
+import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import type { IpcChannel, IpcRequest, IpcResponse } from '../src/shared/ipc';
 import { MCP_BUILTIN_IDS, type ApprovalDecision, type HarnessId, type HarnessRef, type SessionEvent, type SessionMeta, type TranscriptItem } from '../src/shared/types';
+import type { HandlerDeps } from '../src/main/handlers';
 import type { ResolvedServer } from '../src/main/mcp/effective';
 import { createAdapter } from '../src/main/harness/registry';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
 import { RuntimeResolver } from '../src/main/runtime';
-import { defaultSettings } from '../src/main/settings';
+import { defaultSettings, SettingsStore } from '../src/main/settings';
 import { emptyUsage } from '../src/main/models/static-models';
+import { deferred, errorMessage, withTimeout } from '../src/main/util/async';
 
 const enabled = process.env.HARNESS_SMOKE === '1';
+const sharedEnabled = process.env.HARNESS_SMOKE_SHARED === '1';
 const only = (process.env.HARNESS_SMOKE_ONLY ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-const want = (id: string) => enabled && (only.length === 0 || only.includes(id));
+const selected = (id: string) => only.length === 0 || only.includes(id);
+const want = (id: string) => enabled && !sharedEnabled && selected(id);
 // Resume round-trips cost a second turn per harness, so they stay behind their own flag.
 const wantResume = (id: string) => want(id) && process.env.HARNESS_SMOKE_RESUME === '1';
 const smokeModelProviders: Partial<Record<HarnessId, string>> = {
@@ -157,6 +168,189 @@ function assertSuccessfulTurn(items: Map<string, TranscriptItem>, events: Sessio
   expect(statuses.at(-1)).toMatchObject({ status: 'idle' });
   expect(statuses.some((e) => e.status === 'error' || e.status === 'stopped')).toBe(false);
 }
+
+const sharedHarnessRefs = {
+  codex: 'codexThreadId',
+  claude: 'claudeSessionId',
+  pi: 'piSessionFile',
+  antigravity: 'acpSessionId'
+} as const satisfies Partial<Record<HarnessId, keyof HarnessRef>>;
+type SharedSmokeHarness = keyof typeof sharedHarnessRefs;
+
+async function isolateSharedProfile(dir: string, harness: SharedSmokeHarness): Promise<void> {
+  const configured = process.env.HARNESS_SMOKE_SHARED_HOME;
+  if (configured && !path.isAbsolute(configured)) throw new Error('HARNESS_SMOKE_SHARED_HOME must be an absolute path to a dedicated test home.');
+  const home = configured ? await fs.realpath(configured) : path.join(dir, 'home');
+  if (configured && path.relative(await fs.realpath(os.homedir()), home) === '') {
+    throw new Error('HARNESS_SMOKE_SHARED_HOME cannot be the current user home.');
+  }
+  const env = {
+    HOME: home, USERPROFILE: home,
+    APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+    XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local', 'share'),
+    XDG_STATE_HOME: path.join(home, '.local', 'state'), XDG_CACHE_HOME: path.join(home, '.cache'),
+    CODEX_HOME: path.join(home, '.codex'), CODEX_SQLITE_HOME: path.join(home, '.codex'),
+    CLAUDE_CONFIG_DIR: path.join(home, '.claude'), PI_CODING_AGENT_DIR: path.join(home, '.pi', 'agent')
+  };
+  await fs.mkdir(home, { recursive: true });
+  // Codex refuses even to initialize if an explicit CODEX_HOME doesn't exist yet.
+  if (harness === 'codex') await fs.mkdir(env.CODEX_HOME, { recursive: true });
+  if (harness === 'pi' && !configured) {
+    await fs.mkdir(env.PI_CODING_AGENT_DIR, { recursive: true });
+    // Pi can otherwise submit the same inference again after a transport error.
+    await fs.writeFile(path.join(env.PI_CODING_AGENT_DIR, 'settings.json'), JSON.stringify({ retry: { enabled: false } }));
+  }
+  for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+}
+
+function toolOrApproval(event: SessionEvent): boolean {
+  return event.type === 'approval.request' || event.type === 'approval.resolved' ||
+    (event.type === 'item.upsert' && (event.item.kind === 'approval' || event.item.kind === 'tool'));
+}
+
+function sharedSmokeDetail(error: unknown, items: TranscriptItem[], events: SessionEvent[]): string {
+  // Don't print raw provider payloads, SDK stderr, or model output. Shared Skills intentionally
+  // redacts turn errors; only classify details that the runtime made visible through the app.
+  const messages = [errorMessage(error), ...items.flatMap((item) => {
+    if (item.kind === 'info' || item.kind === 'assistant') return [item.text];
+    return item.kind === 'turn' && item.error ? [item.error] : [];
+  }), ...events.flatMap((event) => event.type === 'error' ? [event.message] : event.type === 'status' && event.detail ? [event.detail] : [])];
+  const hint = [
+    [/\b401\b|\bunauthori[sz]ed\b/i, 'provider rejected authentication (401/unauthorized)'],
+    [/sign in|log[ -]?in|not authenticated|auth(?:entication)? required|no api key|no model|invalid api key/i, 'no usable account/model in the smoke profile'],
+    [/incompatible pi runtime/i, 'Pi could not initialize the required Vocs Code extensions'],
+    [/timed out/i, 'owner invoke or terminal event timed out'],
+    [/unexpected tool or approval/i, 'unexpected tool or approval (none granted)'],
+    [/did not retry/i, 'dispatch was not confirmed; no retry'],
+    [/reported an error during the Shared skill turn/i, 'runtime reported a turn error (provider detail redacted by the app)']
+  ] as const;
+  const states = events.flatMap((e) => e.type === 'status' ? [e.status] : e.type === 'item.upsert' && e.item.kind === 'turn' ? [`turn:${e.item.status}`] : []).slice(-12);
+  return `${hint.find(([pattern]) => messages.some((message) => pattern.test(message)))?.[1] ?? 'runtime did not produce one successful nonce turn'}; observed: ${states.join(' → ') || 'no status/turn events'}`;
+}
+
+async function runSharedSkillSmoke(harness: SharedSmokeHarness): Promise<void> {
+  const { createHandlerRegistry } = await import('../src/main/handlers');
+  const { SessionManager } = await import('../src/main/session-manager');
+  const { SessionStore } = await import('../src/main/store');
+  const { SharedSkillsStore } = await import('../src/main/shared-skills');
+  const { AnalyticsStore } = await import('../src/main/analytics');
+  const dir = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'vocs-shared-smoke-'));
+  const teardown: (() => Promise<void>)[] = [];
+  try {
+    const cwd = path.join(dir, 'workspace');
+    const userData = path.join(dir, 'app');
+    await fs.mkdir(cwd);
+    const settings = new SettingsStore(userData);
+    await settings.load();
+    const runtime = new RuntimeResolver({ appRuntimeDir: path.join(dir, 'runtime'), resourcesDir: path.join(appRoot, 'resources'), appRoot }, () => settings.get());
+    const tool = harness === 'antigravity' ? 'agy' : harness;
+    const agy = tool === 'agy' ? process.env.HARNESS_SMOKE_ANTIGRAVITY_BIN : undefined;
+    if (agy && !path.isAbsolute(agy)) throw new Error('HARNESS_SMOKE_ANTIGRAVITY_BIN must be an absolute path.');
+    if (agy) await settings.update({ binaries: { agy } });
+    // Resolve before redirecting the profile (e.g. agy can be installed under LOCALAPPDATA).
+    const binary = runtime.resolve(tool);
+    if (!binary) throw new Error(`${harness}: no installed runtime (${tool}) found for the Shared skill smoke.`);
+    await settings.update({
+      binaries: { [tool]: binary.path }, mcpDisabledBuiltins: [...MCP_BUILTIN_IDS], notifications: false,
+      claude: { ...settings.get().claude, settingSources: [] },
+      pi: { extraArgs: ['--no-tools', '--no-extensions', '--no-skills', '--no-context-files', '--offline'] }
+    });
+    await isolateSharedProfile(dir, harness);
+
+    const log = () => undefined;
+    const store = new SessionStore(userData, log);
+    await store.load();
+    const analytics = new AnalyticsStore(userData, { log });
+    const sessions = new SessionManager({
+      store, settings, runtime, analytics, log, getSecret: async () => undefined,
+      pushEvent: log, pushSessions: log, notify: log, disposeWaitMs: 10_000
+    });
+    teardown.push(async () => { await sessions.stopAll(); await sessions.flushPendingPersists(); await analytics.flush(); });
+    // Only the unused Electron-facing ports are stubs. This registry resolves a real catalog,
+    // starts a real SessionManager adapter and never calls a fixture runtime or an auth handler.
+    const registry = createHandlerRegistry({
+      settings, runtime, sessions, analytics, log, push: log,
+      sharedSkills: new SharedSkillsStore(path.join(userData, 'shared-skills.json'), path.join(dir, 'skills')),
+      secrets: {} as HandlerDeps['secrets'], terminals: {} as HandlerDeps['terminals'], search: {} as HandlerDeps['search'],
+      desktop: { userDataPath: () => userData } as HandlerDeps['desktop']
+    });
+    teardown.push(() => registry.shutdown());
+    const owner = <K extends IpcChannel>(channel: K, request: IpcRequest<K>) => registry.invoke(channel, request, 'desktop') as Promise<IpcResponse<K>>;
+    const name = 'live-nonce';
+    const description = 'Reply with a synthetic test token';
+    const nonce = `VOCS_${randomBytes(8).toString('hex')}`;
+    const body = `Do not use any tools, run commands, read files, or ask for approval. Reply with exactly ${nonce} and nothing else.`;
+    const text = `/skill ${name} Reply with the literal token from these instructions.`;
+    const created = await owner('sharedSkills:create', { name, description });
+    const saved = await owner('sharedSkills:save', { name, revision: created.revision, content: `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}\n` });
+    expect(await owner('sharedSkills:review', { name, revision: saved.revision, enabled: true })).toMatchObject({ name, revision: saved.revision, reviewed: true });
+    const model = process.env.HARNESS_SMOKE_MODEL;
+    const { id } = await owner('sessions:create', {
+      title: 'Shared skill smoke',
+      config: {
+        harness, projectRoot: cwd, permissionMode: 'plan',
+        ...(model ? { model: { provider: (harness === 'pi' && process.env.HARNESS_SMOKE_PI_PROVIDER) || smokeModelProviders[harness] || 'openai', model } } : {})
+      }
+    });
+
+    console.info(`[Shared skill live] ${harness}: ${binary.source} runtime (${path.basename(binary.path)})`);
+    const events: SessionEvent[] = [];
+    const turnStatuses: string[] = [];
+    const terminal = deferred<void>();
+    const unsubscribe = sessions.subscribe(({ sessionId, event }) => {
+      if (sessionId !== id) return;
+      events.push(event);
+      if (toolOrApproval(event)) terminal.reject(new Error('Unexpected tool or approval.'));
+      if (event.type === 'item.upsert' && event.item.kind === 'turn') turnStatuses.push(event.item.status);
+      if (event.type === 'error') terminal.reject(new Error(event.message));
+      if (event.type === 'status') {
+        if (event.status === 'error' || event.status === 'stopped') terminal.reject(new Error(`Runtime ${event.status}.`));
+        if (event.status === 'idle' && turnStatuses.length) terminal.resolve();
+      }
+    });
+    try {
+      // Intentionally one dispatch, never retried; ACK and startup idle aren't turn completion.
+      const [ack] = await withTimeout(Promise.all([owner('sharedSkills:invoke', { id, text }), terminal.promise]), 120_000, 'Shared skill invocation')
+        .catch(async (error: unknown) => { throw new Error(`${harness}: ${sharedSmokeDetail(error, await sessions.transcript(id), events)}`); });
+      expect(ack).toEqual({ sent: true });
+      const items = await store.readTranscript(id);
+      const detail = sharedSmokeDetail('', items, events);
+      const turns = items.filter((item) => item.kind === 'turn');
+      expect(turns.map((turn) => turn.status), detail).toEqual(['completed']);
+      expect(turnStatuses, detail).toEqual(['completed']);
+      expect(events.filter((event) => event.type === 'status').at(-1)).toMatchObject({ status: 'idle' });
+      const meta = sessions.get(id);
+      expect(meta).toMatchObject({ status: 'idle', queued: 0, config: { harness, permissionMode: 'plan' } });
+      expect(meta?.harnessRef[sharedHarnessRefs[harness]]).toMatch(/\S/);
+      expect(events.some((event) => event.type === 'error' || (event.type === 'status' && ['awaiting', 'error', 'stopped'].includes(event.status))), detail).toBe(false);
+      expect(events.some(toolOrApproval)).toBe(false);
+      expect(items.some((item) => item.kind === 'approval' || item.kind === 'tool')).toBe(false);
+      expect(items.some((item) => item.kind === 'info' && item.level === 'error'), detail).toBe(false);
+      const users = items.filter((item) => item.kind === 'user');
+      expect(users).toHaveLength(1);
+      expect(users[0]).toMatchObject({ text, sharedSkill: { name, revision: saved.revision } });
+      expect(JSON.stringify(users[0]).includes(nonce)).toBe(false);
+      const answers = items.flatMap((item) => item.kind === 'assistant' && item.text ? [item.text] : []);
+      expect(answers.length === 1 && answers[0] === nonce, detail).toBe(true);
+    } finally {
+      unsubscribe();
+    }
+  } finally {
+    try {
+      const results = await Promise.allSettled(teardown.map((dispose) => dispose()));
+      for (const result of results) if (result.status === 'rejected') throw result.reason;
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  }
+}
+
+describe.sequential('Shared skill live smoke', () => {
+  for (const harness of Object.keys(sharedHarnessRefs) as SharedSmokeHarness[]) {
+    it.runIf(enabled && sharedEnabled && selected(harness))(`${harness} completes one owner-invoked turn`, { retry: 0 }, () => runSharedSkillSmoke(harness));
+  }
+});
 
 /**
  * Live resume round-trip: run one prompt, tear the adapter down, then rebuild from the same
